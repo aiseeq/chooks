@@ -210,6 +210,7 @@ type benchCase struct {
 	ID         string    `json:"id"`
 	Time       time.Time `json:"ts"`
 	HumanReply string    `json:"prev_reply"`
+	PrevAnswer string    `json:"prev_answer"`
 	Answer     string    `json:"answer"`
 	Label      string    `json:"label"`
 }
@@ -286,7 +287,7 @@ func runQuestionBench(ctx context.Context, path string, judge questioncheck.Judg
 			return err
 		}
 		result.Excerpts = len(excerpts.Replies) + len(excerpts.Decisions)
-		input := questioncheck.Case{HumanReply: example.HumanReply, Answer: example.Answer, Excerpts: excerpts}.Input()
+		input := questioncheck.Case{HumanReply: example.HumanReply, PrevAnswer: example.PrevAnswer, Answer: example.Answer, Excerpts: excerpts}.Input()
 		judgeCtx, cancel := context.WithTimeout(ctx, judgeBudget)
 		started := time.Now()
 		verdict, usage, err := judge.Judge(judgeCtx, input)

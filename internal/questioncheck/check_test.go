@@ -64,7 +64,7 @@ func newFixture(t *testing.T, name, project string) *fixture {
 	writeFile(t, transcript, strings.Join([]string{
 		`{"type":"user","uuid":"u1","origin":{"kind":"human"},"message":{"role":"user","content":"` + humanMsg + `"}}`,
 		`{"type":"attachment","uuid":"a1","attachment":{"type":"queued_command","prompt":"сообщение другой сессии","origin":{"kind":"peer"}}}`,
-		`{"type":"assistant","uuid":"m1","message":{"role":"assistant","content":[{"type":"text","text":"Посчитал. Поменять на $200?"}]}}`,
+		`{"type":"assistant","uuid":"m1","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Посчитал. Поменять на $200?"}]}}`,
 		`{"type":"assistant","uuid":"m2","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]}}`,
 		`{"type":"system","subtype":"turn_duration"}`,
 	}, "\n")+"\n")
@@ -358,11 +358,78 @@ func TestReadTailFindsHumanBeyondFirstWindow(t *testing.T) {
 	b.WriteString(`{"type":"assistant","uuid":"m9","message":{"content":[{"type":"text","text":"Делать?"}]}}` + "\n")
 	writeFile(t, path, b.String())
 
-	tail, err := ReadTail(path)
+	tail, err := ReadTail(path, "Делать?")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !tail.HumanFound || tail.HumanReply != "далёкая реплика" || tail.AssistantUUID != "m9" {
 		t.Fatalf("tail = %+v", tail)
+	}
+}
+
+// Случай lead 25.10 19:01: рекомендация («Я бы взял dream») — в прошлом ответе,
+// после него уведомление фоновой задачи, а проверяемого ответа в транскрипте
+// к Stop-хуку ещё нет. Промежуточный текст хода (tool_use) — не ответ
+func TestScanTailPrevAnswer(t *testing.T) {
+	const (
+		human   = `{"type":"user","uuid":"u1","origin":{"kind":"human"},"message":{"content":"Кстати sleep vs dream - как таки лучше?"}}`
+		interim = `{"type":"assistant","uuid":"m0","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Сейчас проверю пересечения"}]}}`
+		think   = `{"type":"assistant","uuid":"m1","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"…"}]}}`
+		prev    = `{"type":"assistant","uuid":"m2","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Я бы взял **dream**. Переименовываю в dream?"}]}}`
+		notice  = `{"type":"user","uuid":"n1","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>…"}}`
+		current = "Про переименование в dream жду твоего ответа."
+	)
+	currentRecord := `{"type":"assistant","uuid":"m3","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"` + current + `"}]}}`
+
+	tests := []struct {
+		name               string
+		lines              []string
+		prevAnswer, uuid   string
+		humanFound, prevOK bool
+	}{
+		{name: "ответа ещё нет в транскрипте", lines: []string{human, interim, think, prev, notice},
+			prevAnswer: "Я бы взял **dream**. Переименовываю в dream?", uuid: "m2", humanFound: true, prevOK: true},
+		{name: "ответ успел попасть в транскрипт", lines: []string{human, prev, notice, currentRecord},
+			prevAnswer: "Я бы взял **dream**. Переименовываю в dream?", uuid: "m3", humanFound: true, prevOK: true},
+		{name: "предыдущий ответ до реплики человека", lines: []string{prev, human, interim},
+			prevAnswer: "Я бы взял **dream**. Переименовываю в dream?", uuid: "m0", humanFound: true, prevOK: true},
+		{name: "кончившегося хода нет", lines: []string{human, interim}, uuid: "m0", humanFound: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tail := scanTail([]byte(strings.Join(tt.lines, "\n")), current)
+			if tail.PrevAnswer != tt.prevAnswer || tail.PrevFound != tt.prevOK || tail.AssistantUUID != tt.uuid || tail.HumanFound != tt.humanFound {
+				t.Fatalf("tail = %+v", tail)
+			}
+		})
+	}
+}
+
+func TestCaseInputShowsPrevAnswer(t *testing.T) {
+	input := Case{HumanReply: "sleep vs dream?", PrevAnswer: "Я бы взял dream. Переименовываю?", Answer: "Жду твоего ответа?"}.Input()
+	prev := strings.Index(input, "[Предыдущий ответ агента]\nЯ бы взял dream.")
+	final := strings.Index(input, "[Финальный ответ агента]")
+	if prev < 0 || final < prev {
+		t.Fatalf("предыдущий ответ должен идти перед финальным:\n%s", input)
+	}
+	if empty := (Case{Answer: "Делать?"}).Input(); !strings.Contains(empty, "[Предыдущий ответ агента]\n(не найден)") {
+		t.Errorf("без предыдущего ответа — пометка «не найден»:\n%s", empty)
+	}
+	if !strings.Contains(JudgePrompt, "предыдущего ответа агента") {
+		t.Error("промпт судьи должен говорить о вопросах со ссылкой на предыдущий ответ")
+	}
+}
+
+// Судья видит предыдущий ответ, журнал помечает версию судьи
+func TestRun_JudgeSeesPrevAnswer(t *testing.T) {
+	f := newFixture(t, "lead", "~")
+	f.checker.Run(context.Background(), f.event("Жду твоего ответа: делать?"))
+
+	if !strings.Contains(f.judge.input, "[Предыдущий ответ агента]\nПосчитал. Поменять на $200?") {
+		t.Errorf("судья не видел предыдущий ответ:\n%s", f.judge.input)
+	}
+	entries := f.journal(t)
+	if len(entries) != 1 || entries[0].JudgeRev != JudgeRev || !entries[0].PrevFound {
+		t.Fatalf("журнал = %+v", entries)
 	}
 }

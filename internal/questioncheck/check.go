@@ -71,7 +71,11 @@ type Entry struct {
 	LatencyMS  int64     `json:"latency_ms"`
 	Usage      *Usage    `json:"usage,omitempty"`
 	HumanFound bool      `json:"human_reply_found"`
-	Excerpts   int       `json:"excerpts"`
+	// PrevFound — судья видел предыдущий ответ агента
+	PrevFound bool `json:"prev_answer_found"`
+	// JudgeRev — версия судьи (JudgeRev); у записей до 25.10 поля нет
+	JudgeRev int `json:"judge_rev"`
+	Excerpts int `json:"excerpts"`
 	// Message — сообщение после остановки (after_block): что агент сделал
 	// дальше, без чтения транскрипта
 	Message string `json:"message,omitempty"`
@@ -110,6 +114,7 @@ func (c Checker) Run(ctx context.Context, event Event) Result {
 		SessionID:  event.SessionID,
 		Transcript: event.TranscriptPath,
 		Questions:  Texts(questions),
+		JudgeRev:   JudgeRev,
 	}
 
 	if gate.Status == GateAfterBlock {
@@ -117,12 +122,12 @@ func (c Checker) Run(ctx context.Context, event Event) Result {
 		// дописал, по этому итог недели видит, нашёл ли он ответ сам
 		entry.Verdict = VerdictAfterBlock
 		entry.Message = truncateRunes(event.LastMessage, afterBlockRunes)
-		c.fillTail(&entry, event.TranscriptPath)
+		c.fillTail(&entry, event)
 		c.write(entry)
 		return Result{Skip: gate.Skip}
 	}
 
-	tail := c.fillTail(&entry, event.TranscriptPath)
+	tail := c.fillTail(&entry, event)
 	excerpts, err := c.Journals.Find(questions, time.Time{})
 	if err != nil {
 		// Без выдержек судья работает как в сухом прогоне: по тексту и реплике
@@ -130,7 +135,7 @@ func (c Checker) Run(ctx context.Context, event Event) Result {
 	}
 	entry.Excerpts = len(excerpts.Replies) + len(excerpts.Decisions)
 
-	input := Case{HumanReply: tail.HumanReply, Answer: event.LastMessage, Excerpts: excerpts}.Input()
+	input := Case{HumanReply: tail.HumanReply, PrevAnswer: tail.PrevAnswer, Answer: event.LastMessage, Excerpts: excerpts}.Input()
 	judgeCtx, cancel := context.WithTimeout(ctx, c.Budget)
 	defer cancel()
 	started := time.Now()
@@ -167,15 +172,17 @@ func (c Checker) Run(ctx context.Context, event Event) Result {
 	return Result{Verdict: entry.Verdict}
 }
 
-// fillTail дописывает в запись uuid сообщения и признак найденной реплики
-func (c Checker) fillTail(entry *Entry, transcriptPath string) Tail {
-	tail, err := ReadTail(transcriptPath)
+// fillTail дописывает в запись uuid сообщения и признаки найденных реплики
+// человека и предыдущего ответа
+func (c Checker) fillTail(entry *Entry, event Event) Tail {
+	tail, err := ReadTail(event.TranscriptPath, event.LastMessage)
 	if err != nil {
 		c.Warn("question check transcript tail unreadable", "error", err)
 		return Tail{}
 	}
 	entry.MessageID = tail.AssistantUUID
 	entry.HumanFound = tail.HumanFound
+	entry.PrevFound = tail.PrevFound
 	return tail
 }
 

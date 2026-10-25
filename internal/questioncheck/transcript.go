@@ -11,8 +11,9 @@ import (
 
 // Окно чтения хвоста транскрипта: транскрипт сессии бывает в сотни МБ и
 // целиком в таймаут хука не укладывается, а нужное — последние записи. Окно
-// растёт вдвое, пока не найдена прошлая реплика человека или не исчерпан
-// предел: у work-admin между репликами человека бывают сотни сообщений сессий
+// растёт вдвое, пока не найдены прошлая реплика человека и предыдущий ответ
+// агента или не исчерпан предел: у work-admin между репликами человека бывают
+// сотни сообщений сессий
 const (
 	tailWindowStart = 1 << 20
 	tailWindowMax   = 32 << 20
@@ -27,6 +28,13 @@ type Tail struct {
 	HumanReply string
 	// HumanFound — реплика найдена в пределах окна
 	HumanFound bool
+	// PrevAnswer — предыдущий ответ агента: последний текст, которым кончился
+	// его ход (stop_reason end_turn), кроме проверяемого. Проверяемого ответа в
+	// транскрипте к Stop-хуку ещё нет, а рекомендация к вопросу «жду твоего
+	// ответа» бывает в прошлом ответе (пользователь 25.10, случай 19:01)
+	PrevAnswer string
+	// PrevFound — предыдущий ответ найден в пределах окна
+	PrevFound bool
 }
 
 type transcriptRecord struct {
@@ -37,7 +45,8 @@ type transcriptRecord struct {
 	} `json:"origin"`
 	IsSidechain bool `json:"isSidechain"`
 	Message     *struct {
-		Content json.RawMessage `json:"content"`
+		Content    json.RawMessage `json:"content"`
+		StopReason string          `json:"stop_reason"`
 	} `json:"message"`
 	Attachment *struct {
 		Type   string `json:"type"`
@@ -48,10 +57,11 @@ type transcriptRecord struct {
 	} `json:"attachment"`
 }
 
-// ReadTail читает хвост транскрипта: uuid последнего текста ассистента и
+// ReadTail читает хвост транскрипта: uuid последнего текста ассистента,
 // последнюю реплику человека — набранную в приглашении (type user,
-// origin human) или поставленную в очередь посреди хода (queued_command)
-func ReadTail(path string) (Tail, error) {
+// origin human) или поставленную в очередь посреди хода (queued_command) — и
+// предыдущий ответ агента, отличный от проверяемого answer
+func ReadTail(path, answer string) (Tail, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return Tail{}, fmt.Errorf("open transcript: %w", err)
@@ -78,39 +88,59 @@ func ReadTail(path string) (Tail, error) {
 				buf = buf[i+1:]
 			}
 		}
-		tail = scanTail(buf)
-		if tail.HumanFound || window >= size || window >= tailWindowMax {
+		tail = scanTail(buf, answer)
+		if (tail.HumanFound && tail.PrevFound) || window >= size || window >= tailWindowMax {
 			return tail, nil
 		}
 	}
 }
 
-// scanTail идёт по строкам с конца
-func scanTail(buf []byte) Tail {
+// scanTail идёт по строкам с конца. uuid текста ассистента берётся только
+// после реплики человека, предыдущий ответ — и до неё
+func scanTail(buf []byte, answer string) Tail {
 	var tail Tail
+	answer = strings.TrimSpace(answer)
 	lines := bytes.Split(buf, []byte("\n"))
-	for i := len(lines) - 1; i >= 0; i-- {
+	for i := len(lines) - 1; i >= 0 && !(tail.HumanFound && tail.PrevFound); i-- {
 		line := lines[i]
 		// Разбор JSON только у строк-кандидатов: в хвосте мегабайты служебных
 		// записей (api-request-blob), их разбор съел бы бюджет хука
-		wantAssistant := tail.AssistantUUID == "" && bytes.Contains(line, []byte(`"type":"assistant"`))
-		if !wantAssistant && !bytes.Contains(line, []byte(`"kind":"human"`)) {
+		wantUUID := !tail.HumanFound && tail.AssistantUUID == ""
+		wantAssistant := (wantUUID || !tail.PrevFound) && bytes.Contains(line, []byte(`"type":"assistant"`))
+		wantHuman := !tail.HumanFound && bytes.Contains(line, []byte(`"kind":"human"`))
+		if !wantAssistant && !wantHuman {
 			continue
 		}
 		var record transcriptRecord
 		if json.Unmarshal(line, &record) != nil || record.IsSidechain {
 			continue
 		}
-		if tail.AssistantUUID == "" && record.Type == "assistant" && record.Message != nil && contentText(record.Message.Content) != "" {
-			tail.AssistantUUID = record.UUID
+		if record.Type == "assistant" && record.Message != nil {
+			tail.takeAssistant(record, wantUUID, answer)
 		}
-		if text, ok := humanText(record); ok {
+		if text, ok := humanText(record); ok && wantHuman {
 			tail.HumanReply = text
 			tail.HumanFound = true
-			return tail
 		}
 	}
 	return tail
+}
+
+// takeAssistant берёт из записи ассистента uuid текста (если ещё нужен) и
+// предыдущий ответ. Проверяемый ответ, успевший попасть в транскрипт, — не
+// предыдущий
+func (tail *Tail) takeAssistant(record transcriptRecord, wantUUID bool, answer string) {
+	text := contentText(record.Message.Content)
+	if text == "" {
+		return
+	}
+	if wantUUID {
+		tail.AssistantUUID = record.UUID
+	}
+	if !tail.PrevFound && record.Message.StopReason == "end_turn" && strings.TrimSpace(text) != answer {
+		tail.PrevAnswer = text
+		tail.PrevFound = true
+	}
 }
 
 func humanText(record transcriptRecord) (string, bool) {

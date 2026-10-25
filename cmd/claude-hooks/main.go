@@ -69,6 +69,7 @@ func execute() int {
 		newHookCmd(hookUserPromptSubmit, "Обработать UserPromptSubmit hook", &exitCode),
 		newHookCmd(hookPostToolBatch, "Обработать PostToolBatch hook", &exitCode),
 		newHookCmd(hookQuestionCheck, "Проверить вопросы пользователю в конце хода (Stop)", &exitCode),
+		newHookCmd(hookWebFetchFallback, "Подменить отказ сайта в ответе WebFetch текстом из webtext (PostToolUse)", &exitCode),
 		newNotifyCmd(),
 		newStatusLineCmd(),
 		newLimitsCmd(),
@@ -137,6 +138,7 @@ const (
 	hookUserPromptSubmit = "user-prompt-submit"
 	hookPostToolBatch    = "post-tool-batch"
 	hookQuestionCheck    = "question-check"
+	hookWebFetchFallback = "webfetch-fallback"
 )
 
 // newHookCmd создает команду обработки хука, записывающую exit-код по указателю
@@ -196,6 +198,9 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		return exitAllowed, nil
 	case hookQuestionCheck:
 		runQuestionCheck(ctx, parseSessionInput(logger, hookType, data), config, logger, os.Stdout)
+		return exitAllowed, nil
+	case hookWebFetchFallback:
+		runWebFetchFallback(ctx, data, config, logger, os.Stdout)
 		return exitAllowed, nil
 	default:
 		return exitError, fmt.Errorf("unknown hook type: %s", hookType)

@@ -35,6 +35,13 @@ tools:
   question_check:
     enabled: true
 
+  # На отказ сайта в ответе WebFetch (403, 429, страница проверки) подставляет
+  # текст страницы из утилиты akit webtext (PostToolUse, подкоманда
+  # webfetch-fallback). Включает регистрация подкоманды в settings.json; без
+  # ключа включено
+  webfetch_fallback:
+    enabled: true
+
   # Блокирует явный выбор модели, отсутствующей в ~/.config/models/approved
   model_guard:
     enabled: false

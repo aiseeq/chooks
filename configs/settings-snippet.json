@@ -6,6 +6,12 @@
         "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/claude-hooks pre-tool-use", "timeout": 3 }]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "WebFetch",
+        "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/claude-hooks webfetch-fallback", "timeout": 60 }]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/claude-hooks user-prompt-submit", "timeout": 3 }]

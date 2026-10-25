@@ -88,11 +88,10 @@ func TestDetails(t *testing.T) {
 	input := Input{}
 	input.Model.DisplayName = "Opus 5"
 	input.Effort.Level = "high"
-	input.ContextWindow.UsedPercentage = 47
 	input.Cost.LinesAdded = 412
 	input.Cost.LinesRemoved = 87
 
-	parts := details(input, weekBar{label: "нед"}, time.Now())
+	parts := details(input, 47, weekBar{label: "нед"}, time.Now())
 
 	expected := []string{"Opus 5·high", "ctx ▓▓▓▓░░░░░░ 47%", "+412 −87"}
 	if len(parts) != len(expected) {
@@ -124,9 +123,8 @@ func TestBuildFitsSingleLine(t *testing.T) {
 
 	input := Input{CWD: t.TempDir()}
 	input.Model.DisplayName = "Opus 5 (1M context)"
-	input.ContextWindow.UsedPercentage = 47
 
-	line, title := build(input, weekBar{label: "нед"}, time.Now(), testLogger(t))
+	line, title := build(input, 47, weekBar{label: "нед"}, time.Now(), testLogger(t))
 
 	if strings.Contains(line, "\n") {
 		t.Errorf("строка статуса должна умещаться в одну строку: %q", line)
@@ -141,7 +139,7 @@ func TestBuildFitsSingleLine(t *testing.T) {
 
 func TestDetailsSkipsMissingData(t *testing.T) {
 	// Claude Code передаёт не все поля: пустые сведения не должны давать пустых разделителей
-	if parts := details(Input{}, weekBar{label: "нед"}, time.Now()); len(parts) != 0 {
+	if parts := details(Input{}, 0, weekBar{label: "нед"}, time.Now()); len(parts) != 0 {
 		t.Errorf("ожидался пустой список, получено %q", parts)
 	}
 }
@@ -260,9 +258,8 @@ func TestDetailsWeekly(t *testing.T) {
 	used, resets := 51.0, weekResets.Unix()
 
 	input := Input{}
-	input.ContextWindow.UsedPercentage = 47
 	input.RateLimits.SevenDay = &WeeklyLimit{UsedPercentage: &used, ResetsAt: &resets}
-	parts := details(input, weekBar{label: "нед"}, now)
+	parts := details(input, 47, weekBar{label: "нед"}, now)
 	expected := []string{"ctx ▓▓▓▓░░░░░░ 47%", "нед ▓▓▓▓▓░░░░░ 51%"}
 	if len(parts) != len(expected) {
 		t.Fatalf("ожидалось %q, получено %q", expected, parts)
@@ -280,7 +277,7 @@ func TestDetailsWeekly(t *testing.T) {
 		"нет процента":  {ResetsAt: &resets},
 	} {
 		input.RateLimits.SevenDay = limit
-		for _, part := range details(input, weekBar{label: "нед"}, now) {
+		for _, part := range details(input, 47, weekBar{label: "нед"}, now) {
 			if strings.Contains(plain(part), "нед") {
 				t.Errorf("%s: блок недели не должен выводиться, получено %q", name, plain(part))
 			}

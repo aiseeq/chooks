@@ -53,6 +53,7 @@ type Input struct {
 	CWD       string `json:"cwd"`
 
 	Model struct {
+		ID          string `json:"id"`
 		DisplayName string `json:"display_name"`
 	} `json:"model"`
 
@@ -61,8 +62,12 @@ type Input struct {
 		ProjectDir string `json:"project_dir"`
 	} `json:"workspace"`
 
+	// ContextWindow — заполнение окна модели. used_percentage — доля всего
+	// окна, а не порога автосжатия: полоса считает свою долю по токенам
 	ContextWindow struct {
-		UsedPercentage float64 `json:"used_percentage"`
+		UsedPercentage float64       `json:"used_percentage"`
+		Size           int           `json:"context_window_size"`
+		CurrentUsage   *ContextUsage `json:"current_usage"`
 	} `json:"context_window"`
 
 	Cost struct {
@@ -78,6 +83,36 @@ type Input struct {
 		SevenDay *WeeklyLimit `json:"seven_day"`
 		FiveHour *WeeklyLimit `json:"five_hour"`
 	} `json:"rate_limits"`
+}
+
+// ContextUsage — токены последнего запроса; контекст — вход вместе с кэшем
+type ContextUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+// contextUsed — заполнение контекста в процентах порога автосжатия: 100% —
+// сейчас сожмётся (пользователь 25.10: «полоску контекста отрегулировать»).
+// Порога нет (сжатие выключено) или нет токенов во входе — доля всего окна
+func contextUsed(input Input, threshold int) float64 {
+	usage := input.ContextWindow.CurrentUsage
+	if threshold <= 0 || usage == nil {
+		return input.ContextWindow.UsedPercentage
+	}
+	tokens := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+	return float64(tokens) * 100 / float64(threshold)
+}
+
+// contextFill — заполнение контекста до порога автосжатия по settings.json
+// из claudeDir и окружению Claude Code
+func contextFill(input Input, claudeDir string, logger core.Logger) float64 {
+	settings, err := loadCompactSettings(claudeDir)
+	if err != nil {
+		// Явный failover: без settings порог штатный — по полному окну модели
+		logger.Warn("settings unreadable, context bar uses the default compaction window", "error", err)
+	}
+	return contextUsed(input, compactThreshold(input.ContextWindow.Size, input.Model.ID, settings, os.Getenv))
 }
 
 // Render читает данные Claude Code и возвращает строку статуса.
@@ -151,7 +186,7 @@ func Render(stdin io.Reader, logger core.Logger) (string, error) {
 		bar.pool = poolPace(store, snapshot, now, logger)
 	}
 
-	line, title := build(input, bar, now, logger)
+	line, title := build(input, contextFill(input, paths.ClaudeDir, logger), bar, now, logger)
 	if err := desktop.SetTerminalTitle(title); err != nil {
 		logger.Warn("terminal title not set", "error", err)
 	}
@@ -163,7 +198,7 @@ func Render(stdin io.Reader, logger core.Logger) (string, error) {
 // сессии строку не срывает: она рисуется по тому, что удалось прочитать, а
 // сбой уходит в лог. Ветки и worktree в строке нет (пользователь 24.10 о
 // строке всех агентов: «Хочу видеть только вот это»)
-func build(input Input, bar weekBar, now time.Time, logger core.Logger) (string, string) {
+func build(input Input, ctxUsed float64, bar weekBar, now time.Time, logger core.Logger) (string, string) {
 	dir := sessionDir(input)
 	state, err := core.LoadSessionState(input.SessionID)
 	if err != nil {
@@ -176,13 +211,13 @@ func build(input Input, bar weekBar, now time.Time, logger core.Logger) (string,
 	// Путь не показывается: плашка уже называет проект, а полный путь
 	// повторяет её и занимает место
 	var output strings.Builder
-	output.WriteString(projectBadge(dir, state, input.ContextWindow.UsedPercentage))
+	output.WriteString(projectBadge(dir, state, ctxUsed))
 
-	for _, part := range details(input, bar, now) {
+	for _, part := range details(input, ctxUsed, bar, now) {
 		output.WriteString(dim + " · " + reset + part)
 	}
 
-	return output.String(), terminalTitle(dir, state, input.ContextWindow.UsedPercentage)
+	return output.String(), terminalTitle(dir, state, ctxUsed)
 }
 
 // terminalTitle собирает заголовок окна: значок состояния и проект.
@@ -218,7 +253,7 @@ func projectBadge(dir string, state core.SessionState, contextUsed float64) stri
 }
 
 // details собирает вторую строку из доступных сведений
-func details(input Input, bar weekBar, now time.Time) []string {
+func details(input Input, ctxUsed float64, bar weekBar, now time.Time) []string {
 	var parts []string
 
 	if model := shortModel(input.Model.DisplayName); model != "" {
@@ -228,8 +263,8 @@ func details(input Input, bar weekBar, now time.Time) []string {
 		parts = append(parts, cyan+model+reset)
 	}
 
-	if used := input.ContextWindow.UsedPercentage; used > 0 {
-		parts = append(parts, contextBar(used))
+	if ctxUsed > 0 {
+		parts = append(parts, contextBar(ctxUsed))
 	}
 
 	if week, ok := input.RateLimits.SevenDay.usage(); ok {
@@ -252,7 +287,7 @@ func shortModel(model string) string {
 	return strings.TrimSpace(model)
 }
 
-// contextBar рисует полосу заполнения контекстного окна
+// contextBar рисует полосу заполнения контекста до порога автосжатия
 func contextBar(used float64) string {
 	color := green
 	switch {

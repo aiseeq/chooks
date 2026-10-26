@@ -243,6 +243,7 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 	printResponse(logger, response)
 
 	if response.Action == core.HookActionAllow {
+		rewritePgrep(input, config, logger, os.Stdout)
 		return exitAllowed, nil
 	}
 	// Warn и Block одинаково возвращают 2: только этот код доносит сообщение до модели

@@ -226,7 +226,12 @@ func (b saidBench) inForce(example saidCase) []questioncheck.SaidQuote {
 	transcript, _, _ := strings.Cut(example.ID, ".jsonl:")
 	session := filepath.Base(transcript)
 	var own, other []questioncheck.SaidRecord
-	for _, record := range questioncheck.InForce(b.said, example.Project, b.home, example.Time) {
+	// ts примера — время следующей реплики пользователя (поправки), а время
+	// записи said.tsv — до секунды: без среза по секунде судья видел бы
+	// запись из самой поправки (26.10: 32 из 42 положительных, 16 из 150
+	// отрицательных). Живой хук срабатывает до реплики, ему это не нужно
+	cutoff := example.Time.Truncate(time.Second)
+	for _, record := range questioncheck.InForce(b.said, example.Project, b.home, cutoff) {
 		id, _, _ := strings.Cut(record.Ref, ":")
 		if id != "" && strings.HasPrefix(session, id) {
 			own = append(own, record)

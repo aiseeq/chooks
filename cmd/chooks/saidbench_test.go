@@ -32,7 +32,9 @@ func TestSaidBenchInForce(t *testing.T) {
 		questioncheck.SaidRecord{Time: at(1), Scope: "global", Ref: "ffffffff:1", Words: "селинукс", Quote: "разберись с селинуксом"},
 		questioncheck.SaidRecord{Time: at(1), Scope: "global", Ref: "ffffffff:2", Words: "отчёт", Quote: "чужое не по теме"},
 	)
-	example := saidCase{ID: "-home-u/8abab4f1-9009.jsonl:100", Time: at(13), Project: "-home-u", Turn: "→ Bash: ausearch селинукс"}
+	// Запись из самой следующей реплики: время до секунды, ts примера — с долями
+	bench.said = append(bench.said, questioncheck.SaidRecord{Time: at(13), Scope: "global", Ref: "8abab4f1:100", Quote: "поправка"})
+	example := saidCase{ID: "-home-u/8abab4f1-9009.jsonl:100", Time: at(13).Add(101 * time.Millisecond), Project: "-home-u", Turn: "→ Bash: ausearch селинукс"}
 	quotes := bench.inForce(example)
 	if len(quotes) != sameSessionSaid+1 || quotes[0].Text != "своё 3" || quotes[sameSessionSaid-1].Text != "своё 12" || quotes[sameSessionSaid].Text != "разберись с селинуксом" {
 		t.Fatalf("quotes = %+v", quotes)

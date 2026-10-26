@@ -108,7 +108,9 @@ func deliverDesktop(ctx context.Context, alert Alert) error {
 		return nil
 	}
 
-	return ActivateWindowByPIDs(conn, alert.ActivatePIDs)
+	// Сначала вкладка, потом окно: поднятое окно сразу показывает нужную.
+	// Сбой выбора вкладки окно не отменяет
+	return errors.Join(SelectTab(conn), ActivateWindowByPIDs(conn, alert.ActivatePIDs))
 }
 
 // DeliverInBackground запускает доставку оповещения в отдельном процессе и сразу

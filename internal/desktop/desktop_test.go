@@ -114,3 +114,13 @@ func TestParseInts_RejectsGarbage(t *testing.T) {
 		t.Errorf("пустая строка даёт пустой список, получено %v", got)
 	}
 }
+
+// Вне Konsole выбирать вкладку нечем: без ошибки и без обращения к D-Bus
+func TestSelectTabOutsideKonsole(t *testing.T) {
+	t.Setenv("KONSOLE_DBUS_SERVICE", "")
+	t.Setenv("KONSOLE_DBUS_SESSION", "")
+	t.Setenv("KONSOLE_DBUS_WINDOW", "")
+	if err := SelectTab(nil); err != nil {
+		t.Errorf("вне Konsole: %v", err)
+	}
+}

@@ -180,6 +180,23 @@ func TestBuildMarksTurnSeen(t *testing.T) {
 	}
 }
 
+// Сессия без записи — новая или после /clear — стоит пустой, а не работает;
+// показ записи не создаёт, первый запрос по-прежнему делает её работой
+func TestBuildFreshSessionIdle(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	input := Input{CWD: "/home/user/work/demo", SessionID: "s1"}
+
+	if _, title := build(input, 10, weekBar{}, time.Now(), hidden, testLogger(t)); title != "✅ demo" {
+		t.Errorf("сессия без записи: %q", title)
+	}
+	if _, recorded, err := core.LookupSessionState("s1"); err != nil || recorded {
+		t.Errorf("строка статуса записала состояние: %v, %v", recorded, err)
+	}
+	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StateWorking {
+		t.Errorf("хукам сессия без записи — работа: %q, %v", state, err)
+	}
+}
+
 // Пауза показывает, что держит сессию; задачи старше срока — уже «готово»
 func TestBuildShowsBackground(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())

@@ -132,34 +132,48 @@ func withStateLock(fn func() error) error {
 // возвращается StateWorking: раз хук ещё не отработал, работа идёт.
 // Нечитаемая запись — ошибка без состояния: чем её заменить, решает вызывающий
 func LoadSessionState(sessionID string) (SessionState, error) {
-	if sessionID == "" {
+	state, recorded, err := LookupSessionState(sessionID)
+	if err != nil {
+		return "", err
+	}
+	if !recorded {
 		return StateWorking, nil
+	}
+	return state, nil
+}
+
+// LookupSessionState читает состояние и сообщает, была ли запись. Записи нет
+// у сессии, где ещё не было ни одного запроса: новая или сброшенная /clear —
+// у неё новый идентификатор. Пустой идентификатор — тоже без записи
+func LookupSessionState(sessionID string) (SessionState, bool, error) {
+	if sessionID == "" {
+		return "", false, nil
 	}
 
 	path, err := sessionStatePath(sessionID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return StateWorking, nil
+			return "", false, nil
 		}
-		return "", fmt.Errorf("cannot read session state: %w", err)
+		return "", false, fmt.Errorf("cannot read session state: %w", err)
 	}
 
 	switch SessionState(strings.TrimSpace(string(data))) {
 	case StateWaiting:
-		return StateWaiting, nil
+		return StateWaiting, true, nil
 	case StateDone:
-		return StateDone, nil
+		return StateDone, true, nil
 	case StatePaused:
-		return StatePaused, nil
+		return StatePaused, true, nil
 	case StateIdle:
-		return StateIdle, nil
+		return StateIdle, true, nil
 	default:
-		return StateWorking, nil
+		return StateWorking, true, nil
 	}
 }
 

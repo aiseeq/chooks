@@ -206,12 +206,19 @@ func Render(stdin io.Reader, logger core.Logger) (string, error) {
 // строке всех агентов: «Хочу видеть только вот это»)
 func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible func() (bool, error), logger core.Logger) (string, string) {
 	dir := sessionDir(input)
-	state, err := core.LoadSessionState(input.SessionID)
+	state, recorded, err := core.LookupSessionState(input.SessionID)
 	if err != nil {
 		// Явный failover: без записи состояние помечается неизвестным, и
 		// плашка остаётся нейтральной — ни «ждёт ответа», ни «готово»
 		logger.Warn("session state unavailable", "session", input.SessionID, "error", err)
 		state = core.StateUnknown
+	} else if !recorded && input.SessionID == "" {
+		state = core.StateWorking
+	} else if !recorded {
+		// Запросов ещё не было: сессия только открыта или сброшена /clear и
+		// стоит на пустом приглашении. Это не работа (26.10 после /clear
+		// projectA стоял пустым с ⚙️), а показ — не запись: хуки её не видят
+		state = core.StateIdle
 	}
 	// Фоновая работа известна на конец хода: пока ход идёт, список устарел
 	var background core.Background

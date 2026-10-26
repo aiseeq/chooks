@@ -13,12 +13,12 @@ import (
 const pgrepAncestorsTool = "pgrep_ancestors"
 
 // preToolUseOutput — ответ PreToolUse с подменой входа инструмента. Без
-// permissionDecision: решение о разрешении остаётся за обычным порядком
+// permissionDecision: решение о разрешении остаётся за обычным порядком.
+// Без additionalContext: хуки-подсказчики пользователь отклонил 25.10
 type preToolUseOutput struct {
 	HookSpecificOutput struct {
-		HookEventName     string         `json:"hookEventName"`
-		UpdatedInput      map[string]any `json:"updatedInput"`
-		AdditionalContext string         `json:"additionalContext"`
+		HookEventName string         `json:"hookEventName"`
+		UpdatedInput  map[string]any `json:"updatedInput"`
 	} `json:"hookSpecificOutput"`
 }
 
@@ -50,7 +50,6 @@ func rewritePgrep(input *core.ToolInput, config *core.Config, logger core.Logger
 	var output preToolUseOutput
 	output.HookSpecificOutput.HookEventName = "PreToolUse"
 	output.HookSpecificOutput.UpdatedInput = toolInput
-	output.HookSpecificOutput.AdditionalContext = tools.PgrepAncestorsNote
 	if err := json.NewEncoder(out).Encode(output); err != nil {
 		logger.Warn("pgrep rewrite not written", "error", err)
 		return

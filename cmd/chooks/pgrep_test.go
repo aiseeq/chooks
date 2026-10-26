@@ -53,3 +53,13 @@ func TestRewritePgrepSilent(t *testing.T) {
 		})
 	}
 }
+
+// Переписывание молчит: в ответе нет additionalContext
+func TestRewritePgrepNoContext(t *testing.T) {
+	config, logger := silentConfig(t)
+	var out bytes.Buffer
+	rewritePgrep(&core.ToolInput{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"pgrep -f x"}`)}, config, logger, &out)
+	if out.Len() == 0 || bytes.Contains(out.Bytes(), []byte("additionalContext")) {
+		t.Errorf("output = %q", out.String())
+	}
+}

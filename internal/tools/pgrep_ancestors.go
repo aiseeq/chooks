@@ -9,10 +9,6 @@ import (
 // pgrepAncestorsFlag исключает из ответа pgrep его предков (здесь procps-ng 4.0.6)
 const pgrepAncestorsFlag = "-A"
 
-// PgrepAncestorsNote — что агенту сказать о переписанной команде: без
-// пояснения изменённый вызов выглядел бы чужим
-const PgrepAncestorsNote = "chooks: к pgrep -f добавлен -A (--ignore-ancestors): без него pgrep находит шелл самой команды — в его argv тот же шаблон"
-
 // pgrepPrefixes — слова, после которых следующее слово — снова команда
 var pgrepPrefixes = map[string]bool{
 	"!": true, "do": true, "then": true, "else": true, "elif": true, "if": true, "while": true, "until": true,

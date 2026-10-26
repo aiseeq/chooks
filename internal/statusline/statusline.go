@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -356,7 +357,8 @@ func meter(label string, used float64, color, mark string) string {
 		used = 100
 	}
 
-	filled := int(used) * barSegments / 100
+	// Клетки — от того же округления, что и проценты: 99,6% — «100%» и полная полоса
+	filled := int(math.Round(used)) * barSegments / 100
 	bar := strings.Repeat("▓", filled) + strings.Repeat("░", barSegments-filled)
 	return fmt.Sprintf("%s%s %s%s %.0f%%%s%s", dim, label, color, bar, used, mark, reset)
 }

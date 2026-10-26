@@ -51,6 +51,9 @@ func TestContextBar(t *testing.T) {
 		{used: 47, expected: "ctx ▓▓▓▓░░░░░░ 47%", shade: "111"},
 		{used: 74, expected: "ctx ▓▓▓▓▓▓▓░░░ 74%", shade: "69"},
 		{used: 100, expected: "ctx ▓▓▓▓▓▓▓▓▓▓ 100%", shade: "33"},
+		// Округлённые до 100% проценты — полная полоса, а не 9 клеток
+		{used: 99.6, expected: "ctx ▓▓▓▓▓▓▓▓▓▓ 100%", shade: "33"},
+		{used: 29.6, expected: "ctx ▓▓▓░░░░░░░ 30%", shade: "111"},
 		// Заявленное переполнение не должно рисовать полосу длиннее шкалы
 		{used: 140, expected: "ctx ▓▓▓▓▓▓▓▓▓▓ 100%", shade: "33"},
 	}

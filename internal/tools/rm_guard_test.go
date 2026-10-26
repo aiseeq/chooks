@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // rmGuardEnv окружение, в котором снимались вердикты Claude Code: HOME и PWD

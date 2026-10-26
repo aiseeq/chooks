@@ -10,8 +10,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/desktop"
 )
 
 // Сроки ротации

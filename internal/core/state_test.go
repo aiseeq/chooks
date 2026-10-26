@@ -57,7 +57,7 @@ func TestSessionStateIgnoresEmptyID(t *testing.T) {
 
 	saveState(t, "", StateDone)
 
-	if entries, err := os.ReadDir(filepath.Join(runtimeDir, "claude-hooks", "sessions")); err == nil && len(entries) > 0 {
+	if entries, err := os.ReadDir(filepath.Join(runtimeDir, "chooks", "sessions")); err == nil && len(entries) > 0 {
 		t.Error("сессия без идентификатора не должна создавать файлов")
 	}
 	if got := loadState(t, ""); got != StateWorking {

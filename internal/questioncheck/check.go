@@ -84,7 +84,7 @@ type Entry struct {
 // afterBlockRunes — сколько текста хода после остановки сохраняет журнал
 const afterBlockRunes = 4000
 
-// DefaultJournalPath — $XDG_STATE_HOME/claude-hooks/question-check.jsonl,
+// DefaultJournalPath — $XDG_STATE_HOME/chooks/question-check.jsonl,
 // рядом с limits-history.jsonl и skill-reload
 func DefaultJournalPath() (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
@@ -95,7 +95,7 @@ func DefaultJournalPath() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "claude-hooks", "question-check.jsonl"), nil
+	return filepath.Join(base, "chooks", "question-check.jsonl"), nil
 }
 
 // Run проверяет конец хода. Всё, кроме вердикта «лишний», пропускает агента:

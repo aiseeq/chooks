@@ -40,7 +40,7 @@ func merge(t *testing.T, path string, used float64, resets time.Time, session st
 }
 
 func TestMergeWeeklyLimitFirstSnapshot(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "claude-hooks", "limits.json")
+	path := filepath.Join(t.TempDir(), "chooks", "limits.json")
 	now := time.Date(2026, 10, 20, 12, 0, 0, 123456789, time.UTC)
 	merged, verdict := merge(t, path, 38, workResets, "s1", now)
 	if verdict != weekRaised || merged.used != 38 {

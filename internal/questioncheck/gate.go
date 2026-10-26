@@ -67,8 +67,9 @@ func (s Scope) Gate(now time.Time, event Event) Gate {
 	return gate
 }
 
-// HookCommand — подкоманда, по которой проверка видна в settings.json
-const HookCommand = "claude-hooks question-check"
+// HookSubcommand — подкоманда, по которой проверка видна в settings.json:
+// последнее слово команды хука, путь к бинарю не важен
+const HookSubcommand = "question-check"
 
 // Registered — стоит ли проверка в Stop-хуках settings.json. Stop-хук
 // оповещений отдаёт ей звонок только тогда: установленный бинарник без
@@ -95,7 +96,7 @@ func Registered(settingsPath string) (bool, error) {
 	}
 	for _, group := range settings.Hooks.Stop {
 		for _, hook := range group.Hooks {
-			if strings.Contains(hook.Command, HookCommand) {
+			if fields := strings.Fields(hook.Command); len(fields) > 1 && fields[len(fields)-1] == HookSubcommand {
 				return true, nil
 			}
 		}

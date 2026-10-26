@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // jiraCommentEndpoint запрос, создающий или редактирующий комментарий в Jira

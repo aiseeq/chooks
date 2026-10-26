@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // fixture — скилл, файл инструкций и транскрипт сессии во временном каталоге

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/aiseeq/claude-hooks/internal/textstyle"
+	"github.com/aiseeq/chooks/internal/textstyle"
 )
 
 // jiraStyleMarker маркер write-as-user с областью поиска в команде.

@@ -26,7 +26,7 @@ type Paths struct {
 	ClaudeDir string
 	// GlobalConfig — ~/.claude.json, в нём oauthAccount
 	GlobalConfig string
-	// StateDir — каталог состояния claude-hooks: хранилище и журнал переключений
+	// StateDir — каталог состояния chooks: хранилище и журнал переключений
 	StateDir string
 }
 
@@ -50,7 +50,7 @@ func DefaultPaths() (Paths, error) {
 	if state == "" {
 		state = filepath.Join(home, ".local", "state")
 	}
-	paths.StateDir = filepath.Join(state, "claude-hooks")
+	paths.StateDir = filepath.Join(state, "chooks")
 	return paths, nil
 }
 

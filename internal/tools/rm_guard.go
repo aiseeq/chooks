@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // RmGuardTool отклоняет rm и rmdir, на которые Claude Code сам остановит

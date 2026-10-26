@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 func newEngine(t *testing.T, config *core.Config) *Engine {

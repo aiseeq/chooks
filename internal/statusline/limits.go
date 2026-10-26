@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/accounts"
+	"github.com/aiseeq/chooks/internal/accounts"
 )
 
 // WeeklyLimit — доля недельного лимита подписки, как её отдаёт Claude Code
@@ -147,7 +147,7 @@ func LimitsFile() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "claude-hooks", "limits.json"), nil
+	return filepath.Join(base, "chooks", "limits.json"), nil
 }
 
 // limitsHistory — журнал шагов рядом со снимком. Строка — шаг в 1% одной
@@ -585,7 +585,7 @@ func WriteLimits(w io.Writer, steps bool) error {
 		}
 		auto := "включено"
 		if store.AutoOff {
-			auto = "выключено (claude-hooks account auto on)"
+			auto = "выключено (chooks account auto on)"
 		}
 		fmt.Fprintf(w, "Автопереключение: %s; учётка пуста с %g%% недели или %d%% пяти часов, из непустых — ближайший сброс недели\n",
 			auto, accounts.WeekEmptyPercent, accounts.FiveHourEmptyPercent)
@@ -616,7 +616,7 @@ func WriteLimits(w io.Writer, steps bool) error {
 		fmt.Fprintf(w, "сброс %s  %g%%  с %s, видно %s%s\n",
 			accounts.ShortTime(rec.ResetsAt), rec.SevenDay, accounts.ShortTime(rec.At), accounts.ShortTime(rec.SeenAt), mark)
 	}
-	fmt.Fprintf(w, "Шагов в журнале: %d (claude-hooks limits --steps)\n", len(journal))
+	fmt.Fprintf(w, "Шагов в журнале: %d (chooks limits --steps)\n", len(journal))
 	return nil
 }
 

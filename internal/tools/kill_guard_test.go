@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // fakeProc процесс поддельного /proc
@@ -25,7 +25,7 @@ var killGuardTree = []fakeProc{
 	{1500, 1, "systemd", []string{"/usr/lib/systemd/systemd", "--user"}},
 	{2000, 1500, "konsole", []string{"/usr/bin/konsole"}},
 	{2100, 2000, "claude", []string{"claude", "--dangerously-skip-permissions"}},
-	{2200, 2100, "claude-hooks", []string{"claude-hooks", "pre-tool-use"}},
+	{2200, 2100, "chooks", []string{"chooks", "pre-tool-use"}},
 	{455274, 1500, "opencode", []string{"opencode", "run", "--dir", "/home/u/.cache/worktrees/sc2demu/farm-reflect-longcat"}},
 	{600, 1500, "sleep", []string{"sleep", "1000"}},
 }

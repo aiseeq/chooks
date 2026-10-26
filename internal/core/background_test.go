@@ -57,7 +57,7 @@ func TestActiveBackgroundTasks_ForgetsFinishedTasks(t *testing.T) {
 	if _, err := ActiveBackgroundTasks("s1", nil, start.Add(time.Minute)); err != nil {
 		t.Fatalf("учёт задач: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(runtimeDir, "claude-hooks", "sessions", "s1"+tasksFileSuffix)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(runtimeDir, "chooks", "sessions", "s1"+tasksFileSuffix)); !os.IsNotExist(err) {
 		t.Error("без задач файл учёта должен удаляться")
 	}
 
@@ -74,7 +74,7 @@ func TestActiveBackgroundTasks_CorruptFileIsAnError(t *testing.T) {
 	runtimeDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
-	dir := filepath.Join(runtimeDir, "claude-hooks", "sessions")
+	dir := filepath.Join(runtimeDir, "chooks", "sessions")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

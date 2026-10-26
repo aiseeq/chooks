@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 func newWriteGuard(t *testing.T) *WriteGuardTool {

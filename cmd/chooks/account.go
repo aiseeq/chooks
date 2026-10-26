@@ -7,9 +7,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aiseeq/claude-hooks/internal/accounts"
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/statusline"
+	"github.com/aiseeq/chooks/internal/accounts"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/statusline"
 )
 
 // rotateTimeout — потолок фоновой ротации: сетевые запросы и ожидание
@@ -22,7 +22,7 @@ func newAccountCmd() *cobra.Command {
 		Use:   "account",
 		Short: "Учётки подписок Claude: список, сохранение, переключение",
 		Long: `Хранит токены нескольких подписок Claude и переключает между ними
-Claude Code без нового входа. Хранилище — ~/.local/state/claude-hooks/accounts.json
+Claude Code без нового входа. Хранилище — ~/.local/state/chooks/accounts.json
 (права 600, токены не печатаются).
 
 Вход в новую учётку — /login в любой сессии Claude Code: строка статуса
@@ -33,7 +33,7 @@ Claude Code без нового входа. Хранилище — ~/.local/stat
 её остаток не сгорит. Запущенные сессии берут новую учётку на следующем
 запросе к API.
 
-Без подкоманды печатает сводку учёток, как claude-hooks limits.`,
+Без подкоманды печатает сводку учёток, как chooks limits.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return statusline.WriteLimits(cmd.OutOrStdout(), false)
 		},
@@ -84,7 +84,7 @@ func newAccountSwitchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "активна %s; автопереключение выключено (claude-hooks account auto on)\n", email)
+			fmt.Fprintf(cmd.OutOrStdout(), "активна %s; автопереключение выключено (chooks account auto on)\n", email)
 			return nil
 		},
 	}
@@ -172,7 +172,7 @@ func newRotator() (*accounts.Rotator, error) {
 	}
 	return &accounts.Rotator{
 		Paths:  paths,
-		Client: accounts.NewClient("claude-hooks/" + Version),
+		Client: accounts.NewClient("chooks/" + Version),
 		Limits: statusline.SnapshotLimits{},
 		Log:    logger,
 		Now:    time.Now,

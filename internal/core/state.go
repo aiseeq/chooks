@@ -123,7 +123,7 @@ func stateDir() string {
 	return filepath.Join(RuntimeDir(), "sessions")
 }
 
-// RuntimeDir возвращает каталог для недолговечных файлов claude-hooks.
+// RuntimeDir возвращает каталог для недолговечных файлов chooks.
 // Каталог времени выполнения очищается при перезагрузке — это как раз то,
 // что нужно состояниям сессий и блокировкам
 func RuntimeDir() string {
@@ -131,7 +131,7 @@ func RuntimeDir() string {
 	if base == "" {
 		base = os.TempDir()
 	}
-	return filepath.Join(base, "claude-hooks")
+	return filepath.Join(base, "chooks")
 }
 
 // cleanupStaleStates удаляет записи завершившихся сессий. Записи, которые

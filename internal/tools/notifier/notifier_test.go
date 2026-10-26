@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 func newNotifier(t *testing.T, config core.ToolConfig) *Notifier {
@@ -93,7 +93,7 @@ func TestNotifierTool_ProjectName(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	// Проекты вне ~/work и вложенные каталоги: имя определяется по факту, а не по шаблону пути
-	for _, dir := range []string{"work/claude-hooks", "git/life", "work/projecta/frontend/admin-app"} {
+	for _, dir := range []string{"work/chooks", "git/life", "work/projecta/frontend/admin-app"} {
 		if err := os.MkdirAll(filepath.Join(home, dir), 0o755); err != nil {
 			t.Fatalf("не удалось создать каталог: %v", err)
 		}
@@ -108,8 +108,8 @@ func TestNotifierTool_ProjectName(t *testing.T) {
 		{
 			// Агент сделал cd в подпапку чужого проекта: вкладка называет сессию по каталогу запуска
 			name:     "каталог запуска приоритетнее текущего",
-			input:    core.ToolInput{CWD: filepath.Join(home, "work/projecta/frontend"), TranscriptPath: "/p/" + encodedHome + "-work-claude-hooks/s.jsonl"},
-			expected: "claude-hooks",
+			input:    core.ToolInput{CWD: filepath.Join(home, "work/projecta/frontend"), TranscriptPath: "/p/" + encodedHome + "-work-chooks/s.jsonl"},
+			expected: "chooks",
 		},
 		{
 			name:     "без транскрипта берётся текущий каталог",
@@ -128,8 +128,8 @@ func TestNotifierTool_ProjectName(t *testing.T) {
 		},
 		{
 			name:     "дефис в имени проекта не является разделителем",
-			input:    core.ToolInput{TranscriptPath: "/p/" + encodedHome + "-work-claude-hooks/s.jsonl"},
-			expected: "claude-hooks",
+			input:    core.ToolInput{TranscriptPath: "/p/" + encodedHome + "-work-chooks/s.jsonl"},
+			expected: "chooks",
 		},
 		{
 			name:     "проект вне рабочего каталога",
@@ -144,8 +144,8 @@ func TestNotifierTool_ProjectName(t *testing.T) {
 		},
 		{
 			name:     "проект первого уровня остаётся без родителя",
-			input:    core.ToolInput{CWD: filepath.Join(home, "work/claude-hooks")},
-			expected: "claude-hooks",
+			input:    core.ToolInput{CWD: filepath.Join(home, "work/chooks")},
+			expected: "chooks",
 		},
 		{
 			name:     "сессия из домашнего каталога",

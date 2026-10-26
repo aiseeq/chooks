@@ -1,4 +1,4 @@
-module github.com/aiseeq/claude-hooks
+module github.com/aiseeq/chooks
 
 go 1.21
 

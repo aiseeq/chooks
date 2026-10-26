@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/accounts"
+	"github.com/aiseeq/chooks/internal/accounts"
 )
 
 // rotationCall — запуск ротации, который строка статуса попросила

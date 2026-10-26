@@ -155,13 +155,14 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
-// DefaultConfigPath возвращает путь к конфигурации по умолчанию
+// DefaultConfigPath возвращает путь к конфигурации по умолчанию:
+// $XDG_CONFIG_HOME/chooks/config.yaml
 func DefaultConfigPath() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve default config path: %w", err)
 	}
-	return filepath.Join(homeDir, ".claude", "hooks", "config.yaml"), nil
+	return filepath.Join(configDir, "chooks", "config.yaml"), nil
 }
 
 // containsFold проверяет содержится ли элемент в слайсе без учета регистра

@@ -91,7 +91,7 @@ const lockWait = time.Second
 // lockPoll — шаг ожидания блокировки
 const lockPoll = 10 * time.Millisecond
 
-// DefaultStateDir — каталог записей: $XDG_STATE_HOME/claude-hooks/skill-reload.
+// DefaultStateDir — каталог записей: $XDG_STATE_HOME/chooks/skill-reload.
 // Не каталог времени выполнения: сессию продолжают после перезагрузки
 func DefaultStateDir() (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
@@ -102,7 +102,7 @@ func DefaultStateDir() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "claude-hooks", "skill-reload"), nil
+	return filepath.Join(base, "chooks", "skill-reload"), nil
 }
 
 // stateFileName — имя записи сессии или её субагента

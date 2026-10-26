@@ -3,7 +3,7 @@ package notifier
 import (
 	"testing"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 func tasks(items ...core.BackgroundTask) *[]core.BackgroundTask { return &items }

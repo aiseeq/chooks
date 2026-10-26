@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 func modelGuardForTest(t *testing.T, contents string) *ModelGuardTool {

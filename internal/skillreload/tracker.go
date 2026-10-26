@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // Notice — правка файла, которую агент ещё не видел

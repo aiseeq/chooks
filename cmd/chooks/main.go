@@ -12,13 +12,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/desktop"
-	"github.com/aiseeq/claude-hooks/internal/processor"
-	"github.com/aiseeq/claude-hooks/internal/statusline"
-	"github.com/aiseeq/claude-hooks/internal/textstyle"
-	"github.com/aiseeq/claude-hooks/internal/tools"
-	"github.com/aiseeq/claude-hooks/internal/tools/notifier"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/processor"
+	"github.com/aiseeq/chooks/internal/statusline"
+	"github.com/aiseeq/chooks/internal/textstyle"
+	"github.com/aiseeq/chooks/internal/tools"
+	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
 
 // Exit-коды, которые понимает Claude Code:
@@ -48,7 +48,7 @@ func execute() int {
 	exitCode := exitAllowed
 
 	rootCmd := &cobra.Command{
-		Use:           "claude-hooks",
+		Use:           "chooks",
 		Short:         "Claude Code hooks processor",
 		Long:          "Обработчик хуков Claude Code: уведомления о завершении и ожидании ответа, строка статуса, проверка стиля Jira-комментариев и черновиков текста.",
 		SilenceUsage:  true,
@@ -84,7 +84,7 @@ func execute() int {
 	)
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-hooks: %v\n", err)
+		fmt.Fprintf(os.Stderr, "chooks: %v\n", err)
 		if exitCode == exitAllowed {
 			exitCode = exitError
 		}
@@ -526,7 +526,7 @@ func newNotifyCmd() *cobra.Command {
 Команда возвращает управление сразу, не дожидаясь ни звука, ни клика.
 
 Пример вызова из плагина стороннего агента:
-  claude-hooks notify --title "opencode ждёт ответа" --message "Проект: projecta" --window-pid $$`,
+  chooks notify --title "opencode ждёт ответа" --message "Проект: projecta" --window-pid $$`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if alert.Title == "" {
 				return fmt.Errorf("не задан --title")
@@ -542,7 +542,7 @@ func newNotifyCmd() *cobra.Command {
 				if err != nil {
 					// Best effort: собранная часть цепочки — настоящие PID, окно
 					// может быть у них; без окна клик просто ничего не активирует
-					fmt.Fprintf(os.Stderr, "claude-hooks: process ancestry incomplete: %v\n", err)
+					fmt.Fprintf(os.Stderr, "chooks: process ancestry incomplete: %v\n", err)
 				}
 				alert.ActivatePIDs = ancestors
 			}
@@ -559,7 +559,7 @@ func newNotifyCmd() *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&alert.Title, "title", "", "заголовок уведомления")
 	flags.StringVar(&alert.Message, "message", "", "текст уведомления")
-	flags.StringVar(&alert.AppName, "app-name", "claude-hooks", "имя приложения в уведомлении")
+	flags.StringVar(&alert.AppName, "app-name", "chooks", "имя приложения в уведомлении")
 	flags.StringVar(&alert.Icon, "icon", "utilities-terminal", "значок уведомления")
 	flags.DurationVar(&alert.Timeout, "timeout", 30*time.Second, "время показа уведомления")
 	flags.BoolVar(&alert.Sound, "sound", true, "проиграть звук")
@@ -620,7 +620,7 @@ func newStatusLineCmd() *cobra.Command {
 и недельном лимите подписки.
 
 Подключается в ~/.claude/settings.json:
-  "statusLine": {"type": "command", "command": "~/.claude/hooks/claude-hooks statusline"}`,
+  "statusLine": {"type": "command", "command": "~/bin/chooks statusline"}`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config, err := core.LoadConfig(configPath)
 			if err != nil {
@@ -647,8 +647,8 @@ func newLimitsCmd() *cobra.Command {
 		Use:   "limits",
 		Short: "Показать неделю Claude по каждой учётке",
 		Long: `Печатает лимиты из снимка строки статуса
-(~/.local/state/claude-hooks/limits.json) по каждой учётке хранилища
-(claude-hooks account): почта, неделя - доля и сброс, пять часов, срок входа.
+(~/.local/state/chooks/limits.json) по каждой учётке хранилища
+(chooks account): почта, неделя - доля и сброс, пять часов, срок входа.
 Неделя приписывается учётке, активной в момент замера; недели без учётки
 (до хранилища) - строками без почты, по сбросу недели.
 
@@ -676,7 +676,7 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Показать версию",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("claude-hooks %s\n", Version)
+			fmt.Printf("chooks %s\n", Version)
 		},
 	}
 }

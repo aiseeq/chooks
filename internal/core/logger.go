@@ -120,7 +120,7 @@ func openLogWriter(config LoggerConfig) (io.Writer, error) {
 		}
 		// Неудавшаяся ротация логирование не останавливает: лог просто растёт дальше
 		if err := rotateLogIfNeeded(config.LogFile, config.MaxSizeMB); err != nil {
-			fmt.Fprintf(os.Stderr, "claude-hooks: log rotation failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "chooks: log rotation failed: %v\n", err)
 		}
 
 		file, err := os.OpenFile(config.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)

@@ -40,7 +40,7 @@ func dirLock(path string, stale time.Duration) (func(), error) {
 			return func() {
 				// Каталог пуст: proper-lockfile ничего в него не кладёт
 				if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					fmt.Fprintf(os.Stderr, "claude-hooks: lock %s not released: %v\n", path, err)
+					fmt.Fprintf(os.Stderr, "chooks: lock %s not released: %v\n", path, err)
 				}
 			}, nil
 		}

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // fakeWebtext кладёт в PATH скрипт webtext: он отмечает вызов и отдаёт

@@ -1,10 +1,10 @@
-# Конфигурация claude-hooks
+# Конфигурация chooks
 
 logger:
   level: "info" # debug, info, warn, error
   format: "text" # text, json
   output: "file" # stdout, stderr, file
-  file: "~/.claude/logs/claude-hooks.log"
+  file: "~/.claude/logs/chooks.log"
   max_size_mb: 16 # ротация лога при превышении размера, 0 — отключить
 
 tools:
@@ -30,7 +30,7 @@ tools:
   # Проверка вопросов пользователю в конце хода (Stop, подкоманда question-check):
   # судья-модель останавливает конец хода, если вопрос лишний — ответ в журналах
   # реплик и решений или в зоне агента. Только сессии lead и work-admin, до 30.10
-  # включительно; журнал — ~/.local/state/claude-hooks/question-check.jsonl.
+  # включительно; журнал — ~/.local/state/chooks/question-check.jsonl.
   # Включает регистрация подкоманды в settings.json; без ключа включено
   question_check:
     enabled: true

@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/skillreload"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/skillreload"
 )
 
 // Имена событий в hookSpecificOutput: по ним Claude Code понимает, к какому

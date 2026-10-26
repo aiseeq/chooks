@@ -11,7 +11,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/accounts"
+	"github.com/aiseeq/chooks/internal/accounts"
 )
 
 // Темп расхода пула — сумма шагов доли всех учёток из журнала

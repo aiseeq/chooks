@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/desktop"
 )
 
 // WatchCommand имя скрытой подкоманды, которая доставляет оповещение в фоне
@@ -151,10 +151,10 @@ func (n *Notifier) ProjectName(input *core.ToolInput) string {
 }
 
 // decodeProjectDir восстанавливает путь проекта из имени каталога транскриптов
-// Claude Code: /home/user/work/claude-hooks → -home-user-work-claude-hooks.
+// Claude Code: /home/user/work/chooks → -home-user-work-chooks.
 // Кодирование неоднозначно — дефис может быть как разделителем каталогов,
 // так и частью имени, — поэтому вариант проверяется по файловой системе.
-// Так различаются ~/work/projecta/frontend/admin-app и ~/work/claude-hooks
+// Так различаются ~/work/projecta/frontend/admin-app и ~/work/chooks
 func decodeProjectDir(encoded string) string {
 	if encoded == "" || encoded == "." || encoded == string(filepath.Separator) {
 		return ""

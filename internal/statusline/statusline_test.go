@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // ansiPattern убирает оформление: проверяется содержимое, а не escape-коды

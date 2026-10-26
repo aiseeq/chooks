@@ -7,8 +7,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/webfallback"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/webfallback"
 )
 
 // webFallbackTool — ключ в config.yaml; без ключа включено, включает

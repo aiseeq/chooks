@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // stopInput собирает вход Stop по схеме Claude Code 2.1.284
@@ -104,7 +104,7 @@ func TestRunSessionEvent_PauseThenDone(t *testing.T) {
 func TestRunSessionEvent_BrokenTaskBookkeepingKeepsPause(t *testing.T) {
 	config, logger := silentConfig(t)
 
-	dir := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "claude-hooks", "sessions")
+	dir := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "chooks", "sessions")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

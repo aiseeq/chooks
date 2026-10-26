@@ -6,8 +6,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/tools"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/tools"
 )
 
 // Engine прогоняет вызов инструмента через проверки перед выполнением

@@ -2,7 +2,7 @@
 // скилл write-as-user запрещает: тире, markdown, типографские кавычки,
 // противопоставление "X, а не Y", числа прописью. Те же маркеры блокируют
 // комментарий в Jira (хук jira_style) и проверяют черновик командой
-// claude-hooks style
+// chooks style
 package textstyle
 
 import (

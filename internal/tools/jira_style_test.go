@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 func newJiraStyleTool(t *testing.T) *JiraStyleTool {

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/questioncheck"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/questioncheck"
 )
 
 // questionDay — день внутри эксперимента: решения в тестах от часов не зависят
@@ -60,12 +60,12 @@ func newQuestionEnv(t *testing.T, sessionName string, registered bool) *question
 
 	claudeDir := filepath.Join(home, ".claude")
 	writeFile(t, filepath.Join(claudeDir, "sessions", pid+".json"), `{"pid":`+pid+`,"name":"`+sessionName+`"}`)
-	command := "$HOME/.claude/hooks/claude-hooks stop"
+	command := "$HOME/bin/chooks stop"
 	if registered {
-		command = "$HOME/.claude/hooks/claude-hooks question-check"
+		command = "$HOME/bin/chooks question-check"
 	}
 	writeFile(t, filepath.Join(claudeDir, "settings.json"),
-		`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$HOME/.claude/hooks/claude-hooks stop","timeout":3},{"type":"command","command":"`+command+`","timeout":60}]}]}}`)
+		`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$HOME/bin/chooks stop","timeout":3},{"type":"command","command":"`+command+`","timeout":60}]}]}}`)
 
 	transcript := filepath.Join(claudeDir, "projects", questioncheck.ProjectDirName(home), "s.jsonl")
 	writeFile(t, transcript, `{"type":"user","uuid":"u1","origin":{"kind":"human"},"message":{"role":"user","content":"посчитай лимит"}}`+"\n"+
@@ -171,7 +171,7 @@ func TestQuestionCheckRingsAfterVerdict(t *testing.T) {
 			if err := json.Unmarshal([]byte(out), &block); err != nil || block.Decision != "block" {
 				t.Fatalf("ожидалась остановка, вывод %q: %v", out, err)
 			}
-			if _, err := os.Stat(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "claude-hooks", "sessions", input.SessionID)); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "chooks", "sessions", input.SessionID)); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("на block состояние сессии записано: %v", err)
 			}
 		})
@@ -265,7 +265,7 @@ func TestStopMutedWhileQuestionCheckJudges(t *testing.T) {
 	if stopEvent(t, env, input) {
 		t.Fatal("Stop-хук позвонил до вердикта")
 	}
-	if _, err := os.Stat(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "claude-hooks", "sessions", "muted")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "chooks", "sessions", "muted")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Stop-хук записал состояние до вердикта: %v", err)
 	}
 

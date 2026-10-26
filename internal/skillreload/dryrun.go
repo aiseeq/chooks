@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // Сухой прогон: по транскриптам за последние дни проиграть хук и посчитать,

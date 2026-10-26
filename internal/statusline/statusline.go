@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/accounts"
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/accounts"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/desktop"
 )
 
 // ANSI-последовательности. Строка статуса должна читаться боковым зрением,

@@ -3,7 +3,7 @@ package notifier
 import (
 	"fmt"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // Типы события Notification (hooks.md, раздел Notification)

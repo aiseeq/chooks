@@ -40,7 +40,7 @@ func ActivateWindowByPIDs(conn *dbus.Conn, pids []int) (err error) {
 	}()
 
 	// Имя плагина уникально для процесса: параллельные хуки не мешают друг другу
-	pluginName := "claude-hooks-activate-" + strconv.Itoa(os.Getpid())
+	pluginName := "chooks-activate-" + strconv.Itoa(os.Getpid())
 	scripting := conn.Object(kwinService, kwinScripting)
 
 	if err := scripting.Call(kwinScriptIface+".loadScript", 0, scriptPath, pluginName).Err; err != nil {
@@ -58,7 +58,7 @@ func ActivateWindowByPIDs(conn *dbus.Conn, pids []int) (err error) {
 // writeActivationScript создаёт временный файл с KWin-скриптом.
 // KWin читает скрипт с диска, передать его строкой нельзя
 func writeActivationScript(pids []int) (string, error) {
-	file, err := os.CreateTemp("", "claude-hooks-activate-*.js")
+	file, err := os.CreateTemp("", "chooks-activate-*.js")
 	if err != nil {
 		return "", fmt.Errorf("failed to create script file: %w", err)
 	}

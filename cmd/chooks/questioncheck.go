@@ -12,9 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
-	"github.com/aiseeq/claude-hooks/internal/questioncheck"
-	"github.com/aiseeq/claude-hooks/internal/tools/notifier"
+	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/questioncheck"
+	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
 
 // questionCheckTool — ключ в config.yaml. Отсутствие ключа — включено:
@@ -23,7 +23,7 @@ import (
 const questionCheckTool = "question_check"
 
 // Судья выбран прогоном на 20 размеченных примерах сухого прогона 22.10
-// (claude-hooks question-bench, 11 лишних, 7 нужных, 2 цитаты): opus/high
+// (chooks question-bench, 11 лишних, 7 нужных, 2 цитаты): opus/high
 // поймал 7 и 6 из 11 в двух прогонах, ложно не остановил ни одного нужного;
 // sol/low — 8 из 11, но 2 из 7 нужных; luna/high — 6 из 11 и 1 из 7
 const (

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aiseeq/claude-hooks/internal/core"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // Токены фикстуры узнаются по приставкам: ни одна не должна попасть в лог,

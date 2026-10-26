@@ -80,6 +80,7 @@ func execute() int {
 		newModelScanCmd(),
 		newSkillScanCmd(),
 		newQuestionBenchCmd(),
+		newSaidBenchCmd(),
 		newDeliverAlertCmd(),
 	)
 

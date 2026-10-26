@@ -163,6 +163,15 @@ type CLIJudge struct {
 	Effort string
 	// Dir — пустой каталог запуска: в нём нет CLAUDE.md и AGENTS.md
 	Dir string
+	// Prompt — промпт судьи; пусто — JudgePrompt проверки вопросов
+	Prompt string
+}
+
+func (j CLIJudge) prompt() string {
+	if j.Prompt == "" {
+		return JudgePrompt
+	}
+	return j.Prompt
 }
 
 // Model — имя модели для журнала
@@ -172,10 +181,20 @@ func (j CLIJudge) Model() string {
 
 // Judge отдаёт модели промпт и случай и разбирает вердикт
 func (j CLIJudge) Judge(ctx context.Context, input string) (Verdict, Usage, error) {
-	if j.Name == "opus" {
-		return j.judgeClaude(ctx, input)
+	answer, usage, err := j.Ask(ctx, input)
+	if err != nil {
+		return Verdict{}, usage, err
 	}
-	return j.judgeCodex(ctx, input)
+	verdict, err := ParseVerdict(answer)
+	return verdict, usage, err
+}
+
+// Ask отдаёт модели промпт и случай и возвращает её ответ как есть
+func (j CLIJudge) Ask(ctx context.Context, input string) (string, Usage, error) {
+	if j.Name == "opus" {
+		return j.askClaude(ctx, input)
+	}
+	return j.askCodex(ctx, input)
 }
 
 // judgeEnv — окружение вызова без признаков сессии-родителя: вложенный
@@ -192,10 +211,10 @@ func judgeEnv() []string {
 	return env
 }
 
-func (j CLIJudge) judgeClaude(ctx context.Context, input string) (Verdict, Usage, error) {
+func (j CLIJudge) askClaude(ctx context.Context, input string) (string, Usage, error) {
 	cmd := exec.CommandContext(ctx, "claude", "-p",
 		"--model", j.Name,
-		"--system-prompt", JudgePrompt,
+		"--system-prompt", j.prompt(),
 		"--tools", "",
 		"--setting-sources", "",
 		"--strict-mcp-config",
@@ -205,7 +224,7 @@ func (j CLIJudge) judgeClaude(ctx context.Context, input string) (Verdict, Usage
 		"--output-format", "json")
 	out, err := runCLI(cmd, j.Dir, input)
 	if err != nil {
-		return Verdict{}, Usage{}, err
+		return "", Usage{}, err
 	}
 	var result struct {
 		Result  string `json:"result"`
@@ -218,7 +237,7 @@ func (j CLIJudge) judgeClaude(ctx context.Context, input string) (Verdict, Usage
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(out, &result); err != nil {
-		return Verdict{}, Usage{}, fmt.Errorf("claude output is not JSON: %w", err)
+		return "", Usage{}, fmt.Errorf("claude output is not JSON: %w", err)
 	}
 	usage := Usage{
 		InputTokens:       result.Usage.InputTokens,
@@ -227,13 +246,12 @@ func (j CLIJudge) judgeClaude(ctx context.Context, input string) (Verdict, Usage
 		OutputTokens:      result.Usage.OutputTokens,
 	}
 	if result.IsError {
-		return Verdict{}, usage, fmt.Errorf("claude returned an error: %s", truncateRunes(result.Result, 300))
+		return "", usage, fmt.Errorf("claude returned an error: %s", truncateRunes(result.Result, 300))
 	}
-	verdict, err := ParseVerdict(result.Result)
-	return verdict, usage, err
+	return result.Result, usage, nil
 }
 
-func (j CLIJudge) judgeCodex(ctx context.Context, input string) (Verdict, Usage, error) {
+func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, error) {
 	cmd := exec.CommandContext(ctx, "codex", "exec",
 		"--json", "--skip-git-repo-check", "--ephemeral",
 		"--ignore-user-config", "--ignore-rules",
@@ -243,9 +261,9 @@ func (j CLIJudge) judgeCodex(ctx context.Context, input string) (Verdict, Usage,
 		"-c", `web_search="disabled"`,
 		"-c", "project_doc_max_bytes=0",
 		"-")
-	out, err := runCLI(cmd, j.Dir, JudgePrompt+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input)
+	out, err := runCLI(cmd, j.Dir, j.prompt()+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input)
 	if err != nil {
-		return Verdict{}, Usage{}, err
+		return "", Usage{}, err
 	}
 	var message string
 	var usage Usage
@@ -279,10 +297,9 @@ func (j CLIJudge) judgeCodex(ctx context.Context, input string) (Verdict, Usage,
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return Verdict{}, usage, fmt.Errorf("read codex output: %w", err)
+		return "", usage, fmt.Errorf("read codex output: %w", err)
 	}
-	verdict, err := ParseVerdict(message)
-	return verdict, usage, err
+	return message, usage, nil
 }
 
 // runCLI запускает вызов с текстом на stdin; ошибка несёт хвост stderr

@@ -40,6 +40,25 @@ type Background struct {
 	Crons int           `json:"crons"`
 }
 
+// agentTypes — типы фоновых задач, где работают свои агенты, а не ожидание
+// внешнего (shell, монитор)
+var agentTypes = map[string]bool{"subagent": true, "workflow": true}
+
+// Agent — в задаче работают свои агенты
+func (t TrackedTask) Agent() bool {
+	return agentTypes[t.Type]
+}
+
+// AgentsWorking — среди задач есть не брошенная задача агентов
+func (b Background) AgentsWorking(now time.Time) bool {
+	for _, task := range b.Tasks {
+		if task.Agent() && !task.Abandoned(now) {
+			return true
+		}
+	}
+	return false
+}
+
 // Abandoned — вся работа брошена: будильников нет, а каждая задача висит
 // дольше срока. Пустая работа брошенной не считается: её просто нет
 func (b Background) Abandoned(now time.Time) bool {

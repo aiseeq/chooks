@@ -26,6 +26,11 @@ const (
 	// StatePaused — Claude остановился, но ждёт фоновые задачи или будильник
 	// и вернётся к работе сам. Для человека это всё ещё работа
 	StatePaused SessionState = "paused"
+	// StateAgents — пауза, в которой работают свои агенты (субагенты,
+	// Workflow). Хранилищу не пишется: строка статуса выводит его из паузы и
+	// учёта задач. Такую сессию можно сжимать, но не сбрасывать (пользователь
+	// 26.10: «я бы такое разрешил только компактить. И иконку другую, м.б. 19 ▶»)
+	StateAgents SessionState = "agents"
 	// StateUnknown — запись состояния не прочиталась. Хранилищу не пишется:
 	// им вызывающий явно помечает, что предыдущее состояние не получено
 	StateUnknown SessionState = "unknown"
@@ -41,6 +46,8 @@ func (s SessionState) Marker() string {
 		return "🔔"
 	case StatePaused:
 		return "⏸️"
+	case StateAgents:
+		return "▶️"
 	case StateDone:
 		return "✨"
 	case StateIdle:

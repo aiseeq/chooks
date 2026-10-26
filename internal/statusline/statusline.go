@@ -232,6 +232,9 @@ func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible fun
 	if state == core.StatePaused && background.Abandoned(now) {
 		state = abandon(input.SessionID, logger)
 	}
+	if state == core.StatePaused && background.AgentsWorking(now) {
+		state = core.StateAgents
+	}
 	if state == core.StateDone {
 		state = seen(input.SessionID, visible, logger)
 	}
@@ -275,12 +278,18 @@ func abandon(sessionID string, logger core.Logger) core.SessionState {
 }
 
 // backgroundPart показывает, что держит сессию после хода: первая задача с
-// описанием и возрастом, число остальных и будильники. Пусто — держать
-// нечему, сессию можно сжимать и сбрасывать
+// описанием и возрастом — задача агентов, если есть, — число остальных и
+// будильники. Пусто — держать нечему, сессию можно сжимать и сбрасывать
 func backgroundPart(background core.Background, now time.Time) string {
 	var items []string
 	if len(background.Tasks) > 0 {
 		task := background.Tasks[0]
+		for _, candidate := range background.Tasks {
+			if candidate.Agent() && !candidate.Abandoned(now) {
+				task = candidate
+				break
+			}
+		}
 		item := truncateRunes(task.Description, backgroundRunes)
 		if item == "" {
 			item = task.Type
@@ -361,8 +370,9 @@ func terminalTitle(dir string, state core.SessionState) string {
 }
 
 // projectBadge рисует имя проекта плашкой, цвет которой показывает состояние:
-// синяя — работает, сине-серая — ход кончился, но ждёт свои задачи (что
-// именно — в «фон:»), янтарная — ждёт ответа человека, зелёная — новое, что
+// синяя — работает, в том числе своими агентами после хода, сине-серая — ход
+// кончился и ждёт внешнего: shell, монитор, будильник (что именно — в
+// «фон:»), янтарная — ждёт ответа человека, зелёная — новое, что
 // он ещё не видел, серая — просмотрена. Заполнение контекста видно по полосе
 // ctx, плашка его не повторяет (пользователь 26.10: убрать красный с плашки)
 func projectBadge(dir string, state core.SessionState) string {

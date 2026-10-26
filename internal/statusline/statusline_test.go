@@ -232,6 +232,42 @@ func TestBuildShowsBackground(t *testing.T) {
 	}
 }
 
+// Пауза, где работают свои агенты, — ▶️ на синей плашке, агент первым в
+// «фон:»; брошенный агент паузу внешнего ожидания не меняет
+func TestBuildShowsAgentsWorking(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	input := Input{CWD: "/home/user/work/demo", SessionID: "s1"}
+	start := time.Now()
+	tasks := []core.BackgroundTask{
+		{ID: "m1", Type: "monitor", Description: "live updates"},
+		{ID: "a1", Type: "subagent", Description: "Sleep page"},
+	}
+	if _, err := core.RecordBackground("s1", tasks, 0, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.SaveSessionState("s1", core.StatePaused); err != nil {
+		t.Fatal(err)
+	}
+
+	line, title := build(input, 10, weekBar{}, start.Add(5*time.Minute), hidden, testLogger(t))
+	if title != "▶️ demo" || !strings.HasPrefix(line, badgeBlue) || !strings.Contains(plain(line), "фон: Sleep page 5 мин +1") {
+		t.Errorf("агенты работают: %q, %q", title, plain(line))
+	}
+	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StatePaused {
+		t.Errorf("показ агентов не пишется в состояние: %q, %v", state, err)
+	}
+
+	if err := core.SaveSessionState("s1", core.StatePaused); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.RecordBackground("s1", []core.BackgroundTask{{ID: "a1", Type: "subagent"}, {ID: "b1", Type: "shell"}}, 0, start.Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, title := build(input, 10, weekBar{}, start.Add(3*time.Hour), hidden, testLogger(t)); title != "⏸️ demo" {
+		t.Errorf("брошенный агент и живой shell — пауза: %q", title)
+	}
+}
+
 func TestBackgroundPart(t *testing.T) {
 	now := time.Now()
 	long := strings.Repeat("я", 50)

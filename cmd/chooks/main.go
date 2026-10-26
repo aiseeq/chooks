@@ -188,8 +188,17 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		return exitAllowed, nil
 	case hookPostToolBatch:
 		// Пакет инструментов — место напоминания в длинном ходе и у субагентов,
-		// до которых UserPromptSubmit не доходит
-		remindStaleSkills(eventPostToolBatch, parseSessionInput(logger, hookType, data), config, logger)
+		// до которых UserPromptSubmit не доходит. Он же снимает «ждёт ответа»:
+		// ответ на запрос разрешения или AskUserQuestion не проходит через
+		// UserPromptSubmit, а пакет после ответа значит, что работа идёт.
+		// Пакет субагента — не ответ: главный ход может стоять на вопросе
+		input := parseSessionInput(logger, hookType, data)
+		if input.AgentID == "" {
+			if _, err := core.SwapSessionState(input.SessionID, core.StateWaiting, core.StateWorking); err != nil {
+				logger.Warn("session state not resumed", "session", input.SessionID, "error", err)
+			}
+		}
+		remindStaleSkills(eventPostToolBatch, input, config, logger)
 		return exitAllowed, nil
 	case hookStop:
 		runSessionEvent(core.EventStop, data, config, logger)

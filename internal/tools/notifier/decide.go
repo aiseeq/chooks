@@ -13,11 +13,11 @@ const (
 )
 
 // waitingTypes — уведомления, после которых сессия стоит, пока человек не
-// ответит: запрос разрешения, минутное напоминание, диалог MCP, вопрос
-// агента, продолжение после сна по Enter, отказ продолжать после лимита
+// ответит: запрос разрешения (и вопрос AskUserQuestion), диалог MCP, вопрос
+// агента, продолжение после сна по Enter, отказ продолжать после лимита.
+// Минутное напоминание idle_prompt разбирается отдельно: это не вопрос
 var waitingTypes = map[string]bool{
 	"permission_prompt":          true,
-	TypeIdlePrompt:               true,
 	"elicitation_dialog":         true,
 	"elicitation_url_dialog":     true,
 	"agent_needs_input":          true,
@@ -98,6 +98,15 @@ func decideNotification(event Event) Decision {
 		// фоновые задачи; запрос разрешения при этом проходит всегда —
 		// без ответа человека сессия встанет
 		return Decision{Reason: "сессия ждёт фоновые задачи или будильник"}
+	case kind == TypeIdlePrompt && (event.Previous == core.StateWorking || event.Previous == core.StateUnknown):
+		// Конец хода прошёл мимо Stop или состояние не прочиталось: сессия
+		// стоит готовой, человека зовут
+		return finish(core.StateDone, event.Previous, "минутное напоминание без конца хода")
+	case kind == TypeIdlePrompt:
+		// Минутное напоминание после конца хода — не вопрос человеку: «готово»
+		// остаётся «готово», иначе каждая стоящая сессия выглядела бы ждущей
+		// ответа (26.10: 2884 перехода done → waiting по idle_prompt в логе)
+		return Decision{Reason: "минутное напоминание: сессия уже ждёт, состояние " + string(event.Previous)}
 	case waitingTypes[kind]:
 		return finish(core.StateWaiting, event.Previous, "")
 	case kind == typeQuotaAutoResumeFire:

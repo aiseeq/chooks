@@ -1,6 +1,7 @@
 package statusline
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -16,21 +17,21 @@ func plain(s string) string { return ansiPattern.ReplaceAllString(s, "") }
 
 func TestProjectBadgeShowsState(t *testing.T) {
 	tests := []struct {
-		name        string
-		state       core.SessionState
-		contextUsed float64
-		expected    string
+		name     string
+		state    core.SessionState
+		expected string
 	}{
-		{name: "работа", state: core.StateWorking, contextUsed: 10, expected: badgeBlue},
-		{name: "ожидание ответа", state: core.StateWaiting, contextUsed: 10, expected: badgeAmber},
-		{name: "работа завершена", state: core.StateDone, contextUsed: 10, expected: badgeBlue},
-		// Переполненный контекст важнее прочего: скоро сожмётся история
-		{name: "контекст важнее ожидания", state: core.StateWaiting, contextUsed: 90, expected: badgeRed},
+		{name: "работа", state: core.StateWorking, expected: badgeBlue},
+		{name: "ждёт свои задачи", state: core.StatePaused, expected: badgeGray},
+		{name: "ожидание ответа", state: core.StateWaiting, expected: badgeAmber},
+		{name: "новое, не смотрел", state: core.StateDone, expected: badgeGreen},
+		{name: "посмотрел", state: core.StateIdle, expected: badgeGray},
+		{name: "состояние не прочиталось", state: core.StateUnknown, expected: badgeBlue},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			badge := projectBadge("/home/user/work/demo", tt.state, tt.contextUsed)
+			badge := projectBadge("/home/user/work/demo", tt.state)
 			if !strings.HasPrefix(badge, tt.expected) {
 				t.Errorf("ожидался цвет %q, получено %q", tt.expected, badge)
 			}
@@ -72,21 +73,21 @@ func TestContextBar(t *testing.T) {
 
 func TestTerminalTitle(t *testing.T) {
 	tests := []struct {
-		name        string
-		state       core.SessionState
-		contextUsed float64
-		expected    string
+		name     string
+		state    core.SessionState
+		expected string
 	}{
-		{name: "работа", state: core.StateWorking, expected: "🔵 demo"},
-		{name: "ожидание ответа", state: core.StateWaiting, expected: "🟡 demo"},
-		{name: "работа завершена", state: core.StateDone, expected: "✅ demo"},
-		{name: "состояние не прочиталось: нейтральный значок", state: core.StateUnknown, expected: "🔵 demo"},
-		{name: "контекст на исходе", state: core.StateWorking, contextUsed: 90, expected: "🔴 demo"},
+		{name: "работа", state: core.StateWorking, expected: "⚙️ demo"},
+		{name: "ждёт свои задачи", state: core.StatePaused, expected: "💤 demo"},
+		{name: "ожидание ответа", state: core.StateWaiting, expected: "🙋 demo"},
+		{name: "новое, не смотрел", state: core.StateDone, expected: "📬 demo"},
+		{name: "посмотрел", state: core.StateIdle, expected: "· demo"},
+		{name: "состояние не прочиталось: как работа", state: core.StateUnknown, expected: "⚙️ demo"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := terminalTitle("/home/user/work/demo", tt.state, tt.contextUsed)
+			got := terminalTitle("/home/user/work/demo", tt.state)
 			if got != tt.expected {
 				t.Errorf("ожидалось %q, получено %q", tt.expected, got)
 			}
@@ -134,7 +135,7 @@ func TestBuildFitsSingleLine(t *testing.T) {
 	input := Input{CWD: t.TempDir()}
 	input.Model.DisplayName = "Opus 5 (1M context)"
 
-	line, title := build(input, 47, weekBar{label: "нед"}, time.Now(), testLogger(t))
+	line, title := build(input, 47, weekBar{label: "нед"}, time.Now(), hidden, testLogger(t))
 
 	if strings.Contains(line, "\n") {
 		t.Errorf("строка статуса должна умещаться в одну строку: %q", line)
@@ -142,8 +143,40 @@ func TestBuildFitsSingleLine(t *testing.T) {
 	if strings.Contains(plain(line), "1M context") {
 		t.Errorf("уточнение модели должно убираться: %q", plain(line))
 	}
-	if !strings.HasPrefix(title, "🔵 ") {
+	if !strings.HasPrefix(title, "⚙️ ") {
 		t.Errorf("заголовок должен начинаться со значка состояния: %q", title)
+	}
+}
+
+func hidden() (bool, error)  { return false, nil }
+func visible() (bool, error) { return true, nil }
+
+// Законченный ход становится «посмотрел», только когда вкладку видно
+func TestBuildMarksTurnSeen(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	input := Input{CWD: "/home/user/work/demo", SessionID: "s1"}
+	if err := core.SaveSessionState("s1", core.StateDone); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, title := build(input, 10, weekBar{}, time.Now(), hidden, testLogger(t)); title != "📬 demo" {
+		t.Errorf("вкладку не видно — новое остаётся: %q", title)
+	}
+	if _, title := build(input, 10, weekBar{}, time.Now(), func() (bool, error) { return false, errors.New("dbus") }, testLogger(t)); title != "📬 demo" {
+		t.Errorf("сбой проверки — новое остаётся: %q", title)
+	}
+	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "· demo" {
+		t.Errorf("вкладку видно — посмотрел: %q", title)
+	}
+	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StateIdle {
+		t.Errorf("состояние = %q, %v", state, err)
+	}
+	// Работу вид вкладки не трогает
+	if err := core.SaveSessionState("s1", core.StateWorking); err != nil {
+		t.Fatal(err)
+	}
+	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "⚙️ demo" {
+		t.Errorf("работа остаётся работой: %q", title)
 	}
 }
 

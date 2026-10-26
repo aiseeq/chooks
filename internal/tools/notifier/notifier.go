@@ -49,13 +49,15 @@ func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision De
 	}
 
 	projectName := n.ProjectName(input)
-	alert, terminalTitle, err := n.buildAlert(eventName, input, projectName)
+	alert, err := n.buildAlert(eventName, input, projectName)
 	if err != nil {
 		return err
 	}
 
+	// Значок — по новому состоянию, как в строке статуса: минутное
+	// напоминание без конца хода — это «готово», а не вопрос.
 	// Без заголовка уведомление всё равно уходит
-	if err := desktop.SetTerminalTitle(terminalTitle); err != nil {
+	if err := desktop.SetTerminalTitle(decision.State.Marker() + " " + projectName); err != nil {
 		n.logger.Warn("terminal title not set", "error", err)
 	}
 
@@ -82,7 +84,7 @@ func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision De
 }
 
 // buildAlert собирает оповещение под конкретное событие
-func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectName string) (desktop.Alert, string, error) {
+func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectName string) (desktop.Alert, error) {
 	alert := desktop.Alert{
 		AppName:     "Claude Code",
 		Icon:        "utilities-terminal",
@@ -102,17 +104,13 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 		alert.ActivatePIDs = ancestors
 	}
 
-	var terminalTitle string
-
 	switch eventName {
 	case core.EventStop:
-		terminalTitle = "✅ " + projectName
 		alert.Title = "Claude Code завершил работу"
 		alert.Message = "Проект: " + projectName
 		alert.Timeout = stopTimeout
 
 	case core.EventNotification:
-		terminalTitle = "🟡 " + projectName
 		alert.Title = fmt.Sprintf("Claude Code ждёт ответа (%s)", projectName)
 		// Claude Code сообщает, чего именно ждёт: разрешения на инструмент или ввода
 		alert.Message = input.Message
@@ -122,10 +120,10 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 		alert.Timeout = notificationTimeout
 
 	default:
-		return desktop.Alert{}, "", fmt.Errorf("notifier does not handle event %q", eventName)
+		return desktop.Alert{}, fmt.Errorf("notifier does not handle event %q", eventName)
 	}
 
-	return alert, terminalTitle, nil
+	return alert, nil
 }
 
 // ProjectName определяет имя проекта по каталогу, где запущена сессия: его

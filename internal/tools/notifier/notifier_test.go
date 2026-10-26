@@ -23,7 +23,7 @@ func TestNotifier_BuildAlert(t *testing.T) {
 	})
 
 	t.Run("вопрос показывает текст запроса", func(t *testing.T) {
-		alert, title, err := notifier.buildAlert(core.EventNotification, &core.ToolInput{
+		alert, err := notifier.buildAlert(core.EventNotification, &core.ToolInput{
 			Message: "Claude needs your permission to use Bash",
 		}, "my-project")
 		if err != nil {
@@ -32,9 +32,6 @@ func TestNotifier_BuildAlert(t *testing.T) {
 		if alert.Message != "Claude needs your permission to use Bash" {
 			t.Errorf("текст запроса не подставлен: %q", alert.Message)
 		}
-		if title != "🟡 my-project" {
-			t.Errorf("заголовок окна: %q", title)
-		}
 		// Без списка процессов уведомление останется без действия по клику
 		if len(alert.ActivatePIDs) == 0 {
 			t.Error("процессы для активации окна не определены")
@@ -42,20 +39,17 @@ func TestNotifier_BuildAlert(t *testing.T) {
 	})
 
 	t.Run("завершение работы без текста запроса", func(t *testing.T) {
-		alert, title, err := notifier.buildAlert(core.EventStop, &core.ToolInput{}, "my-project")
+		alert, err := notifier.buildAlert(core.EventStop, &core.ToolInput{}, "my-project")
 		if err != nil {
 			t.Fatalf("событие должно обрабатываться: %v", err)
 		}
 		if !strings.Contains(alert.Message, "my-project") {
 			t.Errorf("сообщение: %q", alert.Message)
 		}
-		if title != "✅ my-project" {
-			t.Errorf("заголовок окна: %q", title)
-		}
 	})
 
 	t.Run("посторонние события — ошибка", func(t *testing.T) {
-		if _, _, err := notifier.buildAlert("Write", &core.ToolInput{}, "my-project"); err == nil {
+		if _, err := notifier.buildAlert("Write", &core.ToolInput{}, "my-project"); err == nil {
 			t.Error("Write не является событием сессии")
 		}
 	})
@@ -64,7 +58,7 @@ func TestNotifier_BuildAlert(t *testing.T) {
 func TestNotifier_ActivationDisabled(t *testing.T) {
 	notifier := newNotifier(t, core.ToolConfig{Enabled: true, Desktop: true, ActivateOnClick: false})
 
-	alert, _, err := notifier.buildAlert(core.EventStop, &core.ToolInput{}, "my-project")
+	alert, err := notifier.buildAlert(core.EventStop, &core.ToolInput{}, "my-project")
 	if err != nil {
 		t.Fatalf("событие должно обрабатываться: %v", err)
 	}

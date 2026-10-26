@@ -115,7 +115,7 @@ func TestRenderContextBarUntilCompaction(t *testing.T) {
 	if !strings.Contains(plain(line), "ctx ▓▓▓▓▓▓▓▓▓░ 97%") {
 		t.Errorf("полоса должна мерить до порога сжатия: %q", plain(line))
 	}
-	if !strings.Contains(line, contextShades[len(contextShades)-1]+"▓") || !strings.Contains(line, badgeRed) {
-		t.Errorf("97%% до сжатия — самый густой оттенок полосы и красная плашка: %q", line)
+	if !strings.Contains(line, contextShades[len(contextShades)-1]+"▓") {
+		t.Errorf("97%% до сжатия — самый густой оттенок полосы: %q", line)
 	}
 }

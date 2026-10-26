@@ -14,7 +14,7 @@ func TestSessionStateRoundTrip(t *testing.T) {
 		t.Errorf("неизвестная сессия должна считаться работающей, получено %q", got)
 	}
 
-	for _, state := range []SessionState{StateWaiting, StateDone, StatePaused, StateWorking} {
+	for _, state := range []SessionState{StateWaiting, StateDone, StateIdle, StatePaused, StateWorking} {
 		saveState(t, "session-1", state)
 		if got := loadState(t, "session-1"); got != state {
 			t.Errorf("ожидалось %q, получено %q", state, got)
@@ -167,5 +167,33 @@ func TestSessionStateChangedSince(t *testing.T) {
 	saveState(t, "fresh", StateWorking)
 	if changed, err := SessionStateChangedSince("fresh", since); err != nil || !changed {
 		t.Fatalf("запись после отметки — изменение, даже того же состояния: %v, %v", changed, err)
+	}
+}
+
+func TestSwapSessionState(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	// Записи нет — менять нечего
+	if swapped, err := SwapSessionState("s1", StateDone, StateIdle); err != nil || swapped {
+		t.Fatalf("swapped=%v err=%v", swapped, err)
+	}
+	if err := SaveSessionState("s1", StateWorking); err != nil {
+		t.Fatal(err)
+	}
+	// Состояние не то — не заменяется
+	if swapped, err := SwapSessionState("s1", StateDone, StateIdle); err != nil || swapped {
+		t.Fatalf("swapped=%v err=%v", swapped, err)
+	}
+	if state, _ := LoadSessionState("s1"); state != StateWorking {
+		t.Fatalf("state = %q", state)
+	}
+	if err := SaveSessionState("s1", StateDone); err != nil {
+		t.Fatal(err)
+	}
+	if swapped, err := SwapSessionState("s1", StateDone, StateIdle); err != nil || !swapped {
+		t.Fatalf("swapped=%v err=%v", swapped, err)
+	}
+	if state, _ := LoadSessionState("s1"); state != StateIdle {
+		t.Fatalf("state = %q", state)
 	}
 }

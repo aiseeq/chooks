@@ -29,12 +29,9 @@ const (
 
 	badgeBlue  = "\033[1;38;5;231;48;5;33m"
 	badgeAmber = "\033[1;38;5;16;48;5;214m"
-	badgeRed   = "\033[1;38;5;231;48;5;196m"
+	badgeGreen = "\033[1;38;5;231;48;5;28m"
+	badgeGray  = "\033[1;38;5;231;48;5;243m"
 )
-
-// contextCriticalPercent — заполнение контекста, с которого плашка проекта и
-// вкладка предупреждают о скором сжатии истории
-const contextCriticalPercent = 85
 
 // contextShades — оттенки голубого от светлого к густому по четвертям
 // заполнения. Полнота контекста — количество, а не оценка, поэтому без
@@ -191,7 +188,7 @@ func Render(stdin io.Reader, logger core.Logger) (string, error) {
 		bar.pool = poolPace(store, snapshot, now, logger)
 	}
 
-	line, title := build(input, contextFill(input, paths.ClaudeDir, logger), bar, now, logger)
+	line, title := build(input, contextFill(input, paths.ClaudeDir, logger), bar, now, desktop.TabVisible, logger)
 	if err := desktop.SetTerminalTitle(title); err != nil {
 		logger.Warn("terminal title not set", "error", err)
 	}
@@ -203,7 +200,7 @@ func Render(stdin io.Reader, logger core.Logger) (string, error) {
 // сессии строку не срывает: она рисуется по тому, что удалось прочитать, а
 // сбой уходит в лог. Ветки и worktree в строке нет (пользователь 24.10 о
 // строке всех агентов: «Хочу видеть только вот это»)
-func build(input Input, ctxUsed float64, bar weekBar, now time.Time, logger core.Logger) (string, string) {
+func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible func() (bool, error), logger core.Logger) (string, string) {
 	dir := sessionDir(input)
 	state, err := core.LoadSessionState(input.SessionID)
 	if err != nil {
@@ -212,45 +209,72 @@ func build(input Input, ctxUsed float64, bar weekBar, now time.Time, logger core
 		logger.Warn("session state unavailable", "session", input.SessionID, "error", err)
 		state = core.StateUnknown
 	}
+	if state == core.StateDone {
+		state = seen(input.SessionID, visible, logger)
+	}
 
 	// Путь не показывается: плашка уже называет проект, а полный путь
 	// повторяет её и занимает место
 	var output strings.Builder
-	output.WriteString(projectBadge(dir, state, ctxUsed))
+	output.WriteString(projectBadge(dir, state))
 
 	for _, part := range details(input, ctxUsed, bar, now) {
 		output.WriteString(dim + " · " + reset + part)
 	}
 
-	return output.String(), terminalTitle(dir, state, ctxUsed)
+	return output.String(), terminalTitle(dir, state)
+}
+
+// seen переводит законченный ход в «посмотрел», если человек видит вкладку.
+// Строка статуса — единственное, что запускается, пока сессия стоит
+// (statusLine.refreshInterval), поэтому смотрит она. Сбой — «новое» остаётся:
+// лишний значок лучше пропущенного ответа
+func seen(sessionID string, visible func() (bool, error), logger core.Logger) core.SessionState {
+	shown, err := visible()
+	if err != nil {
+		logger.Warn("tab visibility unknown, keeping the turn unseen", "session", sessionID, "error", err)
+		return core.StateDone
+	}
+	if !shown {
+		return core.StateDone
+	}
+	swapped, err := core.SwapSessionState(sessionID, core.StateDone, core.StateIdle)
+	if err != nil {
+		logger.Warn("session not marked seen", "session", sessionID, "error", err)
+		return core.StateDone
+	}
+	if !swapped {
+		// Между чтением и заменой хук записал новое состояние: им и рисовать
+		state, err := core.LoadSessionState(sessionID)
+		if err != nil {
+			return core.StateUnknown
+		}
+		return state
+	}
+	return core.StateIdle
 }
 
 // terminalTitle собирает заголовок окна: значок состояния и проект.
 // Значок идёт первым — по нему окно находится взглядом в панели задач; ветка
 // есть в строке статуса, во вкладке она вытесняет имя проекта
-func terminalTitle(dir string, state core.SessionState, contextUsed float64) string {
-	marker := "🔵"
-	switch {
-	case contextUsed >= contextCriticalPercent:
-		marker = "🔴"
-	case state == core.StateWaiting:
-		marker = "🟡"
-	case state == core.StateDone:
-		marker = "✅"
-	}
-
-	return marker + " " + core.ProjectNameForDir(dir)
+func terminalTitle(dir string, state core.SessionState) string {
+	return state.Marker() + " " + core.ProjectNameForDir(dir)
 }
 
-// projectBadge рисует имя проекта плашкой, цвет которой показывает состояние.
-// Переполненный контекст важнее прочего: скоро сожмётся история
-func projectBadge(dir string, state core.SessionState, contextUsed float64) string {
+// projectBadge рисует имя проекта плашкой, цвет которой показывает состояние:
+// синяя — работает, янтарная — ждёт ответа человека, зелёная — новое, что он
+// ещё не видел, серая — ждёт свои задачи или уже просмотрена. Заполнение
+// контекста видно по полосе ctx, плашка его не повторяет (пользователь 26.10:
+// убрать красный с плашки)
+func projectBadge(dir string, state core.SessionState) string {
 	badge := badgeBlue
-	switch {
-	case contextUsed >= contextCriticalPercent:
-		badge = badgeRed
-	case state == core.StateWaiting:
+	switch state {
+	case core.StateWaiting:
 		badge = badgeAmber
+	case core.StateDone:
+		badge = badgeGreen
+	case core.StatePaused, core.StateIdle:
+		badge = badgeGray
 	}
 
 	name := strings.ToUpper(core.ProjectNameForDir(dir))

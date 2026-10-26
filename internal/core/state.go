@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -17,7 +18,11 @@ type SessionState string
 const (
 	StateWorking SessionState = "working"
 	StateWaiting SessionState = "waiting"
-	StateDone    SessionState = "done"
+	// StateDone — ход закончен, а человек его ещё не видел: вкладка не
+	// открывалась с конца хода
+	StateDone SessionState = "done"
+	// StateIdle — ход закончен и человек открыл вкладку после этого
+	StateIdle SessionState = "idle"
 	// StatePaused — Claude остановился, но ждёт фоновые задачи или будильник
 	// и вернётся к работе сам. Для человека это всё ещё работа
 	StatePaused SessionState = "paused"
@@ -25,6 +30,23 @@ const (
 	// им вызывающий явно помечает, что предыдущее состояние не получено
 	StateUnknown SessionState = "unknown"
 )
+
+// Marker — значок состояния во вкладке терминала. Набор выбрал пользователь
+// 26.10 (вопрос с вариантами в сессии chooks-master: эмодзи)
+func (s SessionState) Marker() string {
+	switch s {
+	case StatePaused:
+		return "💤"
+	case StateWaiting:
+		return "🙋"
+	case StateDone:
+		return "📬"
+	case StateIdle:
+		return "·"
+	default:
+		return "⚙️"
+	}
+}
 
 // stateTTL определяет, как долго запись считается актуальной.
 // Сессии завершаются без уведомления, поэтому старые файлы просто устаревают
@@ -42,14 +64,66 @@ func SaveSessionState(sessionID string, state SessionState) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("cannot create session state dir: %w", err)
-	}
-
-	if err := os.WriteFile(path, []byte(state), 0o644); err != nil {
-		return fmt.Errorf("cannot write session state: %w", err)
+	err = withStateLock(func() error {
+		if err := os.WriteFile(path, []byte(state), 0o644); err != nil {
+			return fmt.Errorf("cannot write session state: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	return cleanupStaleStates(filepath.Dir(path))
+}
+
+// SwapSessionState меняет состояние сессии на to, только если сейчас оно
+// from; true — заменено. Строка статуса и хуки пишут состояние из разных
+// процессов: без сверки под блокировкой «посмотрел» затёр бы «работает»
+// от только что отправленного сообщения
+func SwapSessionState(sessionID string, from, to SessionState) (bool, error) {
+	if sessionID == "" {
+		return false, nil
+	}
+	path, err := sessionStatePath(sessionID)
+	if err != nil {
+		return false, err
+	}
+	swapped := false
+	err = withStateLock(func() error {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("cannot read session state: %w", err)
+		}
+		if SessionState(strings.TrimSpace(string(data))) != from {
+			return nil
+		}
+		if err := os.WriteFile(path, []byte(to), 0o644); err != nil {
+			return fmt.Errorf("cannot write session state: %w", err)
+		}
+		swapped = true
+		return nil
+	})
+	return swapped, err
+}
+
+// withStateLock выполняет fn под блокировкой каталога состояний
+func withStateLock(fn func() error) error {
+	dir := stateDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("cannot create session state dir: %w", err)
+	}
+	lock, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("cannot open session state dir: %w", err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("cannot lock session state dir: %w", err)
+	}
+	return fn()
 }
 
 // LoadSessionState читает состояние сессии. Для сессии без записи
@@ -80,6 +154,8 @@ func LoadSessionState(sessionID string) (SessionState, error) {
 		return StateDone, nil
 	case StatePaused:
 		return StatePaused, nil
+	case StateIdle:
+		return StateIdle, nil
 	default:
 		return StateWorking, nil
 	}

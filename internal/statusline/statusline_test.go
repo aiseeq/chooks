@@ -25,7 +25,7 @@ func TestProjectBadgeShowsState(t *testing.T) {
 		{name: "ждёт свои задачи", state: core.StatePaused, expected: badgeSlate},
 		{name: "ожидание ответа", state: core.StateWaiting, expected: badgeAmber},
 		{name: "новое, не смотрел", state: core.StateDone, expected: badgeGreen},
-		{name: "посмотрел", state: core.StateIdle, expected: badgeGray},
+		{name: "посмотрел", state: core.StateIdle, expected: badgeLeaf},
 		{name: "ошибка API", state: core.StateError, expected: badgeRed},
 		{name: "состояние не прочиталось", state: core.StateUnknown, expected: badgeBlue},
 	}

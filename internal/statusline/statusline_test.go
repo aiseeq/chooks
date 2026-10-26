@@ -205,7 +205,7 @@ func TestBuildShowsBackground(t *testing.T) {
 	input := Input{CWD: "/home/user/work/demo", SessionID: "s1"}
 	start := time.Now()
 	tasks := []core.BackgroundTask{{ID: "b1", Type: "shell", Description: "Luna на честном наборе"}}
-	if _, err := core.RecordBackground("s1", tasks, 0, start); err != nil {
+	if _, err := core.RecordBackground("s1", tasks, nil, start); err != nil {
 		t.Fatal(err)
 	}
 	if err := core.SaveSessionState("s1", core.StatePaused); err != nil {
@@ -244,7 +244,7 @@ func TestBuildShowsAgentsWorking(t *testing.T) {
 		{ID: "m1", Type: "monitor", Description: "live updates"},
 		{ID: "a1", Type: "subagent", Description: "Sleep page"},
 	}
-	if _, err := core.RecordBackground("s1", tasks, 0, start); err != nil {
+	if _, err := core.RecordBackground("s1", tasks, nil, start); err != nil {
 		t.Fatal(err)
 	}
 	if err := core.SaveSessionState("s1", core.StatePaused); err != nil {
@@ -262,7 +262,7 @@ func TestBuildShowsAgentsWorking(t *testing.T) {
 	if err := core.SaveSessionState("s1", core.StatePaused); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.RecordBackground("s1", []core.BackgroundTask{{ID: "a1", Type: "subagent"}, {ID: "b1", Type: "shell"}}, 0, start.Add(3*time.Hour)); err != nil {
+	if _, err := core.RecordBackground("s1", []core.BackgroundTask{{ID: "a1", Type: "subagent"}, {ID: "b1", Type: "shell"}}, nil, start.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, title := build(input, 10, weekBar{}, start.Add(3*time.Hour), hidden, testLogger(t)); title != "⏸️ demo" {
@@ -290,6 +290,7 @@ func TestBackgroundPart(t *testing.T) {
 			expected:   "фон: " + strings.Repeat("я", backgroundRunes-1) + "… 0 мин",
 		},
 		{name: "будильник", background: core.Background{Crons: 1}, expected: "фон: будильник"},
+		{name: "расписания", background: core.Background{Schedules: 2}, expected: "фон: расписаний: 2"},
 		{
 			name:       "задача и будильники",
 			background: core.Background{Crons: 2, Tasks: []core.TrackedTask{{Description: "сборка", Since: now.Add(-61 * time.Minute)}}},

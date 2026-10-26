@@ -37,7 +37,10 @@ func (t TrackedTask) Abandoned(now time.Time) bool {
 // понятно, можно ли сбрасывать?»)
 type Background struct {
 	Tasks []TrackedTask `json:"tasks"`
-	Crons int           `json:"crons"`
+	// Crons — разовые будильники: держат паузу. Schedules — расписания:
+	// паузу не держат, но пропадут при перезапуске сессии
+	Crons     int `json:"crons"`
+	Schedules int `json:"schedules,omitempty"`
 }
 
 // agentTypes — типы фоновых задач, где работают свои агенты, а не ожидание
@@ -59,7 +62,7 @@ func (b Background) AgentsWorking(now time.Time) bool {
 	return false
 }
 
-// Abandoned — вся работа брошена: будильников нет, а каждая задача висит
+// Abandoned — вся работа брошена: разовых будильников нет, а каждая задача висит
 // дольше срока. Пустая работа брошенной не считается: её просто нет
 func (b Background) Abandoned(now time.Time) bool {
 	if b.Crons > 0 || len(b.Tasks) == 0 {
@@ -79,7 +82,7 @@ func (b Background) Abandoned(now time.Time) bool {
 // рядом с состоянием сессии, исчезнувшие из списка задачи забываются. При
 // сбое учёта возвращается только ошибка: брошенные задачи не отличить от
 // живых, и чем заменить отбор, решает вызывающий
-func RecordBackground(sessionID string, tasks []BackgroundTask, crons int, now time.Time) ([]BackgroundTask, error) {
+func RecordBackground(sessionID string, tasks []BackgroundTask, crons []SessionCron, now time.Time) ([]BackgroundTask, error) {
 	if sessionID == "" {
 		return tasks, nil
 	}
@@ -90,7 +93,7 @@ func RecordBackground(sessionID string, tasks []BackgroundTask, crons int, now t
 	}
 	path := statePath + tasksFileSuffix
 
-	if len(tasks) == 0 && crons == 0 {
+	if len(tasks) == 0 && len(crons) == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("cannot forget background tasks: %w", err)
 		}
@@ -106,7 +109,8 @@ func RecordBackground(sessionID string, tasks []BackgroundTask, crons int, now t
 		since[task.ID] = task.Since
 	}
 
-	current := Background{Crons: crons, Tasks: make([]TrackedTask, 0, len(tasks))}
+	wakeups, schedules := CountCrons(crons)
+	current := Background{Crons: wakeups, Schedules: schedules, Tasks: make([]TrackedTask, 0, len(tasks))}
 	active := make([]BackgroundTask, 0, len(tasks))
 	for _, task := range tasks {
 		first, known := since[task.ID]

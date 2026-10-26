@@ -84,6 +84,22 @@ type SessionCron struct {
 	Recurring bool   `json:"recurring"`
 }
 
+// CountCrons делит будильники сессии на разовые и расписания. Разовый
+// (ScheduleWakeup, разовый CronCreate) — Claude вернётся к начатой работе,
+// это пауза. Расписание (recurring) — постоянная задача сессии вроде ночного
+// Сна: конца хода оно не откладывает (пользователь 26.10 о «~» на паузе из-за
+// Сна и Дайджеста: «если можно не считать будильник паузой, то я предпочёл бы так»)
+func CountCrons(crons []SessionCron) (wakeups, schedules int) {
+	for _, cron := range crons {
+		if cron.Recurring {
+			schedules++
+		} else {
+			wakeups++
+		}
+	}
+	return wakeups, schedules
+}
+
 // Violation представляет найденное нарушение
 type Violation struct {
 	Type       string `json:"type"`

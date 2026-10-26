@@ -300,9 +300,9 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 
 	event := notifier.Event{Name: eventName, Input: input, Previous: previous, Fresh: err == nil && !recorded && input.SessionID != ""}
 	if eventName == core.EventStop && input.BackgroundTasks != nil {
-		crons := 0
+		var crons []core.SessionCron
 		if input.SessionCrons != nil {
-			crons = len(*input.SessionCrons)
+			crons = *input.SessionCrons
 		}
 		active, err := core.RecordBackground(input.SessionID, *input.BackgroundTasks, crons, time.Now())
 		if err != nil {

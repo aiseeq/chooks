@@ -280,7 +280,7 @@ func abandon(sessionID string, logger core.Logger) core.SessionState {
 
 // backgroundPart показывает, что держит сессию после хода: первая задача с
 // описанием и возрастом — задача агентов, если есть, — число остальных и
-// будильники. Пусто — держать нечему, сессию можно сжимать и сбрасывать
+// будильники с расписаниями. Пусто — держать нечему, сессию можно сжимать и сбрасывать
 func backgroundPart(background core.Background, now time.Time) string {
 	var items []string
 	if len(background.Tasks) > 0 {
@@ -309,6 +309,12 @@ func backgroundPart(background core.Background, now time.Time) string {
 		items = append(items, "будильник")
 	case crons > 1:
 		items = append(items, fmt.Sprintf("будильников: %d", crons))
+	}
+	switch schedules := background.Schedules; {
+	case schedules == 1:
+		items = append(items, "расписание")
+	case schedules > 1:
+		items = append(items, fmt.Sprintf("расписаний: %d", schedules))
 	}
 	if len(items) == 0 {
 		return ""

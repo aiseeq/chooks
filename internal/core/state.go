@@ -23,7 +23,7 @@ const (
 	StateDone SessionState = "done"
 	// StateIdle — ход закончен и человек открыл вкладку после этого
 	StateIdle SessionState = "idle"
-	// StatePaused — Claude остановился, но ждёт фоновые задачи или будильник
+	// StatePaused — Claude остановился, но ждёт фоновые задачи или разовый будильник
 	// и вернётся к работе сам. Для человека это всё ещё работа
 	StatePaused SessionState = "paused"
 	// StateError — ход оборвала ошибка API (StopFailure): лимит, перегрузка,

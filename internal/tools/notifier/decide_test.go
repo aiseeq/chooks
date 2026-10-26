@@ -14,6 +14,7 @@ func crons(items ...core.SessionCron) *[]core.SessionCron { return &items }
 func TestDecide_Stop(t *testing.T) {
 	shell := core.BackgroundTask{ID: "b1", Type: "shell", Status: "running"}
 	wakeup := core.SessionCron{ID: "c1"}
+	schedule := core.SessionCron{ID: "c2", Recurring: true}
 
 	tests := []struct {
 		name        string
@@ -30,10 +31,17 @@ func TestDecide_Stop(t *testing.T) {
 			want:        Decision{State: core.StatePaused},
 		},
 		{
-			name:     "взведённый будильник: пауза без звонка",
-			input:    core.ToolInput{BackgroundTasks: tasks(), SessionCrons: crons(wakeup)},
+			name:     "разовый будильник: пауза без звонка",
+			input:    core.ToolInput{BackgroundTasks: tasks(), SessionCrons: crons(wakeup, schedule)},
 			previous: core.StateWorking,
 			want:     Decision{State: core.StatePaused},
+		},
+		{
+			// Ночной Сон и утренний Дайджест в «~» не откладывают конец хода
+			name:     "расписание паузу не держит",
+			input:    core.ToolInput{BackgroundTasks: tasks(), SessionCrons: crons(schedule, schedule)},
+			previous: core.StateWorking,
+			want:     Decision{State: core.StateDone, Alert: true},
 		},
 		{
 			name:        "брошенная задача не держит паузу",

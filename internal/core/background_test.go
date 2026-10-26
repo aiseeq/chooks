@@ -12,7 +12,7 @@ func TestRecordBackground_FreshTasksAreActive(t *testing.T) {
 	now := time.Now()
 
 	tasks := []BackgroundTask{{ID: "a", Type: "shell", Description: "сборка"}, {ID: "b", Type: "subagent"}}
-	active, err := RecordBackground("s1", tasks, 0, now)
+	active, err := RecordBackground("s1", tasks, nil, now)
 	if err != nil {
 		t.Fatalf("учёт задач: %v", err)
 	}
@@ -36,13 +36,13 @@ func TestRecordBackground_AbandonedTaskExpires(t *testing.T) {
 	start := time.Now()
 
 	server := BackgroundTask{ID: "server", Type: "shell"}
-	if _, err := RecordBackground("s1", []BackgroundTask{server}, 0, start); err != nil {
+	if _, err := RecordBackground("s1", []BackgroundTask{server}, nil, start); err != nil {
 		t.Fatalf("учёт задач: %v", err)
 	}
 
 	later := start.Add(abandonedTaskAge + time.Minute)
 	agent := BackgroundTask{ID: "agent", Type: "subagent"}
-	active, err := RecordBackground("s1", []BackgroundTask{server, agent}, 0, later)
+	active, err := RecordBackground("s1", []BackgroundTask{server, agent}, nil, later)
 	if err != nil {
 		t.Fatalf("учёт задач: %v", err)
 	}
@@ -59,17 +59,17 @@ func TestRecordBackground_ForgetsFinishedTasks(t *testing.T) {
 	start := time.Now()
 
 	task := BackgroundTask{ID: "a"}
-	if _, err := RecordBackground("s1", []BackgroundTask{task}, 0, start); err != nil {
+	if _, err := RecordBackground("s1", []BackgroundTask{task}, nil, start); err != nil {
 		t.Fatalf("учёт задач: %v", err)
 	}
-	if _, err := RecordBackground("s1", nil, 0, start.Add(time.Minute)); err != nil {
+	if _, err := RecordBackground("s1", nil, nil, start.Add(time.Minute)); err != nil {
 		t.Fatalf("учёт задач: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(runtimeDir, "chooks", "sessions", "s1"+tasksFileSuffix)); !os.IsNotExist(err) {
 		t.Error("без задач файл учёта должен удаляться")
 	}
 
-	active, err := RecordBackground("s1", []BackgroundTask{task}, 0, start.Add(abandonedTaskAge+time.Hour))
+	active, err := RecordBackground("s1", []BackgroundTask{task}, nil, start.Add(abandonedTaskAge+time.Hour))
 	if err != nil {
 		t.Fatalf("учёт задач: %v", err)
 	}
@@ -78,15 +78,16 @@ func TestRecordBackground_ForgetsFinishedTasks(t *testing.T) {
 	}
 }
 
-// Будильник без задач тоже держит сессию: учёт его помнит
+// Будильники без задач учёт тоже помнит: разовые отдельно от расписаний
 func TestRecordBackground_KeepsCrons(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	if _, err := RecordBackground("s1", nil, 2, time.Now()); err != nil {
+	crons := []SessionCron{{ID: "w1"}, {ID: "w2"}, {ID: "r1", Recurring: true}}
+	if _, err := RecordBackground("s1", nil, crons, time.Now()); err != nil {
 		t.Fatalf("учёт задач: %v", err)
 	}
 	background, err := LoadBackground("s1")
-	if err != nil || background.Crons != 2 {
+	if err != nil || background.Crons != 2 || background.Schedules != 1 {
 		t.Errorf("будильники: %+v, %v", background, err)
 	}
 }
@@ -104,7 +105,7 @@ func TestRecordBackground_CorruptFileIsAnError(t *testing.T) {
 	}
 
 	tasks := []BackgroundTask{{ID: "a"}}
-	active, err := RecordBackground("s1", tasks, 0, time.Now())
+	active, err := RecordBackground("s1", tasks, nil, time.Now())
 	if err == nil {
 		t.Error("испорченный файл учёта должен давать ошибку")
 	}

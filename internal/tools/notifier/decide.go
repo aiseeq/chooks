@@ -75,8 +75,8 @@ func Decide(event Event) Decision {
 	}
 }
 
-// decideStop: остановка при живых фоновых задачах или взведённом будильнике —
-// не конец работы, Claude вернётся к ней сам
+// decideStop: остановка при живых фоновых задачах или разовом будильнике —
+// не конец работы, Claude вернётся к ней сам. Расписания паузу не держат
 func decideStop(event Event) Decision {
 	input := event.Input
 	if input.BackgroundTasks == nil || input.SessionCrons == nil {
@@ -87,8 +87,8 @@ func decideStop(event Event) Decision {
 	if event.ActiveTasks > 0 {
 		return Decision{State: core.StatePaused, Reason: fmt.Sprintf("живых фоновых задач: %d", event.ActiveTasks)}
 	}
-	if crons := len(*input.SessionCrons); crons > 0 {
-		return Decision{State: core.StatePaused, Reason: fmt.Sprintf("взведённых будильников: %d", crons)}
+	if wakeups, _ := core.CountCrons(*input.SessionCrons); wakeups > 0 {
+		return Decision{State: core.StatePaused, Reason: fmt.Sprintf("разовых будильников: %d", wakeups)}
 	}
 
 	return finish(core.StateDone, event.Previous, "")

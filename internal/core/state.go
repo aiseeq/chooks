@@ -31,18 +31,17 @@ const (
 	StateUnknown SessionState = "unknown"
 )
 
-// Marker — значок состояния во вкладке терминала. Набор выбрал пользователь
-// 26.10 (вопрос с вариантами в сессии chooks-master: эмодзи)
+// Marker — значок состояния во вкладке терминала. Значки выбрал пользователь
+// 26.10 по каталогу: «1 ⚙», «72 🔔», «99 ✨», «134 ✅»; «"Ждёт свои задачи" -
+// думаю, мне не надо отдельно, объедини с "Работает"»
 func (s SessionState) Marker() string {
 	switch s {
-	case StatePaused:
-		return "💤"
 	case StateWaiting:
-		return "🙋"
+		return "🔔"
 	case StateDone:
-		return "📬"
+		return "✨"
 	case StateIdle:
-		return "·"
+		return "✅"
 	default:
 		return "⚙️"
 	}

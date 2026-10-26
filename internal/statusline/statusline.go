@@ -262,8 +262,9 @@ func terminalTitle(dir string, state core.SessionState) string {
 }
 
 // projectBadge рисует имя проекта плашкой, цвет которой показывает состояние:
-// синяя — работает, янтарная — ждёт ответа человека, зелёная — новое, что он
-// ещё не видел, серая — ждёт свои задачи или уже просмотрена. Заполнение
+// синяя — работает (и ждёт свои задачи: пользователь 26.10 «объедини с
+// "Работает"»), янтарная — ждёт ответа человека, зелёная — новое, что он
+// ещё не видел, серая — просмотрена. Заполнение
 // контекста видно по полосе ctx, плашка его не повторяет (пользователь 26.10:
 // убрать красный с плашки)
 func projectBadge(dir string, state core.SessionState) string {
@@ -273,7 +274,7 @@ func projectBadge(dir string, state core.SessionState) string {
 		badge = badgeAmber
 	case core.StateDone:
 		badge = badgeGreen
-	case core.StatePaused, core.StateIdle:
+	case core.StateIdle:
 		badge = badgeGray
 	}
 

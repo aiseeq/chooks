@@ -22,7 +22,7 @@ func TestProjectBadgeShowsState(t *testing.T) {
 		expected string
 	}{
 		{name: "работа", state: core.StateWorking, expected: badgeBlue},
-		{name: "ждёт свои задачи", state: core.StatePaused, expected: badgeGray},
+		{name: "ждёт свои задачи — как работа", state: core.StatePaused, expected: badgeBlue},
 		{name: "ожидание ответа", state: core.StateWaiting, expected: badgeAmber},
 		{name: "новое, не смотрел", state: core.StateDone, expected: badgeGreen},
 		{name: "посмотрел", state: core.StateIdle, expected: badgeGray},
@@ -78,10 +78,10 @@ func TestTerminalTitle(t *testing.T) {
 		expected string
 	}{
 		{name: "работа", state: core.StateWorking, expected: "⚙️ demo"},
-		{name: "ждёт свои задачи", state: core.StatePaused, expected: "💤 demo"},
-		{name: "ожидание ответа", state: core.StateWaiting, expected: "🙋 demo"},
-		{name: "новое, не смотрел", state: core.StateDone, expected: "📬 demo"},
-		{name: "посмотрел", state: core.StateIdle, expected: "· demo"},
+		{name: "ждёт свои задачи — как работа", state: core.StatePaused, expected: "⚙️ demo"},
+		{name: "ожидание ответа", state: core.StateWaiting, expected: "🔔 demo"},
+		{name: "новое, не смотрел", state: core.StateDone, expected: "✨ demo"},
+		{name: "посмотрел", state: core.StateIdle, expected: "✅ demo"},
 		{name: "состояние не прочиталось: как работа", state: core.StateUnknown, expected: "⚙️ demo"},
 	}
 
@@ -159,13 +159,13 @@ func TestBuildMarksTurnSeen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, title := build(input, 10, weekBar{}, time.Now(), hidden, testLogger(t)); title != "📬 demo" {
+	if _, title := build(input, 10, weekBar{}, time.Now(), hidden, testLogger(t)); title != "✨ demo" {
 		t.Errorf("вкладку не видно — новое остаётся: %q", title)
 	}
-	if _, title := build(input, 10, weekBar{}, time.Now(), func() (bool, error) { return false, errors.New("dbus") }, testLogger(t)); title != "📬 demo" {
+	if _, title := build(input, 10, weekBar{}, time.Now(), func() (bool, error) { return false, errors.New("dbus") }, testLogger(t)); title != "✨ demo" {
 		t.Errorf("сбой проверки — новое остаётся: %q", title)
 	}
-	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "· demo" {
+	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "✅ demo" {
 		t.Errorf("вкладку видно — посмотрел: %q", title)
 	}
 	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StateIdle {

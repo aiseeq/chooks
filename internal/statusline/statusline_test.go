@@ -45,17 +45,24 @@ func TestContextBar(t *testing.T) {
 	tests := []struct {
 		used     float64
 		expected string
+		shade    string
 	}{
-		{used: 0, expected: "ctx ░░░░░░░░░░ 0%"},
-		{used: 47, expected: "ctx ▓▓▓▓░░░░░░ 47%"},
-		{used: 100, expected: "ctx ▓▓▓▓▓▓▓▓▓▓ 100%"},
+		{used: 0, expected: "ctx ░░░░░░░░░░ 0%", shade: "153"},
+		{used: 47, expected: "ctx ▓▓▓▓░░░░░░ 47%", shade: "111"},
+		{used: 74, expected: "ctx ▓▓▓▓▓▓▓░░░ 74%", shade: "69"},
+		{used: 100, expected: "ctx ▓▓▓▓▓▓▓▓▓▓ 100%", shade: "33"},
 		// Заявленное переполнение не должно рисовать полосу длиннее шкалы
-		{used: 140, expected: "ctx ▓▓▓▓▓▓▓▓▓▓ 100%"},
+		{used: 140, expected: "ctx ▓▓▓▓▓▓▓▓▓▓ 100%", shade: "33"},
 	}
 
 	for _, tt := range tests {
-		if got := plain(contextBar(tt.used)); got != tt.expected {
-			t.Errorf("contextBar(%v) = %q, ожидалось %q", tt.used, got, tt.expected)
+		got := contextBar(tt.used)
+		if plain(got) != tt.expected {
+			t.Errorf("contextBar(%v) = %q, ожидалось %q", tt.used, plain(got), tt.expected)
+		}
+		// Чем полнее, тем гуще оттенок голубого, без светофора
+		if !strings.Contains(got, "\033[38;5;"+tt.shade+"m▓") && !strings.Contains(got, "\033[38;5;"+tt.shade+"m░") {
+			t.Errorf("contextBar(%v) = %q, ожидался оттенок %s", tt.used, got, tt.shade)
 		}
 	}
 }

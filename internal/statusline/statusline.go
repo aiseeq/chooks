@@ -31,11 +31,15 @@ const (
 	badgeRed   = "\033[1;38;5;231;48;5;196m"
 )
 
-// Пороги заполнения контекста, при которых меняется цвет полосы
-const (
-	contextWarnPercent     = 60
-	contextCriticalPercent = 85
-)
+// contextCriticalPercent — заполнение контекста, с которого плашка проекта и
+// вкладка предупреждают о скором сжатии истории
+const contextCriticalPercent = 85
+
+// contextShades — оттенки голубого от светлого к густому по четвертям
+// заполнения. Полнота контекста — количество, а не оценка, поэтому без
+// светофора (пользователь 26.10: «пустой контекст это не обязательно
+// "хорошо", а полный - не обязательно "плохо" же»)
+var contextShades = []string{"\033[38;5;153m", "\033[38;5;111m", "\033[38;5;69m", "\033[38;5;33m"}
 
 // barSegments — клеток в полосе доли; клетка — 10%
 const barSegments = 10
@@ -289,14 +293,8 @@ func shortModel(model string) string {
 
 // contextBar рисует полосу заполнения контекста до порога автосжатия
 func contextBar(used float64) string {
-	color := green
-	switch {
-	case used >= contextCriticalPercent:
-		color = red
-	case used >= contextWarnPercent:
-		color = yellow
-	}
-	return meter("ctx", used, color, "")
+	shade := min(max(int(used)*len(contextShades)/100, 0), len(contextShades)-1)
+	return meter("ctx", used, contextShades[shade], "")
 }
 
 // weekBar — подпись полосы недели и прогноз пула учёток; pool nil —

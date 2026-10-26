@@ -22,7 +22,7 @@ func TestProjectBadgeShowsState(t *testing.T) {
 		expected string
 	}{
 		{name: "работа", state: core.StateWorking, expected: badgeBlue},
-		{name: "ждёт свои задачи — как работа", state: core.StatePaused, expected: badgeBlue},
+		{name: "ждёт свои задачи", state: core.StatePaused, expected: badgeSlate},
 		{name: "ожидание ответа", state: core.StateWaiting, expected: badgeAmber},
 		{name: "новое, не смотрел", state: core.StateDone, expected: badgeGreen},
 		{name: "посмотрел", state: core.StateIdle, expected: badgeGray},
@@ -78,7 +78,7 @@ func TestTerminalTitle(t *testing.T) {
 		expected string
 	}{
 		{name: "работа", state: core.StateWorking, expected: "⚙️ demo"},
-		{name: "ждёт свои задачи — как работа", state: core.StatePaused, expected: "⚙️ demo"},
+		{name: "ждёт свои задачи", state: core.StatePaused, expected: "⏸️ demo"},
 		{name: "ожидание ответа", state: core.StateWaiting, expected: "🔔 demo"},
 		{name: "новое, не смотрел", state: core.StateDone, expected: "✨ demo"},
 		{name: "посмотрел", state: core.StateIdle, expected: "✅ demo"},
@@ -177,6 +177,76 @@ func TestBuildMarksTurnSeen(t *testing.T) {
 	}
 	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "⚙️ demo" {
 		t.Errorf("работа остаётся работой: %q", title)
+	}
+}
+
+// Пауза показывает, что держит сессию; задачи старше срока — уже «готово»
+func TestBuildShowsBackground(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	input := Input{CWD: "/home/user/work/demo", SessionID: "s1"}
+	start := time.Now()
+	tasks := []core.BackgroundTask{{ID: "b1", Type: "shell", Description: "Luna на честном наборе"}}
+	if _, err := core.RecordBackground("s1", tasks, 0, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.SaveSessionState("s1", core.StatePaused); err != nil {
+		t.Fatal(err)
+	}
+
+	line, title := build(input, 10, weekBar{}, start.Add(14*time.Minute), hidden, testLogger(t))
+	if title != "⏸️ demo" || !strings.Contains(plain(line), "фон: Luna на честном наборе 14 мин") {
+		t.Errorf("пауза с задачей: %q, %q", title, plain(line))
+	}
+
+	line, title = build(input, 10, weekBar{}, start.Add(3*time.Hour+28*time.Minute), hidden, testLogger(t))
+	if title != "✨ demo" || !strings.Contains(plain(line), "Luna на честном наборе 3 ч 28 мин брошена") {
+		t.Errorf("брошенная задача — готово: %q, %q", title, plain(line))
+	}
+	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StateDone {
+		t.Errorf("состояние = %q, %v", state, err)
+	}
+
+	// Пока ход идёт, список задач устарел и не показывается
+	if err := core.SaveSessionState("s1", core.StateWorking); err != nil {
+		t.Fatal(err)
+	}
+	if line, _ := build(input, 10, weekBar{}, start, hidden, testLogger(t)); strings.Contains(plain(line), "фон:") {
+		t.Errorf("во время хода фон не показывается: %q", plain(line))
+	}
+}
+
+func TestBackgroundPart(t *testing.T) {
+	now := time.Now()
+	long := strings.Repeat("я", 50)
+	tests := []struct {
+		name       string
+		background core.Background
+		expected   string
+	}{
+		{name: "пусто", background: core.Background{}, expected: ""},
+		{
+			name:       "задача без описания и ещё одна",
+			background: core.Background{Tasks: []core.TrackedTask{{Type: "subagent", Since: now.Add(-5 * time.Minute)}, {Type: "shell", Since: now}}},
+			expected:   "фон: subagent 5 мин +1",
+		},
+		{
+			name:       "длинное описание обрезается",
+			background: core.Background{Tasks: []core.TrackedTask{{Description: long, Since: now}}},
+			expected:   "фон: " + strings.Repeat("я", backgroundRunes-1) + "… 0 мин",
+		},
+		{name: "будильник", background: core.Background{Crons: 1}, expected: "фон: будильник"},
+		{
+			name:       "задача и будильники",
+			background: core.Background{Crons: 2, Tasks: []core.TrackedTask{{Description: "сборка", Since: now.Add(-61 * time.Minute)}}},
+			expected:   "фон: сборка 1 ч 1 мин, будильников: 2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := plain(backgroundPart(tt.background, now)); got != tt.expected {
+				t.Errorf("получено %q, ожидалось %q", got, tt.expected)
+			}
+		})
 	}
 }
 

@@ -41,7 +41,7 @@ type Event struct {
 	Input    *core.ToolInput
 	Previous core.SessionState
 	// ActiveTasks — фоновые задачи, которых Claude ещё ждёт (только Stop):
-	// список Claude Code без брошенных, см. core.ActiveBackgroundTasks
+	// список Claude Code без брошенных, см. core.RecordBackground
 	ActiveTasks int
 }
 

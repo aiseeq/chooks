@@ -291,7 +291,11 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 
 	event := notifier.Event{Name: eventName, Input: input, Previous: previous}
 	if eventName == core.EventStop && input.BackgroundTasks != nil {
-		active, err := core.ActiveBackgroundTasks(input.SessionID, *input.BackgroundTasks, time.Now())
+		crons := 0
+		if input.SessionCrons != nil {
+			crons = len(*input.SessionCrons)
+		}
+		active, err := core.RecordBackground(input.SessionID, *input.BackgroundTasks, crons, time.Now())
 		if err != nil {
 			// Failover на список Claude Code: брошенные задачи не отличить от
 			// живых, а про все задачи списка Claude Code сам сказал, что они живы

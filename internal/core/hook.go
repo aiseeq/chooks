@@ -63,12 +63,13 @@ type ToolInput struct {
 }
 
 // BackgroundTask незавершённая фоновая задача сессии: субагент, фоновая
-// команда, Monitor, workflow. Описание и команда не читаются: для решения
-// хватает идентификатора и типа, а текст задачи в лог попадать не должен
+// команда, Monitor, workflow. Описание показывает строка статуса; команда не
+// читается, а текст задачи в лог попадать не должен
 type BackgroundTask struct {
-	ID     string `json:"id"`
-	Type   string `json:"type"`
-	Status string `json:"status"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Description string `json:"description"`
 }
 
 // SessionCron взведённый будильник сессии: CronCreate, ScheduleWakeup, /loop

@@ -83,6 +83,9 @@ func TestRunSessionEvent_PauseThenDone(t *testing.T) {
 	if state, err := core.LoadSessionState("s2"); err != nil || state != core.StatePaused {
 		t.Fatalf("при живой задаче ожидалась пауза: %q, %v", state, err)
 	}
+	if background, err := core.LoadBackground("s2"); err != nil || len(background.Tasks) != 1 || background.Tasks[0].Description != "sleep 40" {
+		t.Fatalf("строке статуса нужно описание задачи: %+v, %v", background, err)
+	}
 
 	idle, err := json.Marshal(map[string]any{"session_id": "s2", "notification_type": "idle_prompt", "message": "Claude is waiting for your input"})
 	if err != nil {

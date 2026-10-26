@@ -31,7 +31,11 @@ const (
 	badgeAmber = "\033[1;38;5;16;48;5;214m"
 	badgeGreen = "\033[1;38;5;231;48;5;28m"
 	badgeGray  = "\033[1;38;5;231;48;5;243m"
+	badgeSlate = "\033[1;38;5;231;48;5;61m"
 )
+
+// backgroundRunes — сколько знаков описания фоновой задачи помещается в строку
+const backgroundRunes = 40
 
 // contextShades — оттенки голубого от светлого к густому по четвертям
 // заполнения. Полнота контекста — количество, а не оценка, поэтому без
@@ -209,6 +213,18 @@ func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible fun
 		logger.Warn("session state unavailable", "session", input.SessionID, "error", err)
 		state = core.StateUnknown
 	}
+	// Фоновая работа известна на конец хода: пока ход идёт, список устарел
+	var background core.Background
+	if state == core.StatePaused || state == core.StateDone || state == core.StateIdle {
+		background, err = core.LoadBackground(input.SessionID)
+		if err != nil {
+			// Сбой не срывает строку: фон не показывается, сбой — в лог
+			logger.Warn("background tasks unreadable, not shown", "session", input.SessionID, "error", err)
+		}
+	}
+	if state == core.StatePaused && background.Abandoned(now) {
+		state = abandon(input.SessionID, logger)
+	}
 	if state == core.StateDone {
 		state = seen(input.SessionID, visible, logger)
 	}
@@ -218,11 +234,87 @@ func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible fun
 	var output strings.Builder
 	output.WriteString(projectBadge(dir, state))
 
-	for _, part := range details(input, ctxUsed, bar, now) {
+	parts := details(input, ctxUsed, bar, now)
+	if part := backgroundPart(background, now); part != "" {
+		parts = append(parts, part)
+	}
+	for _, part := range parts {
 		output.WriteString(dim + " · " + reset + part)
 	}
 
 	return output.String(), terminalTitle(dir, state)
+}
+
+// abandon переводит паузу в «готово», когда все задачи сессии висят дольше
+// срока, а будильников нет: Claude их больше не ждёт, а конец хода был
+// раньше, чем задачи стали брошенными. Без этого вкладка показывала бы паузу
+// до следующего хода
+func abandon(sessionID string, logger core.Logger) core.SessionState {
+	swapped, err := core.SwapSessionState(sessionID, core.StatePaused, core.StateDone)
+	if err != nil {
+		logger.Warn("abandoned background tasks, pause kept", "session", sessionID, "error", err)
+		return core.StatePaused
+	}
+	if !swapped {
+		// Между чтением и заменой хук записал новое состояние: им и рисовать
+		state, err := core.LoadSessionState(sessionID)
+		if err != nil {
+			return core.StateUnknown
+		}
+		return state
+	}
+	logger.Info("background tasks abandoned, session done", "session", sessionID)
+	return core.StateDone
+}
+
+// backgroundPart показывает, что держит сессию после хода: первая задача с
+// описанием и возрастом, число остальных и будильники. Пусто — держать
+// нечему, сессию можно сжимать и сбрасывать
+func backgroundPart(background core.Background, now time.Time) string {
+	var items []string
+	if len(background.Tasks) > 0 {
+		task := background.Tasks[0]
+		item := truncateRunes(task.Description, backgroundRunes)
+		if item == "" {
+			item = task.Type
+		}
+		item += " " + age(now.Sub(task.Since))
+		if task.Abandoned(now) {
+			item += " " + yellow + "брошена" + reset
+		}
+		if more := len(background.Tasks) - 1; more > 0 {
+			item += fmt.Sprintf(" +%d", more)
+		}
+		items = append(items, item)
+	}
+	switch crons := background.Crons; {
+	case crons == 1:
+		items = append(items, "будильник")
+	case crons > 1:
+		items = append(items, fmt.Sprintf("будильников: %d", crons))
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	return dim + "фон: " + reset + strings.Join(items, ", ")
+}
+
+// age — возраст задачи до минуты: «14 мин», «3 ч 28 мин»
+func age(d time.Duration) string {
+	minutes := int(d.Minutes())
+	if minutes < 60 {
+		return fmt.Sprintf("%d мин", minutes)
+	}
+	return fmt.Sprintf("%d ч %d мин", minutes/60, minutes%60)
+}
+
+// truncateRunes обрезает текст до limit знаков с многоточием
+func truncateRunes(text string, limit int) string {
+	runes := []rune(strings.TrimSpace(text))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return strings.TrimSpace(string(runes[:limit-1])) + "…"
 }
 
 // seen переводит законченный ход в «посмотрел», если человек видит вкладку.
@@ -262,14 +354,15 @@ func terminalTitle(dir string, state core.SessionState) string {
 }
 
 // projectBadge рисует имя проекта плашкой, цвет которой показывает состояние:
-// синяя — работает (и ждёт свои задачи: пользователь 26.10 «объедини с
-// "Работает"»), янтарная — ждёт ответа человека, зелёная — новое, что он
-// ещё не видел, серая — просмотрена. Заполнение
-// контекста видно по полосе ctx, плашка его не повторяет (пользователь 26.10:
-// убрать красный с плашки)
+// синяя — работает, сине-серая — ход кончился, но ждёт свои задачи (что
+// именно — в «фон:»), янтарная — ждёт ответа человека, зелёная — новое, что
+// он ещё не видел, серая — просмотрена. Заполнение контекста видно по полосе
+// ctx, плашка его не повторяет (пользователь 26.10: убрать красный с плашки)
 func projectBadge(dir string, state core.SessionState) string {
 	badge := badgeBlue
 	switch state {
+	case core.StatePaused:
+		badge = badgeSlate
 	case core.StateWaiting:
 		badge = badgeAmber
 	case core.StateDone:

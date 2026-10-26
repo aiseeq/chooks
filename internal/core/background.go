@@ -18,12 +18,49 @@ const abandonedTaskAge = 2 * time.Hour
 // tasksFileSuffix отличает файл учёта задач от файла состояния той же сессии
 const tasksFileSuffix = ".tasks"
 
-// ActiveBackgroundTasks отбирает задачи, которых Claude ещё ждёт: всё из
-// списка Claude Code, кроме висящих дольше abandonedTaskAge. Время первого
-// появления задачи хранится рядом с состоянием сессии, исчезнувшие из списка
-// задачи забываются. При сбое учёта возвращается только ошибка: брошенные
-// задачи не отличить от живых, и чем заменить отбор, решает вызывающий
-func ActiveBackgroundTasks(sessionID string, tasks []BackgroundTask, now time.Time) ([]BackgroundTask, error) {
+// TrackedTask — фоновая задача сессии, как её застал конец хода
+type TrackedTask struct {
+	ID          string    `json:"id"`
+	Type        string    `json:"type"`
+	Description string    `json:"description"`
+	Since       time.Time `json:"since"`
+}
+
+// Abandoned — задача висит дольше abandonedTaskAge, Claude её больше не ждёт
+func (t TrackedTask) Abandoned(now time.Time) bool {
+	return now.Sub(t.Since) >= abandonedTaskAge
+}
+
+// Background — фоновая работа сессии на конец последнего хода. Её читает
+// строка статуса: по ней человек видит, что держит сессию на паузе и можно
+// ли её сбрасывать (пользователь 26.10: «С этими висящими консолями не
+// понятно, можно ли сбрасывать?»)
+type Background struct {
+	Tasks []TrackedTask `json:"tasks"`
+	Crons int           `json:"crons"`
+}
+
+// Abandoned — вся работа брошена: будильников нет, а каждая задача висит
+// дольше срока. Пустая работа брошенной не считается: её просто нет
+func (b Background) Abandoned(now time.Time) bool {
+	if b.Crons > 0 || len(b.Tasks) == 0 {
+		return false
+	}
+	for _, task := range b.Tasks {
+		if !task.Abandoned(now) {
+			return false
+		}
+	}
+	return true
+}
+
+// RecordBackground запоминает фоновую работу сессии на конец хода и
+// отбирает задачи, которых Claude ещё ждёт: всё из списка Claude Code, кроме
+// висящих дольше abandonedTaskAge. Время первого появления задачи хранится
+// рядом с состоянием сессии, исчезнувшие из списка задачи забываются. При
+// сбое учёта возвращается только ошибка: брошенные задачи не отличить от
+// живых, и чем заменить отбор, решает вызывающий
+func RecordBackground(sessionID string, tasks []BackgroundTask, crons int, now time.Time) ([]BackgroundTask, error) {
 	if sessionID == "" {
 		return tasks, nil
 	}
@@ -34,58 +71,72 @@ func ActiveBackgroundTasks(sessionID string, tasks []BackgroundTask, now time.Ti
 	}
 	path := statePath + tasksFileSuffix
 
-	if len(tasks) == 0 {
+	if len(tasks) == 0 && crons == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("cannot forget background tasks: %w", err)
 		}
 		return tasks, nil
 	}
 
-	seen, err := loadFirstSeen(path)
+	previous, err := loadBackground(path)
 	if err != nil {
 		return nil, err
 	}
+	since := make(map[string]time.Time, len(previous.Tasks))
+	for _, task := range previous.Tasks {
+		since[task.ID] = task.Since
+	}
 
-	current := make(map[string]time.Time, len(tasks))
+	current := Background{Crons: crons, Tasks: make([]TrackedTask, 0, len(tasks))}
 	active := make([]BackgroundTask, 0, len(tasks))
 	for _, task := range tasks {
-		first, known := seen[task.ID]
+		first, known := since[task.ID]
 		if !known {
 			first = now
 		}
-		current[task.ID] = first
-		if now.Sub(first) < abandonedTaskAge {
+		tracked := TrackedTask{ID: task.ID, Type: task.Type, Description: task.Description, Since: first}
+		current.Tasks = append(current.Tasks, tracked)
+		if !tracked.Abandoned(now) {
 			active = append(active, task)
 		}
 	}
 
-	if err := saveFirstSeen(path, current); err != nil {
+	if err := saveBackground(path, current); err != nil {
 		return nil, err
 	}
 	return active, nil
 }
 
-// loadFirstSeen читает время первого появления задач. Отсутствующий файл —
-// задач ещё не видели
-func loadFirstSeen(path string) (map[string]time.Time, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]time.Time{}, nil
-	}
+// LoadBackground читает фоновую работу сессии на конец последнего хода.
+// Нет записи — работы нет
+func LoadBackground(sessionID string) (Background, error) {
+	statePath, err := sessionStatePath(sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read background tasks: %w", err)
+		return Background{}, err
 	}
-
-	seen := map[string]time.Time{}
-	if err := json.Unmarshal(data, &seen); err != nil {
-		return nil, fmt.Errorf("cannot parse background tasks %s: %w", path, err)
-	}
-	return seen, nil
+	return loadBackground(statePath + tasksFileSuffix)
 }
 
-// saveFirstSeen запоминает время первого появления задач
-func saveFirstSeen(path string, seen map[string]time.Time) error {
-	data, err := json.Marshal(seen)
+// loadBackground читает файл учёта. Отсутствующий файл — задач ещё не видели
+func loadBackground(path string) (Background, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Background{}, nil
+	}
+	if err != nil {
+		return Background{}, fmt.Errorf("cannot read background tasks: %w", err)
+	}
+
+	var background Background
+	if err := json.Unmarshal(data, &background); err != nil {
+		return Background{}, fmt.Errorf("cannot parse background tasks %s: %w", path, err)
+	}
+	return background, nil
+}
+
+// saveBackground запоминает фоновую работу сессии
+func saveBackground(path string, background Background) error {
+	data, err := json.Marshal(background)
 	if err != nil {
 		return fmt.Errorf("cannot encode background tasks: %w", err)
 	}

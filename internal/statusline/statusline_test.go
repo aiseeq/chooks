@@ -26,6 +26,7 @@ func TestProjectBadgeShowsState(t *testing.T) {
 		{name: "ожидание ответа", state: core.StateWaiting, expected: badgeAmber},
 		{name: "новое, не смотрел", state: core.StateDone, expected: badgeGreen},
 		{name: "посмотрел", state: core.StateIdle, expected: badgeGray},
+		{name: "ошибка API", state: core.StateError, expected: badgeRed},
 		{name: "состояние не прочиталось", state: core.StateUnknown, expected: badgeBlue},
 	}
 
@@ -77,12 +78,13 @@ func TestTerminalTitle(t *testing.T) {
 		state    core.SessionState
 		expected string
 	}{
-		{name: "работа", state: core.StateWorking, expected: "⚙️ demo"},
+		{name: "работа", state: core.StateWorking, expected: "🔄 demo"},
 		{name: "ждёт свои задачи", state: core.StatePaused, expected: "⏸️ demo"},
-		{name: "ожидание ответа", state: core.StateWaiting, expected: "🔔 demo"},
-		{name: "новое, не смотрел", state: core.StateDone, expected: "✨ demo"},
+		{name: "ожидание ответа", state: core.StateWaiting, expected: "✴️ demo"},
+		{name: "новое, не смотрел", state: core.StateDone, expected: "❇️ demo"},
 		{name: "посмотрел", state: core.StateIdle, expected: "✅ demo"},
-		{name: "состояние не прочиталось: как работа", state: core.StateUnknown, expected: "⚙️ demo"},
+		{name: "ошибка API", state: core.StateError, expected: "🅰️ demo"},
+		{name: "состояние не прочиталось: как работа", state: core.StateUnknown, expected: "🔄 demo"},
 	}
 
 	for _, tt := range tests {
@@ -143,7 +145,7 @@ func TestBuildFitsSingleLine(t *testing.T) {
 	if strings.Contains(plain(line), "1M context") {
 		t.Errorf("уточнение модели должно убираться: %q", plain(line))
 	}
-	if !strings.HasPrefix(title, "⚙️ ") {
+	if !strings.HasPrefix(title, "🔄 ") {
 		t.Errorf("заголовок должен начинаться со значка состояния: %q", title)
 	}
 }
@@ -159,10 +161,10 @@ func TestBuildMarksTurnSeen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, title := build(input, 10, weekBar{}, time.Now(), hidden, testLogger(t)); title != "✨ demo" {
+	if _, title := build(input, 10, weekBar{}, time.Now(), hidden, testLogger(t)); title != "❇️ demo" {
 		t.Errorf("вкладку не видно — новое остаётся: %q", title)
 	}
-	if _, title := build(input, 10, weekBar{}, time.Now(), func() (bool, error) { return false, errors.New("dbus") }, testLogger(t)); title != "✨ demo" {
+	if _, title := build(input, 10, weekBar{}, time.Now(), func() (bool, error) { return false, errors.New("dbus") }, testLogger(t)); title != "❇️ demo" {
 		t.Errorf("сбой проверки — новое остаётся: %q", title)
 	}
 	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "✅ demo" {
@@ -175,7 +177,7 @@ func TestBuildMarksTurnSeen(t *testing.T) {
 	if err := core.SaveSessionState("s1", core.StateWorking); err != nil {
 		t.Fatal(err)
 	}
-	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "⚙️ demo" {
+	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "🔄 demo" {
 		t.Errorf("работа остаётся работой: %q", title)
 	}
 }
@@ -216,7 +218,7 @@ func TestBuildShowsBackground(t *testing.T) {
 	}
 
 	line, title = build(input, 10, weekBar{}, start.Add(3*time.Hour+28*time.Minute), hidden, testLogger(t))
-	if title != "✨ demo" || !strings.Contains(plain(line), "Luna на честном наборе 3 ч 28 мин брошена") {
+	if title != "❇️ demo" || !strings.Contains(plain(line), "Luna на честном наборе 3 ч 28 мин брошена") {
 		t.Errorf("брошенная задача — готово: %q, %q", title, plain(line))
 	}
 	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StateDone {

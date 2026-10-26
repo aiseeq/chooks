@@ -27,6 +27,7 @@ const (
 // Имена событий сессии, на которые отзывается notifier
 const (
 	EventStop         = "Stop"
+	EventStopFailure  = "StopFailure"
 	EventNotification = "Notification"
 )
 
@@ -60,6 +61,11 @@ type ToolInput struct {
 	// после остановки Stop-хуком, и текст последнего сообщения ассистента
 	StopHookActive       bool   `json:"stop_hook_active,omitempty"`
 	LastAssistantMessage string `json:"last_assistant_message,omitempty"`
+
+	// Error и ErrorDetails приходят в StopFailure: тип ошибки API
+	// (rate_limit, overloaded, server_error, authentication_failed…) и текст
+	Error        string `json:"error,omitempty"`
+	ErrorDetails string `json:"error_details,omitempty"`
 }
 
 // BackgroundTask незавершённая фоновая задача сессии: субагент, фоновая

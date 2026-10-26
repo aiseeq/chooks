@@ -26,6 +26,10 @@ const (
 	// StatePaused — Claude остановился, но ждёт фоновые задачи или будильник
 	// и вернётся к работе сам. Для человека это всё ещё работа
 	StatePaused SessionState = "paused"
+	// StateError — ход оборвала ошибка API (StopFailure): лимит, перегрузка,
+	// сбой сервера, авторизация. Claude сам не продолжит, держится до
+	// следующего запроса человека
+	StateError SessionState = "error"
 	// StateAgents — пауза, в которой работают свои агенты (субагенты,
 	// Workflow). Хранилищу не пишется: строка статуса выводит его из паузы и
 	// учёта задач. Такую сессию можно сжимать, но не сбрасывать (пользователь
@@ -36,24 +40,26 @@ const (
 	StateUnknown SessionState = "unknown"
 )
 
-// Marker — значок состояния во вкладке терминала. Значки выбрал пользователь
-// 26.10 по каталогу: «1 ⚙», «72 🔔», «99 ✨», «134 ✅»; «ждёт свои задачи»
-// сначала слили с «работает», потом вернули отдельным: «Тогда 35 ⏸» — по
-// нему видно, что ход кончился, а держит сессию висящая задача
+// Marker — значок состояния во вкладке терминала: значки в квадрате, цвет
+// фона — как у плашки. Выбор пользователя 26.10 по каталогу квадратов:
+// «🔄, ▶, ⏸ - они почти об одном так что общий фон как раз ок. ✴, ❇ и ✅»,
+// для ошибки — «🅰 (🆘 мне не нравится)»
 func (s SessionState) Marker() string {
 	switch s {
 	case StateWaiting:
-		return "🔔"
+		return "✴️"
 	case StatePaused:
 		return "⏸️"
 	case StateAgents:
 		return "▶️"
 	case StateDone:
-		return "✨"
+		return "❇️"
 	case StateIdle:
 		return "✅"
+	case StateError:
+		return "🅰️"
 	default:
-		return "⚙️"
+		return "🔄"
 	}
 }
 
@@ -179,6 +185,8 @@ func LookupSessionState(sessionID string) (SessionState, bool, error) {
 		return StatePaused, true, nil
 	case StateIdle:
 		return StateIdle, true, nil
+	case StateError:
+		return StateError, true, nil
 	default:
 		return StateWorking, true, nil
 	}

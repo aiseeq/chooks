@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
@@ -131,5 +132,18 @@ func TestDecide_Notification(t *testing.T) {
 				t.Error("причина молчания должна быть названа для лога")
 			}
 		})
+	}
+}
+
+// Ход, оборванный ошибкой API, — «ошибка» и звонок: сам Claude не продолжит
+func TestDecide_StopFailure(t *testing.T) {
+	input := &core.ToolInput{Error: "overloaded"}
+	got := Decide(Event{Name: core.EventStopFailure, Input: input, Previous: core.StateWorking})
+	if got.State != core.StateError || !got.Alert || !strings.Contains(got.Reason, "overloaded") {
+		t.Errorf("получено %+v", got)
+	}
+	// Повтор той же ошибки не зовёт второй раз
+	if got := Decide(Event{Name: core.EventStopFailure, Input: input, Previous: core.StateError}); got.Alert {
+		t.Errorf("повтор ошибки: %+v", got)
 	}
 }

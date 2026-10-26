@@ -31,6 +31,11 @@
       {
         "hooks": [{ "type": "command", "command": "$HOME/bin/chooks stop", "timeout": 3 }]
       }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [{ "type": "command", "command": "$HOME/bin/chooks stop-failure", "timeout": 3 }]
+      }
     ]
   },
   "statusLine": {

@@ -65,6 +65,9 @@ func Decide(event Event) Decision {
 	switch event.Name {
 	case core.EventStop:
 		return decideStop(event)
+	case core.EventStopFailure:
+		// Ход оборвала ошибка API: Claude сам не продолжит, нужен человек
+		return finish(core.StateError, event.Previous, "ошибка API: "+event.Input.Error)
 	case core.EventNotification:
 		return decideNotification(event)
 	default:

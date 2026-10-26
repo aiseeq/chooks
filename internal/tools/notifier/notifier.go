@@ -44,7 +44,7 @@ func New(config core.ToolConfig, logger core.Logger) *Notifier {
 // панели задач. Звук и уведомление уходят в отдельный процесс — хук не ждёт
 // ни звука, ни клика
 func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision Decision) error {
-	if decision.State != core.StateDone && decision.State != core.StateWaiting {
+	if decision.State != core.StateDone && decision.State != core.StateWaiting && decision.State != core.StateError {
 		return nil
 	}
 
@@ -108,6 +108,14 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 	case core.EventStop:
 		alert.Title = "Claude Code завершил работу"
 		alert.Message = "Проект: " + projectName
+		alert.Timeout = stopTimeout
+
+	case core.EventStopFailure:
+		alert.Title = fmt.Sprintf("Claude Code остановлен ошибкой (%s)", projectName)
+		alert.Message = input.Error
+		if input.ErrorDetails != "" {
+			alert.Message += ": " + input.ErrorDetails
+		}
 		alert.Timeout = stopTimeout
 
 	case core.EventNotification:

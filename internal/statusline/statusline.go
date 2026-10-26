@@ -32,6 +32,7 @@ const (
 	badgeGreen = "\033[1;38;5;231;48;5;28m"
 	badgeGray  = "\033[1;38;5;231;48;5;243m"
 	badgeSlate = "\033[1;38;5;231;48;5;61m"
+	badgeRed   = "\033[1;38;5;231;48;5;160m"
 )
 
 // backgroundRunes — сколько знаков описания фоновой задачи помещается в строку
@@ -217,7 +218,7 @@ func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible fun
 	} else if !recorded {
 		// Запросов ещё не было: сессия только открыта или сброшена /clear и
 		// стоит на пустом приглашении. Это не работа (26.10 после /clear
-		// projectA стоял пустым с ⚙️), а показ — не запись: хуки её не видят
+		// projectA стоял пустым с ⚙️, прежним значком работы), а показ — не запись: хуки её не видят
 		state = core.StateIdle
 	}
 	// Фоновая работа известна на конец хода: пока ход идёт, список устарел
@@ -373,7 +374,7 @@ func terminalTitle(dir string, state core.SessionState) string {
 // синяя — работает, в том числе своими агентами после хода, сине-серая — ход
 // кончился и ждёт внешнего: shell, монитор, будильник (что именно — в
 // «фон:»), янтарная — ждёт ответа человека, зелёная — новое, что
-// он ещё не видел, серая — просмотрена. Заполнение контекста видно по полосе
+// он ещё не видел, серая — просмотрена, красная — ход оборван ошибкой API. Заполнение контекста видно по полосе
 // ctx, плашка его не повторяет (пользователь 26.10: убрать красный с плашки)
 func projectBadge(dir string, state core.SessionState) string {
 	badge := badgeBlue
@@ -386,6 +387,8 @@ func projectBadge(dir string, state core.SessionState) string {
 		badge = badgeGreen
 	case core.StateIdle:
 		badge = badgeGray
+	case core.StateError:
+		badge = badgeRed
 	}
 
 	name := strings.ToUpper(core.ProjectNameForDir(dir))

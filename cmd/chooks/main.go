@@ -65,6 +65,7 @@ func execute() int {
 	rootCmd.AddCommand(
 		newHookCmd(hookPreToolUse, "Обработать PreToolUse hook", &exitCode),
 		newHookCmd(hookStop, "Обработать Stop hook", &exitCode),
+		newHookCmd(hookStopFailure, "Обработать StopFailure hook (ход оборван ошибкой API)", &exitCode),
 		newHookCmd(hookNotification, "Обработать Notification hook", &exitCode),
 		newHookCmd(hookUserPromptSubmit, "Обработать UserPromptSubmit hook", &exitCode),
 		newHookCmd(hookPostToolBatch, "Обработать PostToolBatch hook", &exitCode),
@@ -135,6 +136,7 @@ func newModelScanCmd() *cobra.Command {
 const (
 	hookPreToolUse       = "pre-tool-use"
 	hookStop             = "stop"
+	hookStopFailure      = "stop-failure"
 	hookNotification     = "notification"
 	hookUserPromptSubmit = "user-prompt-submit"
 	hookPostToolBatch    = "post-tool-batch"
@@ -202,6 +204,9 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		return exitAllowed, nil
 	case hookStop:
 		runSessionEvent(core.EventStop, data, config, logger)
+		return exitAllowed, nil
+	case hookStopFailure:
+		runSessionEvent(core.EventStopFailure, data, config, logger)
 		return exitAllowed, nil
 	case hookNotification:
 		runSessionEvent(core.EventNotification, data, config, logger)

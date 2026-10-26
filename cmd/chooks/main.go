@@ -281,15 +281,18 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 	// Строка статуса рисуется отдельным процессом и о ходе сессии не знает —
 	// состояние для неё оставляют хуки. Предыдущее состояние нужно решению:
 	// по нему виден переход, а не только новое состояние
-	previous, err := core.LoadSessionState(input.SessionID)
+	previous, recorded, err := core.LookupSessionState(input.SessionID)
 	if err != nil {
 		// Явный failover: без записи переход не виден, и решение принимается
 		// по StateUnknown — оно зовёт человека, лишний звонок лучше пропущенного
 		logger.Warn("session state unavailable", "session", input.SessionID, "error", err)
 		previous = core.StateUnknown
+	} else if !recorded {
+		// Хук ещё не отработал: для решения это работа
+		previous = core.StateWorking
 	}
 
-	event := notifier.Event{Name: eventName, Input: input, Previous: previous}
+	event := notifier.Event{Name: eventName, Input: input, Previous: previous, Fresh: err == nil && !recorded && input.SessionID != ""}
 	if eventName == core.EventStop && input.BackgroundTasks != nil {
 		crons := 0
 		if input.SessionCrons != nil {

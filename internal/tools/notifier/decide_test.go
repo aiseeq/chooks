@@ -94,8 +94,11 @@ func TestDecide_Notification(t *testing.T) {
 		name     string
 		kind     string
 		previous core.SessionState
+		fresh    bool
 		want     Decision
 	}{
+		{name: "напоминание пустой сессии после /clear", kind: "idle_prompt", previous: core.StateWorking, fresh: true, want: Decision{}},
+		{name: "вопрос в сессии без записи зовёт", kind: "permission_prompt", previous: core.StateWorking, fresh: true, want: Decision{State: core.StateWaiting, Alert: true}},
 		{name: "запрос разрешения посреди работы", kind: "permission_prompt", previous: core.StateWorking, want: Decision{State: core.StateWaiting, Alert: true}},
 		{name: "запрос разрешения при фоновых задачах", kind: "permission_prompt", previous: core.StatePaused, want: Decision{State: core.StateWaiting, Alert: true}},
 		{name: "повторный вопрос", kind: "permission_prompt", previous: core.StateWaiting, want: Decision{State: core.StateWaiting}},
@@ -119,6 +122,7 @@ func TestDecide_Notification(t *testing.T) {
 				Name:     core.EventNotification,
 				Input:    &core.ToolInput{NotificationType: tt.kind, Message: "text"},
 				Previous: tt.previous,
+				Fresh:    tt.fresh,
 			})
 			if got.State != tt.want.State || got.Alert != tt.want.Alert {
 				t.Errorf("получено %+v, ожидалось состояние %q, звонок %v", got, tt.want.State, tt.want.Alert)

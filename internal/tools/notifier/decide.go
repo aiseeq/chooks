@@ -40,6 +40,9 @@ type Event struct {
 	Name     string
 	Input    *core.ToolInput
 	Previous core.SessionState
+	// Fresh — у сессии нет записи состояния: запросов в ней ещё не было
+	// (новая или сброшенная /clear), Previous тогда — StateWorking
+	Fresh bool
 	// ActiveTasks — фоновые задачи, которых Claude ещё ждёт (только Stop):
 	// список Claude Code без брошенных, см. core.RecordBackground
 	ActiveTasks int
@@ -93,6 +96,10 @@ func decideNotification(event Event) Decision {
 	kind := event.Input.NotificationType
 
 	switch {
+	case kind == TypeIdlePrompt && event.Fresh:
+		// Напоминание приходит и на пустое приглашение после /clear: хода не
+		// было, звать не о чем (26.10 projectA позвал через минуту после /clear)
+		return Decision{Reason: "минутное напоминание сессии без запросов: новая или после /clear"}
 	case kind == TypeIdlePrompt && event.Previous == core.StatePaused:
 		// Минутное напоминание приходит и тогда, когда Claude ждёт свои
 		// фоновые задачи; запрос разрешения при этом проходит всегда —

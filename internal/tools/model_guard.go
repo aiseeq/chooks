@@ -99,11 +99,7 @@ func bashModelCandidates(command string) []modelCandidate {
 
 func withoutHereDocBodies(command string) string {
 	var output strings.Builder
-	type delimiter struct {
-		name     string
-		stripTab bool
-	}
-	var delimiters []delimiter
+	var delimiters []hereDoc
 	for _, line := range strings.SplitAfter(command, "\n") {
 		plain := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		if len(delimiters) > 0 {
@@ -117,19 +113,7 @@ func withoutHereDocBodies(command string) string {
 			continue
 		}
 		output.WriteString(line)
-		for _, words := range splitSimpleCommands(plain) {
-			for i := 0; i < len(words); i++ {
-				value := words[i].text
-				if after, ok := strings.CutPrefix(value, "<<-"); ok {
-					delimiters = append(delimiters, delimiter{name: after, stripTab: true})
-				} else if strings.HasPrefix(value, "<<") && len(value) > 2 {
-					delimiters = append(delimiters, delimiter{name: strings.TrimPrefix(value, "<<")})
-				} else if value == "<<" && i+1 < len(words) {
-					i++
-					delimiters = append(delimiters, delimiter{name: words[i].text})
-				}
-			}
-		}
+		delimiters = append(delimiters, lexShell(plain).hereDocs...)
 	}
 	return output.String()
 }

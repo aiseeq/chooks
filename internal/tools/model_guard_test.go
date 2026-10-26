@@ -51,6 +51,9 @@ func TestModelGuard(t *testing.T) {
 		{"echo", "Bash", "", "echo 'claude --model sonnet'", false},
 		{"grep", "Bash", "", "grep -- '--model sonnet' f", false},
 		{"here-doc", "Bash", "", "cat <<'EOF'\nclaude --model sonnet\nEOF", false},
+		{"here-doc с табуляцией", "Bash", "", "cat <<-EOF >out\n\tclaude --model sonnet\n\tEOF", false},
+		{"here-doc через пробел", "Bash", "", "cat << \"EOF\" 2>&1\nclaude --model sonnet\nEOF", false},
+		{"команда после here-doc", "Bash", "", "cat <<EOF\nx\nEOF\nclaude --model sonnet", true},
 		{"ls", "Bash", "", "ls", false},
 	}
 	for _, tc := range cases {

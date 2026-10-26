@@ -79,6 +79,14 @@ func TestKillGuardBlocks(t *testing.T) {
 		`killall systemd`,
 		`pkill konsole`,
 		`pkill -f "$NAME"`,
+		// перенаправление не прячет опасную или вычисляемую цель
+		`kill 1500 2>&1`,
+		`kill -9 2100 2>/dev/null`,
+		`kill $p 2>/dev/null`,
+		`kill -0 455274 2>/dev/null && kill 1`,
+		// подстановка процесса и команда в цели перенаправления — тоже команды
+		`echo x | tee >(kill 1500)`,
+		`echo x 2>$(kill 1500)`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -97,6 +105,13 @@ func TestKillGuardAllows(t *testing.T) {
 		`killall opencode`,
 		`ps -eo pid,args | grep '[o]pencode'`,
 		`echo "kill $p"`,
+		// перенаправление — не цель kill (ложные отказы 19–26.10)
+		`kill 455274 2>&1`,
+		`kill -0 455274 2>/dev/null`,
+		`kill -0 455274 2>/dev/null && echo alive || echo gone`,
+		`kill 455274 >/dev/null 2>&1; sleep 1`,
+		`kill -TERM 455274 &>/dev/null`,
+		`kill 455274 2> /tmp/kill.err`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)

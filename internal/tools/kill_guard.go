@@ -312,11 +312,31 @@ type shellLexer struct {
 	literal bool
 	inWord  bool
 	quote   rune
+	// redirTarget — следующее слово цель перенаправления (файл или номер
+	// дескриптора), а не аргумент команды
+	redirTarget bool
+	// hereDoc — цель перенаправления — разделитель here-doc (<< или <<-)
+	hereDoc  bool
+	stripTab bool
+	hereDocs []hereDoc
+}
+
+// hereDoc разделитель тела here-doc; stripTab — <<-, строки тела и
+// разделитель могут начинаться табуляцией
+type hereDoc struct {
+	name     string
+	stripTab bool
 }
 
 func (l *shellLexer) flushWord() {
 	if l.inWord {
-		l.cur = append(l.cur, word{text: l.buf.String(), literal: l.literal})
+		switch {
+		case l.hereDoc:
+			l.hereDocs = append(l.hereDocs, hereDoc{name: l.buf.String(), stripTab: l.stripTab})
+		case !l.redirTarget:
+			l.cur = append(l.cur, word{text: l.buf.String(), literal: l.literal})
+		}
+		l.redirTarget, l.hereDoc = false, false
 	}
 	l.buf.Reset()
 	l.literal, l.inWord = true, false
@@ -324,10 +344,68 @@ func (l *shellLexer) flushWord() {
 
 func (l *shellLexer) flushCmd() {
 	l.flushWord()
+	l.redirTarget, l.hereDoc = false, false
 	if len(l.cur) > 0 {
 		l.cmds = append(l.cmds, l.cur)
 	}
 	l.cur = nil
+}
+
+// redirect разбирает перенаправление, начатое с runes[i] (> < или &>), и
+// возвращает индекс его последнего символа. Номер дескриптора перед ним
+// (2>/dev/null) и цель после (2>&1, >/dev/null) в аргументы не попадают:
+// иначе kill PID 2>&1 видел бы цели «2>» и «1»
+func (l *shellLexer) redirect(runes []rune, i int) int {
+	if l.inWord && l.literal && isDigits(l.buf.String()) {
+		l.buf.Reset()
+		l.inWord = false
+	}
+	l.flushWord()
+	l.redirTarget = true
+	switch {
+	case runes[i] == '&':
+		i++ // &> и &>>
+	case runes[i] == '<' && next(runes, i) == '<' && next(runes, i+1) == '<':
+		return i + 2 // here-string <<<
+	case runes[i] == '<' && next(runes, i) == '<':
+		i++
+		l.hereDoc, l.stripTab = true, next(runes, i) == '-'
+		if l.stripTab {
+			i++
+		}
+		return i
+	}
+	for strings.ContainsRune(">&|", next(runes, i)) {
+		i++ // >> >& >| <&
+	}
+	return i
+}
+
+// next символ после runes[i]; за концом строки — 0
+func next(runes []rune, i int) rune {
+	if i+1 < len(runes) {
+		return runes[i+1]
+	}
+	return 0
+}
+
+// isRedirect — с runes[i] начинается перенаправление; >( и <( — подстановка
+// процесса, её команда разбирается как обычная
+func isRedirect(runes []rune, i int) bool {
+	r := runes[i]
+	if r == '&' {
+		return i+1 < len(runes) && runes[i+1] == '>' && (i+2 >= len(runes) || runes[i+2] != '(')
+	}
+	return (r == '>' || r == '<') && (i+1 >= len(runes) || runes[i+1] != '(')
+}
+
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // add добавляет символ слова; $ и ` делают слово вычисляемым
@@ -352,15 +430,25 @@ func (l *shellLexer) quoted(r rune) {
 }
 
 // splitSimpleCommands режет команду на простые по ; & | ( ) и переводу строки
-// вне кавычек. Разбор грубый, но для поиска kill и его аргументов достаточен
+// вне кавычек, перенаправления в слова не попадают. Разбор грубый, но для
+// поиска kill и его аргументов достаточен
 func splitSimpleCommands(command string) [][]word {
+	return lexShell(command).cmds
+}
+
+// lexShell разбирает команду на простые команды и разделители here-doc
+func lexShell(command string) *shellLexer {
 	l := &shellLexer{literal: true}
-	for _, r := range command {
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		switch {
 		case l.quote != 0:
 			l.quoted(r)
 		case r == '\'' || r == '"':
 			l.quote, l.inWord = r, true
+		case isRedirect(runes, i):
+			i = l.redirect(runes, i)
 		case strings.ContainsRune(";&|\n()", r):
 			l.flushCmd()
 		case r == ' ' || r == '\t':
@@ -370,7 +458,7 @@ func splitSimpleCommands(command string) [][]word {
 		}
 	}
 	l.flushCmd()
-	return l.cmds
+	return l
 }
 
 // unwrapCommand снимает обёртки sudo, timeout, nohup, env, xargs и возвращает

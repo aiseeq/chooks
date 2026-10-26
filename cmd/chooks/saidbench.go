@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,10 @@ type saidCase struct {
 	Human   string                    `json:"human"`
 	Message string                    `json:"message"`
 	Quotes  []questioncheck.SaidQuote `json:"quotes"`
+	// Turn — весь ход агента, Project — каталог проекта Claude Code
+	// (-home-aisee-work): для --turn и --said
+	Turn    string `json:"turn"`
+	Project string `json:"project"`
 }
 
 // saidResult — вердикт по примеру. Found — поиск по журналу нашёл хотя бы
@@ -51,10 +56,16 @@ type saidBench struct {
 	given   bool
 	search  int
 	timeout time.Duration
+	// turn — судья видит весь ход; said — записи said.tsv, saidLimit — сколько
+	// взять поиском сверх записей той же сессии
+	turn      bool
+	said      []questioncheck.SaidRecord
+	saidLimit int
+	home      string
 }
 
 func newSaidBenchCmd() *cobra.Command {
-	var model, effort string
+	var model, effort, saidPath string
 	bench := saidBench{}
 	jobs := 4
 	cmd := &cobra.Command{
@@ -75,7 +86,16 @@ func newSaidBenchCmd() *cobra.Command {
 				return err
 			}
 			bench.judge.Prompt = questioncheck.SaidPrompt
+			if bench.turn {
+				bench.judge.Prompt = questioncheck.SaidTurnPrompt
+			}
 			bench.journals = questioncheck.DefaultJournals(filepath.Join(home, ".claude"))
+			bench.home = home
+			if saidPath != "" {
+				if bench.said, err = questioncheck.ReadSaid(saidPath); err != nil {
+					return err
+				}
+			}
 			return bench.run(cmd.Context(), args[0], jobs, cmd.OutOrStdout())
 		},
 	}
@@ -85,6 +105,9 @@ func newSaidBenchCmd() *cobra.Command {
 	cmd.Flags().IntVar(&bench.search, "search", 5, "сколько реплик журнала добавить поиском по словам сообщения")
 	cmd.Flags().IntVar(&jobs, "jobs", 4, "сколько судей звать одновременно")
 	cmd.Flags().DurationVar(&bench.timeout, "timeout", 3*time.Minute, "предел на один вызов судьи")
+	cmd.Flags().BoolVar(&bench.turn, "turn", false, "давать судье весь ход (поле turn), а не последнее сообщение")
+	cmd.Flags().StringVar(&saidPath, "said", "", "said.tsv: давать судье действующие записи вместо поиска по журналу реплик")
+	cmd.Flags().IntVar(&bench.saidLimit, "said-limit", 10, "сколько записей said.tsv взять поиском сверх записей той же сессии")
 	return cmd
 }
 
@@ -151,7 +174,12 @@ func (b saidBench) one(ctx context.Context, example saidCase) (saidResult, error
 		quotes = append(quotes, example.Quotes...)
 		result.Given = len(example.Quotes)
 	}
-	if b.search > 0 {
+	if b.said != nil {
+		said := b.inForce(example)
+		result.Searched = len(said)
+		result.Found = coversAny(said, example.Quotes)
+		quotes = append(quotes, said...)
+	} else if b.search > 0 {
 		searched, err := b.journals.FindSaid(example.Message, example.Time, b.search)
 		if err != nil {
 			return result, err
@@ -164,7 +192,11 @@ func (b saidBench) one(ctx context.Context, example saidCase) (saidResult, error
 		result.Verdict = questioncheck.VerdictPass
 		return result, nil
 	}
-	input := questioncheck.SaidCase{Human: example.Human, Quotes: quotes, Message: example.Message}.Input()
+	saidCase := questioncheck.SaidCase{Human: example.Human, Quotes: quotes, Message: example.Message}
+	if b.turn {
+		saidCase.Turn = example.Turn
+	}
+	input := saidCase.Input()
 	judgeCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 	started := time.Now()
@@ -182,6 +214,38 @@ func (b saidBench) one(ctx context.Context, example saidCase) (saidResult, error
 	}
 	result.Verdict, result.Findings = verdict.Verdict, verdict.Findings
 	return result, nil
+}
+
+// sameSessionSaid — сколько последних записей той же сессии судья видит всегда:
+// обещания и поручения этой беседы поиск по словам хода может не найти
+const sameSessionSaid = 10
+
+// inForce — действующие записи said.tsv для примера: последние записи той же
+// сессии и лучшие по словам реплики и хода из остальных
+func (b saidBench) inForce(example saidCase) []questioncheck.SaidQuote {
+	transcript, _, _ := strings.Cut(example.ID, ".jsonl:")
+	session := filepath.Base(transcript)
+	var own, other []questioncheck.SaidRecord
+	for _, record := range questioncheck.InForce(b.said, example.Project, b.home, example.Time) {
+		id, _, _ := strings.Cut(record.Ref, ":")
+		if id != "" && strings.HasPrefix(session, id) {
+			own = append(own, record)
+		} else {
+			other = append(other, record)
+		}
+	}
+	// said-eval.tsv собирается не по порядку дат
+	sort.SliceStable(own, func(i, j int) bool { return own[i].Time.Before(own[j].Time) })
+	own = own[max(len(own)-sameSessionSaid, 0):]
+	text := example.Message
+	if b.turn {
+		text = example.Turn
+	}
+	var quotes []questioncheck.SaidQuote
+	for _, record := range append(own, questioncheck.RankSaid(other, example.Human+"\n"+text, b.saidLimit)...) {
+		quotes = append(quotes, record.AsQuote())
+	}
+	return quotes
 }
 
 // coversAny — среди найденных поиском есть реплика, содержащая начало одной

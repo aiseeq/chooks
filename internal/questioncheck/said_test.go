@@ -53,3 +53,82 @@ func TestFindSaid(t *testing.T) {
 		t.Fatalf("quotes = %+v", quotes)
 	}
 }
+
+const saidHeader = "time\tsession\tname\tproject\tscope\tkind\twords\tquote\tref\tsupersedes\n"
+
+func writeSaid(t *testing.T, rows ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "said.tsv")
+	if err := os.WriteFile(path, []byte(saidHeader+strings.Join(rows, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestReadSaid(t *testing.T) {
+	path := writeSaid(t, "2026-10-20T16:01:16+02:00\t8abab4f1-x\tlead\t~\tglobal\trule\tбинарь chooks\tстрока 1\\nстрока 2\\tтаб \\\\ слэш\t8abab4f1:120\t")
+	records, err := ReadSaid(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Quote != "строка 1\nстрока 2\tтаб \\ слэш" || records[0].Kind != "rule" || records[0].Time.Hour() != 16 {
+		t.Fatalf("records = %+v", records)
+	}
+	for _, bad := range []string{"x\ty\n", saidHeader + "2026-10-20T16:01:16+02:00\tмало полей\n", saidHeader + "вчера\ts\tn\tp\tglobal\trule\tw\tq\tr\t\n"} {
+		path := filepath.Join(t.TempDir(), "bad.tsv")
+		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadSaid(path); err == nil {
+			t.Errorf("должна быть ошибка: %q", bad)
+		}
+	}
+}
+
+func TestInForce(t *testing.T) {
+	at := func(day int) time.Time { return time.Date(2026, 10, day, 12, 0, 0, 0, time.UTC) }
+	records := []SaidRecord{
+		{Time: at(20), Scope: "global", Ref: "a:1", Quote: "общее"},
+		{Time: at(20), Scope: "~/work", Ref: "a:2", Quote: "для work"},
+		{Time: at(20), Scope: "/home/u/git", Ref: "a:3", Quote: "для git"},
+		{Time: at(20), Scope: "~/work/projectB", Ref: "a:4", Quote: "старое projectB"},
+		{Time: at(21), Scope: "~/work/projectB", Ref: "a:5", Supersedes: "a:4", Quote: "новое projectB"},
+		{Time: at(23), Scope: "global", Ref: "a:6", Quote: "позже хода"},
+		{Time: at(20), Scope: "~/work/projectBx", Ref: "a:7", Quote: "соседний проект"},
+	}
+	var got []string
+	for _, record := range InForce(records, "-home-u-work-projectB", "/home/u", at(22)) {
+		got = append(got, record.Quote)
+	}
+	if strings.Join(got, ",") != "общее,для work,новое projectB" {
+		t.Fatalf("in force = %v", got)
+	}
+	// До отмены действует прежняя запись
+	got = got[:0]
+	for _, record := range InForce(records, "-home-u-work-projectB", "/home/u", at(21).Add(-time.Hour)) {
+		got = append(got, record.Quote)
+	}
+	if strings.Join(got, ",") != "общее,для work,старое projectB" {
+		t.Fatalf("in force before supersede = %v", got)
+	}
+}
+
+func TestRankSaidAndTurnInput(t *testing.T) {
+	records := []SaidRecord{
+		{Time: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC), Kind: "rule", Words: "бинарь chooks", Quote: "переименовать бинарь полностью в chooks", Ref: "a:1"},
+		{Kind: "promise", Words: "отчёт", Quote: "пришлю отчёт о прогоне", Ref: "a:2"},
+	}
+	ranked := RankSaid(records, "Переименовал бинарь в chooks", 5)
+	if len(ranked) != 1 || ranked[0].Ref != "a:1" {
+		t.Fatalf("ranked = %+v", ranked)
+	}
+	input := SaidCase{Quotes: []SaidQuote{ranked[0].AsQuote(), {Time: "t", Kind: "other", Text: "x"}}, Message: "итог", Turn: "→ Bash: mv a b\nитог"}.Input()
+	for _, want := range []string{"— 2026-10-20T12:00:00Z, правило: переименовать", "— t, other: x", "[Ход агента]\n→ Bash: mv a b\nитог"} {
+		if !strings.Contains(input, want) {
+			t.Errorf("нет %q в\n%s", want, input)
+		}
+	}
+	if strings.Contains(input, "[Сообщение агента]") {
+		t.Error("с ходом последнее сообщение отдельно не нужно")
+	}
+}

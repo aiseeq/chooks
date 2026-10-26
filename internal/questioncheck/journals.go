@@ -205,6 +205,16 @@ func decisionEntries(text string, before time.Time) ([]string, error) {
 // или одной редкой (id артефакта, номер тикета — не больше rareEntries записей);
 // при равном весе новее та, что ниже в журнале
 func best(entries, keys []string, limit, runes int) []string {
+	indexes := bestIndexes(entries, keys, limit)
+	result := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		result = append(result, truncateRunes(entries[index], runes))
+	}
+	return result
+}
+
+// bestIndexes — номера записей, которые выбрал бы best, лучшие первыми
+func bestIndexes(entries, keys []string, limit int) []int {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -257,11 +267,11 @@ func best(entries, keys []string, limit, runes int) []string {
 	if len(hits) > limit {
 		hits = hits[:limit]
 	}
-	result := make([]string, 0, len(hits))
+	indexes := make([]int, 0, len(hits))
 	for _, hit := range hits {
-		result = append(result, truncateRunes(entries[hit.index], runes))
+		indexes = append(indexes, hit.index)
 	}
-	return result
+	return indexes
 }
 
 func truncateRunes(text string, limit int) string {

@@ -75,6 +75,8 @@ type Entry struct {
 	PrevFound bool `json:"prev_answer_found"`
 	// JudgeRev — версия судьи (JudgeRev); у записей до 25.10 поля нет
 	JudgeRev int `json:"judge_rev"`
+	// BlockRev — версия текста остановки (BlockRev); у записей до 26.10 поля нет
+	BlockRev int `json:"block_rev"`
 	Excerpts int `json:"excerpts"`
 	// Message — сообщение после остановки (after_block): что агент сделал
 	// дальше, без чтения транскрипта
@@ -115,6 +117,7 @@ func (c Checker) Run(ctx context.Context, event Event) Result {
 		Transcript: event.TranscriptPath,
 		Questions:  Texts(questions),
 		JudgeRev:   JudgeRev,
+		BlockRev:   BlockRev,
 	}
 
 	if gate.Status == GateAfterBlock {
@@ -213,6 +216,13 @@ func appendJSONL(path string, entry Entry) error {
 	return file.Close()
 }
 
+// BlockRev — версия текста остановки в журнале (block_rev): итог опыта 30.10
+// делит записи по ней. 1 (поля нет) — до 26.10, 2 — снятый вопрос агент
+// показывает строкой «Хотел спросить…» (пользователь 26.10: «если я мог бы
+// видеть что-то типа: "Я хотел спросить Х, но нашёл в Y что ответ Z" - это
+// было бы лучшим вариантом»)
+const BlockRev = 2
+
 // BlockReason — текст, который агент получит вместо конца хода
 func BlockReason(verdict Verdict) string {
 	var b strings.Builder
@@ -224,7 +234,12 @@ func BlockReason(verdict Verdict) string {
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString("Найди ответ сам (журналы, код, тикеты, переписка) или реши в своей зоне и допиши итог. " +
+	b.WriteString("Найди ответ сам (журналы, код, тикеты, переписка) или реши в своей зоне. " +
+		"Снятый вопрос пользователь должен видеть: следующий ответ ему начни строкой " +
+		"«Хотел спросить \"X\", но нашёл в Y, что ответ Z», где Y — источник, который он откроет сам " +
+		"(файл со строкой, коммит, реплика с датой, запись журнала решений), Z — что взято как ответ; " +
+		"не нашёл, а сделал сам — «Хотел спросить \"X\", сделал сам: …». Так он видит, что вопрос был " +
+		"и что взято за ответ, и может поправить. " +
 		"Если после поиска вопрос всё же нужен, задай его снова со строкой «Искал: …».")
 	return b.String()
 }

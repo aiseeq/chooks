@@ -134,6 +134,12 @@ func TestRun_BlocksRedundantQuestion(t *testing.T) {
 	if !result.Block || !strings.Contains(result.Reason, "Поменять на $200?") || !strings.Contains(result.Reason, "Искал") {
 		t.Fatalf("result = %+v", result)
 	}
+	// Снятый вопрос виден пользователю: где нашёл ответ или что сделал сам
+	for _, want := range []string{"«Хотел спросить \"X\", но нашёл в Y, что ответ Z»", "«Хотел спросить \"X\", сделал сам: …»"} {
+		if !strings.Contains(result.Reason, want) {
+			t.Errorf("в тексте остановки нет %s:\n%s", want, result.Reason)
+		}
+	}
 	if !strings.Contains(f.judge.input, humanMsg) || strings.Contains(f.judge.input, "сообщение другой сессии") {
 		t.Fatalf("judge input lacks the human reply or carries a session message:\n%s", f.judge.input)
 	}
@@ -142,7 +148,7 @@ func TestRun_BlocksRedundantQuestion(t *testing.T) {
 		t.Fatalf("journal = %+v", entries)
 	}
 	entry := entries[0]
-	if entry.Verdict != VerdictBlock || entry.Session != "lead" || entry.MessageID != "m1" || !entry.HumanFound ||
+	if entry.Verdict != VerdictBlock || entry.BlockRev != BlockRev || entry.Session != "lead" || entry.MessageID != "m1" || !entry.HumanFound ||
 		entry.Model != "stub/low" || entry.Transcript != f.transcript || len(entry.Questions) != 1 || entry.Usage == nil {
 		t.Fatalf("entry = %+v", entry)
 	}

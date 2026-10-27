@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Monitor",
+        "matcher": "Bash|Agent|Monitor",
         "hooks": [{ "type": "command", "command": "$HOME/bin/chooks pre-tool-use", "timeout": 3 }]
       }
     ],

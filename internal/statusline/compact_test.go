@@ -1,6 +1,7 @@
 package statusline
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -108,7 +109,7 @@ func TestRenderContextBarUntilCompaction(t *testing.T) {
 	input := fmt.Sprintf(`{"session_id":"s1","cwd":%q,"model":{"id":"claude-opus-5-5[1m]","display_name":"Opus 5 (1M context)"},`+
 		`"context_window":{"used_percentage":26,"context_window_size":1000000,`+
 		`"current_usage":{"input_tokens":2000,"cache_creation_input_tokens":8000,"cache_read_input_tokens":250000}}}`, t.TempDir())
-	line, err := Render(strings.NewReader(input), testLogger(t))
+	line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}

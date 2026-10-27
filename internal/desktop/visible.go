@@ -18,7 +18,7 @@ const visibleTimeout = 300 * time.Millisecond
 // TabVisible сообщает, видит ли человек вкладку этого процесса: она текущая
 // в своём окне Konsole, а окно в фокусе. Не Konsole — false без ошибки:
 // узнать, смотрел ли человек, там нечем
-func TabVisible() (bool, error) {
+func TabVisible(ctx context.Context) (bool, error) {
 	service, session, ok := konsoleSession()
 	window := os.Getenv("KONSOLE_DBUS_WINDOW")
 	if !ok || window == "" {
@@ -28,7 +28,7 @@ func TabVisible() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("session bus unavailable: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), visibleTimeout)
+	ctx, cancel := context.WithTimeout(ctx, visibleTimeout)
 	defer cancel()
 
 	var current int32

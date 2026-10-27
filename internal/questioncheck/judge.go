@@ -62,7 +62,7 @@ func (c Case) Input() string {
 	if c.HumanReply == "" {
 		b.WriteString("(не найдена)\n")
 	} else {
-		b.WriteString(truncateRunes(c.HumanReply, humanReplyRunes))
+		b.WriteString(clipMarked(c.HumanReply, humanReplyRunes))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n[Журнал реплик пользователя: выдержки по словам вопроса]\n")
@@ -85,11 +85,11 @@ func (c Case) Input() string {
 	if c.PrevAnswer == "" {
 		b.WriteString("(не найден)\n")
 	} else {
-		b.WriteString(truncateRunes(c.PrevAnswer, prevAnswerRunes))
+		b.WriteString(clipMarked(c.PrevAnswer, prevAnswerRunes))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n[Финальный ответ агента]\n")
-	b.WriteString(truncateRunes(c.Answer, answerRunes))
+	b.WriteString(clipMarked(c.Answer, answerRunes))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -133,7 +133,7 @@ func ParseVerdict(text string) (Verdict, error) {
 	start := strings.Index(text, "{")
 	end := strings.LastIndex(text, "}")
 	if start < 0 || end < start {
-		return Verdict{}, fmt.Errorf("no JSON object in judge answer: %q", truncateRunes(text, 200))
+		return Verdict{}, fmt.Errorf("no JSON object in judge answer: %q", clipMarked(text, 200))
 	}
 	var verdict Verdict
 	if err := json.Unmarshal([]byte(text[start:end+1]), &verdict); err != nil {
@@ -246,7 +246,7 @@ func (j CLIJudge) askClaude(ctx context.Context, input string) (string, Usage, e
 		OutputTokens:      result.Usage.OutputTokens,
 	}
 	if result.IsError {
-		return "", usage, fmt.Errorf("claude returned an error: %s", truncateRunes(result.Result, 300))
+		return "", usage, fmt.Errorf("claude returned an error: %s", clipMarked(result.Result, 300))
 	}
 	return result.Result, usage, nil
 }
@@ -314,7 +314,7 @@ func runCLI(cmd *exec.Cmd, dir, stdin string) ([]byte, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("%s failed: %w: %s", cmd.Args[0], err, truncateRunes(strings.TrimSpace(stderr.String()), 300))
+		return nil, fmt.Errorf("%s failed: %w: %s", cmd.Args[0], err, clipMarked(strings.TrimSpace(stderr.String()), 300))
 	}
 	return out, nil
 }

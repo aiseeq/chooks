@@ -208,7 +208,7 @@ func best(entries, keys []string, limit, runes int) []string {
 	indexes := bestIndexes(entries, keys, limit)
 	result := make([]string, 0, len(indexes))
 	for _, index := range indexes {
-		result = append(result, truncateRunes(entries[index], runes))
+		result = append(result, clipMarked(entries[index], runes))
 	}
 	return result
 }
@@ -274,7 +274,9 @@ func bestIndexes(entries, keys []string, limit int) []int {
 	return indexes
 }
 
-func truncateRunes(text string, limit int) string {
+// clipMarked обрезает текст до limit знаков с пометкой «…[обрезано]»: судья
+// должен знать, что видит не всё
+func clipMarked(text string, limit int) string {
 	runes := []rune(text)
 	if len(runes) <= limit {
 		return text

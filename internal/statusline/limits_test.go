@@ -1,6 +1,7 @@
 package statusline
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -288,7 +289,7 @@ func TestRenderStaleSessionShowsRecordedWeek(t *testing.T) {
 		t.Helper()
 		input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"rate_limits":{"seven_day":{"used_percentage":%d,"resets_at":%d}}}`,
 			session, t.TempDir(), used, resets)
-		line, err := Render(strings.NewReader(input), testLogger(t))
+		line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
 		if err != nil {
 			t.Fatal(err)
 		}

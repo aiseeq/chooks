@@ -85,7 +85,7 @@ func (c SaidCase) Input() string {
 	if c.Human == "" {
 		b.WriteString("(не найдена)\n")
 	} else {
-		b.WriteString(truncateRunes(c.Human, humanReplyRunes))
+		b.WriteString(clipMarked(c.Human, humanReplyRunes))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n[Прежние слова пользователя]\n")
@@ -102,10 +102,10 @@ func (c SaidCase) Input() string {
 	}
 	if c.Turn != "" {
 		b.WriteString("\n[Ход агента]\n")
-		b.WriteString(truncateRunes(c.Turn, turnRunes))
+		b.WriteString(clipMarked(c.Turn, turnRunes))
 	} else {
 		b.WriteString("\n[Сообщение агента]\n")
-		b.WriteString(truncateRunes(c.Message, answerRunes))
+		b.WriteString(clipMarked(c.Message, answerRunes))
 	}
 	b.WriteString("\n")
 	return b.String()
@@ -136,7 +136,7 @@ func ParseSaidVerdict(text string) (SaidVerdict, error) {
 	start := strings.Index(text, "{")
 	end := strings.LastIndex(text, "}")
 	if start < 0 || end < start {
-		return SaidVerdict{}, fmt.Errorf("no JSON object in judge answer: %q", truncateRunes(text, 200))
+		return SaidVerdict{}, fmt.Errorf("no JSON object in judge answer: %q", clipMarked(text, 200))
 	}
 	var verdict SaidVerdict
 	if err := json.Unmarshal([]byte(text[start:end+1]), &verdict); err != nil {
@@ -176,7 +176,7 @@ func (j Journals) FindSaid(message string, before time.Time, limit int) ([]SaidQ
 		if strings.HasPrefix(body, "в ответ на:") {
 			_, body, _ = strings.Cut(body, "\n")
 		}
-		quote := SaidQuote{Source: "user-replies.md", Text: truncateRunes(strings.TrimSpace(body), saidQuoteRunes)}
+		quote := SaidQuote{Source: "user-replies.md", Text: clipMarked(strings.TrimSpace(body), saidQuoteRunes)}
 		if m := replyHeader.FindStringSubmatch(header); m != nil {
 			quote.Time = m[1]
 		}
@@ -264,18 +264,19 @@ func unescapeSaid(field string) string {
 // поздней записью до before
 func InForce(records []SaidRecord, project, home string, before time.Time) []SaidRecord {
 	superseded := map[string]bool{}
-	for _, record := range records {
-		if record.Supersedes != "" && record.Time.Before(before) {
+	for i := range records {
+		if record := &records[i]; record.Supersedes != "" && record.Time.Before(before) {
 			superseded[record.Supersedes] = true
 		}
 	}
 	var result []SaidRecord
-	for _, record := range records {
+	for i := range records {
+		record := &records[i]
 		if !record.Time.Before(before) || superseded[record.Ref] {
 			continue
 		}
 		if record.Scope == "global" || scopeCovers(ProjectDirName(scopePath(record.Scope, home)), project) {
-			result = append(result, record)
+			result = append(result, *record)
 		}
 	}
 	return result
@@ -301,8 +302,8 @@ func RankSaid(records []SaidRecord, text string, limit int) []SaidRecord {
 		return nil
 	}
 	entries := make([]string, len(records))
-	for i, record := range records {
-		entries[i] = record.Words + "\n" + record.Quote
+	for i := range records {
+		entries[i] = records[i].Words + "\n" + records[i].Quote
 	}
 	var result []SaidRecord
 	for _, index := range bestIndexes(entries, keys, limit) {
@@ -313,5 +314,5 @@ func RankSaid(records []SaidRecord, text string, limit int) []SaidRecord {
 
 // AsQuote — запись в виде слова для судьи сверки
 func (r SaidRecord) AsQuote() SaidQuote {
-	return SaidQuote{Time: r.Time.Format(time.RFC3339), Source: r.Ref, Kind: r.Kind, Text: truncateRunes(r.Quote, saidQuoteRunes)}
+	return SaidQuote{Time: r.Time.Format(time.RFC3339), Source: r.Ref, Kind: r.Kind, Text: clipMarked(r.Quote, saidQuoteRunes)}
 }

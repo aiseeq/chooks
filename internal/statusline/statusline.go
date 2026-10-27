@@ -1,6 +1,7 @@
 package statusline
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -125,7 +126,7 @@ func contextFill(input Input, claudeDir string, logger core.Logger) float64 {
 // Render читает данные Claude Code и возвращает строку статуса.
 // Попутно обновляется заголовок окна: строка статуса видна только в активном
 // окне, а по заголовку сессию видно в панели задач и в переключателе окон.
-func Render(stdin io.Reader, logger core.Logger) (string, error) {
+func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, error) {
 	data, err := io.ReadAll(stdin)
 	if err != nil {
 		return "", fmt.Errorf("failed to read status line input: %w", err)
@@ -193,7 +194,8 @@ func Render(stdin io.Reader, logger core.Logger) (string, error) {
 		bar.pool = poolPace(store, snapshot, now, logger)
 	}
 
-	line, title := build(input, contextFill(input, paths.ClaudeDir, logger), bar, now, desktop.TabVisible, logger)
+	visible := func() (bool, error) { return desktop.TabVisible(ctx) }
+	line, title := build(input, contextFill(input, paths.ClaudeDir, logger), bar, now, visible, logger)
 	if err := desktop.SetTerminalTitle(title); err != nil {
 		logger.Warn("terminal title not set", "error", err)
 	}
@@ -267,12 +269,7 @@ func abandon(sessionID string, logger core.Logger) core.SessionState {
 		return core.StatePaused
 	}
 	if !swapped {
-		// Между чтением и заменой хук записал новое состояние: им и рисовать
-		state, err := core.LoadSessionState(sessionID)
-		if err != nil {
-			return core.StateUnknown
-		}
-		return state
+		return reloadState(sessionID, logger)
 	}
 	logger.Info("background tasks abandoned, session done", "session", sessionID)
 	return core.StateDone
@@ -359,14 +356,20 @@ func seen(sessionID string, visible func() (bool, error), logger core.Logger) co
 		return core.StateDone
 	}
 	if !swapped {
-		// Между чтением и заменой хук записал новое состояние: им и рисовать
-		state, err := core.LoadSessionState(sessionID)
-		if err != nil {
-			return core.StateUnknown
-		}
-		return state
+		return reloadState(sessionID, logger)
 	}
 	return core.StateIdle
+}
+
+// reloadState перечитывает состояние, которое хук записал между чтением и
+// заменой: им и рисовать. Не прочиталось — значка нет, сбой в лог
+func reloadState(sessionID string, logger core.Logger) core.SessionState {
+	state, err := core.LoadSessionState(sessionID)
+	if err != nil {
+		logger.Warn("session state changed but unreadable, no badge", "session", sessionID, "error", err)
+		return core.StateUnknown
+	}
+	return state
 }
 
 // terminalTitle собирает заголовок окна: значок состояния и проект.

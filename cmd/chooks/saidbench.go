@@ -138,8 +138,8 @@ func (b saidBench) run(ctx context.Context, path string, jobs int, out io.Writer
 			}
 		}()
 	}
-	for _, example := range examples {
-		queue <- example
+	for i := range examples {
+		queue <- examples[i]
 	}
 	close(queue)
 	wg.Wait()
@@ -231,12 +231,13 @@ func (b saidBench) inForce(example saidCase) []questioncheck.SaidQuote {
 	// запись из самой поправки (26.10: 32 из 42 положительных, 16 из 150
 	// отрицательных). Живой хук срабатывает до реплики, ему это не нужно
 	cutoff := example.Time.Truncate(time.Second)
-	for _, record := range questioncheck.InForce(b.said, example.Project, b.home, cutoff) {
-		id, _, _ := strings.Cut(record.Ref, ":")
+	inForce := questioncheck.InForce(b.said, example.Project, b.home, cutoff)
+	for i := range inForce {
+		id, _, _ := strings.Cut(inForce[i].Ref, ":")
 		if id != "" && strings.HasPrefix(session, id) {
-			own = append(own, record)
+			own = append(own, inForce[i])
 		} else {
-			other = append(other, record)
+			other = append(other, inForce[i])
 		}
 	}
 	// said-eval.tsv собирается не по порядку дат
@@ -247,8 +248,9 @@ func (b saidBench) inForce(example saidCase) []questioncheck.SaidQuote {
 		text = example.Turn
 	}
 	var quotes []questioncheck.SaidQuote
-	for _, record := range append(own, questioncheck.RankSaid(other, example.Human+"\n"+text, b.saidLimit)...) {
-		quotes = append(quotes, record.AsQuote())
+	chosen := append(own, questioncheck.RankSaid(other, example.Human+"\n"+text, b.saidLimit)...)
+	for i := range chosen {
+		quotes = append(quotes, chosen[i].AsQuote())
 	}
 	return quotes
 }

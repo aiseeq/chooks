@@ -154,9 +154,9 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 			logger.Warn("weekly limit not saved, showing the session one", "error", err)
 		case res.verdict == weekStale:
 			// Полоса показывает свежайшую долю своей недели: своя доля
-			// сессии — из её последнего ответа API, он мог быть часы назад
-			logger.Info("stale weekly limit, showing the recorded one", "session", input.SessionID,
-				"session_used", week.used, "recorded_used", res.merged.used, "resets_at", week.resetsAt.Format(time.RFC3339))
+			// сессии — из её последнего ответа API, он мог быть часы назад.
+			// В лог не пишется: строка статуса рисуется чаще раза в секунду на
+			// сессию, и эта запись вытесняла из лога всё остальное за часы
 			input.RateLimits.SevenDay = res.merged.limit()
 		}
 		owner, snapshot = res.owner, res.snapshot

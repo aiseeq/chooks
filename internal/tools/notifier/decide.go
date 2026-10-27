@@ -44,7 +44,7 @@ type Event struct {
 	// (новая или сброшенная /clear), Previous тогда — StateWorking
 	Fresh bool
 	// ActiveTasks — фоновые задачи, которых Claude ещё ждёт (только Stop):
-	// список Claude Code без брошенных, см. core.RecordBackground
+	// список Claude Code без брошенных и слежения за Artifact, см. core.RecordBackground
 	ActiveTasks int
 }
 

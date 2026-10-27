@@ -51,6 +51,35 @@ func TestRecordBackground_AbandonedTaskExpires(t *testing.T) {
 	}
 }
 
+// Слежение за правками Artifact Claude Code ставит сам при публикации и не
+// снимает даже после /clear: агент его не ждёт, паузу оно не держит и в
+// строке статуса не видно (27.10 work-admin стоял на паузе без уведомления о
+// конце хода)
+func TestRecordBackground_ArtifactWatchIsNotWaited(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	watch := BackgroundTask{ID: "m1", Type: "monitor", Description: "live updates for artifact https://claude.ai/artifact/HPY63WfM3BQkbnf5dv7eaV (auto-armed on publish)"}
+	monitor := BackgroundTask{ID: "m2", Type: "monitor", Description: "live updates for deploy log"}
+	active, err := RecordBackground("s1", []BackgroundTask{watch, monitor}, nil, time.Now())
+	if err != nil {
+		t.Fatalf("учёт задач: %v", err)
+	}
+	if len(active) != 1 || active[0].ID != "m2" {
+		t.Errorf("живым должен остаться только свой монитор: %+v", active)
+	}
+	background, err := LoadBackground("s1")
+	if err != nil || len(background.Tasks) != 1 || background.Tasks[0].ID != "m2" {
+		t.Errorf("в учёте не должно быть слежения за Artifact: %+v, %v", background, err)
+	}
+
+	if _, err := RecordBackground("s1", []BackgroundTask{watch}, nil, time.Now()); err != nil {
+		t.Fatalf("учёт задач: %v", err)
+	}
+	if background, err := LoadBackground("s1"); err != nil || len(background.Tasks) != 0 {
+		t.Errorf("одно слежение за Artifact - фоновой работы нет: %+v, %v", background, err)
+	}
+}
+
 // Задача, пропавшая из списка, забывается: тот же идентификатор позже —
 // уже новая задача
 func TestRecordBackground_ForgetsFinishedTasks(t *testing.T) {

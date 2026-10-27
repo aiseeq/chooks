@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -76,13 +78,27 @@ func (b Background) Abandoned(now time.Time) bool {
 	return true
 }
 
+// artifactWatchPrefix — начало описания монитора, который Claude Code сам
+// ставит на каждую публикацию Artifact («live updates for artifact <url>
+// (auto-armed on publish)») и не снимает даже после /clear. Это ожидание
+// правок страницы, не работа агента: пользователь отвечает на страницы в
+// чате, а не на них самих
+const artifactWatchPrefix = "live updates for artifact "
+
+// artifactWatch — задача только следит за правками опубликованного Artifact
+func artifactWatch(task BackgroundTask) bool {
+	return task.Type == "monitor" && strings.HasPrefix(task.Description, artifactWatchPrefix)
+}
+
 // RecordBackground запоминает фоновую работу сессии на конец хода и
 // отбирает задачи, которых Claude ещё ждёт: всё из списка Claude Code, кроме
-// висящих дольше abandonedTaskAge. Время первого появления задачи хранится
+// слежения за Artifact и висящих дольше abandonedTaskAge. Слежение за
+// Artifact не попадает и в учёт. Время первого появления задачи хранится
 // рядом с состоянием сессии, исчезнувшие из списка задачи забываются. При
 // сбое учёта возвращается только ошибка: брошенные задачи не отличить от
 // живых, и чем заменить отбор, решает вызывающий
 func RecordBackground(sessionID string, tasks []BackgroundTask, crons []SessionCron, now time.Time) ([]BackgroundTask, error) {
+	tasks = slices.DeleteFunc(slices.Clone(tasks), artifactWatch)
 	if sessionID == "" {
 		return tasks, nil
 	}

@@ -87,6 +87,11 @@ func TestKillGuardBlocks(t *testing.T) {
 		// подстановка процесса и команда в цели перенаправления — тоже команды
 		`echo x | tee >(kill 1500)`,
 		`echo x 2>$(kill 1500)`,
+		// тело here-doc, которое исполнит оболочка, — команды
+		"bash <<'EOF'\nkill 1500\nEOF",
+		"cat <<EOF | sudo sh\nkill -9 2100\nEOF",
+		"ssh host <<-EOF\n\tkill $p\n\tEOF",
+		"cat <<'EOF' > /dev/null\ntext\nEOF\nkill 1500",
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -112,6 +117,11 @@ func TestKillGuardAllows(t *testing.T) {
 		`kill 455274 >/dev/null 2>&1; sleep 1`,
 		`kill -TERM 455274 &>/dev/null`,
 		`kill 455274 2> /tmp/kill.err`,
+		// тело here-doc для файла или утилиты — текст, не команды (ложный
+		// отказ aguard-master 27.10: комментарий «(kill -TERM, --resume)» в sub)
+		"sed -n 1,2p decide.go && sub <<'EOF'\ndecide.go\n// замер 27.10 (kill -TERM, --resume) и (kill -TERM, -p --resume /compact)\nEOF",
+		"cat > note.md <<-EOF\n\tkill $p\n\tEOF\nkill 455274",
+		"graft commit -m \"fix: сброс\n(kill -TERM, --resume) и kill $p\"",
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)

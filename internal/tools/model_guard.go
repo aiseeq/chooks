@@ -87,7 +87,7 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 
 func bashModelCandidates(command string) []modelCandidate {
 	var found []modelCandidate
-	for _, words := range splitSimpleCommands(withoutHereDocBodies(command)) {
+	for _, words := range splitSimpleCommands(withoutHereDocBodies(command, false)) {
 		name, args, _ := unwrapCommand(words)
 		if name != "claude" && name != "codex" && name != "opencode" {
 			continue
@@ -97,9 +97,14 @@ func bashModelCandidates(command string) []modelCandidate {
 	return found
 }
 
-func withoutHereDocBodies(command string) string {
+// withoutHereDocBodies вырезает тела here-doc: это текст для файла или
+// утилиты, не команды. keepShellFed оставляет тело, если в строке с его
+// началом есть оболочка (bash <<EOF, cat <<EOF | sh, ssh host <<EOF): его
+// строки она исполнит
+func withoutHereDocBodies(command string, keepShellFed bool) string {
 	var output strings.Builder
 	var delimiters []hereDoc
+	keep := false
 	for _, line := range strings.SplitAfter(command, "\n") {
 		plain := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		if len(delimiters) > 0 {
@@ -107,15 +112,32 @@ func withoutHereDocBodies(command string) string {
 			if delimiters[0].stripTab {
 				bodyLine = strings.TrimLeft(bodyLine, "\t")
 			}
-			if bodyLine == delimiters[0].name {
+			switch {
+			case bodyLine == delimiters[0].name:
 				delimiters = delimiters[1:]
+			case keep:
+				output.WriteString(line)
 			}
 			continue
 		}
 		output.WriteString(line)
-		delimiters = append(delimiters, lexShell(plain).hereDocs...)
+		lexed := lexShell(plain)
+		delimiters = append(delimiters, lexed.hereDocs...)
+		keep = keepShellFed && feedsShell(lexed.cmds)
 	}
 	return output.String()
+}
+
+// shellNames утилиты, которые исполняют свой вход как команды оболочки
+var shellNames = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": true, "ksh": true, "fish": true, "ssh": true}
+
+func feedsShell(cmds [][]word) bool {
+	for _, cmd := range cmds {
+		if name, _, _ := unwrapCommand(cmd); shellNames[name] {
+			return true
+		}
+	}
+	return false
 }
 
 func candidatesFromArgs(name string, args []word) []modelCandidate {

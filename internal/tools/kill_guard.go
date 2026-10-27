@@ -50,7 +50,7 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 
 	var reasons []string
 	var procs []procInfo
-	for _, cmd := range splitSimpleCommands(input.Command) {
+	for _, cmd := range splitSimpleCommands(withoutHereDocBodies(input.Command, true)) {
 		name, args, viaXargs := unwrapCommand(cmd)
 		if name != "kill" && name != "pkill" && name != "killall" {
 			continue

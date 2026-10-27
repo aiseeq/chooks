@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aiseeq/akit/transcript"
 )
@@ -36,6 +37,9 @@ type Tail struct {
 	PrevAnswer string
 	// PrevFound — предыдущий ответ найден в пределах окна
 	PrevFound bool
+	// PrevAfterHuman — предыдущий ответ написан после реплики человека: она на
+	// него не отвечала (lead 27.10 23:31, «"Делаем так?" - да» на другой вопрос)
+	PrevAfterHuman bool
 }
 
 // ReadTail читает хвост транскрипта: uuid последнего текста ассистента,
@@ -99,6 +103,8 @@ func scanTail(buf []byte, answer string) Tail {
 			tail.take(events, wantUUID, wantHuman, answer)
 		}
 	}
+	// Реплики нет в окне — порядок неизвестен
+	tail.PrevAfterHuman = tail.PrevAfterHuman && tail.HumanFound
 	return tail
 }
 
@@ -133,5 +139,61 @@ func (tail *Tail) takeAssistant(text, uuid, stopReason string, wantUUID bool, an
 	if !tail.PrevFound && stopReason == "end_turn" && strings.TrimSpace(text) != answer {
 		tail.PrevAnswer = text
 		tail.PrevFound = true
+		// Хвост читается с конца: реплика ещё не найдена — значит, она раньше
+		tail.PrevAfterHuman = !tail.HumanFound
 	}
+}
+
+// replaySlack — допуск ReplayTail: время журнала — начало хука до секунды, а
+// запись ответа в транскрипте бывает в той же секунде позже
+const replaySlack = 2 * time.Second
+
+// ReplayTail восстанавливает по транскрипту то, что видел хук в момент at
+// (время записи журнала): проверяемый ответ — последний текст хода (end_turn)
+// не позже at с допуском replaySlack, хвост —
+// как у ReadTail, если бы транскрипт кончался этим ответом. Нужен стенду,
+// чтобы прогнать нового судью по записям журнала
+func ReplayTail(path string, at time.Time) (Tail, string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Tail{}, "", fmt.Errorf("read transcript: %w", err)
+	}
+	end, answer := -1, ""
+	at = at.Add(replaySlack)
+	for start := 0; start < len(data); {
+		next := bytes.IndexByte(data[start:], '\n')
+		if next < 0 {
+			next = len(data) - start
+		}
+		line := data[start : start+next]
+		start += next + 1
+		if !bytes.Contains(line, []byte(`"type":"assistant"`)) || !bytes.Contains(line, []byte(`"end_turn"`)) {
+			continue
+		}
+		events, err := transcript.NewParser().Parse(line)
+		if err != nil || len(events) == 0 || events[0].Time.After(at) {
+			continue
+		}
+		var texts []string
+		for i := range events {
+			event := &events[i]
+			if event.Role == transcript.Agent && !event.Sidechain && event.Reply != nil && event.Reply.StopReason == "end_turn" && strings.TrimSpace(event.Text) != "" {
+				texts = append(texts, event.Text)
+			}
+		}
+		if len(texts) > 0 {
+			end, answer = start, strings.Join(texts, "\n")
+		}
+	}
+	if end < 0 {
+		return Tail{}, "", fmt.Errorf("no finished turn before %s in %s", at.Format(time.RFC3339), path)
+	}
+	buf := data[:min(end, len(data))]
+	if len(buf) > tailWindowMax {
+		buf = buf[len(buf)-tailWindowMax:]
+		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+			buf = buf[i+1:]
+		}
+	}
+	return scanTail(buf, strings.TrimSpace(answer)), strings.TrimSpace(answer), nil
 }

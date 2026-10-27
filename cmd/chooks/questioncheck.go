@@ -211,8 +211,13 @@ type benchCase struct {
 	Time       time.Time `json:"ts"`
 	HumanReply string    `json:"prev_reply"`
 	PrevAnswer string    `json:"prev_answer"`
-	Answer     string    `json:"answer"`
-	Label      string    `json:"label"`
+	// PrevAfterReply — предыдущий ответ написан после prev_reply
+	PrevAfterReply bool   `json:"prev_after_reply"`
+	Answer         string `json:"answer"`
+	// Transcript — транскрипт записи журнала: ответ, реплика и предыдущий
+	// ответ берутся из него на момент ts, поля выше не нужны
+	Transcript string `json:"transcript"`
+	Label      string `json:"label"`
 }
 
 // benchResult — вердикт по примеру
@@ -234,7 +239,10 @@ func newQuestionBenchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "question-bench [--model luna] [--effort low] <примеры.jsonl>",
 		Short: "Прогнать судью проверки вопросов по размеченным примерам",
-		Long: `Читает JSONL примеров {id, ts, prev_reply, answer, label} и прогоняет каждый
+		Long: `Читает JSONL примеров {id, ts, prev_reply, prev_answer, prev_after_reply,
+answer, label} (prev_after_reply — предыдущий ответ написан после prev_reply) или
+{id, ts, transcript, label} — запись журнала: ответ, реплика и предыдущий ответ
+берутся из транскрипта на момент ts. Прогоняет каждый
 тем же путём, что Stop-хук question-check: фильтр вопросов, выдержки из
 журналов реплик и решений (только записи раньше ts), судья. Печатает JSONL
 вердиктов. Модель — только из ~/.config/models/approved.`,
@@ -272,6 +280,13 @@ func runQuestionBench(ctx context.Context, path string, judge questioncheck.Judg
 			return fmt.Errorf("parse example: %w", err)
 		}
 		result := benchResult{ID: example.ID, Label: example.Label}
+		if example.Transcript != "" {
+			tail, answer, err := questioncheck.ReplayTail(example.Transcript, example.Time)
+			if err != nil {
+				return fmt.Errorf("example %s: %w", example.ID, err)
+			}
+			example.HumanReply, example.PrevAnswer, example.PrevAfterReply, example.Answer = tail.HumanReply, tail.PrevAnswer, tail.PrevAfterHuman, answer
+		}
 		questions := questioncheck.Questions(example.Answer)
 		result.Questions = questioncheck.Texts(questions)
 		if len(questions) == 0 {
@@ -287,7 +302,7 @@ func runQuestionBench(ctx context.Context, path string, judge questioncheck.Judg
 			return err
 		}
 		result.Excerpts = len(excerpts.Replies) + len(excerpts.Decisions)
-		input := questioncheck.Case{HumanReply: example.HumanReply, PrevAnswer: example.PrevAnswer, Answer: example.Answer, Excerpts: excerpts}.Input()
+		input := questioncheck.Case{HumanReply: example.HumanReply, PrevAnswer: example.PrevAnswer, PrevAfterReply: example.PrevAfterReply, Answer: example.Answer, Excerpts: excerpts}.Input()
 		judgeCtx, cancel := context.WithTimeout(ctx, judgeBudget)
 		started := time.Now()
 		verdict, usage, err := judge.Judge(judgeCtx, input)

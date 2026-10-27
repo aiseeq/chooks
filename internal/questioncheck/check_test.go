@@ -351,6 +351,44 @@ func TestJournalsFindBefore(t *testing.T) {
 	if len(excerpts.Replies) != 2 || len(excerpts.Decisions) != 1 {
 		t.Fatalf("excerpts = %+v", excerpts)
 	}
+
+	// Решение 21.10 10:00 не видно в 09:00 того же дня (стенд 27.10: «Вносим?»
+	// в 18:05 снят по решению 18:54), видно после 10:00
+	for _, tt := range []struct {
+		hour, decisions int
+	}{{9, 0}, {11, 1}} {
+		at := time.Date(2026, 10, 21, tt.hour, 0, 0, 0, time.Local)
+		excerpts, err := journals.Find(questions, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(excerpts.Decisions) != tt.decisions {
+			t.Errorf("21.10 %d:00: decisions = %d, want %d", tt.hour, len(excerpts.Decisions), tt.decisions)
+		}
+	}
+	// Без времени решение того же дня не видно: когда оно принято, неизвестно
+	writeFile(t, decisions, "# Журнал\n\n## Записи\n\n## infra-owner\n- Решение: «Доступы - это Сергей» (21.10, ~/work)\n- Действует: бакет S3 и доступы\n")
+	excerpts, err = journals.Find(questions, time.Date(2026, 10, 21, 23, 0, 0, 0, time.Local))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(excerpts.Decisions) != 0 {
+		t.Errorf("решение без времени в тот же день видно: %+v", excerpts.Decisions)
+	}
+	// Запись дописана позже: «Да, давай 3» 11:12 в записи от 10:48 не видно в 10:49
+	writeFile(t, decisions, "# Журнал\n\n## Записи\n\n## infra-owner\n- Решение: «Доступы - это Сергей» (21.10 10:48 CET, ~/work); на бакет S3: «Да, давай 3» (21.10 ~11:12 CET)\n- Действует: бакет S3 и доступы, 12.50 не дата\n")
+	for _, tt := range []struct {
+		minute, decisions int
+	}{{49, 0}, {13 + 60, 1}} {
+		at := time.Date(2026, 10, 21, 10, tt.minute, 0, 0, time.Local)
+		excerpts, err := journals.Find(questions, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(excerpts.Decisions) != tt.decisions {
+			t.Errorf("%s: decisions = %d, want %d", at.Format("15:04"), len(excerpts.Decisions), tt.decisions)
+		}
+	}
 }
 
 func TestReadTailFindsHumanBeyondFirstWindow(t *testing.T) {
@@ -392,19 +430,22 @@ func TestScanTailPrevAnswer(t *testing.T) {
 		lines              []string
 		prevAnswer, uuid   string
 		humanFound, prevOK bool
+		prevAfterHuman     bool
 	}{
 		{name: "ответа ещё нет в транскрипте", lines: []string{human, interim, think, prev, notice},
-			prevAnswer: "Я бы взял **dream**. Переименовываю в dream?", uuid: "m2", humanFound: true, prevOK: true},
+			prevAnswer: "Я бы взял **dream**. Переименовываю в dream?", uuid: "m2", humanFound: true, prevOK: true, prevAfterHuman: true},
 		{name: "ответ успел попасть в транскрипт", lines: []string{human, prev, notice, currentRecord},
-			prevAnswer: "Я бы взял **dream**. Переименовываю в dream?", uuid: "m3", humanFound: true, prevOK: true},
+			prevAnswer: "Я бы взял **dream**. Переименовываю в dream?", uuid: "m3", humanFound: true, prevOK: true, prevAfterHuman: true},
 		{name: "предыдущий ответ до реплики человека", lines: []string{prev, human, interim},
 			prevAnswer: "Я бы взял **dream**. Переименовываю в dream?", uuid: "m0", humanFound: true, prevOK: true},
 		{name: "кончившегося хода нет", lines: []string{human, interim}, uuid: "m0", humanFound: true},
+		{name: "реплики нет в окне", lines: []string{interim, prev},
+			prevAnswer: "Я бы взял **dream**. Переименовываю в dream?", uuid: "m2", prevOK: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tail := scanTail([]byte(strings.Join(tt.lines, "\n")), current)
-			if tail.PrevAnswer != tt.prevAnswer || tail.PrevFound != tt.prevOK || tail.AssistantUUID != tt.uuid || tail.HumanFound != tt.humanFound {
+			if tail.PrevAnswer != tt.prevAnswer || tail.PrevFound != tt.prevOK || tail.AssistantUUID != tt.uuid || tail.HumanFound != tt.humanFound || tail.PrevAfterHuman != tt.prevAfterHuman {
 				t.Fatalf("tail = %+v", tail)
 			}
 		})
@@ -429,7 +470,7 @@ func TestScanTailQueuedReplyWithImage(t *testing.T) {
 
 func TestCaseInputShowsPrevAnswer(t *testing.T) {
 	input := Case{HumanReply: "sleep vs dream?", PrevAnswer: "Я бы взял dream. Переименовываю?", Answer: "Жду твоего ответа?"}.Input()
-	prev := strings.Index(input, "[Предыдущий ответ агента]\nЯ бы взял dream.")
+	prev := strings.Index(input, "[Предыдущий ответ агента]\n(написан до прошлой реплики пользователя)\nЯ бы взял dream.")
 	final := strings.Index(input, "[Финальный ответ агента]")
 	if prev < 0 || final < prev {
 		t.Fatalf("предыдущий ответ должен идти перед финальным:\n%s", input)
@@ -442,16 +483,60 @@ func TestCaseInputShowsPrevAnswer(t *testing.T) {
 	}
 }
 
+// «"Делаем так?" - да» в 23:17 отвечало на другое предложение, а судья счёл
+// его ответом на вопрос предыдущего ответа 23:30 (lead 27.10 23:31): судья
+// должен видеть, что предыдущий ответ написан после реплики
+func TestCaseInputShowsPrevAnswerAfterReply(t *testing.T) {
+	input := Case{HumanReply: `"Делаем так?" - да`, PrevAnswer: "Сабтаском сборной задачи. Делаем так?", PrevAfterReply: true, Answer: "Ждёт вашего ответа: делаем так?"}.Input()
+	if !strings.Contains(input, "[Предыдущий ответ агента]\n(написан после прошлой реплики пользователя: её «да» не про вопросы этого ответа)\nСабтаском") {
+		t.Errorf("судья не видит порядок:\n%s", input)
+	}
+	noReply := Case{PrevAnswer: "Делаем так?", PrevAfterReply: true, Answer: "Делаем так?"}.Input()
+	if strings.Contains(noReply, "(написан") {
+		t.Errorf("без реплики порядок не пишется:\n%s", noReply)
+	}
+	if !strings.Contains(JudgePrompt, "ответ только на то, что было написано до неё") {
+		t.Error("промпт судьи должен говорить о порядке реплики и ответа")
+	}
+
+}
+
 // Судья видит предыдущий ответ, журнал помечает версию судьи
 func TestRun_JudgeSeesPrevAnswer(t *testing.T) {
 	f := newFixture(t, "lead", "~")
 	f.checker.Run(context.Background(), f.event("Жду твоего ответа: делать?"))
 
-	if !strings.Contains(f.judge.input, "[Предыдущий ответ агента]\nПосчитал. Поменять на $200?") {
+	if !strings.Contains(f.judge.input, "Посчитал. Поменять на $200?") {
 		t.Errorf("судья не видел предыдущий ответ:\n%s", f.judge.input)
 	}
 	entries := f.journal(t)
 	if len(entries) != 1 || entries[0].JudgeRev != JudgeRev || !entries[0].PrevFound {
 		t.Fatalf("журнал = %+v", entries)
+	}
+}
+
+// Стенд восстанавливает по транскрипту ответ, реплику и предыдущий ответ на
+// момент записи журнала; ход, кончившийся позже, не берётся
+func TestReplayTail(t *testing.T) {
+	lines := []string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-10-27T22:17:10Z","origin":{"kind":"human"},"message":{"content":"\"Делаем так?\" - да"}}`,
+		`{"type":"assistant","uuid":"m1","timestamp":"2026-10-27T22:30:24Z","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Сабтаском сборной задачи. Делаем так?"}]}}`,
+		`{"type":"assistant","uuid":"m2","timestamp":"2026-10-27T22:31:50Z","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"…"}]}}`,
+		`{"type":"assistant","uuid":"m3","timestamp":"2026-10-27T22:31:55Z","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Ждёт вашего ответа: делаем так?"}]}}`,
+		`{"type":"assistant","uuid":"m4","timestamp":"2026-10-27T22:40:00Z","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Позже"}]}}`,
+	}
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tail, answer, err := ReplayTail(path, time.Date(2026, 10, 27, 22, 32, 4, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Ждёт вашего ответа: делаем так?" || tail.PrevAnswer != "Сабтаском сборной задачи. Делаем так?" || !tail.PrevAfterHuman || tail.HumanReply != `"Делаем так?" - да` {
+		t.Fatalf("answer = %q, tail = %+v", answer, tail)
+	}
+	if _, _, err := ReplayTail(path, time.Date(2026, 10, 27, 22, 0, 0, 0, time.UTC)); err == nil {
+		t.Error("до первого хода — ошибка, а не пустой ответ")
 	}
 }

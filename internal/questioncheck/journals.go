@@ -49,8 +49,10 @@ var (
 	wordPattern = regexp.MustCompile(`[\p{L}\p{N}][\p{L}\p{N}_-]*`)
 	// replyHeader — заголовок блока журнала реплик: «### 2026-10-22T14:33:15.508Z (…) · ~ · claude …»
 	replyHeader = regexp.MustCompile(`^### (\d{4}-\d{2}-\d{2}T[0-9:.]+Z)`)
-	// decisionDate — первая дата «(16.10 …» в записи журнала решений
-	decisionDate = regexp.MustCompile(`\((\d{2})\.(\d{2})[ ,)]`)
+	// decisionDate — дата «16.10» в записи журнала решений, с временем, если
+	// оно есть: «22.10 ~22:10 CEST»; isoDate — «2026-10-26» в «Применялось»
+	decisionDate = regexp.MustCompile(`\b(\d{2})\.(\d{2})(?: ~?(\d{1,2}):(\d{2}))?\b`)
+	isoDate      = regexp.MustCompile(`\b(\d{4})-(\d{2})-(\d{2})\b`)
 )
 
 // stopWords — частые слова вопросов, которые ничего не находят
@@ -170,8 +172,13 @@ func replyBlocks(text string, before time.Time) []string {
 }
 
 // decisionEntries режет журнал решений на записи «## slug». Шапка журнала —
-// не запись. С before отбрасываются записи, решение в которых датировано
-// позже (дата «(16.10 …» без года — год before)
+// не запись. С before отбрасываются записи, в которых есть дата позже before:
+// запись дописывают (уточнения, новые ответы, «Применялось»), и в момент
+// before её последних строк ещё не было (стенд 27.10: «Да, давай 3» 11:12 в
+// записи от 10:48 снимало вопрос 10:49). Дата «16.10» без года — год before,
+// время местное; дата без времени в день before — позже: когда, неизвестно.
+// Срок в будущем («до 30.10») тоже скрывает запись: стенд скорее недосчитает
+// остановки, чем припишет судье знание из будущего
 func decisionEntries(text string, before time.Time) ([]string, error) {
 	var entries []string
 	parts := strings.Split(text, "\n## ")
@@ -181,21 +188,36 @@ func decisionEntries(text string, before time.Time) ([]string, error) {
 			continue
 		}
 		if !before.IsZero() {
-			m := decisionDate.FindStringSubmatch(part)
-			if m == nil {
-				continue
-			}
-			decided, err := time.ParseInLocation("02.01.2006", fmt.Sprintf("%s.%s.%d", m[1], m[2], before.Year()), before.Location())
-			if err != nil {
-				return nil, fmt.Errorf("decision date %s.%s: %w", m[1], m[2], err)
-			}
-			if decided.After(before) {
+			latest, ok := latestDate(part, before.In(time.Local).Year())
+			if !ok || latest.After(before) {
 				continue
 			}
 		}
 		entries = append(entries, "## "+part)
 	}
 	return entries, nil
+}
+
+// latestDate — самая поздняя дата записи журнала решений; дата без времени —
+// конец дня. Не дата («12.50», «31.02») пропускается
+func latestDate(part string, year int) (time.Time, bool) {
+	var latest time.Time
+	take := func(layout, value string) {
+		if at, err := time.ParseInLocation(layout, value, time.Local); err == nil && at.After(latest) {
+			latest = at
+		}
+	}
+	for _, m := range decisionDate.FindAllStringSubmatch(part, -1) {
+		clock := "23:59"
+		if m[3] != "" {
+			clock = fmt.Sprintf("%02s:%s", m[3], m[4])
+		}
+		take("02.01.2006 15:04", fmt.Sprintf("%s.%s.%d %s", m[1], m[2], year, clock))
+	}
+	for _, m := range isoDate.FindAllStringSubmatch(part, -1) {
+		take("2006-01-02 15:04", m[0]+" 23:59")
+	}
+	return latest, !latest.IsZero()
 }
 
 // best выбирает записи по BM25 с бинарной частотой: вес основы —

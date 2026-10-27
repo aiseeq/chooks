@@ -73,6 +73,8 @@ type Entry struct {
 	HumanFound bool      `json:"human_reply_found"`
 	// PrevFound — судья видел предыдущий ответ агента
 	PrevFound bool `json:"prev_answer_found"`
+	// PrevAfterReply — предыдущий ответ написан после прошлой реплики человека
+	PrevAfterReply bool `json:"prev_after_reply,omitempty"`
 	// JudgeRev — версия судьи (JudgeRev); у записей до 25.10 поля нет
 	JudgeRev int `json:"judge_rev"`
 	// BlockRev — версия текста остановки (BlockRev); у записей до 26.10 поля нет
@@ -138,7 +140,7 @@ func (c Checker) Run(ctx context.Context, event Event) Result {
 	}
 	entry.Excerpts = len(excerpts.Replies) + len(excerpts.Decisions)
 
-	input := Case{HumanReply: tail.HumanReply, PrevAnswer: tail.PrevAnswer, Answer: event.LastMessage, Excerpts: excerpts}.Input()
+	input := Case{HumanReply: tail.HumanReply, PrevAnswer: tail.PrevAnswer, PrevAfterReply: tail.PrevAfterHuman, Answer: event.LastMessage, Excerpts: excerpts}.Input()
 	judgeCtx, cancel := context.WithTimeout(ctx, c.Budget)
 	defer cancel()
 	started := time.Now()
@@ -186,6 +188,7 @@ func (c Checker) fillTail(entry *Entry, event Event) Tail {
 	entry.MessageID = tail.AssistantUUID
 	entry.HumanFound = tail.HumanFound
 	entry.PrevFound = tail.PrevFound
+	entry.PrevAfterReply = tail.PrevAfterHuman
 	return tail
 }
 

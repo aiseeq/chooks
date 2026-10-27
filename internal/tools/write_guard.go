@@ -93,7 +93,7 @@ func (t *WriteGuardTool) bodyHits(body string, vars *rmVars) []string {
 	mark := string(substMark)
 	s := strings.ReplaceAll(body, "\\\n", " ")
 	s = backtickSpan.ReplaceAllString(s, mark)
-	for pass := 0; pass < 16; pass++ {
+	for range 16 {
 		prev := s
 		s = flatParens.ReplaceAllString(flatSubst.ReplaceAllString(s, mark), mark)
 		if s == prev {

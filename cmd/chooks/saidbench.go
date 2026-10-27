@@ -122,9 +122,7 @@ func (b saidBench) run(ctx context.Context, path string, jobs int, out io.Writer
 	queue := make(chan saidCase)
 	var wg sync.WaitGroup
 	for i := 0; i < max(jobs, 1); i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for example := range queue {
 				result, err := b.one(ctx, example)
 				mu.Lock()
@@ -136,7 +134,7 @@ func (b saidBench) run(ctx context.Context, path string, jobs int, out io.Writer
 				}
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	for i := range examples {
 		queue <- examples[i]

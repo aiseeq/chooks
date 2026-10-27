@@ -151,7 +151,7 @@ func replyBlocks(text string, before time.Time) []string {
 		}
 		current.Reset()
 	}
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if m := replyHeader.FindStringSubmatch(line); m != nil {
 			flush()
 			keep = true

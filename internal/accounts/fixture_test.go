@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -289,9 +290,7 @@ func (l *fakeLimits) Usage() (map[string]Usage, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := make(map[string]Usage, len(l.usage))
-	for k, v := range l.usage {
-		out[k] = v
-	}
+	maps.Copy(out, l.usage)
 	return out, nil
 }
 

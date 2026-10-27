@@ -311,7 +311,7 @@ func TestParallelStopHooksRingOnce(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newQuestionEnv(t, "lead", true)
-			for i := 0; i < 20; i++ {
+			for i := range 20 {
 				input := env.input("par-"+strconv.Itoa(i), tc.message, false)
 				data, err := json.Marshal(input)
 				if err != nil {

@@ -1,7 +1,7 @@
 package tools
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,22 +13,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/akit/transcript"
 	"github.com/aiseeq/chooks/internal/core"
 )
 
-type modelScanToolUse struct {
-	Type  string          `json:"type"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
-}
-type modelScanMessage struct {
-	Content []modelScanToolUse `json:"content"`
-}
-type modelScanLine struct {
-	Type      string           `json:"type"`
-	Timestamp string           `json:"timestamp"`
-	Message   modelScanMessage `json:"message"`
-}
+// modelScanTime — метка времени примера, как её пишет Claude Code
+const modelScanTime = "2006-01-02T15:04:05.000Z07:00"
+
+// assistantMarker — запись ответа модели: вызовы инструментов есть только в
+// ней, остальные строки транскрипта не разбираются
+var assistantMarker = []byte(`"type":"assistant"`)
 
 type modelScanExample struct{ file, timestamp, command string }
 type modelScanBucket struct {
@@ -82,55 +76,35 @@ func ScanModelTranscripts(ctx context.Context, root string, days int, validator 
 }
 
 func scanModelFile(ctx context.Context, root, path string, validator *ModelGuardTool, result *ModelScanResult) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open transcript %s: %w", path, err)
-	}
-	defer f.Close()
-	reader := bufio.NewReaderSize(f, 64*1024)
 	project, err := transcriptProject(root, path)
 	if err != nil {
 		return err
 	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
+	// Первая ошибка останавливает разбор: остальные строки отбрасываются до JSON
+	var failed error
+	keep := func(raw []byte) bool {
+		if failed == nil {
+			failed = ctx.Err()
 		}
-		line, readErr := reader.ReadString('\n')
-		if len(line) > 0 {
-			var event modelScanLine
-			if err := json.Unmarshal([]byte(line), &event); err == nil && event.Type == "assistant" {
-				if err := scanModelEvent(ctx, event, path, project, validator, result); err != nil {
-					return err
-				}
-			}
-		}
-		if readErr == io.EOF {
-			return nil
-		}
-		if readErr != nil {
-			return fmt.Errorf("read transcript %s: %w", path, readErr)
-		}
+		return failed == nil && bytes.Contains(raw, assistantMarker)
 	}
+	_, err = transcript.Read(path, keep, func(event transcript.Event) {
+		if failed != nil || event.Role != transcript.Cmd || (event.Who != "Bash" && event.Who != "Agent") {
+			return
+		}
+		failed = recordModelUse(ctx, event.Who, event.Raw, event.Time.Format(modelScanTime), path, project, validator, result)
+	})
+	if failed != nil {
+		return failed
+	}
+	return err
 }
 
-func scanModelEvent(ctx context.Context, event modelScanLine, path, project string, validator *ModelGuardTool, result *ModelScanResult) error {
-	for _, use := range event.Message.Content {
-		if use.Type != "tool_use" || (use.Name != "Bash" && use.Name != "Agent") {
-			continue
-		}
-		if err := recordModelUse(ctx, use, event.Timestamp, path, project, validator, result); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func recordModelUse(ctx context.Context, use modelScanToolUse, timestamp, path, project string, validator *ModelGuardTool, result *ModelScanResult) error {
-	input := &core.ToolInput{ToolName: use.Name, ToolInput: use.Input}
+func recordModelUse(ctx context.Context, tool string, raw json.RawMessage, timestamp, path, project string, validator *ModelGuardTool, result *ModelScanResult) error {
+	input := &core.ToolInput{ToolName: tool, ToolInput: raw}
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(use.Input, &fields); err != nil {
-		return fmt.Errorf("decode %s input in %s: %w", use.Name, path, err)
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fmt.Errorf("decode %s input in %s: %w", tool, path, err)
 	}
 	if raw := fields["command"]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &input.Command); err != nil {
@@ -144,7 +118,7 @@ func recordModelUse(ctx context.Context, use modelScanToolUse, timestamp, path, 
 	}
 	if validation != nil && !validation.IsValid {
 		recordRejectedModel(input, timestamp, path, project, validator, result)
-	} else if use.Name == "Bash" {
+	} else if tool == "Bash" {
 		recordModelMentions(input.Command, timestamp, path, validator, result)
 	}
 	return nil

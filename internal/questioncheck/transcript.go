@@ -2,11 +2,12 @@ package questioncheck
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+
+	"github.com/aiseeq/akit/transcript"
 )
 
 // Окно чтения хвоста транскрипта: транскрипт сессии бывает в сотни МБ и
@@ -35,26 +36,6 @@ type Tail struct {
 	PrevAnswer string
 	// PrevFound — предыдущий ответ найден в пределах окна
 	PrevFound bool
-}
-
-type transcriptRecord struct {
-	Type   string `json:"type"`
-	UUID   string `json:"uuid"`
-	Origin *struct {
-		Kind string `json:"kind"`
-	} `json:"origin"`
-	IsSidechain bool `json:"isSidechain"`
-	Message     *struct {
-		Content    json.RawMessage `json:"content"`
-		StopReason string          `json:"stop_reason"`
-	} `json:"message"`
-	Attachment *struct {
-		Type   string `json:"type"`
-		Prompt string `json:"prompt"`
-		Origin *struct {
-			Kind string `json:"kind"`
-		} `json:"origin"`
-	} `json:"attachment"`
 }
 
 // ReadTail читает хвост транскрипта: uuid последнего текста ассистента,
@@ -111,67 +92,46 @@ func scanTail(buf []byte, answer string) Tail {
 		if !wantAssistant && !wantHuman {
 			continue
 		}
-		var record transcriptRecord
-		if json.Unmarshal(line, &record) != nil || record.IsSidechain {
-			continue
-		}
-		if record.Type == "assistant" && record.Message != nil {
-			tail.takeAssistant(record, wantUUID, answer)
-		}
-		if text, ok := humanText(record); ok && wantHuman {
-			tail.HumanReply = text
-			tail.HumanFound = true
+		// Строки разбираются по одной: состояние разбора (имена инструментов
+		// по id вызова) реплике и тексту ответа не нужно. Нечитаемая строка —
+		// обрезанная первая в окне или последняя, которую ещё дописывают, — без событий
+		if events, err := transcript.NewParser().Parse(line); err == nil {
+			tail.take(events, wantUUID, wantHuman, answer)
 		}
 	}
 	return tail
 }
 
-// takeAssistant берёт из записи ассистента uuid текста (если ещё нужен) и
+// take берёт из событий одной записи текст ответа ассистента и реплику человека
+func (tail *Tail) take(events []transcript.Event, wantUUID, wantHuman bool, answer string) {
+	var texts []string
+	var reply *transcript.Reply
+	for i := range events {
+		event := &events[i]
+		switch {
+		case event.Sidechain:
+		case event.Role == transcript.Agent:
+			texts = append(texts, event.Text)
+			reply = event.Reply
+		case event.Role == transcript.User && wantHuman:
+			tail.HumanReply = event.Text
+			tail.HumanFound = true
+		}
+	}
+	if len(texts) > 0 {
+		tail.takeAssistant(strings.Join(texts, "\n"), events[0].UUID, reply.StopReason, wantUUID, answer)
+	}
+}
+
+// takeAssistant берёт из ответа ассистента uuid текста (если ещё нужен) и
 // предыдущий ответ. Проверяемый ответ, успевший попасть в транскрипт, — не
 // предыдущий
-func (tail *Tail) takeAssistant(record transcriptRecord, wantUUID bool, answer string) {
-	text := contentText(record.Message.Content)
-	if text == "" {
-		return
-	}
+func (tail *Tail) takeAssistant(text, uuid, stopReason string, wantUUID bool, answer string) {
 	if wantUUID {
-		tail.AssistantUUID = record.UUID
+		tail.AssistantUUID = uuid
 	}
-	if !tail.PrevFound && record.Message.StopReason == "end_turn" && strings.TrimSpace(text) != answer {
+	if !tail.PrevFound && stopReason == "end_turn" && strings.TrimSpace(text) != answer {
 		tail.PrevAnswer = text
 		tail.PrevFound = true
 	}
-}
-
-func humanText(record transcriptRecord) (string, bool) {
-	switch {
-	case record.Type == "user" && record.Origin != nil && record.Origin.Kind == "human" && record.Message != nil:
-		return contentText(record.Message.Content), true
-	case record.Type == "attachment" && record.Attachment != nil && record.Attachment.Type == "queued_command" &&
-		record.Attachment.Origin != nil && record.Attachment.Origin.Kind == "human":
-		return record.Attachment.Prompt, true
-	}
-	return "", false
-}
-
-// contentText — текст содержимого сообщения: строка или текстовые части
-func contentText(raw json.RawMessage) string {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return text
-	}
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &parts) != nil {
-		return ""
-	}
-	var texts []string
-	for _, part := range parts {
-		if part.Type == "text" && part.Text != "" {
-			texts = append(texts, part.Text)
-		}
-	}
-	return strings.Join(texts, "\n")
 }

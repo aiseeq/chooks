@@ -62,10 +62,10 @@ func newFixture(t *testing.T, name, project string) *fixture {
 	projectDir := strings.ReplaceAll(project, "~", ProjectDirName(home))
 	transcript := filepath.Join(claudeDir, "projects", projectDir, "s1.jsonl")
 	writeFile(t, transcript, strings.Join([]string{
-		`{"type":"user","uuid":"u1","origin":{"kind":"human"},"message":{"role":"user","content":"` + humanMsg + `"}}`,
-		`{"type":"attachment","uuid":"a1","attachment":{"type":"queued_command","prompt":"сообщение другой сессии","origin":{"kind":"peer"}}}`,
-		`{"type":"assistant","uuid":"m1","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Посчитал. Поменять на $200?"}]}}`,
-		`{"type":"assistant","uuid":"m2","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]}}`,
+		`{"type":"user","uuid":"u1","timestamp":"2026-10-23T10:00:00Z","origin":{"kind":"human"},"message":{"role":"user","content":"` + humanMsg + `"}}`,
+		`{"type":"attachment","uuid":"a1","timestamp":"2026-10-23T10:00:00Z","attachment":{"type":"queued_command","prompt":"сообщение другой сессии","origin":{"kind":"peer"}}}`,
+		`{"type":"assistant","uuid":"m1","timestamp":"2026-10-23T10:00:00Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Посчитал. Поменять на $200?"}]}}`,
+		`{"type":"assistant","uuid":"m2","timestamp":"2026-10-23T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]}}`,
 		`{"type":"system","subtype":"turn_duration"}`,
 	}, "\n")+"\n")
 
@@ -356,12 +356,12 @@ func TestJournalsFindBefore(t *testing.T) {
 func TestReadTailFindsHumanBeyondFirstWindow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.jsonl")
 	var b strings.Builder
-	b.WriteString(`{"type":"user","uuid":"u1","origin":{"kind":"human"},"message":{"content":[{"type":"text","text":"далёкая реплика"}]}}` + "\n")
+	b.WriteString(`{"type":"user","uuid":"u1","timestamp":"2026-10-23T10:00:00Z","origin":{"kind":"human"},"message":{"content":[{"type":"text","text":"далёкая реплика"}]}}` + "\n")
 	filler := `{"type":"api-request-blob","data":"` + strings.Repeat("x", 4096) + `"}` + "\n"
 	for b.Len() < 3*tailWindowStart {
 		b.WriteString(filler)
 	}
-	b.WriteString(`{"type":"assistant","uuid":"m9","message":{"content":[{"type":"text","text":"Делать?"}]}}` + "\n")
+	b.WriteString(`{"type":"assistant","uuid":"m9","timestamp":"2026-10-23T10:00:00Z","message":{"content":[{"type":"text","text":"Делать?"}]}}` + "\n")
 	writeFile(t, path, b.String())
 
 	tail, err := ReadTail(path, "Делать?")
@@ -378,14 +378,14 @@ func TestReadTailFindsHumanBeyondFirstWindow(t *testing.T) {
 // к Stop-хуку ещё нет. Промежуточный текст хода (tool_use) — не ответ
 func TestScanTailPrevAnswer(t *testing.T) {
 	const (
-		human   = `{"type":"user","uuid":"u1","origin":{"kind":"human"},"message":{"content":"Кстати sleep vs dream - как таки лучше?"}}`
-		interim = `{"type":"assistant","uuid":"m0","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Сейчас проверю пересечения"}]}}`
-		think   = `{"type":"assistant","uuid":"m1","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"…"}]}}`
-		prev    = `{"type":"assistant","uuid":"m2","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Я бы взял **dream**. Переименовываю в dream?"}]}}`
-		notice  = `{"type":"user","uuid":"n1","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>…"}}`
+		human   = `{"type":"user","uuid":"u1","timestamp":"2026-10-23T10:00:00Z","origin":{"kind":"human"},"message":{"content":"Кстати sleep vs dream - как таки лучше?"}}`
+		interim = `{"type":"assistant","uuid":"m0","timestamp":"2026-10-23T10:00:00Z","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Сейчас проверю пересечения"}]}}`
+		think   = `{"type":"assistant","uuid":"m1","timestamp":"2026-10-23T10:00:00Z","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"…"}]}}`
+		prev    = `{"type":"assistant","uuid":"m2","timestamp":"2026-10-23T10:00:00Z","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Я бы взял **dream**. Переименовываю в dream?"}]}}`
+		notice  = `{"type":"user","uuid":"n1","timestamp":"2026-10-23T10:00:00Z","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>…"}}`
 		current = "Про переименование в dream жду твоего ответа."
 	)
-	currentRecord := `{"type":"assistant","uuid":"m3","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"` + current + `"}]}}`
+	currentRecord := `{"type":"assistant","uuid":"m3","timestamp":"2026-10-23T10:00:00Z","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"` + current + `"}]}}`
 
 	tests := []struct {
 		name               string
@@ -408,6 +408,22 @@ func TestScanTailPrevAnswer(t *testing.T) {
 				t.Fatalf("tail = %+v", tail)
 			}
 		})
+	}
+}
+
+// Реплика с картинкой, набранная посреди хода, приходит в очередь с prompt
+// списком частей, а не строкой. Прежний разбор ждал строку, терял такую
+// реплику и брал более раннюю (сессия chooks 26.10, «[Image #1] - не забудьте
+// везде заменить в проекте»)
+func TestScanTailQueuedReplyWithImage(t *testing.T) {
+	lines := []string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-10-23T10:00:00Z","origin":{"kind":"human"},"message":{"content":"ранняя реплика"}}`,
+		`{"type":"attachment","uuid":"a1","timestamp":"2026-10-23T10:01:00Z","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"[Image #1] - визуальный баг?"},{"type":"image","source":{"type":"base64","data":"AA=="}}],"origin":{"kind":"human"}}}`,
+		`{"type":"assistant","uuid":"m1","timestamp":"2026-10-23T10:02:00Z","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Смотрю"}]}}`,
+	}
+	tail := scanTail([]byte(strings.Join(lines, "\n")), "ответ")
+	if !tail.HumanFound || tail.HumanReply != "[Image #1] - визуальный баг?" || tail.AssistantUUID != "m1" {
+		t.Fatalf("tail = %+v", tail)
 	}
 }
 

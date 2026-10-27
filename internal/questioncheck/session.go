@@ -1,12 +1,14 @@
 package questioncheck
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/akit/session"
 )
 
 // Until — конец эксперимента: после 30.10 23:59 по местному хук ничего не
@@ -35,34 +37,27 @@ func DefaultTargets(home string) []Target {
 	}
 }
 
-// sessionRecord — запись живой сессии ~/.claude/sessions/<pid>.json, которую
-// Claude Code ведёт для каждого процесса: имя, заданное /rename или --name
-type sessionRecord struct {
-	PID       int    `json:"pid"`
-	SessionID string `json:"sessionId"`
-	Name      string `json:"name"`
-	CWD       string `json:"cwd"`
-}
-
-// SessionName читает имя сессии процесса claude из ~/.claude/sessions/<pid>.json.
-// Pid хук получает в CLAUDE_PID. Пустой pid — сессия без имени: признак
-// не прочитан, и это ошибка — решает вызывающий
+// SessionName читает имя сессии процесса claude из реестра Claude Code
+// ~/.claude/sessions/<pid>.json: имя, заданное /rename или --name. Pid хук
+// получает в CLAUDE_PID. Пустой pid — сессия без имени: признак не прочитан,
+// и это ошибка — решает вызывающий
 func SessionName(claudeDir, pid string) (string, error) {
 	pid = strings.TrimSpace(pid)
 	if pid == "" {
 		return "", fmt.Errorf("CLAUDE_PID is empty")
 	}
-	// Значение пришло из окружения: в путь оно попадает только именем файла
-	path := filepath.Join(claudeDir, "sessions", filepath.Base(pid)+".json")
-	data, err := os.ReadFile(path)
+	number, err := strconv.Atoi(pid)
+	if err != nil {
+		return "", fmt.Errorf("CLAUDE_PID %q is not a pid: %w", pid, err)
+	}
+	info, err := session.Registry{Dir: filepath.Join(claudeDir, "sessions")}.Get(number)
 	if err != nil {
 		return "", fmt.Errorf("read session record: %w", err)
 	}
-	var record sessionRecord
-	if err := json.Unmarshal(data, &record); err != nil {
-		return "", fmt.Errorf("parse session record %s: %w", path, err)
+	if info == nil {
+		return "", fmt.Errorf("read session record: pid %d: %w", number, os.ErrNotExist)
 	}
-	return record.Name, nil
+	return info.Name, nil
 }
 
 // MatchTarget находит цель по имени сессии и сверяет её с каталогом проекта

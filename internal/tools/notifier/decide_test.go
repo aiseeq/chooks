@@ -7,9 +7,17 @@ import (
 	"github.com/aiseeq/chooks/internal/core"
 )
 
-func tasks(items ...core.BackgroundTask) *[]core.BackgroundTask { return &items }
+// Через локальную переменную: на «return &items» с вызовом без аргументов
+// падает go fix (анализатор newexpr в Go 1.26.10, workarounds.md go-fix-newexpr-variadic)
+func tasks(items ...core.BackgroundTask) *[]core.BackgroundTask {
+	list := items
+	return &list
+}
 
-func crons(items ...core.SessionCron) *[]core.SessionCron { return &items }
+func crons(items ...core.SessionCron) *[]core.SessionCron {
+	list := items
+	return &list
+}
 
 func TestDecide_Stop(t *testing.T) {
 	shell := core.BackgroundTask{ID: "b1", Type: "shell", Status: "running"}

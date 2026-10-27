@@ -283,16 +283,14 @@ func scanAll(ctx context.Context, paths []string) ([]transcriptScan, error) {
 	errs := make([]error, len(paths))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for w := 0; w < 8; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			for i := range jobs {
 				scan, err := scanTranscript(paths[i], 0, time.Time{}, true)
 				scans[i] = transcriptScan{Path: paths[i], Events: scan.Events, Broken: scan.Broken}
 				errs[i] = err
 			}
-		}()
+		})
 	}
 	for i := range paths {
 		if ctx.Err() != nil {
@@ -342,7 +340,7 @@ func fileVersions(ctx context.Context, kind, path string) ([]version, []error) {
 	if err != nil {
 		return versions, append(problems, fmt.Errorf("%s: %w", path, err))
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
 		}

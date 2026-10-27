@@ -616,10 +616,8 @@ func TestConcurrentEventsNotifyOnce(t *testing.T) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	total := 0
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			result, err := f.checker.Check(Event{SessionID: "sess-1", TranscriptPath: f.transcript})
 			if err != nil {
 				t.Error(err)
@@ -628,7 +626,7 @@ func TestConcurrentEventsNotifyOnce(t *testing.T) {
 			mu.Lock()
 			total += len(result.Notices)
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	if total != 1 {
@@ -852,7 +850,7 @@ func TestEventOutputFitsClaudeCodeLimit(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
 	var paths []string
 	var lines []string
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		path := filepath.Join(root, "proj", fmt.Sprintf("p%d", i), "CLAUDE.md")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

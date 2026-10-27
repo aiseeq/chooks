@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"time"
@@ -85,9 +86,7 @@ func (c credentialsFile) oauthRaw() json.RawMessage { return c.fields[oauthKey] 
 // записывает файл атомарно с правами 600. Возвращает новое время изменения
 func writeCredentials(path string, current credentialsFile, value json.RawMessage) (time.Time, error) {
 	fields := make(map[string]json.RawMessage, len(current.fields)+1)
-	for key, raw := range current.fields {
-		fields[key] = raw
-	}
+	maps.Copy(fields, current.fields)
 	fields[oauthKey] = value
 	data, err := json.Marshal(fields)
 	if err != nil {

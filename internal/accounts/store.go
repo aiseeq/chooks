@@ -17,13 +17,13 @@ type Store struct {
 	Active string `json:"active,omitempty"`
 	// SyncedMtime — время изменения файла токенов при последней сверке:
 	// пока оно то же, файл сверять не нужно
-	SyncedMtime time.Time `json:"syncedMtime,omitempty"`
+	SyncedMtime time.Time `json:"syncedMtime"`
 	// AutoOff — автоматическое переключение выключено (ручным switch или auto off)
 	AutoOff bool `json:"autoOff,omitempty"`
 	// LastSwitch — последнее переключение: после него ротация выжидает
-	LastSwitch time.Time `json:"lastSwitch,omitempty"`
+	LastSwitch time.Time `json:"lastSwitch"`
 	// RetryAt — сетевой шаг сверки не удался, до этого момента не повторять
-	RetryAt  time.Time `json:"retryAt,omitempty"`
+	RetryAt  time.Time `json:"retryAt"`
 	Accounts []Account `json:"accounts"`
 }
 
@@ -40,7 +40,7 @@ type Account struct {
 	// Dead — почему вход учётки мёртв; пусто — жив
 	Dead string `json:"dead,omitempty"`
 	// UsageCheckedAt — когда расход учётки последний раз спрашивался у API
-	UsageCheckedAt time.Time `json:"usageCheckedAt,omitempty"`
+	UsageCheckedAt time.Time `json:"usageCheckedAt"`
 }
 
 func (a *Account) oauth() (oauth, error) { return parseOAuth(a.OAuth) }

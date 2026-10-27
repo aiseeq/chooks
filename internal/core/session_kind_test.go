@@ -28,7 +28,7 @@ func startWithArgs(t *testing.T, args ...string) string {
 	pid := strconv.Itoa(cmd.Process.Pid)
 	// Между стартом процесса и подменой его образа на sh проходит время,
 	// и до этого момента в /proc лежит командная строка тестового бинаря
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		raw, err := os.ReadFile("/proc/" + pid + "/cmdline")
 		if err == nil && strings.Contains(string(raw), "while :;") {
 			return pid

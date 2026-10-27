@@ -61,7 +61,7 @@ type sessionState struct {
 	LastAssistant int64 `json:"last_assistant,omitempty"`
 	// CompactAt — время последнего сжатия: список инструкций сразу после
 	// него Claude Code не отслеживает
-	CompactAt time.Time `json:"compact_at,omitempty"`
+	CompactAt time.Time `json:"compact_at"`
 	// Announced — хеши SKILL.md, о которых напомнил хук схемы 1, по
 	// каталогу скилла: та правка уже объявлена, второй раз её не показывать
 	Announced map[string]string `json:"announced,omitempty"`

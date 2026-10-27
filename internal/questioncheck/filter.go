@@ -66,7 +66,7 @@ func Questions(text string) []Question {
 		found = append(found, Question{Text: sentence, Line: contextBefore(line, sentence)})
 	}
 
-	for _, line = range strings.Split(plain, "\n") {
+	for line = range strings.SplitSeq(plain, "\n") {
 		if isQuoteLine(line) {
 			continue
 		}

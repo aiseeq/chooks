@@ -215,7 +215,7 @@ func TestMergeWeeklyLimitConcurrent(t *testing.T) {
 	now := time.Date(2026, 10, 21, 1, 0, 0, 0, time.UTC)
 	var wg sync.WaitGroup
 	errs := make(chan error, 40)
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		wg.Add(1)
 		go func(used float64) {
 			defer wg.Done()

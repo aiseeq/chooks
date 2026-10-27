@@ -1,8 +1,9 @@
 module github.com/aiseeq/chooks
 
-go 1.21
+go 1.26.0
 
 require (
+	github.com/aiseeq/akit v0.8.1
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/pmezard/go-difflib v1.0.0
 	github.com/spf13/cobra v1.8.0

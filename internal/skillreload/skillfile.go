@@ -142,7 +142,7 @@ func splitFrontmatter(text string) (string, string) {
 func skillName(dir string, raw []byte) string {
 	name := filepath.Base(dir)
 	frontmatter, _ := splitFrontmatter(string(raw))
-	for _, line := range strings.Split(frontmatter, "\n") {
+	for line := range strings.SplitSeq(frontmatter, "\n") {
 		key, value, ok := strings.Cut(strings.TrimRight(line, "\r"), ":")
 		if ok && strings.TrimSpace(key) == "name" {
 			if v := strings.Trim(strings.TrimSpace(value), `"'`); v != "" {

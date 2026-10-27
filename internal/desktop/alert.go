@@ -185,7 +185,7 @@ func ParseInts(raw string) ([]int, error) {
 	}
 
 	var values []int
-	for _, part := range strings.Split(raw, ",") {
+	for part := range strings.SplitSeq(raw, ",") {
 		value, err := strconv.Atoi(strings.TrimSpace(part))
 		if err != nil {
 			return nil, fmt.Errorf("invalid pid list %q: %w", raw, err)

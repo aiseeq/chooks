@@ -19,3 +19,4 @@
 ## Журнал
 - 2026-10-28 03:02 открыт — chooks-master
 - 2026-10-28 03:02 note — chooks-master: правка .graft.yaml и README; дальше graft commit и graft install
+- 2026-10-28 03:02 note — chooks-master: коммит 294271a; glint medium unused-internal-export на BaseTool.SupportedTools — ложное (метод интерфейса core.ToolValidator через встраивание), отправлено glint-master

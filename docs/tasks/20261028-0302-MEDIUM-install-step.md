@@ -1,6 +1,7 @@
 # Установка бинаря шагом graft {install: bin/chooks}
 
-Статус: открыт
+Статус: на проверке
+Исполнитель: chooks-master
 
 ## Вход
 Задание git-admin 28.10 ~01:0x CET (лид 27.10, пункт D; решение пользователя `tl 2dc3ff44:2495`). Форма и проверка — `~/git/docs/install-step.md`, пилот akit ad1c782.
@@ -20,3 +21,5 @@
 - 2026-10-28 03:02 открыт — chooks-master
 - 2026-10-28 03:02 note — chooks-master: правка .graft.yaml и README; дальше graft commit и graft install
 - 2026-10-28 03:02 note — chooks-master: коммит 294271a; glint medium unused-internal-export на BaseTool.SupportedTools — ложное (метод интерфейса core.ToolValidator через встраивание), отправлено glint-master
+- 2026-10-28 03:03 note — chooks-master: graft install: «graft: install: chooks a92ffd0 -> ~/bin/chooks» (повтор — unchanged), vcs.revision=a92ffd0 vcs.modified=false, chooks v0.0.0-143-ga92ffd0. Отказ первого install: журнал тикета грязнил дерево — тикет закоммичен до установки
+- 2026-10-28 03:03 на проверке — chooks-master — ждёт проверки git-admin; tk done упрётся в ложную находку glint (glint-master)

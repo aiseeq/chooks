@@ -69,7 +69,7 @@ tasks:
       - go vet ./...
       - sh: |
           if command -v golangci-lint >/dev/null 2>&1; then
-            golangci-lint run
+            golangci-lint run --allow-serial-runners
           else
             echo "golangci-lint не установлен, выполнен только go vet"
           fi

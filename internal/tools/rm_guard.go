@@ -31,6 +31,9 @@ import (
 // сменой каталога: Claude Code спрашивает «Dangerous rm operation on
 // statically-unresolvable target» (сверено с Claude Code 2.1.304 и 2.1.308,
 // таблица в тесте), хук просит литеральный абсолютный путь.
+//
+// Третья форма — цель сама рабочая папка Bash или её родитель
+// (workspaceReasons, «would remove a workspace directory»).
 type RmGuardTool struct {
 	*BaseTool
 	lookupEnv func(string) (string, bool)
@@ -101,11 +104,23 @@ func (t *RmGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*c
 			reasons = append(reasons, t.checkCommand(c.words, vars, inlineNone)...)
 		}
 	}
-	header := rmGuardHeader
-	if len(reasons) == 0 {
-		header = rmCdGlobHeader
+	workspace, err := t.workspaceReasons(script, input.CWD)
+	if err != nil {
+		return nil, err
 	}
-	reasons = append(reasons, cdGlobReasons(script)...)
+	header := rmGuardHeader
+	for _, form := range []struct {
+		header  string
+		reasons []string
+	}{
+		{rmCdGlobHeader, cdGlobReasons(script)},
+		{rmWorkspaceHeader, workspace},
+	} {
+		if len(reasons) == 0 {
+			header = form.header
+		}
+		reasons = append(reasons, form.reasons...)
+	}
 	if len(reasons) == 0 {
 		return &core.ValidationResult{IsValid: true}, nil
 	}

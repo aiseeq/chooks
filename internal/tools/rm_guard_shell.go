@@ -20,6 +20,8 @@ type shWord struct {
 type shCommand struct {
 	words  []shWord
 	nested bool
+	// sep разделитель перед командой: "" у первой, &&, ;, |, ||, &, перевод строки
+	sep string
 }
 
 // shScript разбор всей команды Bash. Флаги — конструкции, на которых
@@ -64,6 +66,8 @@ type shLexer struct {
 	heredocs  []heredocSpec
 	// closers слова, закрывающие открытые составные команды, от внешней к внутренней
 	closers []string
+	// sep разделитель перед следующей командой
+	sep string
 }
 
 // heredocSpec ожидающее тело here-doc: строка-ограничитель и <<- (снимать табы)
@@ -133,9 +137,18 @@ func (l *shLexer) closeCompound(word string) {
 func (l *shLexer) flushCmd() {
 	l.flushWord()
 	if len(l.words) > 0 {
-		l.out.cmds = append(l.out.cmds, shCommand{words: l.words, nested: l.nested})
+		l.out.cmds = append(l.out.cmds, shCommand{words: l.words, nested: l.nested, sep: l.sep})
+		l.sep = ""
 	}
 	l.words = nil
+}
+
+// setSep запоминает разделитель перед следующей командой; ; | || и перевод
+// строки не заменяются на && (x;\n, ) && …)
+func (l *shLexer) setSep(sep string) {
+	if l.sep == "" || l.sep == "&&" {
+		l.sep = sep
+	}
 }
 
 func (l *shLexer) at(i int) rune {
@@ -248,14 +261,17 @@ func (l *shLexer) separator(i int) (int, bool) {
 	switch {
 	case c == '\n':
 		l.flushCmd()
+		l.setSep("\n")
 		return l.skipHeredocs(i + 1), true
 	case c == '&' && l.at(i+1) == '>':
 		return i, false // &> — перенаправление
 	case c == ';' || c == '&' || c == '|':
 		l.flushCmd()
 		if n := l.at(i + 1); n == c || (c == '|' && n == '&') {
+			l.setSep(l.slice(i, i+2))
 			return i + 2, true
 		}
+		l.setSep(string(c))
 		return i + 1, true
 	}
 	return i, false

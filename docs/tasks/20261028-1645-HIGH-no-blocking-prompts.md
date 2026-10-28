@@ -1,6 +1,7 @@
 # Хуки: отказ окнам, ждущим ввода (AskUserQuestion, PermissionRequest, Elicitation)
 
-Статус: открыт
+Статус: в работе
+Исполнитель: chooks-master
 
 ## Вход
 Задание lead 28.10 ~16:50 CET, итог — lead. Решение пользователя: user-word ~/.claude/projects/-home-aisee/2dc3ff44-a1ed-4f1b-98e8-35938be18b82.jsonl 'Включаю этот набор?" - да' (28.10 16:44 CET), ~/.claude/decisions.md no-blocking-prompts.
@@ -22,3 +23,4 @@
 
 ## Журнал
 - 2026-10-28 16:45 открыт — chooks-master
+- 2026-10-28 16:46 в работе — chooks-master

@@ -1,6 +1,6 @@
 # rm_guard: отказ на rm текущей папки Bash (workspace directory)
 
-Статус: на проверке
+Статус: готово
 Исполнитель: chooks-master
 
 ## Вход
@@ -24,3 +24,4 @@
 - 2026-10-28 10:10 note — chooks-master: Сделано: rm_guard_workspace.go (+ sep в разборе оболочки), тесты на 29 вердиктов CC 2.1.312 и 4 случая транскриптов. Подсказка — отдельный cd в CLAUDE_PROJECT_DIR, затем отдельный rm (новое правило ~/.claude/CLAUDE.md 28.10 «rm — отдельным вызовом»). Сухой прогон 6917 rm-вызовов транскриптов: 4/4 настоящих отказа CC ловятся; лишних отказов 4 — 2 на CC 2.1.302/303 (проверки ещё не было), 1 обрезанная строка извлечения, 1 aguard 27.10 на 2.1.310 (CC пропустил cd … && … | tail; …; rm -r cwd; на 2.1.312 та же форма останавливается запросом multiple operations). 7239 вызовов, 311 отказов старого хука не изменились.
 - 2026-10-28 10:11 note — chooks-master: Основание без «да»: declined.md 23.10 (пользователь: «буду тогда просто отказывать агенту во всех таких запросах», rm_guard расширен, «чтобы окно и нотис не доходили») + decisions.md hook-bugfix-no-ask. Коммит и graft install.
 - 2026-10-28 10:18 на проверке — chooks-master — 415f47c, установлен (chooks v0.0.0-150-g415f47c). Проверить: graft smoke; go test ./internal/tools -run Workspace; сухой прогон — scratchpad 705b00fe dry/run.sh (dry.tsv); песочница вердиктов — scratchpad 705b00fe rmlab/run.sh + cases*.tsv.
+- 2026-10-28 10:21 готово — git-admin: git-admin 28.10: ~/bin/chooks = 415f47c, modified=false; чёрный ящик pre-tool-use, cwd=W: rm W, rm родителя, rm -rf ., cd /x; rm W → отказ 2 с подсказкой; rm W/sub, rm чужой папки, rmdir W/sub, cd /x && rm W, ls; rm other, W/../other → пропуск. Основание без «да» — declined.md:69 (23.10 rm_guard расширен, чтобы окно не доходило). Замечание вне приёмки: rm -rf ~ и rm -rf $PWD при cwd под ними пропускаются

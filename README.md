@@ -72,14 +72,15 @@ WebFetch представляется сайтам как Claude-User, и час
 Сборка идёт через [graft](https://github.com/aiseeq/graft) (задачи в `.graft.yaml`):
 
 ```bash
-go install github.com/aiseeq/graft@v0.4.0
+go install github.com/aiseeq/graft@latest
 git clone https://github.com/aiseeq/chooks.git
 cd chooks
 graft install
 ```
 
 Устанавливает бинарь в `~/bin/chooks` и конфигурацию в `~/.config/chooks/config.yaml`.
-Существующая конфигурация не перезаписывается: новая версия кладётся рядом как `config.yaml.new`.
+Бинарь ставит шаг graft `{install: bin/chooks}`: только из закоммиченного дерева, атомарной заменой (запущенный процесс уведомления держит старый файл).
+Существующая конфигурация не перезаписывается: `graft install` печатает её отличия от шаблона `configs/hooks.yaml`.
 
 Затем добавь блок `hooks` из [`configs/settings-snippet.json`](configs/settings-snippet.json) в `~/.claude/settings.json`:
 

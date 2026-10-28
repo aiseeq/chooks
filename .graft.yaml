@@ -4,7 +4,7 @@ version:
   mode: git-tag
 gate:
   - task: smoke
-  # glint падает кодом выхода на любой находке: fail_on: low в .glint.yaml.
+  # glint падает кодом выхода на находках high и выше (fail_on по умолчанию).
   - sh: GOWORK=off ~/bin/glint check .
 
 tools:
@@ -22,15 +22,11 @@ tasks:
     desc: установить бинарь в ~/bin и конфигурацию в ~/.config/chooks
     deps: [build]
     run:
-      # Замена через переименование: прямая перезапись падает с "Text file busy",
-      # пока работает фоновый процесс уведомления
+      - {install: bin/chooks}
       - sh: |
           set -eu
-          dir="$HOME/bin"
           config="${XDG_CONFIG_HOME:-$HOME/.config}/chooks/config.yaml"
-          mkdir -p "$dir" "$(dirname "$config")" "$HOME/.claude/logs"
-          cp bin/chooks "$dir/chooks.new"
-          mv -f "$dir/chooks.new" "$dir/chooks"
+          mkdir -p "$(dirname "$config")" "$HOME/.claude/logs"
           # Существующую конфигурацию не трогаем и шаблон рядом не кладём:
           # копия .new устаревала и путала, какие хуки включены
           if [ -f "$config" ]; then
@@ -43,7 +39,6 @@ tasks:
             cp configs/hooks.yaml "$config"
             echo "Конфигурация создана: $config"
           fi
-          echo "Бинарь установлен: $dir/chooks"
           echo ""
           echo "Добавь блок hooks из configs/settings-snippet.json в ~/.claude/settings.json"
   uninstall:

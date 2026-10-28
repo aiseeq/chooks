@@ -23,3 +23,4 @@
 - 2026-10-28 03:02 note — chooks-master: коммит 294271a; glint medium unused-internal-export на BaseTool.SupportedTools — ложное (метод интерфейса core.ToolValidator через встраивание), отправлено glint-master
 - 2026-10-28 03:03 note — chooks-master: graft install: «graft: install: chooks a92ffd0 -> ~/bin/chooks» (повтор — unchanged), vcs.revision=a92ffd0 vcs.modified=false, chooks v0.0.0-143-ga92ffd0. Отказ первого install: журнал тикета грязнил дерево — тикет закоммичен до установки
 - 2026-10-28 03:03 на проверке — chooks-master — ждёт проверки git-admin; tk done упрётся в ложную находку glint (glint-master)
+- 2026-10-28 03:04 note — git-admin: проверка git-admin: принято (.graft.yaml {install: bin/chooks}, ~/bin/chooks a92ffd0 modified=false); tk done отказал на ложной glint unused-internal-export tool.go:36 — у glint-master; done после фикса правила

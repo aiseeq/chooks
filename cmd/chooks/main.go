@@ -71,6 +71,7 @@ func execute() int {
 		newHookCmd(hookPostToolBatch, "Обработать PostToolBatch hook", &exitCode),
 		newHookCmd(hookQuestionCheck, "Проверить вопросы пользователю в конце хода (Stop)", &exitCode),
 		newHookCmd(hookWebFetchFallback, "Подменить отказ сайта в ответе WebFetch текстом из webtext (PostToolUse)", &exitCode),
+		newHookCmd(hookNoPrompt, "Отказать окну, ждущему ввода человека (PreToolUse AskUserQuestion, PermissionRequest, Elicitation)", &exitCode),
 		newNotifyCmd(),
 		newStatusLineCmd(),
 		newLimitsCmd(),
@@ -142,6 +143,7 @@ const (
 	hookPostToolBatch    = "post-tool-batch"
 	hookQuestionCheck    = "question-check"
 	hookWebFetchFallback = "webfetch-fallback"
+	hookNoPrompt         = "no-prompt"
 )
 
 // newHookCmd создает команду обработки хука, записывающую exit-код по указателю
@@ -216,6 +218,12 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		return exitAllowed, nil
 	case hookWebFetchFallback:
 		runWebFetchFallback(ctx, data, config, logger, os.Stdout)
+		return exitAllowed, nil
+	case hookNoPrompt:
+		if err := runNoPrompt(data, logger, os.Stdout); err != nil {
+			logger.Error("prompt left to the dialog", "hook", hookNoPrompt, "error", err)
+			return exitError, err
+		}
 		return exitAllowed, nil
 	default:
 		return exitError, fmt.Errorf("unknown hook type: %s", hookType)

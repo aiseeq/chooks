@@ -21,11 +21,35 @@ import (
 // кириллицы: границы — не-буква или край текста
 var claim = regexp.MustCompile(`(?i)(?:ещё|еще) не отправлено|(?:^|\P{L})ты (?:(?:ещё|еще) )?не отправил|(?:ответ|текст|черновик|сообщение|вопрос)\S*[^.\n]{0,60}?(?:^|\P{L})не (?:отправлен[оаы]?(?:\P{L}|$)|ушл|ушёл|ушел)|(?:^|\P{L})не отправлен[оаы]? (?:ответ|текст|черновик|вопрос)`)
 
-// reddyHistory — вызов, которым агент открывает чат: программа reddy в начале
-// команды или после разделителя (`;`, `&&`, `|`, `$(`), подкоманда history
-// после её флагов. Слова reddy и history в тексте правки, тикета или промпта —
-// не вызов (ложный пропуск 29.10 12:15 у chooks-master)
-var reddyHistory = regexp.MustCompile(`(?:^|[;&|(]\s*)(?:\S*/)?reddy(?:\s+-\S+)*\s+history\b`)
+// Вызов, которым агент открывает чат: программа reddy в начале простой
+// команды, подкоманда history после её флагов. Начало команды — начало
+// строки, разделитель (`;`, `&&`, `|`, `$(`, `{`), `do`, `then`, после префиксов
+// `timeout N`, `env`, `sudo`, `X=…`. Слова reddy и history в тексте правки,
+// тикета или промпта — не вызов (ложный пропуск 29.10 12:15 у chooks-master)
+const (
+	callStart   = `(?:^|[;&|({\n]|\bdo\b|\bthen\b)\s*(?:(?:timeout(?:\s+-\S+)*\s+\S+|env|sudo|[A-Za-z_]\w*=\S*)\s+)*`
+	historyArgs = `(?:\s+-\S+)*\s+history\b`
+)
+
+var reddyHistory = regexp.MustCompile(callStart + `["']?(?:\S*/)?reddy["']?` + historyArgs)
+
+// reddyVar — переменная с путём к reddy: в сессиях ~/work чат открывают
+// `R=/home/aisee/work/reddy/bin/reddy; $R history <чат>`
+var reddyVar = regexp.MustCompile(`\b([A-Za-z_]\w*)=["']?(?:\S*/)?reddy["']?(?:[\s;&|]|$)`)
+
+// chatCall — открывает ли команда Bash чат
+func chatCall(command string) bool {
+	if reddyHistory.MatchString(command) {
+		return true
+	}
+	for _, m := range reddyVar.FindAllStringSubmatch(command, -1) {
+		viaVar := regexp.MustCompile(callStart + `"?\$(?:` + m[1] + `\b|\{` + m[1] + `\})"?` + historyArgs)
+		if viaVar.MatchString(command) {
+			return true
+		}
+	}
+	return false
+}
 
 // Claim — первая фраза о неотправленном тексте в ответе, "" — её нет
 func Claim(answer string) string {
@@ -151,7 +175,7 @@ func scanEvents(events []transcript.Event) (checked, turnFound bool) {
 		case event.Sidechain:
 		case event.Role == transcript.User || event.Role == transcript.Peer || (event.Role == transcript.Note && event.Who == "prompt"):
 			return false, true
-		case event.Role == transcript.Cmd && event.Who == "Bash" && reddyHistory.MatchString(event.Text):
+		case event.Role == transcript.Cmd && event.Who == "Bash" && chatCall(event.Text):
 			return true, true
 		}
 	}

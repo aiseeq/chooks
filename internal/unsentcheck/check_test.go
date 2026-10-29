@@ -59,8 +59,16 @@ const (
 	ticketEdit = `{"type":"assistant","uuid":"m3","timestamp":"2026-10-29T10:02:00Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"cat >> docs/tasks/t.md <<'EOF'\n- ход без reddy history — блок\nEOF"}}]}}`
 )
 
-func TestReddyHistory(t *testing.T) {
+func TestChatCall(t *testing.T) {
 	calls := []string{
+		// Формы из транскриптов за 7 дней (независимая проверка 29.10)
+		"R=/home/aisee/work/reddy/bin/reddy; $R history 2783119 --since '2026-10-29'",
+		`R="/home/aisee/work/reddy/bin/reddy" && "${R}" history Оля`,
+		"which reddy && timeout 60 reddy history Оля",
+		"for c in 1 2; do reddy history $c; done",
+		"for c in 1 2; do ./bin/reddy history $c; done",
+		"cd ~/work\nreddy history Оля | tail",
+		`R=/home/aisee/work/reddy/bin/reddy; f(){ $R history $1 --since "$2"; }; f 1 2`,
 		"reddy history 'Клиент - задачи'",
 		"reddy history --since 1d Оля | tail -20",
 		"cd ~ && reddy history Оля",
@@ -69,7 +77,7 @@ func TestReddyHistory(t *testing.T) {
 		`echo "$(reddy history Оля)"`,
 	}
 	for _, command := range calls {
-		if !reddyHistory.MatchString(command) {
+		if !chatCall(command) {
 			t.Errorf("вызов не узнан: %q", command)
 		}
 	}
@@ -79,9 +87,11 @@ func TestReddyHistory(t *testing.T) {
 		"cat >> t.md <<'EOF'\nход без reddy history — блок\nEOF",
 		`claude -p "Сначала выполни Bash: reddy history Оля"`,
 		"git commit -m 'unsent-check: reddy history в ходе'",
+		"R=/home/aisee/work/reddy/bin/reddy; $R chats; echo history",
+		"R=/home/aisee/work/reddy/bin/reddy; $RX history",
 	}
 	for _, command := range texts {
-		if reddyHistory.MatchString(command) {
+		if chatCall(command) {
 			t.Errorf("текст принят за вызов: %q", command)
 		}
 	}

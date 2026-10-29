@@ -53,7 +53,39 @@ const (
 	otherBash  = `{"type":"assistant","uuid":"m2","timestamp":"2026-10-29T10:02:00Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"reddy unread"}}]}}`
 	toolResult = `{"type":"user","uuid":"r2","timestamp":"2026-10-29T10:02:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"history пуста"}]}}`
 	notice     = `{"type":"user","uuid":"n1","timestamp":"2026-10-29T10:03:00Z","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>…"}}`
+	// Запрос claude -p и SDK пишется без origin
+	program = `{"type":"user","uuid":"p1","timestamp":"2026-10-29T10:00:00Z","entrypoint":"sdk-cli","message":{"content":"что с ответом?"}}`
+	// Правка тикета, где слова reddy и history — текст, а не вызов
+	ticketEdit = `{"type":"assistant","uuid":"m3","timestamp":"2026-10-29T10:02:00Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"cat >> docs/tasks/t.md <<'EOF'\n- ход без reddy history — блок\nEOF"}}]}}`
 )
+
+func TestReddyHistory(t *testing.T) {
+	calls := []string{
+		"reddy history 'Клиент - задачи'",
+		"reddy history --since 1d Оля | tail -20",
+		"cd ~ && reddy history Оля",
+		"reddy --json history Оля",
+		"/home/aisee/bin/reddy history Оля",
+		`echo "$(reddy history Оля)"`,
+	}
+	for _, command := range calls {
+		if !reddyHistory.MatchString(command) {
+			t.Errorf("вызов не узнан: %q", command)
+		}
+	}
+	texts := []string{
+		"reddy unread",
+		"sub 'reddy history' 'x' check.go",
+		"cat >> t.md <<'EOF'\nход без reddy history — блок\nEOF",
+		`claude -p "Сначала выполни Bash: reddy history Оля"`,
+		"git commit -m 'unsent-check: reddy history в ходе'",
+	}
+	for _, command := range texts {
+		if reddyHistory.MatchString(command) {
+			t.Errorf("текст принят за вызов: %q", command)
+		}
+	}
+}
 
 func writeTranscript(t *testing.T, lines ...string) string {
 	t.Helper()
@@ -78,6 +110,9 @@ func TestRun(t *testing.T) {
 		{name: "чат открыт в прошлом ходе", event: Event{LastMessage: answer}, lines: []string{history, human, otherBash}, wantBlock: true},
 		{name: "письмо сессии начинает ход", event: Event{LastMessage: answer}, lines: []string{human, history, peer, otherBash}, wantBlock: true},
 		{name: "начала хода нет", event: Event{LastMessage: answer}, lines: []string{history, otherBash}},
+		{name: "запрос программы начинает ход", event: Event{LastMessage: answer}, lines: []string{program, history, program, otherBash}, wantBlock: true},
+		{name: "чат открыт в ходе программы", event: Event{LastMessage: answer}, lines: []string{program, history, otherBash}},
+		{name: "reddy history в тексте правки", event: Event{LastMessage: answer}, lines: []string{human, ticketEdit}, wantBlock: true},
 		{name: "фразы нет", event: Event{LastMessage: "Ответ Ане отправлен."}, lines: []string{human}},
 		{name: "повторный Stop", event: Event{LastMessage: answer, StopHookActive: true}, lines: []string{human}, wantSkip: "stop hook active"},
 		{name: "субагент", event: Event{LastMessage: answer, AgentID: "a1"}, lines: []string{human}, wantSkip: "subagent"},

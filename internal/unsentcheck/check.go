@@ -21,8 +21,11 @@ import (
 // кириллицы: границы — не-буква или край текста
 var claim = regexp.MustCompile(`(?i)(?:ещё|еще) не отправлено|(?:^|\P{L})ты (?:(?:ещё|еще) )?не отправил|(?:ответ|текст|черновик|сообщение|вопрос)\S*[^.\n]{0,60}?(?:^|\P{L})не (?:отправлен[оаы]?(?:\P{L}|$)|ушл|ушёл|ушел)|(?:^|\P{L})не отправлен[оаы]? (?:ответ|текст|черновик|вопрос)`)
 
-// reddyHistory — вызов, которым агент открывает чат
-var reddyHistory = regexp.MustCompile(`\breddy\b.*\bhistory\b`)
+// reddyHistory — вызов, которым агент открывает чат: программа reddy в начале
+// команды или после разделителя (`;`, `&&`, `|`, `$(`), подкоманда history
+// после её флагов. Слова reddy и history в тексте правки, тикета или промпта —
+// не вызов (ложный пропуск 29.10 12:15 у chooks-master)
+var reddyHistory = regexp.MustCompile(`(?:^|[;&|(]\s*)(?:\S*/)?reddy(?:\s+-\S+)*\s+history\b`)
 
 // Claim — первая фраза о неотправленном тексте в ответе, "" — её нет
 func Claim(answer string) string {
@@ -86,8 +89,9 @@ const (
 )
 
 // ChatOpened — вызывался ли в текущем ходе Bash с `reddy … history`. Ход —
-// от последней реплики человека или письма сессии; начала хода нет и в
-// предельном окне — смотрится всё окно
+// от последней реплики человека, письма сессии или запроса программы
+// (`claude -p`, SDK: запись без origin); начала хода нет и в предельном
+// окне — смотрится всё окно
 func ChatOpened(path string) (bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -145,7 +149,7 @@ func scanEvents(events []transcript.Event) (checked, turnFound bool) {
 		event := &events[j]
 		switch {
 		case event.Sidechain:
-		case event.Role == transcript.User || event.Role == transcript.Peer:
+		case event.Role == transcript.User || event.Role == transcript.Peer || (event.Role == transcript.Note && event.Who == "prompt"):
 			return false, true
 		case event.Role == transcript.Cmd && event.Who == "Bash" && reddyHistory.MatchString(event.Text):
 			return true, true

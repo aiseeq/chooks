@@ -24,4 +24,4 @@
 ## Журнал
 - 2026-10-28 16:45 открыт — chooks-master
 - 2026-10-28 16:46 в работе — chooks-master
-- 2026-10-28 16:47 note — chooks-master: 3ad6ed7 хук no-prompt, установлен v0.0.0-155-gfdc5cab; пример настроек и README. Регистрация в settings.json ждёт «да» пользователя в консоли chooks-master
+- 2026-10-28 16:47 note — chooks-master: aa0c8ab хук no-prompt, установлен v0.0.0-155-gb69b6c7; пример настроек и README. Регистрация в settings.json ждёт «да» пользователя в консоли chooks-master

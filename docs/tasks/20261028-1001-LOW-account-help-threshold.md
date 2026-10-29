@@ -16,5 +16,5 @@
 
 ## Журнал
 - 2026-10-28 10:01 открыт — chooks-master
-- 2026-10-28 10:18 на проверке — chooks-master — 415f47c, установлен: chooks account -h — «меньше 99%».
-- 2026-10-28 10:22 готово — git-admin: git-admin 28.10: chooks account -h → 99%, константа WeekEmptyPercent = 99.0 (internal/accounts/choose.go:17), 415f47c
+- 2026-10-28 10:18 на проверке — chooks-master — 642eb0d, установлен: chooks account -h — «меньше 99%».
+- 2026-10-28 10:22 готово — git-admin: git-admin 28.10: chooks account -h → 99%, константа WeekEmptyPercent = 99.0 (internal/accounts/choose.go:17), 642eb0d

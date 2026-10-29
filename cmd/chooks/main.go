@@ -72,6 +72,7 @@ func execute() int {
 		newHookCmd(hookQuestionCheck, "Проверить вопросы пользователю в конце хода (Stop)", &exitCode),
 		newHookCmd(hookWebFetchFallback, "Подменить отказ сайта в ответе WebFetch текстом из webtext (PostToolUse)", &exitCode),
 		newHookCmd(hookNoPrompt, "Отказать окну, ждущему ввода человека (PreToolUse AskUserQuestion, PermissionRequest, Elicitation)", &exitCode),
+		newHookCmd(hookUnsentCheck, "Не выпустить ответ «текст не отправлен» без reddy history в ходе (Stop)", &exitCode),
 		newNotifyCmd(),
 		newStatusLineCmd(),
 		newLimitsCmd(),
@@ -144,6 +145,7 @@ const (
 	hookQuestionCheck    = "question-check"
 	hookWebFetchFallback = "webfetch-fallback"
 	hookNoPrompt         = "no-prompt"
+	hookUnsentCheck      = "unsent-check"
 )
 
 // newHookCmd создает команду обработки хука, записывающую exit-код по указателю
@@ -218,6 +220,9 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		return exitAllowed, nil
 	case hookWebFetchFallback:
 		runWebFetchFallback(ctx, data, config, logger, os.Stdout)
+		return exitAllowed, nil
+	case hookUnsentCheck:
+		runUnsentCheck(parseSessionInput(logger, hookType, data), logger, os.Stdout)
 		return exitAllowed, nil
 	case hookNoPrompt:
 		if err := runNoPrompt(data, logger, os.Stdout); err != nil {

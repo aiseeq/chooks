@@ -44,6 +44,9 @@
     "Stop": [
       {
         "hooks": [{ "type": "command", "command": "$HOME/bin/chooks stop", "timeout": 3 }]
+      },
+      {
+        "hooks": [{ "type": "command", "command": "$HOME/bin/chooks unsent-check", "timeout": 5 }]
       }
     ],
     "StopFailure": [

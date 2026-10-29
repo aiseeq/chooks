@@ -31,7 +31,7 @@ const (
 	historyArgs = `(?:\s+-\S+)*\s+history\b`
 )
 
-var reddyHistory = regexp.MustCompile(callStart + `["']?(?:\S*/)?reddy["']?` + historyArgs)
+var reddyHistory = regexp.MustCompile(callStart + `(?:["']\S*/reddy["']|(?:\S*/)?reddy)` + historyArgs)
 
 // reddyVar — переменная с путём к reddy: в сессиях ~/work чат открывают
 // `R=/home/aisee/work/reddy/bin/reddy; $R history <чат>`

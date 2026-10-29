@@ -66,6 +66,7 @@ func TestChatCall(t *testing.T) {
 		`R="/home/aisee/work/reddy/bin/reddy" && "${R}" history Оля`,
 		"which reddy && timeout 60 reddy history Оля",
 		"for c in 1 2; do reddy history $c; done",
+		`"$HOME/bin/reddy" history Оля`,
 		"for c in 1 2; do ./bin/reddy history $c; done",
 		"cd ~/work\nreddy history Оля | tail",
 		`R=/home/aisee/work/reddy/bin/reddy; f(){ $R history $1 --since "$2"; }; f 1 2`,
@@ -89,6 +90,8 @@ func TestChatCall(t *testing.T) {
 		"git commit -m 'unsent-check: reddy history в ходе'",
 		"R=/home/aisee/work/reddy/bin/reddy; $R chats; echo history",
 		"R=/home/aisee/work/reddy/bin/reddy; $RX history",
+		// Строка heredoc с примером вызова в правке теста
+		"sub <<'EOF'\ncalls := []string{\n\t\"reddy history 'Клиент - задачи'\",\n}\nEOF",
 	}
 	for _, command := range texts {
 		if chatCall(command) {

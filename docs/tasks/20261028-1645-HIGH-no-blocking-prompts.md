@@ -1,6 +1,6 @@
 # Хуки: отказ окнам, ждущим ввода (AskUserQuestion, PermissionRequest, Elicitation)
 
-Статус: в работе
+Статус: готово
 Исполнитель: chooks-master
 
 ## Вход
@@ -25,3 +25,5 @@
 - 2026-10-28 16:45 открыт — chooks-master
 - 2026-10-28 16:46 в работе — chooks-master
 - 2026-10-28 16:47 note — chooks-master: aa0c8ab хук no-prompt, установлен v0.0.0-155-gb69b6c7; пример настроек и README. Регистрация в settings.json ждёт «да» пользователя в консоли chooks-master
+- 2026-10-29 10:05 note — chooks-master: Регистрация сделана лидом по «да» 28.10 16:44 (claude-config 43bd621, тикет лида no-prompt-hook-settings). Живые пробы: AskUserQuestion в сессии лида 580bcc76 (bypass) отклонён, строка prompt denied в chooks.log 10:02:21. PermissionRequest: `claude -p --permission-mode default` — curl отклонён, агент получил текст message дословно, строка в логе 10:03:40 (сессия 2d20f0bf); в auto классификатор пропустил curl без окна, хук не вызывался; в bypass окна нет. Elicitation — только образец stdin (лид 10:01:51), живого MCP с elicitation нет.
+- 2026-10-29 10:05 готово — chooks-master

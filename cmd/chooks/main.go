@@ -84,6 +84,7 @@ func execute() int {
 		newSkillScanCmd(),
 		newQuestionBenchCmd(),
 		newSaidBenchCmd(),
+		newCorpusSweepCmd(),
 		newDeliverAlertCmd(),
 	)
 

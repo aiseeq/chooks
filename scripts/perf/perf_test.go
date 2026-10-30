@@ -100,7 +100,7 @@ func TestExecMSIsolationAndFailure(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "mock.sh")
 	result := filepath.Join(root, "env.txt")
-	content := "#!/usr/bin/env bash\necho 1\nprintf '%s|%s|%s\\n' \"$HOME\" \"${KONSOLE_DBUS_SERVICE-unset}\" \"${CLAUDE_PID-unset}\" >\"$CHECK_FILE\"\nexit \"${MOCK_EXIT:-0}\"\n"
+	content := "#!/usr/bin/env bash\necho 1\n[[ -z ${COUNT_FILE-} ]] || echo run >>\"$COUNT_FILE\"\nprintf '%s|%s|%s\\n' \"$HOME\" \"${KONSOLE_DBUS_SERVICE-unset}\" \"${CLAUDE_PID-unset}\" >\"$CHECK_FILE\"\nexit \"${MOCK_EXIT:-0}\"\n"
 	if err := os.WriteFile(bin, []byte(content), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +127,28 @@ func TestExecMSIsolationAndFailure(t *testing.T) {
 	fields := strings.Split(strings.TrimSpace(string(data)), "|")
 	if len(fields) != 3 || fields[0] == os.Getenv("HOME") || fields[1] != "unset" || fields[2] != "unset" {
 		t.Fatalf("окружение mock бинаря: %q", data)
+	}
+
+	for _, tc := range []struct {
+		args []string
+		runs int
+	}{
+		{[]string{"--bin", bin, "statusline", input}, 5},
+		{[]string{"--budget", "0", "--bin", bin, "statusline", input}, 1},
+	} {
+		count := filepath.Join(root, fmt.Sprintf("count-%d.txt", tc.runs))
+		cmd = exec.Command("./exec-ms.sh", tc.args...)
+		cmd.Env = append(os.Environ(), "TMPDIR="+filepath.Join(root, "tmp"), "CHECK_FILE="+result, "COUNT_FILE="+count)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("прогоны %v: %v: %s", tc.args, err, out)
+		}
+		data, err := os.ReadFile(count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Count(string(data), "run"); got != tc.runs {
+			t.Fatalf("прогоны %v: %d, ожидалось %d", tc.args, got, tc.runs)
+		}
 	}
 
 	cmd = exec.Command("./exec-ms.sh", "--runs", "1", "--bin", bin, "--", "statusline", input)

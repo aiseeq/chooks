@@ -2,17 +2,25 @@
 set -euo pipefail
 
 usage() {
-  echo "Использование: exec-ms.sh [--runs N] [--bin ПУТЬ] <подкоманда> <вход.json>" >&2
+  echo "Использование: exec-ms.sh [--runs N] [--budget С] [--bin ПУТЬ] <подкоманда> <вход.json>" >&2
   exit 2
 }
 
-runs=11
+# До 5 прогонов в бюджете 45 с (FORMAT.md ночного обхода perf): следующий
+# прогон — только пока с начала прошло меньше бюджета, так замедление не
+# выводит команду за таймаут ночи 120 с
+runs=5
+budget=45
 bin="${HOME}/bin/chooks"
 while (($#)); do
   case "$1" in
-    --runs|--bin)
+    --runs|--budget|--bin)
       (($# >= 2)) || usage
-      if [[ $1 == --runs ]]; then runs=$2; else bin=$2; fi
+      case "$1" in
+        --runs) runs=$2 ;;
+        --budget) budget=$2 ;;
+        --bin) bin=$2 ;;
+      esac
       shift 2
       ;;
     --) shift; break ;;
@@ -24,6 +32,7 @@ done
 subcommand=$1
 input=$2
 [[ $runs =~ ^[1-9][0-9]*$ ]] || usage
+[[ $budget =~ ^[0-9]+$ ]] || usage
 [[ -x $bin ]] || { echo "Бинарь не найден или не исполняемый: $bin" >&2; exit 2; }
 [[ -f $input ]] || { echo "Входной файл не найден: $input" >&2; exit 2; }
 
@@ -42,7 +51,11 @@ trap cleanup EXIT
 times=$(mktemp -t chooks-perf-times.XXXXXX)
 trap 'cleanup; rm -f -- "$times"' EXIT
 
+began=$(date +%s)
 for ((i = 0; i < runs; i++)); do
+  if ((i > 0 && $(date +%s) - began >= budget)); then
+    break
+  fi
   run_dir=$(mktemp -d -t chooks-perf.XXXXXX)
   tmpdirs+=("$run_dir")
   mkdir -p "$run_dir/state" "$run_dir/config" "$run_dir/runtime"

@@ -371,7 +371,7 @@ graft commit -m "fix: ..."  # гейт (сборка и тесты), комми�
 
 ```bash
 scripts/perf/hook-ms.sh --q 95 stop      # p95 хука за 24 ч по транскриптам Claude Code, мс; мало событий — код 3
-scripts/perf/exec-ms.sh statusline scripts/perf/testdata/statusline.json  # медиана запуска в пустом HOME, мс
+scripts/perf/exec-ms.sh statusline scripts/perf/testdata/statusline.json  # медиана до 5 запусков за 45 с в пустом HOME, мс
 ```
 
 `hook-ms.sh` видит Stop-хуки всегда. У остальных хуков он видит только вызовы, в которых хук что-то вывел:

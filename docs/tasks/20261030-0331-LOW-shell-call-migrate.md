@@ -1,6 +1,6 @@
 # перевести unsentcheck, corpus_sweep, pgrep_ancestors на пакет akit «вызвана ли программа» (mvdan/sh)
 
-Статус: в работе
+Статус: готово
 Исполнитель: chooks-master
 
 ## Что сделать
@@ -36,3 +36,4 @@
 - 2026-10-30 05:20 note — chooks-master: akit v1.12.0: *shellcmd.NestedError подключён в unsentcheck (chatCall), pgrep (RewritePgrepAncestors отдаёт подмену вместе с NestedError, хук применяет её и пишет Warn) и corpus_sweep (вызовы брались и раньше). Тесты добавлены во все три и в cmd/chooks. Сверка: pgrep и reddy без изменений, 5 потерянных из-за вложенной ошибки остановок вернулись. Регрессия akit v1.12.0: в форме 'command grep -v' пакет принимает -v grep за 'command -v', grep пропадает, в корпусе 22 снятых остановки. Сообщено akit-master, ждём версию.
 - 2026-10-30 05:24 note — chooks-master: akit v1.12.1 (исправлен command -v). Сверка: pgrep 2, reddy 5, corpus 15 смен вердикта + 3 смены Sweeps — разбор в scratchpad shell-call/divergences.md, неверных новых нет. Влито: c62a980, b93d10d (main). worker done 1030-0421 влито. Постановка и приёмка тикета приведены к решениям ревью. Дальше — независимая проверка суб-агентом.
 - 2026-10-30 05:31 note — chooks-master: независимая проверка (суб-агент, свежий контекст): принято, 1 регрессия — pgrep во втором уровне вложенности (bash -c "bash -c 'pgrep -f x'") не переписывался. Починено: pgrepPositions рекурсивно, тест красный → зелёный, shellName заменён на shellcmd.IsShell. Сверка pgrep после починки — 426, 639. Замечание проверяющего про 202 (новое неверно, по правилу chooks, а не akit) учтено в divergences.md.
+- 2026-10-30 05:34 готово — verifier-subagent (session chooks-master): независимая проверка, суб-агент со свежим контекстом по «Приёмке»: тесты трёх пакетов ok, graft smoke ok, glint без находок; git diff 86c2a74 b93d10d по *_test.go — только сигнатура; сверка своими бинарями из git archive — corpus 18 строк, все в divergences.md; pgrep 426, 639; reddy 36, 48, 58, 197, 486. Найденная регрессия (вложенный pgrep 2-го уровня) починена в 2f013e8, перепроверено: принято, пробы до глубины 3, стенд pgrep совпал с b93d10d. akit v1.12.2 (коммит после) — corpus и pgrep совпали побайтно.

@@ -226,7 +226,7 @@ func TestRun_AfterDeadlineIsNoop(t *testing.T) {
 	f.checker.Now = func() time.Time { return Until.Add(-time.Minute) }
 	f.checker.Run(context.Background(), f.event(questionMessage))
 	if f.judge.calls != 1 {
-		t.Fatalf("30.10 23:59 still in the experiment, calls = %d", f.judge.calls)
+		t.Fatalf("06.11 23:59 still in the experiment, calls = %d", f.judge.calls)
 	}
 }
 

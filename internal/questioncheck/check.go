@@ -229,7 +229,7 @@ const BlockRev = 2
 // BlockReason — текст, который агент получит вместо конца хода
 func BlockReason(verdict Verdict) string {
 	var b strings.Builder
-	b.WriteString("Проверка вопросов (эксперимент до 30.10): судья счёл вопрос пользователю лишним.\n")
+	b.WriteString("Проверка вопросов (эксперимент до 06.11): судья счёл вопрос пользователю лишним.\n")
 	for _, finding := range verdict.Lishnie {
 		fmt.Fprintf(&b, "- «%s»: %s", finding.Quote, finding.Why)
 		if finding.Where != "" {

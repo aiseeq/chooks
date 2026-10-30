@@ -31,7 +31,7 @@ func chatCall(command string) bool {
 	calls, err := shellcmd.Find(command, "reddy")
 	var nested *shellcmd.NestedError
 	if err != nil && !errors.As(err, &nested) {
-		return false //nolint:error-masked-as-false-bool // shellcmd не разбирает только то, что отвергает и bash -n: такую команду оболочка не выполнила, чат не открывался
+		return false // shellcmd не разбирает только то, что отвергает и bash -n: такую команду оболочка не выполнила, чат не открывался
 	}
 	for _, call := range calls {
 		for _, arg := range call.Args {

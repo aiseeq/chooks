@@ -74,6 +74,8 @@ func TestRewritePgrepAncestorsShellScript(t *testing.T) {
 		`pgrep -f a; sh -c 'pgrep -f a'`:                                                     `pgrep -A -f a; sh -c 'pgrep -A -f a'`,
 		// Значение скрипта в двойных кавычках короче исходника на экранирование
 		`timeout 5 bash -c "x=\$(pgrep -f 'zz'); until [ -z \"\$(pgrep -f 'zz')\" ]; do sleep 1; done"`: `timeout 5 bash -c "x=\$(pgrep -A -f 'zz'); until [ -z \"\$(pgrep -A -f 'zz')\" ]; do sleep 1; done"`,
+		// Второй уровень: скрипт оболочки внутри скрипта оболочки
+		`bash -c "bash -c 'pgrep -f x'"`: `bash -c "bash -c 'pgrep -A -f x'"`,
 		// -P со значением $(…): -f только у внутреннего pgrep
 		`bash -c 'pgrep -P $(pgrep -f "bin/cl" | head -1)'`: `bash -c 'pgrep -P $(pgrep -A -f "bin/cl" | head -1)'`,
 	}

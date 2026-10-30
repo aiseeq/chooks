@@ -33,10 +33,7 @@ func RewritePgrepAncestors(command string) (string, bool, error) {
 	if err != nil && !errors.As(err, &nestedErr) {
 		return command, false, fmt.Errorf("shellcmd calls: %w", err)
 	}
-	positions := directPgrepPositions(command, calls)
-	nested, nestedFailed := nestedPgrepPositions(command, calls)
-	positions = append(positions, nested...)
-	err = errors.Join(err, nestedFailed)
+	positions := pgrepPositions(command, calls)
 	if len(positions) == 0 {
 		return command, false, err
 	}
@@ -51,6 +48,12 @@ func RewritePgrepAncestors(command string) (string, bool, error) {
 	}
 	out.WriteString(command[last:])
 	return out.String(), true, err
+}
+
+// pgrepPositions — места вставки -A в command: у pgrep самой команды и в
+// скриптах оболочек на любой глубине
+func pgrepPositions(command string, calls []shellcmd.Call) []int {
+	return append(directPgrepPositions(command, calls), nestedPgrepPositions(command, calls)...)
 }
 
 func directPgrepPositions(command string, calls []shellcmd.Call) []int {
@@ -69,13 +72,13 @@ func directPgrepPositions(command string, calls []shellcmd.Call) []int {
 	return positions
 }
 
-// nestedPgrepPositions пропускает скрипт, который не разобрался: внешний
-// разбор уже назвал его в NestedError. Возвращает ошибки глубже вложенных
-func nestedPgrepPositions(command string, calls []shellcmd.Call) ([]int, error) {
+// nestedPgrepPositions пропускает скрипт, который не разобрался: shellcmd
+// разбирает вложенные скрипты сам, и внешний разбор уже назвал его в
+// NestedError
+func nestedPgrepPositions(command string, calls []shellcmd.Call) []int {
 	var positions []int
-	var failed []error
 	for _, call := range calls {
-		if call.Offset < 0 || !shellName(call.Name) {
+		if call.Offset < 0 || !shellcmd.IsShell(call.Name) {
 			continue
 		}
 		script := shellCommandScript(call.Args)
@@ -91,19 +94,11 @@ func nestedPgrepPositions(command string, calls []shellcmd.Call) ([]int, error) 
 		if err != nil && !errors.As(err, &nestedErr) {
 			continue
 		}
-		if err != nil {
-			failed = append(failed, err)
-		}
-		for _, nestedCall := range nested {
-			if nestedCall.Name != "pgrep" || nestedCall.Offset < 0 || !needsAncestors(nestedCall.Args) {
-				continue
-			}
-			if end, ok := pgrepWordEnd(script, nestedCall.Offset); ok {
-				positions = append(positions, source[end-1]+1)
-			}
+		for _, end := range pgrepPositions(script, nested) {
+			positions = append(positions, source[end-1]+1)
 		}
 	}
-	return positions, errors.Join(failed...)
+	return positions
 }
 
 // scriptSource ищет после from слово в кавычках, чьё значение равно script,
@@ -156,10 +151,6 @@ func sourceValue(command string, source []int) string {
 		value[i] = command[pos]
 	}
 	return string(value)
-}
-
-func shellName(name string) bool {
-	return name == "bash" || name == "sh" || name == "zsh"
 }
 
 func pgrepWordEnd(command string, start int) (int, bool) {

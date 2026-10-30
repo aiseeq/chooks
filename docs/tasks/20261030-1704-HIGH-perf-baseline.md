@@ -1,6 +1,6 @@
 # Первый референс скорости chooks (perf-baseline-1030, задание git-admin)
 
-Статус: в работе
+Статус: готово
 Исполнитель: chooks-master
 
 ## Вход
@@ -24,3 +24,6 @@
 - 2026-10-30 17:11 в работе — chooks-master
 - 2026-10-30 17:11 note — chooks-master: замер 17:05–17:15 CET: stop_hook_summary.hookInfos[].durationMs за 7 дней (суточные p95 stop 47–110 мс, question-check 98–4278, unsent-check 69–84); локально p50 на вызов: statusline 10–12 мс (CPU 12), pre-tool-use 7, post-tool-batch 9, user-prompt-submit 10, chooks version 5 (CPU 6, init пакетов 3.4–4.7 мс: регэкспы textstyle/tools/questioncheck/unsentcheck); bpftrace 120 с (17:07:40–17:09:41): 909 запусков statusline из 932 (7.6/с при 17 сессиях); судья latency_ms около 6 с, 12–70 вызовов в сутки. tl --raw длительности хуков не печатает — скрипт в репо: боец Luna, scripts/perf/hook-ms.sh и exec-ms.sh с тестом, worktree perf-scripts
 - 2026-10-30 17:19 note — chooks-master: боец 1030-1712-perf-scripts (Luna, 5 мин) принят: scripts/perf/hook-ms.sh, exec-ms.sh, testdata, perf_test.go; ревью мастера: hook-ms глушил ошибки rg/jq и звал date на запись — ошибки rg видны (код 2), время в jq; exec-ms требовал TMPDIR — mktemp -t. Сверка: суточные hook-ms по окнам до 17:05:48 совпали с моим счётом (stop 89 58 102 47 48 110 105, webfetch-fallback p50 724 834 889); каждая команда ~0.14 с
+- 2026-10-30 17:21 note — chooks-master: chooks.tsv (11 путей, 10 с командой) и chooks.md закоммичены в claude-config 557ff10; скрипты chooks c11403d, e111305 (exec-ms: до 5 прогонов в бюджете 45 с по FORMAT 17:10). Все 10 команд в env -i: число, код 0, 0.08–0.14 с. Кандидат ×2: job:chooks statusline day 7812 CPU-с/сутки → ~3900. Проверка — git-admin (другая сессия): ждёт его итога
+- 2026-10-30 17:21 на проверке — chooks-master
+- 2026-10-30 17:21 готово — git-admin (session chooks-master): git-admin (другая сессия) 30.10: коммит claude-config 557ff10; скрипты в репо с тестом c11403d, e111305; hook-ms.sh --q 95 stop → 89, exec-ms.sh statusline → 6.9, обе код 0; 909/121 с × 86400 × 12 мс = 7789 CPU-с/сутки против 7812 в tsv. Флаг tl для времени хуков не заказываем: другим проектам не нужен

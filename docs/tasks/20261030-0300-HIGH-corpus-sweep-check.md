@@ -1,6 +1,7 @@
 # corpus-sweep-check - сухой прогон проверки поиска по корпусу транскриптов
 
-Статус: ждёт
+Статус: готово
+Исполнитель: chooks-master
 Ждёт: 2026-10-30 08:30 CET: файл dream-master (все Bash-вызовы по корпусу за 7 дней), затем пункт 3
 
 ## Вход
@@ -38,6 +39,7 @@
 - 2026-10-30 03:16 note — chooks-master: dream-master 03:1x CET: файл будет /home/aisee/.claude/improve/runs/2026-10-30/corpus-search-dryrun.jsonl (поле command + session, time, purpose, freeze, false_positive), рядом .md; о готовности напишет
 - 2026-10-30 03:29 note — chooks-master: прогон по файлу dream-master сделан, итог в разделе «Итог прогона»; лид: хук не предлагать, в хуки не ставить
 - 2026-10-30 03:36 note — chooks-master: независимая проверка (суб-агент, бриф из тикета): все цифры сводки и классов совпали, выборка 15+15 по правилам верна, причины 7 пропусков подтверждены; отступление - часть после = бралась у любого слова: починено (optionAssign/assignWord, тест «= внутри пути» красный до, зелёный после), прогон 1822 → 1820
+- 2026-10-30 03:36 готово — verifier-subagent (session chooks-master): суб-агент со свежим контекстом по тикету: go test ./internal/tools ./cmd/chooks -run CorpusSweep ok; свой бинарь (/home/aisee/.cache/claude-tmp/verify-corpus/chooks) на corpus-search-dryrun.jsonl - сводка 3100/1822/1110/168 и классы совпали; выборка 15+15 вердиктов верна по правилам; причины 7 пропусков подтверждены. Его находка (= у любого слова) починена в e3262f2
 
 ## Итог прогона (пункт 3)
 Вход: /home/aisee/.claude/improve/runs/2026-10-30/corpus-search-dryrun.jsonl (dream-master, 3100 вызовов с наивным совпадением за 23.10 03:00 - 30.10 03:12; классы Сна в поле `class`). Выход: scratchpad сессии 5de41ca4 `corpus-sweep/out.jsonl`. Бинарь - `go build` с 98663e6.

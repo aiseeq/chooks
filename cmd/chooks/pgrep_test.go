@@ -63,3 +63,17 @@ func TestRewritePgrepNoContext(t *testing.T) {
 		t.Errorf("output = %q", out.String())
 	}
 }
+
+// Битый скрипт sh -c упадёт сам: остальные pgrep всё равно переписаны
+func TestRewritePgrepBesideMalformedNestedScript(t *testing.T) {
+	config, logger := silentConfig(t)
+	var out bytes.Buffer
+	rewritePgrep(&core.ToolInput{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"pgrep -f x; sh -c 'echo \"y'"}`)}, config, logger, &out)
+	var got preToolUseOutput
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output %q: %v", out.String(), err)
+	}
+	if got.HookSpecificOutput.UpdatedInput["command"] != `pgrep -A -f x; sh -c 'echo "y'` {
+		t.Errorf("output = %s", out.String())
+	}
+}

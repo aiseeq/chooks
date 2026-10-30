@@ -6,11 +6,13 @@ package unsentcheck
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"regexp"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/akit/transcript"
 )
 
@@ -21,31 +23,24 @@ import (
 // кириллицы: границы — не-буква или край текста
 var claim = regexp.MustCompile(`(?i)(?:ещё|еще) не отправлено|(?:^|\P{L})ты (?:(?:ещё|еще) )?не отправил|(?:ответ|текст|черновик|сообщение|вопрос)\S*[^.\n]{0,60}?(?:^|\P{L})не (?:отправлен[оаы]?(?:\P{L}|$)|ушл|ушёл|ушел)|(?:^|\P{L})не отправлен[оаы]? (?:ответ|текст|черновик|вопрос)`)
 
-// Вызов, которым агент открывает чат: программа reddy в начале простой
-// команды, подкоманда history после её флагов. Начало команды — начало
-// строки, разделитель (`;`, `&&`, `|`, `$(`, `{`), `do`, `then`, после префиксов
-// `timeout N`, `env`, `sudo`, `X=…`. Слова reddy и history в тексте правки,
-// тикета или промпта — не вызов (ложный пропуск 29.10 12:15 у chooks-master)
-const (
-	callStart   = `(?:^|[;&|({\n]|\bdo\b|\bthen\b)\s*(?:(?:timeout(?:\s+-\S+)*\s+\S+|env|sudo|[A-Za-z_]\w*=\S*)\s+)*`
-	historyArgs = `(?:\s+-\S+)*\s+history\b`
-)
-
-var reddyHistory = regexp.MustCompile(callStart + `(?:["']\S*/reddy["']|(?:\S*/)?reddy)` + historyArgs)
-
-// reddyVar — переменная с путём к reddy: в сессиях ~/work чат открывают
-// `R=/home/aisee/work/reddy/bin/reddy; $R history <чат>`
-var reddyVar = regexp.MustCompile(`\b([A-Za-z_]\w*)=["']?(?:\S*/)?reddy["']?(?:[\s;&|]|$)`)
-
-// chatCall — открывает ли команда Bash чат
+// chatCall — открывает ли команда Bash чат: вызов reddy (через обёртки,
+// bash -c, переменную с путём), первое слово после флагов — history. Слова
+// reddy и history в тексте правки, тикета или промпта — не вызов (ложный
+// пропуск 29.10 12:15 у chooks-master)
 func chatCall(command string) bool {
-	if reddyHistory.MatchString(command) {
-		return true
+	calls, err := shellcmd.Find(command, "reddy")
+	var nested *shellcmd.NestedError
+	if err != nil && !errors.As(err, &nested) {
+		return false //nolint:error-masked-as-false-bool // shellcmd не разбирает только то, что отвергает и bash -n: такую команду оболочка не выполнила, чат не открывался
 	}
-	for _, m := range reddyVar.FindAllStringSubmatch(command, -1) {
-		viaVar := regexp.MustCompile(callStart + `"?\$(?:` + m[1] + `\b|\{` + m[1] + `\})"?` + historyArgs)
-		if viaVar.MatchString(command) {
-			return true
+	for _, call := range calls {
+		for _, arg := range call.Args {
+			if arg != "" && arg[0] != '-' {
+				if arg == "history" {
+					return true
+				}
+				break
+			}
 		}
 	}
 	return false

@@ -2,14 +2,18 @@ package tools
 
 import (
 	"regexp"
+	"slices"
 	"strings"
+
+	"github.com/aiseeq/akit/shellcmd"
 )
 
 // CorpusSweepVerdict — результат проверки команды на поиск по корпусу.
 type CorpusSweepVerdict struct {
-	Blocked bool     `json:"blocked"`
-	Sweeps  []string `json:"sweeps"`
-	Points  []string `json:"points"`
+	Blocked    bool     `json:"blocked"`
+	Sweeps     []string `json:"sweeps"`
+	Points     []string `json:"points"`
+	ParseError string   `json:"parse_error,omitempty"`
 }
 
 var corpusSearchTools = map[string]bool{
@@ -25,39 +29,29 @@ var optionAssign = regexp.MustCompile(`^--?[A-Za-z][\w-]*=`)
 // CheckCorpusSweep находит обращения к корпусу транскриптов и решает,
 // затрагивает ли команда широкую выборку.
 func CheckCorpusSweep(command, home string) CorpusSweepVerdict {
-	script := &shScript{}
-	parseShell(command, false, script)
-	cmds := withInlineScripts(script.cmds)
 	var verdict CorpusSweepVerdict
 	hasSearch := false
-	for _, c := range cmds {
-		words := c.words
-		command := commandWords(words)
-		if len(command) > 0 && corpusSearchTools[commandName(command[0].raw)] {
+	// Ошибка разбора — команда, которую отвергает и bash -n: оболочка её не
+	// выполнит, поиска нет. Вызовы — через обёртки, bash -c и $(…)
+	calls, err := shellcmd.Calls(command)
+	if err != nil {
+		verdict.ParseError = err.Error()
+	}
+	for _, call := range calls {
+		if corpusSearchTools[call.Name] {
 			hasSearch = true
 		}
-		// commandWords пропускает xargs как обёртку; учитываем его только
-		// перед найденным именем команды, а не среди обычных аргументов.
-		commandIndex := len(words) - len(command)
-		for i, word := range words {
-			if i < commandIndex && !word.redirect && commandName(word.raw) == "xargs" {
-				hasSearch = true
-			}
+		for _, arg := range call.Args {
+			addCorpusWord(&verdict, arg, home)
 		}
-		for _, word := range words {
-			if word.redirect {
-				continue
-			}
-			value := unquoteWord(word.text)
-			if assignWord.MatchString(value) || optionAssign.MatchString(value) {
-				value = value[strings.IndexByte(value, '=')+1:]
-			}
-			if path, ok := corpusPath(value, home); ok {
-				if corpusPoint(path) {
-					verdict.Points = append(verdict.Points, path)
-				} else {
-					verdict.Sweeps = append(verdict.Sweeps, path)
-				}
+	}
+	// Присваивания и списки for … in — не аргументы вызова: их слова берёт parseShell
+	script := &shScript{}
+	parseShell(command, false, script)
+	for _, c := range withInlineScripts(script.cmds) {
+		for _, word := range c.words {
+			if !word.redirect {
+				addCorpusWord(&verdict, unquoteWord(word.text), home)
 			}
 		}
 	}
@@ -66,6 +60,21 @@ func CheckCorpusSweep(command, home string) CorpusSweepVerdict {
 	}
 	verdict.Blocked = hasSearch && len(verdict.Sweeps) > 0
 	return verdict
+}
+
+func addCorpusWord(verdict *CorpusSweepVerdict, value, home string) {
+	if assignWord.MatchString(value) || optionAssign.MatchString(value) {
+		value = value[strings.IndexByte(value, '=')+1:]
+	}
+	path, ok := corpusPath(value, home)
+	if !ok || slices.Contains(verdict.Sweeps, path) || slices.Contains(verdict.Points, path) {
+		return
+	}
+	if corpusPoint(path) {
+		verdict.Points = append(verdict.Points, path)
+	} else {
+		verdict.Sweeps = append(verdict.Sweeps, path)
+	}
 }
 
 // corpusPath проверяет путь к корпусу и сохраняет исходное слово.

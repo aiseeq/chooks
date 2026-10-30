@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/tools"
 )
@@ -41,7 +43,16 @@ func rewritePgrep(input *core.ToolInput, config *core.Config, logger core.Logger
 	if !ok {
 		return
 	}
-	rewritten, changed := tools.RewritePgrepAncestors(command)
+	rewritten, changed, err := tools.RewritePgrepAncestors(command)
+	var nested *shellcmd.NestedError
+	switch {
+	case errors.As(err, &nested):
+		// Битый вложенный скрипт упадёт сам, остальные pgrep переписаны
+		logger.Warn("pgrep rewrite: nested script unparsed", "tool", input.ToolName, "error", err)
+	case err != nil:
+		logger.Warn("pgrep rewrite failed", "tool", input.ToolName, "error", err)
+		return
+	}
 	if !changed {
 		return
 	}

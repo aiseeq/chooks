@@ -71,3 +71,35 @@ func TestCheckCorpusSweepAllows(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckCorpusSweepWrappedHeavySearches(t *testing.T) {
+	commands := []string{
+		`graft exec --heavy -- bash -c 'find /home/aisee/.claude/projects -name "*.jsonl" | xargs -0 grep -l x'`,
+		`cd ~/.claude/projects; graft exec --heavy -- bash -c 'find . -name "*.jsonl" -print0 | xargs -0 rg x'`,
+		`timeout 270 graft exec --heavy -- bash -c 'cd /home/aisee/.claude/projects; find . -name "*.jsonl" | xargs rg x'`,
+		`/home/aisee/.claude/improve/moment-frame.sh exec /tmp/t bash -c 'grep -rl x /home/aisee/.claude/projects'`,
+	}
+	for _, command := range commands {
+		t.Run(command, func(t *testing.T) {
+			verdict := CheckCorpusSweep(command, sweepHome)
+			if !verdict.Blocked {
+				t.Fatalf("сухой прогон не остановлен: %+v", verdict)
+			}
+		})
+	}
+}
+
+func TestCheckCorpusSweepBesideMalformedNestedScript(t *testing.T) {
+	verdict := CheckCorpusSweep("cd ~/.claude/projects\nfind . -name '*.jsonl' | xargs sh -c 'jq \"x'", sweepHome)
+	if verdict.ParseError == "" || !verdict.Blocked {
+		t.Fatalf("ожидались ошибка вложенного скрипта и блокировка внешнего find: %+v", verdict)
+	}
+}
+
+func TestCheckCorpusSweepReportsParseError(t *testing.T) {
+	verdict := CheckCorpusSweep(`if then; grep -r x ~/.claude/projects`, sweepHome)
+	// Такую команду отвергает и bash -n: она не выполнится, обхода нет
+	if verdict.ParseError == "" || verdict.Blocked {
+		t.Fatalf("ожидались ошибка разбора без блокировки: %+v", verdict)
+	}
+}

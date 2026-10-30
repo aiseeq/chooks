@@ -100,6 +100,27 @@ func TestChatCall(t *testing.T) {
 	}
 }
 
+func TestChatCallShellcmd(t *testing.T) {
+	for _, command := range []string{"bash -c 'reddy history chat'", "graft exec -- reddy history chat"} {
+		if !chatCall(command) {
+			t.Errorf("вызов во вложенной команде не узнан: %q", command)
+		}
+	}
+}
+
+func TestChatCallMalformedShellIsNotCall(t *testing.T) {
+	if chatCall(")") {
+		t.Fatal("ошибка разбора оболочки не должна считаться вызовом")
+	}
+}
+
+// Битый скрипт sh -c падает сам, внешние вызовы bash выполняет
+func TestChatCallBesideMalformedNestedScript(t *testing.T) {
+	if !chatCall(`reddy history Оля; sh -c 'echo "x'`) {
+		t.Fatal("вызов рядом с битым вложенным скриптом не узнан")
+	}
+}
+
 func writeTranscript(t *testing.T, lines ...string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "t.jsonl")

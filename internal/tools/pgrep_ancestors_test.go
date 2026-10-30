@@ -1,6 +1,11 @@
 package tools
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/aiseeq/akit/shellcmd"
+)
 
 func TestRewritePgrepAncestors(t *testing.T) {
 	tests := []struct {
@@ -17,13 +22,17 @@ func TestRewritePgrepAncestors(t *testing.T) {
 		{"ключ со значением раньше -f", `pgrep -u aisee -f worker`, `pgrep -A -u aisee -f worker`},
 		{"после префиксов", `timeout 600 sudo pgrep -f x`, `timeout 600 sudo pgrep -A -f x`},
 		{"после ||", `false || pgrep -f x`, `false || pgrep -A -f x`},
+		{"обёртка timeout и список", `timeout 5 pgrep -f x && pgrep -f y`, `timeout 5 pgrep -A -f x && pgrep -A -f y`},
+		{"полный путь", `/usr/bin/pgrep -f x`, `/usr/bin/pgrep -A -f x`},
+		{"обёртка xargs", `xargs -r pgrep -f x`, `xargs -r pgrep -A -f x`},
+		{"скрипт bash -c", `bash -c "pgrep -f x"`, `bash -c "pgrep -A -f x"`},
 		{"с новой строки", "sleep 1\npgrep -f x", "sleep 1\npgrep -A -f x"},
 		{"переменная-шаблон", `pgrep -f "$P"`, `pgrep -A -f "$P"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, changed := RewritePgrepAncestors(tt.command)
-			if !changed || got != tt.want {
+			got, changed, err := RewritePgrepAncestors(tt.command)
+			if err != nil || !changed || got != tt.want {
 				t.Errorf("RewritePgrepAncestors(%q) = %q, %v; want %q", tt.command, got, changed, tt.want)
 			}
 		})
@@ -49,7 +58,7 @@ func TestRewritePgrepAncestorsKeeps(t *testing.T) {
 	}
 	for name, command := range commands {
 		t.Run(name, func(t *testing.T) {
-			if got, changed := RewritePgrepAncestors(command); changed || got != command {
+			if got, changed, err := RewritePgrepAncestors(command); err != nil || changed || got != command {
 				t.Errorf("RewritePgrepAncestors(%q) = %q, %v; want unchanged", command, got, changed)
 			}
 		})
@@ -63,14 +72,29 @@ func TestRewritePgrepAncestorsShellScript(t *testing.T) {
 		`timeout 900 bash -c "while pgrep -f eval1.sh >/dev/null; do sleep 10; done"; cat x`: `timeout 900 bash -c "while pgrep -A -f eval1.sh >/dev/null; do sleep 10; done"; cat x`,
 		`bash -euo pipefail -c 'date; pgrep -af "graft exec"'`:                               `bash -euo pipefail -c 'date; pgrep -A -af "graft exec"'`,
 		`pgrep -f a; sh -c 'pgrep -f a'`:                                                     `pgrep -A -f a; sh -c 'pgrep -A -f a'`,
+		// Значение скрипта в двойных кавычках короче исходника на экранирование
+		`timeout 5 bash -c "x=\$(pgrep -f 'zz'); until [ -z \"\$(pgrep -f 'zz')\" ]; do sleep 1; done"`: `timeout 5 bash -c "x=\$(pgrep -A -f 'zz'); until [ -z \"\$(pgrep -A -f 'zz')\" ]; do sleep 1; done"`,
+		// -P со значением $(…): -f только у внутреннего pgrep
+		`bash -c 'pgrep -P $(pgrep -f "bin/cl" | head -1)'`: `bash -c 'pgrep -P $(pgrep -A -f "bin/cl" | head -1)'`,
 	}
 	for command, want := range tests {
-		if got, changed := RewritePgrepAncestors(command); !changed || got != want {
+		if got, changed, err := RewritePgrepAncestors(command); err != nil || !changed || got != want {
 			t.Errorf("RewritePgrepAncestors(%q) = %q, %v; want %q", command, got, changed, want)
 		}
 	}
+	// Битый скрипт sh -c не мешает переписать остальные pgrep
+	for command, want := range map[string]string{
+		`pgrep -f x; sh -c 'echo "y'`:           `pgrep -A -f x; sh -c 'echo "y'`,
+		`bash -c 'pgrep -f x'; sh -c 'echo "y'`: `bash -c 'pgrep -A -f x'; sh -c 'echo "y'`,
+	} {
+		got, changed, err := RewritePgrepAncestors(command)
+		var nested *shellcmd.NestedError
+		if !errors.As(err, &nested) || !changed || got != want {
+			t.Errorf("RewritePgrepAncestors(%q) = %q, %v, %v; want %q и NestedError", command, got, changed, err, want)
+		}
+	}
 	for _, command := range []string{`ssh pc 'bash -c "pgrep -f x"'`, `echo bash -c 'pgrep -f x'`} {
-		if got, changed := RewritePgrepAncestors(command); changed {
+		if got, changed, err := RewritePgrepAncestors(command); err != nil || changed {
 			t.Errorf("RewritePgrepAncestors(%q) = %q; want unchanged", command, got)
 		}
 	}

@@ -1,6 +1,7 @@
 # corpus-sweep-check - сухой прогон проверки поиска по корпусу транскриптов
 
-Статус: открыт
+Статус: ждёт
+Ждёт: 2026-10-30 08:30 CET: файл dream-master (все Bash-вызовы по корпусу за 7 дней), затем пункт 3
 
 ## Вход
 - Проблема: Bash-поиски rg/grep/find/xargs по всему корпусу транскриптов (`~/.claude/projects`, `~/.codex`, `~/.local/state/worker`) ночью 30.10 вызвали фризы: суб-агенты Сна 02:27–02:28, бойцы 01:56 и 02:15 (по dream-master). Правило в промпте («`tl`, не grep по jsonl») их не удержало.
@@ -32,3 +33,6 @@
 - 2026-10-30 03:00 открыт — chooks-master
 - 2026-10-30 03:02 note — chooks-master: тесты приёмки `internal/tools/corpus_sweep_test.go` написаны мастером; код - боец Luna (класс фича-инструмента, маршрут luna).
 - 2026-10-30 03:02 note — chooks-master: боец Luna 1030-0302-corpus-sweep-check запущен, worktree /home/aisee/.cache/worktrees/chooks/corpus-sweep-check, тесты приёмки там (sha256 af0a6b3c…)
+- 2026-10-30 03:16 note — chooks-master: влито 98663e6 (Luna, 2 захода, ревью: тест подкоманды и дубль типа); бинарь не ставился - прогон бинарём из scratchpad (go build), образец 3 строки + строка без поля код 1 - ок
+- 2026-10-30 03:16 ждёт — chooks-master — 2026-10-30 08:30 CET: файл dream-master (все Bash-вызовы по корпусу за 7 дней), затем пункт 3
+- 2026-10-30 03:16 note — chooks-master: dream-master 03:1x CET: файл будет /home/aisee/.claude/improve/runs/2026-10-30/corpus-search-dryrun.jsonl (поле command + session, time, purpose, freeze, false_positive), рядом .md; о готовности напишет

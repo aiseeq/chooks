@@ -95,7 +95,7 @@ func TestRewritePgrepAncestorsShellScript(t *testing.T) {
 			t.Errorf("RewritePgrepAncestors(%q) = %q, %v, %v; want %q и NestedError", command, got, changed, err, want)
 		}
 	}
-	for _, command := range []string{`ssh pc 'bash -c "pgrep -f x"'`, `echo bash -c 'pgrep -f x'`} {
+	for _, command := range []string{`ssh pc 'bash -c "pgrep -f x"'`, `echo bash -c 'pgrep -f x'`, `ssh pc pgrep -f x`, `ssh pc -- bash -c 'pgrep -f x'`} {
 		if got, changed, err := RewritePgrepAncestors(command); err != nil || changed {
 			t.Errorf("RewritePgrepAncestors(%q) = %q; want unchanged", command, got)
 		}

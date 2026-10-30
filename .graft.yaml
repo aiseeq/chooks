@@ -81,6 +81,9 @@ tasks:
     run: [rm -rf bin coverage.out]
   smoke:
     desc: гейт коммита, сборка и тесты
+    # Тесты не читают вне дерева того, что есть только здесь: переменные
+    # задают сами (t.Setenv), t.Skip безусловные (graft-master 30.10)
+    remote: true
     run:
       - go build ./...
       - go test ./...

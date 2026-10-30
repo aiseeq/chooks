@@ -80,3 +80,17 @@ func MatchTarget(targets []Target, name, transcriptPath string) (Target, bool) {
 func ProjectDirName(dir string) string {
 	return strings.NewReplacer("/", "-", ".", "-").Replace(filepath.Clean(dir))
 }
+
+// TargetByName — цель по имени сессии. Пустое имя — сессия не указана;
+// имя не из целей — ошибка: судья увидел бы чужую папку
+func TargetByName(targets []Target, name string) (Target, error) {
+	if name == "" {
+		return Target{}, nil
+	}
+	for _, target := range targets {
+		if target.Name == name {
+			return target, nil
+		}
+	}
+	return Target{}, fmt.Errorf("session %q is not a question-check target", name)
+}

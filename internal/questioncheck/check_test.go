@@ -483,12 +483,25 @@ func TestCaseInputShowsPrevAnswer(t *testing.T) {
 	}
 }
 
+// Поручение из реплики другой сессии («дай задачу своим мастерам» в ~/git)
+// судья принял за распоряжение work-admin (разбор 30.10, кейс 153): судья
+// должен видеть, чья это сессия
+func TestCaseInputShowsSession(t *testing.T) {
+	input := Case{Session: Target{Name: "work-admin", Dir: "/home/u/work"}, Answer: "Раздать?"}.Input()
+	if !strings.HasPrefix(input, "[Сессия ответа]\nwork-admin, папка /home/u/work\n") {
+		t.Errorf("судья не видит сессию:\n%s", input)
+	}
+	if unknown := (Case{Answer: "Раздать?"}).Input(); !strings.HasPrefix(unknown, "[Сессия ответа]\n(не указана)\n") {
+		t.Errorf("пустая сессия должна быть помечена:\n%s", unknown)
+	}
+}
+
 // «"Делаем так?" - да» в 23:17 отвечало на другое предложение, а судья счёл
 // его ответом на вопрос предыдущего ответа 23:30 (lead 27.10 23:31): судья
 // должен видеть, что предыдущий ответ написан после реплики
 func TestCaseInputShowsPrevAnswerAfterReply(t *testing.T) {
 	input := Case{HumanReply: `"Делаем так?" - да`, PrevAnswer: "Сабтаском сборной задачи. Делаем так?", PrevAfterReply: true, Answer: "Ждёт вашего ответа: делаем так?"}.Input()
-	if !strings.Contains(input, "[Предыдущий ответ агента]\n(написан после прошлой реплики пользователя: её «да» не про вопросы этого ответа)\nСабтаском") {
+	if !strings.Contains(input, "[Предыдущий ответ агента]\n(написан после прошлой реплики пользователя: её «да» не про вопросы этого ответа, а сказанное в ней по существу — предпочтение, намерение — действует)\nСабтаском") {
 		t.Errorf("судья не видит порядок:\n%s", input)
 	}
 	noReply := Case{PrevAnswer: "Делаем так?", PrevAfterReply: true, Answer: "Делаем так?"}.Input()

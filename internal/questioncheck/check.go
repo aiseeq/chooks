@@ -140,7 +140,7 @@ func (c Checker) Run(ctx context.Context, event Event) Result {
 	}
 	entry.Excerpts = len(excerpts.Replies) + len(excerpts.Decisions)
 
-	input := Case{HumanReply: tail.HumanReply, PrevAnswer: tail.PrevAnswer, PrevAfterReply: tail.PrevAfterHuman, Answer: event.LastMessage, Excerpts: excerpts}.Input()
+	input := Case{Session: gate.Target, HumanReply: tail.HumanReply, PrevAnswer: tail.PrevAnswer, PrevAfterReply: tail.PrevAfterHuman, Answer: event.LastMessage, Excerpts: excerpts}.Input()
 	judgeCtx, cancel := context.WithTimeout(ctx, c.Budget)
 	defer cancel()
 	started := time.Now()

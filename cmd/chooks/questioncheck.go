@@ -217,7 +217,10 @@ type benchCase struct {
 	// Transcript — транскрипт записи журнала: ответ, реплика и предыдущий
 	// ответ берутся из него на момент ts, поля выше не нужны
 	Transcript string `json:"transcript"`
-	Label      string `json:"label"`
+	// Session — имя сессии из журнала (lead, work-admin): судья видит её с
+	// папкой цели. Пусто — сессия не указана
+	Session string `json:"session"`
+	Label   string `json:"label"`
 }
 
 // benchResult — вердикт по примеру
@@ -240,7 +243,7 @@ func newQuestionBenchCmd() *cobra.Command {
 		Use:   "question-bench [--model luna] [--effort low] <примеры.jsonl>",
 		Short: "Прогнать судью проверки вопросов по размеченным примерам",
 		Long: `Читает JSONL примеров {id, ts, prev_reply, prev_answer, prev_after_reply,
-answer, label} (prev_after_reply — предыдущий ответ написан после prev_reply) или
+answer, session, label} (session — имя сессии-цели: lead, work-admin) (prev_after_reply — предыдущий ответ написан после prev_reply) или
 {id, ts, transcript, label} — запись журнала: ответ, реплика и предыдущий ответ
 берутся из транскрипта на момент ts. Прогоняет каждый
 тем же путём, что Stop-хук question-check: фильтр вопросов, выдержки из
@@ -257,7 +260,7 @@ answer, label} (prev_after_reply — предыдущий ответ напис�
 				return err
 			}
 			journals := questioncheck.DefaultJournals(filepath.Join(home, ".claude"))
-			return runQuestionBench(cmd.Context(), args[0], judge, journals, cmd.OutOrStdout())
+			return runQuestionBench(cmd.Context(), args[0], judge, journals, questioncheck.DefaultTargets(home), cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVar(&model, "model", judgeModel, "модель судьи из ~/.config/models/approved")
@@ -265,7 +268,7 @@ answer, label} (prev_after_reply — предыдущий ответ напис�
 	return cmd
 }
 
-func runQuestionBench(ctx context.Context, path string, judge questioncheck.Judge, journals questioncheck.Journals, out io.Writer) error {
+func runQuestionBench(ctx context.Context, path string, judge questioncheck.Judge, journals questioncheck.Journals, targets []questioncheck.Target, out io.Writer) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open examples: %w", err)
@@ -302,7 +305,11 @@ func runQuestionBench(ctx context.Context, path string, judge questioncheck.Judg
 			return err
 		}
 		result.Excerpts = len(excerpts.Replies) + len(excerpts.Decisions)
-		input := questioncheck.Case{HumanReply: example.HumanReply, PrevAnswer: example.PrevAnswer, PrevAfterReply: example.PrevAfterReply, Answer: example.Answer, Excerpts: excerpts}.Input()
+		session, err := questioncheck.TargetByName(targets, example.Session)
+		if err != nil {
+			return fmt.Errorf("example %s: %w", example.ID, err)
+		}
+		input := questioncheck.Case{Session: session, HumanReply: example.HumanReply, PrevAnswer: example.PrevAnswer, PrevAfterReply: example.PrevAfterReply, Answer: example.Answer, Excerpts: excerpts}.Input()
 		judgeCtx, cancel := context.WithTimeout(ctx, judgeBudget)
 		started := time.Now()
 		verdict, usage, err := judge.Judge(judgeCtx, input)

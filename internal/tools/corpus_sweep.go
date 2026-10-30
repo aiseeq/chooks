@@ -1,6 +1,9 @@
 package tools
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // CorpusSweepVerdict — результат проверки команды на поиск по корпусу.
 type CorpusSweepVerdict struct {
@@ -15,6 +18,9 @@ var corpusSearchTools = map[string]bool{
 }
 
 var corpusRoots = []string{".claude/projects", ".codex", ".local/state/worker"}
+
+// optionAssign ключ со значением через =: --glob=…, -o=…
+var optionAssign = regexp.MustCompile(`^--?[A-Za-z][\w-]*=`)
 
 // CheckCorpusSweep находит обращения к корпусу транскриптов и решает,
 // затрагивает ли команда широкую выборку.
@@ -43,8 +49,8 @@ func CheckCorpusSweep(command, home string) CorpusSweepVerdict {
 				continue
 			}
 			value := unquoteWord(word.text)
-			if i := strings.IndexByte(value, '='); i >= 0 {
-				value = value[i+1:]
+			if assignWord.MatchString(value) || optionAssign.MatchString(value) {
+				value = value[strings.IndexByte(value, '=')+1:]
 			}
 			if path, ok := corpusPath(value, home); ok {
 				if corpusPoint(path) {

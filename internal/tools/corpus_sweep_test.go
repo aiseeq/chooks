@@ -57,6 +57,7 @@ func TestCheckCorpusSweepAllows(t *testing.T) {
 		{"путь в here-doc", "cat > notes.md <<'EOF'\nrg foo ~/.claude/projects\nEOF\ngrep -c rg notes.md", nil},
 		{"другой .claude", `rg foo ~/.claude/skills`, nil},
 		{"похожее имя", `rg foo ~/.codex-old/x`, nil},
+		{"= внутри пути", `rg foo ~/.claude/projects/x/k=v.jsonl`, []string{"~/.claude/projects/x/k=v.jsonl"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

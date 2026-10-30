@@ -366,6 +366,17 @@ graft help       # все задачи
 graft commit -m "fix: ..."  # гейт (сборка и тесты), коммит, push
 ```
 
+Скорость хуков: ночной обход perf запускает команды из
+`~/.claude/improve/state/perf/chooks.tsv`. Подробности — в `chooks.md` рядом.
+
+```bash
+scripts/perf/hook-ms.sh --q 95 stop      # p95 хука за 24 ч по транскриптам Claude Code, мс; мало событий — код 3
+scripts/perf/exec-ms.sh statusline scripts/perf/testdata/statusline.json  # медиана запуска в пустом HOME, мс
+```
+
+`hook-ms.sh` видит Stop-хуки всегда. У остальных хуков он видит только вызовы, в которых хук что-то вывел:
+Claude Code пишет время тихого вызова в транскрипт только для Stop-хуков.
+
 ## Требования
 
 - Linux, Go 1.21+, Claude Code 2.1.145+ (поля `background_tasks`/`session_crons` в Stop)

@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"Привет"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Здравствуйте"}]}}
+{"type":"user","message":{"role":"user","content":"Продолжай"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Готово"}]}}

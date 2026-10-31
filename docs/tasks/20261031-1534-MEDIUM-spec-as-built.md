@@ -1,6 +1,6 @@
 # ТЗ chooks «как сделано» + критика вторым агентом
 
-Статус: в работе
+Статус: на проверке
 Исполнитель: chooks-master
 
 ## Что сделать
@@ -27,3 +27,6 @@
 - 2026-10-31 16:34 note — chooks-master: автор принят 16:27: мера 0, 319 ссылок, 6 сверены по коду; 33 мин (22 — очередь), 0.106% недели OpenAI. ТЗ → /home/aisee/.claude/tools/chooks/spec.md (+строка среза 388c8de). accept.sh: база правок origin/main → HEAD (мой e10b09b сдвинул origin/main посреди работы автора). Критик Terra запущен, дерево spec-critic
 - 2026-10-31 16:34 note — chooks-master: критик: worker 1031-1633-spec-critic, 16:34 CET
 - 2026-10-31 17:14 note — chooks-master: критик принят мерой 17:11: 9 находок, 32 мин, 0.047% недели OpenAI. Разбор: scratchpad 4c5ae22d…/scratchpad/spec/triage.md — принято 6 (F1 ТЗ и F2 README исправлены сразу; F3 F4 F5 F8 → тикеты 20261031-1713-*), отклонено 3 (F6 F7 F9 с причиной). Дальше — проверка разбора свежим агентом
+- 2026-10-31 17:16 note — verifier-subagent: проверка разбора: ПРИНЯТО — 9/9 с решением; тикеты 1713-* (F3 F4 F5 F8) несут Суть/Доказательство дословно, «Как проверить» в приёмке; F1 spec.md:17 = hooks.yaml:45 и config.go:101 (false), установленный config.yaml:12-13 true; F2 README 25e55b7 «от 99%» = WeekEmptyPercent 99.0 (choose.go:16,104); F6: 0 строк причины в chooks.log и .1, и все 3022 решения Stop с 27.10 несут оба поля background_tasks и session_crons, смешанный nil не встречался, ветка - звонок, не пропуск; F7 = механизм тикета 1233 (Truncate+WriteAt, пустой → Fresh молча), нового нет; F9: forecast.go:5-10 и 8abab4f1:18997/19021 — цвет = хватит ли недели до сброса; F3 (scanEvents/chatCall — только текст Bash) и F5 (cleanupStaleStates по mtime) подтверждены по коду; private-terms 0 во всех 4
+- 2026-10-31 17:17 note — chooks-master: итог отправлен git-admin 17:18 CET: N=9, M=6, K=4 (+2 сразу), отклонено 3; F8: приёмка тикета — замер, не тест (замечание проверяющего)
+- 2026-10-31 17:17 на проверке — chooks-master

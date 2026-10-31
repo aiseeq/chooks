@@ -1,5 +1,5 @@
-github.com/aiseeq/akit v1.19.2 h1:dbiFftyv9pKCEhMb93XAHz5blVWsBTZML0qLF+DM86k=
-github.com/aiseeq/akit v1.19.2/go.mod h1:jnR4/oknueNXx8824Wpnkn3tAO/yniJ3qmvZirGrvxk=
+github.com/aiseeq/akit v1.20.0 h1:wWqYDI1jtY8cubMZOCPq5xQMtpW3uVrX9rp2WoIxjlg=
+github.com/aiseeq/akit v1.20.0/go.mod h1:jnR4/oknueNXx8824Wpnkn3tAO/yniJ3qmvZirGrvxk=
 github.com/cpuguy83/go-md2man/v2 v2.0.3/go.mod h1:tgQtvFlXSQOSOSIRvRPT7W67SCa46tRHOmNcaadrF8o=
 github.com/go-quicktest/qt v1.102.0 h1:HSQxCeh5YZH3EL3W39ixjtyaEhcWSXQHtHnMBzSs474=
 github.com/go-quicktest/qt v1.102.0/go.mod h1:p4lGIVX+8Wa6ZPNDvqcxq36XpUDLh42FLetFU7odllI=

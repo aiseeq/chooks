@@ -236,22 +236,37 @@ func open(ctx context.Context, rawURL string, noDirect bool, run Runner) (report
 	return rep, string(text), nil
 }
 
+// Имена локальной сети: RFC 6761 (localhost), RFC 6762 (local), RFC 8375
+// (home.arpa) и принятые в домашних и офисных сетях
+var localSuffixes = []string{"localhost", "local", "lan", "internal", "localdomain", "home.arpa"}
+
+// cgnat — общая адресация провайдера (RFC 6598): net.IP.IsPrivate её не знает
+var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
 // checkRemote отказывает адресу без точки в имени (localhost, имя в
-// локальной сети) и IP петли, частной или локальной сети
+// локальной сети), имени локальной зоны, IP петли, частной или локальной
+// сети и IP в сокращённой записи (127.1, 0x7f.0.0.1): у публичного домена
+// последняя часть имени с цифры не начинается
 func checkRemote(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("webfetch url: %w", err)
 	}
-	host := parsed.Hostname()
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
 	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || cgnat.Contains(ip) {
 			return fmt.Errorf("%w: %s", ErrLocalAddress, host)
 		}
 		return nil
 	}
-	if !strings.Contains(host, ".") {
+	dot := strings.LastIndex(host, ".")
+	if dot < 0 || dot == len(host)-1 || host[dot+1] >= '0' && host[dot+1] <= '9' {
 		return fmt.Errorf("%w: %q", ErrLocalAddress, host)
+	}
+	for _, suffix := range localSuffixes {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return fmt.Errorf("%w: %q", ErrLocalAddress, host)
+		}
 	}
 	return nil
 }

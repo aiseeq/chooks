@@ -246,6 +246,10 @@ func TestFailureContextSkipsLocal(t *testing.T) {
 		"http://localhost:8080/admin", "http://127.0.0.1:8080/admin", "http://intranet/wiki",
 		"http://10.1.2.3/", "http://192.168.0.1/", "http://[::1]/", "http://[fe80::1]/", "http://169.254.169.254/latest/meta-data",
 		"http://0.0.0.0/",
+		// Обходы, найденные приёмкой 01.11: точка в конце, зона localhost,
+		// сокращённый IP, CGNAT, имя локальной зоны
+		"http://localhost./", "http://app.localhost/", "http://127.1/", "http://0x7f.0.0.1/",
+		"http://100.64.0.1/", "http://router.lan/", "http://nas.local/", "http://[::ffff:127.0.0.1]/",
 	} {
 		runner := &fakeRunner{}
 		_, _, err := FailureContext(context.Background(), address, "fetch failed", runner.run)
@@ -256,8 +260,10 @@ func TestFailureContextSkipsLocal(t *testing.T) {
 			t.Errorf("%s: webtext вызван на локальный адрес", address)
 		}
 	}
-	runner := &fakeRunner{code: 1, stdout: `{"ok":false}`}
-	if _, _, err := FailureContext(context.Background(), "https://132.70.196.109/x", "connect ECONNREFUSED", runner.run); err != nil || runner.args == nil {
-		t.Errorf("публичный IP должен идти в webtext: err %v, вызван %v", err, runner.args != nil)
+	for _, address := range []string{"https://132.70.196.109/x", "https://www.reddit.com./r/x", "https://3dnews.ru/x", "https://a.b.io/"} {
+		runner := &fakeRunner{code: 1, stdout: `{"ok":false}`}
+		if _, _, err := FailureContext(context.Background(), address, "connect ECONNREFUSED", runner.run); err != nil || runner.args == nil {
+			t.Errorf("%s: публичный адрес должен идти в webtext: err %v, вызван %v", address, err, runner.args != nil)
+		}
 	}
 }

@@ -81,9 +81,8 @@ tasks:
     run: [rm -rf bin coverage.out]
   smoke:
     desc: гейт коммита, сборка и тесты
-    # Тесты не читают вне дерева того, что есть только здесь: переменные
-    # задают сами (t.Setenv), t.Skip безусловные (graft-master 30.10)
-    remote: true
+    # Без remote: go test здесь идёт из кеша 0–1 с, на PC с холодным кешем
+    # 9–14 с; ожидание гейта - допуск местных шагов (graft-master 31.10)
     run:
       - go build ./...
       - go test ./...

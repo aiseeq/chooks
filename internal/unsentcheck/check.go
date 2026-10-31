@@ -85,6 +85,11 @@ func Run(event Event) (Result, error) {
 		return Result{}, nil
 	}
 	checked, err := ChatOpened(event.TranscriptPath)
+	if errors.Is(err, os.ErrNotExist) {
+		// `claude -p --no-session-persistence` (ночные шаги Сна) передаёт путь,
+		// но транскрипт не пишет: проверять нечего, это не сбой
+		return Result{Claim: phrase, Skip: "no transcript"}, nil
+	}
 	if err != nil {
 		return Result{Claim: phrase}, err
 	}

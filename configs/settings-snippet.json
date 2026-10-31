@@ -4,10 +4,6 @@
       {
         "matcher": "Bash|Agent|Monitor",
         "hooks": [{ "type": "command", "command": "$HOME/bin/chooks pre-tool-use", "timeout": 3 }]
-      },
-      {
-        "matcher": "AskUserQuestion",
-        "hooks": [{ "type": "command", "command": "$HOME/bin/chooks no-prompt", "timeout": 5 }]
       }
     ],
     "PermissionRequest": [

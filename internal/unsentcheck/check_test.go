@@ -169,9 +169,20 @@ func TestRun(t *testing.T) {
 }
 
 func TestRun_MissingTranscript(t *testing.T) {
-	_, err := Run(Event{LastMessage: "Ещё не отправлено: ответ Оле", TranscriptPath: filepath.Join(t.TempDir(), "нет.jsonl")})
+	got, err := Run(Event{LastMessage: "Ещё не отправлено: ответ Оле", TranscriptPath: filepath.Join(t.TempDir(), "нет.jsonl")})
+	if err != nil {
+		t.Fatalf("нет транскрипта — пропуск, не ошибка: %v", err)
+	}
+	if got.Block || got.Skip != "no transcript" {
+		t.Errorf("got %+v, want Skip «no transcript» без остановки", got)
+	}
+}
+
+// Транскрипт есть, но не читается — ошибка, как раньше
+func TestRun_UnreadableTranscript(t *testing.T) {
+	_, err := Run(Event{LastMessage: "Ещё не отправлено: ответ Оле", TranscriptPath: t.TempDir()})
 	if err == nil {
-		t.Fatal("ожидалась ошибка чтения транскрипта")
+		t.Fatal("ожидалась ошибка чтения транскрипта-каталога")
 	}
 }
 

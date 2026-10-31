@@ -71,14 +71,14 @@ WebFetch представляется сайтам как Claude-User, и час
 
 Подкоманда `no-prompt` отказывает окнам, на которых агент стоит до ответа человека (пользователь 28.10, `~/.claude/decisions.md` no-blocking-prompts). Событие берётся из `hook_event_name`:
 
-- PreToolUse, matcher `AskUserQuestion` — `permissionDecision: deny`; агент читает в причине, что вопрос задаётся текстом в ответе.
 - PermissionRequest — `decision.behavior: deny` с `message` агенту, `interrupt: false`: ход идёт дальше.
 - Elicitation — `action: decline`, MCP-сервер получает отказ.
 
-Каждый отказ — строка `prompt denied` в `~/.claude/logs/chooks.log` (сессия, событие, инструмент или сервер, режим разрешений). Другое событие или инструмент — ошибка без вывода, окно остаётся как было.
+Окно вопроса с выбором (AskUserQuestion) хук не трогает: с 29.10 инструмент убран из контекста сессий `permissions.deny` в `~/.claude/settings.json`.
+
+Каждый отказ — строка `prompt denied` в `~/.claude/logs/chooks.log` (сессия, событие, инструмент или сервер, режим разрешений). Другое событие — ошибка без вывода, окно остаётся как было.
 
 ```json
-"PreToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "$HOME/bin/chooks no-prompt", "timeout": 5 }] }],
 "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "$HOME/bin/chooks no-prompt", "timeout": 5 }] }],
 "Elicitation": [{ "hooks": [{ "type": "command", "command": "$HOME/bin/chooks no-prompt", "timeout": 5 }] }]
 ```

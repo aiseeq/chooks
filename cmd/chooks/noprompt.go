@@ -8,16 +8,13 @@ import (
 	"github.com/aiseeq/chooks/internal/core"
 )
 
-// Отказ окнам, которые останавливают агента до ввода человека: вопрос с
-// выбором, запрос разрешения, запрос ввода от MCP-сервера. Пользователь
-// 28.10: «"Включаю этот набор?" - да» (~/.claude/decisions.md,
-// no-blocking-prompts). Вопрос пользователю остаётся текстом в ответе
-const (
-	askDeniedReason = "Окно вопроса с выбором отключено пользователем 28.10 (~/.claude/decisions.md, no-blocking-prompts). " +
-		"Задай вопрос текстом в ответе по правилу «Вопрос любому человеку» из ~/.claude/CLAUDE.md и закончи ход."
-	permissionDeniedMessage = "Окно разрешения отключено пользователем 28.10 (~/.claude/decisions.md, no-blocking-prompts): " +
-		"этот вызов не пройдёт. Сделай то же иначе в своих правах или назови в ответе, что нужно и зачем."
-)
+// Отказ окнам, которые останавливают агента до ввода человека: запрос
+// разрешения и запрос ввода от MCP-сервера. Пользователь 28.10:
+// «"Включаю этот набор?" - да» (~/.claude/decisions.md, no-blocking-prompts).
+// Окно вопроса с выбором (AskUserQuestion) с 29.10 снято permissions.deny в
+// settings.json, хук ему не нужен
+const permissionDeniedMessage = "Окно разрешения отключено пользователем 28.10 (~/.claude/decisions.md, no-blocking-prompts): " +
+	"этот вызов не пройдёт. Сделай то же иначе в своих правах или назови в ответе, что нужно и зачем."
 
 // noPromptEvent — поля stdin, по которым хук решает и пишет строку в лог
 type noPromptEvent struct {
@@ -39,12 +36,6 @@ func runNoPrompt(data []byte, logger core.Logger, out io.Writer) error {
 	}
 	output := map[string]any{"hookEventName": event.HookEventName}
 	switch event.HookEventName {
-	case "PreToolUse":
-		if event.ToolName != "AskUserQuestion" {
-			return fmt.Errorf("no-prompt: PreToolUse only for AskUserQuestion, got %q", event.ToolName)
-		}
-		output["permissionDecision"] = "deny"
-		output["permissionDecisionReason"] = askDeniedReason
 	case "PermissionRequest":
 		output["decision"] = map[string]any{"behavior": "deny", "message": permissionDeniedMessage, "interrupt": false}
 	case "Elicitation":

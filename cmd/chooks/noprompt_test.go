@@ -19,11 +19,7 @@ func TestRunNoPrompt(t *testing.T) {
 		input map[string]any
 		want  map[string]any
 	}{
-		{
-			name:  "AskUserQuestion",
-			input: map[string]any{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "tool_input": map[string]any{"questions": []any{}}},
-			want:  map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": askDeniedReason},
-		},
+
 		{
 			name:  "PermissionRequest",
 			input: map[string]any{"session_id": "s1", "hook_event_name": "PermissionRequest", "permission_mode": "bypassPermissions", "tool_name": "Bash", "tool_input": map[string]any{"command": "rm -rf /"}},
@@ -69,6 +65,7 @@ func TestRunNoPromptRejectsOtherEvents(t *testing.T) {
 	}
 	for _, input := range []string{
 		`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`,
+		`{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion"}`,
 		`{"hook_event_name":"Stop"}`,
 		`not json`,
 	} {

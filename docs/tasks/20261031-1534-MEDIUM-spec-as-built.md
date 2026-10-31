@@ -1,6 +1,6 @@
 # ТЗ chooks «как сделано» + критика вторым агентом
 
-Статус: на проверке
+Статус: готово
 Исполнитель: chooks-master
 
 ## Что сделать
@@ -30,3 +30,4 @@
 - 2026-10-31 17:16 note — verifier-subagent: проверка разбора: ПРИНЯТО — 9/9 с решением; тикеты 1713-* (F3 F4 F5 F8) несут Суть/Доказательство дословно, «Как проверить» в приёмке; F1 spec.md:17 = hooks.yaml:45 и config.go:101 (false), установленный config.yaml:12-13 true; F2 README 25e55b7 «от 99%» = WeekEmptyPercent 99.0 (choose.go:16,104); F6: 0 строк причины в chooks.log и .1, и все 3022 решения Stop с 27.10 несут оба поля background_tasks и session_crons, смешанный nil не встречался, ветка - звонок, не пропуск; F7 = механизм тикета 1233 (Truncate+WriteAt, пустой → Fresh молча), нового нет; F9: forecast.go:5-10 и 8abab4f1:18997/19021 — цвет = хватит ли недели до сброса; F3 (scanEvents/chatCall — только текст Bash) и F5 (cleanupStaleStates по mtime) подтверждены по коду; private-terms 0 во всех 4
 - 2026-10-31 17:17 note — chooks-master: итог отправлен git-admin 17:18 CET: N=9, M=6, K=4 (+2 сразу), отклонено 3; F8: приёмка тикета — замер, не тест (замечание проверяющего)
 - 2026-10-31 17:17 на проверке — chooks-master
+- 2026-10-31 17:18 готово — verifier-subagent (session chooks-master): Независимая проверка разбора 31.10 17:16-17:20 CET: 9/9 находок с решением; тикеты 20261031-1713-* (F3 F4 F5 F8) несут суть и доказательство дословно; F1 spec.md:17 = configs/hooks.yaml:45 и internal/core/config.go:101 (model_guard выключен), установленный config.yaml включает; F2 README в 25e55b7 «от 99%» = WeekEmptyPercent 99.0; отказы держатся: F6 - 0 строк причины в chooks.log(.1), все 3022 решения Stop с 27.10 с обоими реестрами; F7 - механизм тикета 20261031-1233 (Truncate+WriteAt, пустой файл -> Fresh); F9 - forecast.go:5-10 и 8abab4f1:18997/19021: цвет = недельный запас; F3 и F5 подтверждены по коду (check.go scanEvents/chatCall, state.go cleanupStaleStates по mtime); private-terms 0 в 4 тикетах; журнал: «итог отправлен git-admin 17:18 CET» есть; приёмка F8: сначала замер до «да», тест после «да» - поправлена; glint: 3 findings, debt glint-debt-skillreload-tools

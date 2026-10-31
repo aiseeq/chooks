@@ -1,6 +1,7 @@
 # Сетевой сбой WebFetch не вызывает webtext
 
-Статус: открыт
+Статус: готово
+Исполнитель: chooks-master
 
 ## Что сделать
 - Находка F8 критика spec-as-built (тикет 20261031-1534-MEDIUM-spec-as-built; ТЗ /home/aisee/.claude/tools/chooks/spec.md, срез 388c8de; находки — критик Terra worker 1031-1633-spec-critic, 31.10 16:40 CET). Принята chooks-master 31.10.
@@ -22,3 +23,4 @@
 - 2026-11-01 00:05 note — chooks-master: work-admin 01.11 ~00:05: legal сделает 02.11 (выходные - только критическое), тикет /home/aisee/work/docs/tasks/20261101-0004-LOW-legal-webfetch-failure-hook.md, ждёт до 02.11 09:00 CET. Сценарий 8 передан, у нас не блокирует.
 - 2026-11-01 00:07 note — chooks-master: Независимая проверка (суб-агент, 01.11 00:05): все 5 пунктов приняты - тесты Failure PASS, мутации checkRemote/fitUTF16 роняют тесты (overlay), доки совпадают, регистрация, chooks v0.0.0-200-gfb999b2, живая проба 00:05:14 opened=true, smoke и glint 0. Замечание: обходы checkRemote (localhost., app.localhost, 127.1, 0x7f.0.0.1, 100.64.0.1, router.lan) - починено как баг фильтра (hook-bugfix-no-ask), тест на каждый.
 - 2026-11-01 00:08 note — chooks-master: d5b09e6 установлен (v0.0.0-202-gd5b09e6); проба router.lan → «webfetch fallback skipped … local address» 00:08:21. legal - тикет work-admin до 02.11.
+- 2026-11-01 00:08 готово — subagent-acceptance (session chooks-master): суб-агент general-purpose 01.11 00:05 CET по брифу /home/aisee/.cache/claude-tmp/claude-1000/-home-aisee-git-chooks/ba40d6e2-29aa-4e2e-a905-17d5be6c5c97/scratchpad/wf/check-brief.md: go test -run Failure PASS, мутации checkRemote/fitUTF16 роняют тесты, доки hooks.md совпадают, settings.json:136, живая проба chooks.log 00:05:14 event=PostToolUseFailure opened=true, smoke и glint 0; замечание про обходы фильтра починено d5b09e6

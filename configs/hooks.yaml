@@ -37,7 +37,8 @@ tools:
 
   # На отказ сайта в ответе WebFetch (403, 429, страница проверки) подставляет
   # текст страницы из утилиты akit webtext (PostToolUse, подкоманда
-  # webfetch-fallback). Включает регистрация подкоманды в settings.json; без
+  # webfetch-fallback), на упавший WebFetch добавляет его контекстом
+  # (PostToolUseFailure). Включает регистрация подкоманды в settings.json; без
   # ключа включено
   webfetch_fallback:
     enabled: true

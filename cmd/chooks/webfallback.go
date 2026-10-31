@@ -23,18 +23,32 @@ type postToolUseOutput struct {
 	} `json:"hookSpecificOutput"`
 }
 
+// postToolUseFailureOutput — контекст рядом с ошибкой инструмента: заменить
+// результат в PostToolUseFailure нельзя
+type postToolUseFailureOutput struct {
+	HookSpecificOutput struct {
+		HookEventName     string `json:"hookEventName"`
+		AdditionalContext string `json:"additionalContext"`
+	} `json:"hookSpecificOutput"`
+}
+
 // runWebFetchFallback подменяет отказ сайта в ответе WebFetch текстом из
-// webtext. Обычный ответ проходит без вызова утилиты; сбой утилиты только
-// логируется, и ответ WebFetch остаётся как был
+// webtext (PostToolUse), а на упавший WebFetch добавляет этот текст
+// контекстом (PostToolUseFailure). Обычный ответ проходит без вызова утилиты;
+// сбой утилиты только логируется, и ответ WebFetch остаётся как был
 func runWebFetchFallback(ctx context.Context, data []byte, config *core.Config, logger core.Logger, out io.Writer) {
 	if tool, exists := config.Tools[webFallbackTool]; exists && !tool.Enabled {
 		return
 	}
 	var event webfallback.Event
-	var fetch webfallback.Fetch
 	if err := json.Unmarshal(data, &event); err != nil || event.ToolName != "WebFetch" {
 		return
 	}
+	if event.HookEventName == "PostToolUseFailure" {
+		runWebFetchFailure(ctx, event, logger, out)
+		return
+	}
+	var fetch webfallback.Fetch
 	if err := json.Unmarshal(event.ToolResponse, &fetch); err != nil {
 		logger.Warn("webfetch response unreadable", "hook", hookWebFetchFallback, "error", err)
 		return
@@ -48,15 +62,9 @@ func runWebFetchFallback(ctx context.Context, data []byte, config *core.Config, 
 	defer cancel()
 	updated, outcome, err := webfallback.Fallback(runCtx, fetch, webfallback.ExecRunner)
 	fields := []any{"session", event.SessionID, "url", webfallback.LogURL(fetch.URL), "reason", outcome.Reason, "ms", time.Since(start).Milliseconds()}
-	switch {
-	case errors.Is(err, webfallback.ErrNoWebtext):
-		logger.Info("webfetch fallback skipped", append(fields, "error", err)...)
-		return
-	case err != nil:
-		logger.Warn("webfetch fallback failed, response left as is", append(fields, "error", err)...)
+	if !logFallback(logger, fields, outcome, err) {
 		return
 	}
-	logger.Info("webfetch fallback", append(fields, "opened", outcome.Opened, "source", outcome.Source)...)
 
 	var output postToolUseOutput
 	output.HookSpecificOutput.HookEventName = "PostToolUse"
@@ -64,4 +72,41 @@ func runWebFetchFallback(ctx context.Context, data []byte, config *core.Config, 
 	if err := json.NewEncoder(out).Encode(output); err != nil {
 		logger.Warn("webfetch fallback output not written", append(fields, "error", err)...)
 	}
+}
+
+// runWebFetchFailure — PostToolUseFailure: прерванный пользователем вызов и
+// вызов без адреса пропускаются, остальные идут в webtext
+func runWebFetchFailure(ctx context.Context, event webfallback.Event, logger core.Logger, out io.Writer) {
+	if event.IsInterrupt || event.ToolInput.URL == "" {
+		return
+	}
+	start := time.Now()
+	runCtx, cancel := context.WithTimeout(ctx, webfallback.Budget)
+	defer cancel()
+	text, outcome, err := webfallback.FailureContext(runCtx, event.ToolInput.URL, event.Error, webfallback.ExecRunner)
+	fields := []any{"session", event.SessionID, "event", event.HookEventName, "url", webfallback.LogURL(event.ToolInput.URL),
+		"reason", outcome.Reason, "ms", time.Since(start).Milliseconds()}
+	if !logFallback(logger, fields, outcome, err) {
+		return
+	}
+	var output postToolUseFailureOutput
+	output.HookSpecificOutput.HookEventName = "PostToolUseFailure"
+	output.HookSpecificOutput.AdditionalContext = text
+	if err := json.NewEncoder(out).Encode(output); err != nil {
+		logger.Warn("webfetch fallback output not written", append(fields, "error", err)...)
+	}
+}
+
+// logFallback пишет исход webtext в лог; false — выводить хуку нечего
+func logFallback(logger core.Logger, fields []any, outcome webfallback.Outcome, err error) bool {
+	switch {
+	case errors.Is(err, webfallback.ErrNoWebtext), errors.Is(err, webfallback.ErrLocalAddress):
+		logger.Info("webfetch fallback skipped", append(fields, "error", err)...)
+		return false
+	case err != nil:
+		logger.Warn("webfetch fallback failed, response left as is", append(fields, "error", err)...)
+		return false
+	}
+	logger.Info("webfetch fallback", append(fields, "opened", outcome.Opened, "source", outcome.Source)...)
+	return true
 }

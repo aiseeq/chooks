@@ -22,6 +22,12 @@
         "hooks": [{ "type": "command", "command": "$HOME/bin/chooks webfetch-fallback", "timeout": 60 }]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "WebFetch",
+        "hooks": [{ "type": "command", "command": "$HOME/bin/chooks webfetch-fallback", "timeout": 60 }]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [{ "type": "command", "command": "$HOME/bin/chooks user-prompt-submit", "timeout": 3 }]

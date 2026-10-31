@@ -100,3 +100,59 @@ func TestRunWebFetchFallback_LeavesResponse(t *testing.T) {
 		}
 	})
 }
+
+func webFetchFailureInput(t *testing.T, url string, interrupt bool) []byte {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"session_id": "s1", "hook_event_name": "PostToolUseFailure", "tool_name": "WebFetch",
+		"tool_input": map[string]any{"url": url, "prompt": "quote"}, "tool_use_id": "toolu_1",
+		"error": "timeout of 60000ms exceeded", "is_interrupt": interrupt, "duration_ms": 60012,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestRunWebFetchFallback_FailureAddsContext(t *testing.T) {
+	config, logger := silentConfig(t)
+	calls := fakeWebtext(t)
+
+	var out bytes.Buffer
+	runWebFetchFallback(context.Background(), webFetchFailureInput(t, "https://www.itv.com/news/x", false), config, logger, &out)
+
+	var output postToolUseFailureOutput
+	if err := json.Unmarshal(out.Bytes(), &output); err != nil {
+		t.Fatalf("вывод хука: %v\n%s", err, out.String())
+	}
+	if output.HookSpecificOutput.HookEventName != "PostToolUseFailure" {
+		t.Errorf("hookEventName = %q", output.HookSpecificOutput.HookEventName)
+	}
+	if text := output.HookSpecificOutput.AdditionalContext; !strings.Contains(text, "timeout of 60000ms exceeded") || !strings.Contains(text, "Текст страницы.") {
+		t.Errorf("в контексте нет ошибки или текста страницы: %s", text)
+	}
+	if strings.Contains(out.String(), "updatedToolOutput") {
+		t.Errorf("в PostToolUseFailure подмены результата нет: %s", out.String())
+	}
+	if args, _ := os.ReadFile(calls); string(args) != "--json --timeout 45s https://www.itv.com/news/x\n" {
+		t.Errorf("аргументы webtext: %q", args)
+	}
+}
+
+func TestRunWebFetchFallback_FailureSkipped(t *testing.T) {
+	config, logger := silentConfig(t)
+	for name, input := range map[string][]byte{
+		"прерван":         webFetchFailureInput(t, "https://www.itv.com/news/x", true),
+		"без адреса":      webFetchFailureInput(t, "", false),
+		"локальный адрес": webFetchFailureInput(t, "http://localhost:3000/", false),
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := fakeWebtext(t)
+			var out bytes.Buffer
+			runWebFetchFallback(context.Background(), input, config, logger, &out)
+			if _, err := os.Stat(calls); out.Len() != 0 || err == nil {
+				t.Errorf("хук сработал: %s", out.String())
+			}
+		})
+	}
+}

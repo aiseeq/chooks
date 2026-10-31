@@ -55,13 +55,14 @@ chooks question-bench --model opus --effort high cases.jsonl   # строки {i
 
 ### Отказ сайта в WebFetch
 
-WebFetch представляется сайтам как Claude-User, и часть сайтов отвечает ему отказом. Подкоманда `webfetch-fallback` (PostToolUse, matcher `WebFetch`) на отказ зовёт утилиту akit `webtext --json --timeout 45s URL`: прямой запрос под другим честным именем, затем архив Wayback, без маскировки. Текст страницы подставляется агенту через `updatedToolOutput`, агенту ничего знать не нужно.
+WebFetch представляется сайтам как Claude-User, и часть сайтов отвечает ему отказом. Подкоманда `webfetch-fallback` (PostToolUse и PostToolUseFailure, matcher `WebFetch`) на отказ или сбой зовёт утилиту akit `webtext --json --timeout 45s URL`: прямой запрос под другим честным именем, затем архив Wayback, без маскировки. Текст страницы подставляется агенту через `updatedToolOutput`, агенту ничего знать не нужно.
 
 - Отказ — код 403, 402, 429, 503, 202 (пустая проверка AWS WAF у eur-lex) или ответ 200, в первых 300 символах пересказа которого заглушка проверки (Anubis, captcha, «Checking your browser»). На 429 сайт второй раз не спрашивается: `--no-direct`, сразу архив. Сухой прогон по 730 вызовам WebFetch 12–25.10: 99 отказов, на обычных страницах ложных срабатываний нет.
 - Агенту идут первые 30 000 символов текста с пометкой, откуда он и что промпт WebFetch к нему не применён; остальное — путём к файлу. Не открыл и webtext — к ответу WebFetch дописываются его ступени и подсказка.
 - Обычный ответ проходит без вызова утилиты. Утилиты нет, она упала или не уложилась в 55 с — ответ WebFetch остаётся как был, причина в логе (`webfetch fallback`).
-- Ответы с `is_error` (сетевые ошибки, TLS) идут в PostToolUseFailure, а там текст не заменить.
-- Фоновые `claude -p` с `--setting-sources project` хуков из `~/.claude/settings.json` не грузят; им хук передаётся флагом `--settings` с этим же элементом.
+- Упавший WebFetch (таймаут, TLS, отказ соединения, отказ домена самим Claude Code) приходит в PostToolUseFailure: там ответ не заменить, и текст webtext идёт рядом с ошибкой как `additionalContext`. Claude Code режет его на 10 000 символов, поэтому текста там до 9 500 единиц UTF-16 вместе с заголовком, остальное — путём к файлу. Прерванный вызов (`is_interrupt`) пропускается. Замер 30 дней до 31.10: 24 сбоя на 1317 вызовов, webtext открыл 14 из 23 адресов.
+- Адрес без точки в имени (localhost) и IP петли, частной или локальной сети хук не запрашивает: WebFetch не открывает их намеренно.
+- Фоновые `claude -p` с `--setting-sources project` хуков из `~/.claude/settings.json` не грузят; им хук передаётся флагом `--settings` с этим же элементом под обоими событиями.
 
 ```json
 { "matcher": "WebFetch", "hooks": [{ "type": "command", "command": "$HOME/bin/chooks webfetch-fallback", "timeout": 60 }] }

@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 const (
@@ -35,6 +37,13 @@ const (
 	// тексту те же слова встречаются в обычных статьях (документация Claude
 	// Code о Cloudflare)
 	checkPageRunes = 300
+	// contextUnits — граница additionalContext в PostToolUseFailure: Claude
+	// Code режет строки хука на 10 000 символов (UTF-16, как длина строки JS),
+	// а длиннее уносит в файл и показывает 2 000; запас — на свои строки
+	// Claude Code вокруг
+	contextUnits = 9500
+	// errorRunes — сколько текста ошибки WebFetch идёт в заголовок
+	errorRunes = 200
 )
 
 // Коды отказа. 202 — пустая страница проверки AWS WAF (eur-lex), 429 — сайт
@@ -60,11 +69,18 @@ type Fetch struct {
 	URL        string `json:"url"`
 }
 
-// Event — нужное из входа PostToolUse
+// Event — нужное из входа PostToolUse и PostToolUseFailure
 type Event struct {
-	SessionID    string          `json:"session_id"`
-	ToolName     string          `json:"tool_name"`
-	ToolResponse json.RawMessage `json:"tool_response"`
+	SessionID     string          `json:"session_id"`
+	HookEventName string          `json:"hook_event_name"`
+	ToolName      string          `json:"tool_name"`
+	ToolResponse  json.RawMessage `json:"tool_response"`
+	ToolInput     struct {
+		URL string `json:"url"`
+	} `json:"tool_input"`
+	// Error и IsInterrupt — только у PostToolUseFailure
+	Error       string `json:"error"`
+	IsInterrupt bool   `json:"is_interrupt"`
 }
 
 // Reason — почему ответ считается отказом сайта; "" — обычный ответ
@@ -95,6 +111,10 @@ type Runner func(ctx context.Context, args []string) ([]byte, int, error)
 
 // ErrNoWebtext — утилита не установлена: ответ WebFetch остаётся как был
 var ErrNoWebtext = errors.New("webtext not installed")
+
+// ErrLocalAddress — адрес локальный или частной сети: WebFetch такие не
+// открывает намеренно, и хук за него их не запрашивает
+var ErrLocalAddress = errors.New("local address")
 
 // report — вывод webtext --json
 type report struct {
@@ -128,21 +148,10 @@ func Fallback(ctx context.Context, fetch Fetch, run Runner) (*Fetch, Outcome, er
 		return nil, outcome, nil
 	}
 
-	args := []string{"--json", "--timeout", webtextTimeout}
 	// Второй прямой запрос после 429 только продлит ограничение
-	if fetch.Code == 429 {
-		args = append(args, "--no-direct")
-	}
-	stdout, code, err := run(ctx, append(args, fetch.URL))
+	rep, text, err := open(ctx, fetch.URL, fetch.Code == 429, run)
 	if err != nil {
 		return nil, outcome, err
-	}
-	if code != 0 && code != 1 {
-		return nil, outcome, fmt.Errorf("webtext exit %d: %s", code, firstLine(stdout))
-	}
-	var rep report
-	if err := json.Unmarshal(stdout, &rep); err != nil {
-		return nil, outcome, fmt.Errorf("webtext output: %w", err)
 	}
 
 	updated := fetch
@@ -150,19 +159,105 @@ func Fallback(ctx context.Context, fetch Fetch, run Runner) (*Fetch, Outcome, er
 		updated.Result = fetch.Result + "\n\n" + failureNote(rep)
 		return &updated, outcome, nil
 	}
-	text, err := os.ReadFile(rep.Path)
-	if err != nil {
-		return nil, outcome, fmt.Errorf("webtext text: %w", err)
-	}
 	outcome.Opened, outcome.Source = true, rep.Source
-	updated.Result = openedText(fetch, outcome.Reason, rep, string(text))
+	reason := outcome.Reason
+	if fetch.CodeText != "" && fetch.Code != 200 {
+		reason += " " + fetch.CodeText
+	}
+	header := fmt.Sprintf("WebFetch получил отказ сайта (%s). Страницу открыл webtext (%s). "+
+		"Промпт WebFetch к тексту не применён, ниже текст страницы как есть", reason, sourceLabel(rep))
+	updated.Result = withText(header, text, rep.Path, resultRunes)
 	updated.Bytes = len(text)
 	return &updated, outcome, nil
 }
 
-// openedText — ответ агенту: откуда текст и что промпт WebFetch к нему не
-// применён, затем сам текст (заголовок, source, страница)
-func openedText(fetch Fetch, reason string, rep report, text string) string {
+// FailureContext зовёт webtext на упавший WebFetch (сеть, TLS, таймаут, отказ
+// домена самим Claude Code) и возвращает additionalContext для
+// PostToolUseFailure: заменить результат там нельзя, текст страницы идёт
+// рядом с ошибкой. Ошибка — утилита не сработала, контекста нет
+func FailureContext(ctx context.Context, rawURL, toolErr string, run Runner) (string, Outcome, error) {
+	outcome := Outcome{Reason: FailureReason(toolErr)}
+	rep, text, err := open(ctx, rawURL, false, run)
+	if err != nil {
+		return "", outcome, err
+	}
+	failed := fmt.Sprintf("WebFetch упал (%s).", outcome.Reason)
+	if !rep.OK {
+		return failed + " " + failureNote(rep), outcome, nil
+	}
+	outcome.Opened, outcome.Source = true, rep.Source
+	header := fmt.Sprintf("%s Страницу открыл webtext (%s). Промпт WebFetch к тексту не применён, ниже текст страницы как есть",
+		failed, sourceLabel(rep))
+	// Пометка об обрезке длиннее всего с путём и двумя числами
+	room := contextUnits - utf16Len(header) - utf16Len(truncNote(len(text), len(text), rep.Path))
+	return withText(header, text, rep.Path, fitUTF16(text, room)), outcome, nil
+}
+
+// FailureReason — первая строка ошибки WebFetch, не длиннее errorRunes
+func FailureReason(toolErr string) string {
+	line := firstLine([]byte(toolErr))
+	if runes := []rune(line); len(runes) > errorRunes {
+		line = string(runes[:errorRunes]) + "…"
+	}
+	if line == "" {
+		return "ошибка без текста"
+	}
+	return line
+}
+
+// open зовёт webtext и читает текст открытой страницы; rep.OK == false —
+// webtext страницу не открыл, его ступени в rep
+func open(ctx context.Context, rawURL string, noDirect bool, run Runner) (report, string, error) {
+	var rep report
+	if err := checkRemote(rawURL); err != nil {
+		return rep, "", err
+	}
+	args := []string{"--json", "--timeout", webtextTimeout}
+	if noDirect {
+		args = append(args, "--no-direct")
+	}
+	stdout, code, err := run(ctx, append(args, rawURL))
+	if err != nil {
+		return rep, "", err
+	}
+	if code != 0 && code != 1 {
+		return rep, "", fmt.Errorf("webtext exit %d: %s", code, firstLine(stdout))
+	}
+	if err := json.Unmarshal(stdout, &rep); err != nil {
+		return rep, "", fmt.Errorf("webtext output: %w", err)
+	}
+	if !rep.OK {
+		return rep, "", nil
+	}
+	text, err := os.ReadFile(rep.Path)
+	if err != nil {
+		return rep, "", fmt.Errorf("webtext text: %w", err)
+	}
+	return rep, string(text), nil
+}
+
+// checkRemote отказывает адресу без точки в имени (localhost, имя в
+// локальной сети) и IP петли, частной или локальной сети
+func checkRemote(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("webfetch url: %w", err)
+	}
+	host := parsed.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return fmt.Errorf("%w: %s", ErrLocalAddress, host)
+		}
+		return nil
+	}
+	if !strings.Contains(host, ".") {
+		return fmt.Errorf("%w: %q", ErrLocalAddress, host)
+	}
+	return nil
+}
+
+// sourceLabel — откуда текст: ступень webtext, дата снимка архива, вид
+func sourceLabel(rep report) string {
 	source := rep.Source
 	if rep.Snapshot != "" {
 		source += " " + rep.Snapshot
@@ -170,18 +265,39 @@ func openedText(fetch Fetch, reason string, rep report, text string) string {
 	if rep.Kind != "" {
 		source += ", " + rep.Kind
 	}
-	if fetch.CodeText != "" && fetch.Code != 200 {
-		reason += " " + fetch.CodeText
-	}
-	header := fmt.Sprintf("WebFetch получил отказ сайта (%s). Страницу открыл webtext (%s). "+
-		"Промпт WebFetch к тексту не применён, ниже текст страницы как есть", reason, source)
+	return source
+}
 
+// withText — заголовок и первые keep символов текста; не влезший текст —
+// ссылкой на файл в заголовке
+func withText(header, text, path string, keep int) string {
 	runes := []rune(text)
-	if len(runes) > resultRunes {
-		header += fmt.Sprintf(": первые %d из %d символов, целиком — %s", resultRunes, len(runes), rep.Path)
-		text = string(runes[:resultRunes])
+	if len(runes) <= keep {
+		return header + ".\n\n" + text
 	}
-	return header + ".\n\n" + text
+	return header + truncNote(keep, len(runes), path) + string(runes[:keep])
+}
+
+func truncNote(kept, total int, path string) string {
+	return fmt.Sprintf(": первые %d из %d символов, целиком — %s.\n\n", kept, total, path)
+}
+
+// fitUTF16 — сколько первых символов текста укладывается в room единиц UTF-16
+func fitUTF16(text string, room int) int {
+	kept, used := 0, 0
+	for _, r := range text {
+		used += utf16.RuneLen(r)
+		if used > room {
+			break
+		}
+		kept++
+	}
+	return kept
+}
+
+// utf16Len — длина строки так, как её считает Claude Code (JavaScript)
+func utf16Len(s string) int {
+	return len(utf16.Encode([]rune(s)))
 }
 
 // failureNote — отчёт webtext, когда страницу не открыть: агент не повторяет

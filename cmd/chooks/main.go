@@ -70,7 +70,7 @@ func execute() int {
 		newHookCmd(hookUserPromptSubmit, "Обработать UserPromptSubmit hook", &exitCode),
 		newHookCmd(hookPostToolBatch, "Обработать PostToolBatch hook", &exitCode),
 		newHookCmd(hookQuestionCheck, "Проверить вопросы пользователю в конце хода (Stop)", &exitCode),
-		newHookCmd(hookWebFetchFallback, "Подменить отказ сайта в ответе WebFetch текстом из webtext (PostToolUse)", &exitCode),
+		newHookCmd(hookWebFetchFallback, "Подменить отказ сайта в ответе WebFetch текстом из webtext (PostToolUse), на упавший WebFetch добавить его контекстом (PostToolUseFailure)", &exitCode),
 		newHookCmd(hookNoPrompt, "Отказать окну, ждущему ввода человека (PermissionRequest, Elicitation)", &exitCode),
 		newHookCmd(hookUnsentCheck, "Не выпустить ответ «текст не отправлен» без reddy history в ходе (Stop)", &exitCode),
 		newNotifyCmd(),

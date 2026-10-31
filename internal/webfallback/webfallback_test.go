@@ -171,3 +171,93 @@ func TestLogURLDropsQuery(t *testing.T) {
 		t.Errorf("LogURL = %q", got)
 	}
 }
+
+// Текст отказа домена самим Claude Code (WebFetch 31.10)
+const domainBlocked = "Claude Code is unable to fetch from www.reddit.com"
+
+func TestFailureContextOpened(t *testing.T) {
+	path := writeText(t, "Thread\nsource: wayback\n\nТекст обсуждения.")
+	runner := &fakeRunner{stdout: `{"ok":true,"source":"wayback","snapshot":"20250801092245","kind":"html","path":"` + path + `"}`}
+
+	text, outcome, err := FailureContext(context.Background(), "https://www.reddit.com/r/x/comments/1/", domainBlocked, runner.run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(runner.args, []string{"--json", "--timeout", "45s", "https://www.reddit.com/r/x/comments/1/"}) {
+		t.Errorf("аргументы webtext: %q", runner.args)
+	}
+	if !outcome.Opened || outcome.Source != "wayback" || outcome.Reason != domainBlocked {
+		t.Errorf("исход: %+v", outcome)
+	}
+	// Дата снимка видна агенту: архив бывает старым
+	for _, want := range []string{"WebFetch упал (" + domainBlocked + ")", "wayback 20250801092245, html", "Промпт WebFetch к тексту не применён", "Текст обсуждения."} {
+		if !strings.Contains(text, want) {
+			t.Errorf("в контексте нет %q:\n%s", want, text)
+		}
+	}
+}
+
+// Весь контекст с длинной ошибкой, заголовком и пометкой — в пределе Claude
+// Code, считая UTF-16: эмодзи занимают две единицы
+func TestFailureContextFitsHookCap(t *testing.T) {
+	page := strings.Repeat("😀я", 8000)
+	path := writeText(t, page)
+	runner := &fakeRunner{stdout: `{"ok":true,"source":"direct","kind":"html","path":"` + path + `"}`}
+	longErr := strings.Repeat("certificate chain error ", 100) + "\nвторая строка"
+
+	text, outcome, err := FailureContext(context.Background(), "https://example.org/a", longErr, runner.run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := utf16Len(text); got > 10000 {
+		t.Errorf("контекст %d единиц UTF-16, предел Claude Code 10000", got)
+	}
+	if got := len([]rune(outcome.Reason)); got > errorRunes+1 || strings.Contains(outcome.Reason, "вторая") {
+		t.Errorf("ошибка в заголовке не обрезана: %d символов, %q", got, outcome.Reason)
+	}
+	if !strings.Contains(text, "из 16000 символов, целиком — "+path) {
+		t.Errorf("нет пометки об обрезке: %.400s", text)
+	}
+	if !strings.HasSuffix(text, "😀я") && !strings.HasSuffix(text, "😀") {
+		t.Errorf("текст обрезан посреди символа: %q", text[len(text)-8:])
+	}
+}
+
+func TestFailureContextNotOpened(t *testing.T) {
+	runner := &fakeRunner{code: 1, stdout: `{"ok":false,"steps":[{"step":"direct","result":"error: tls: failed to verify certificate"},{"step":"wayback","result":"no snapshot with status 200"}]}`}
+
+	text, outcome, err := FailureContext(context.Background(), "https://developer.bank.example/docs/x", "self signed certificate in certificate chain", runner.run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Opened {
+		t.Error("страница не открыта, а исход Opened")
+	}
+	want := "WebFetch упал (self signed certificate in certificate chain). webtext тоже не открыл страницу " +
+		"(direct: error: tls: failed to verify certificate; wayback: no snapshot with status 200)."
+	if text != want {
+		t.Errorf("контекст:\n%s\nожидался:\n%s", text, want)
+	}
+}
+
+// WebFetch намеренно не открывает локальные адреса — хук за него тоже
+func TestFailureContextSkipsLocal(t *testing.T) {
+	for _, address := range []string{
+		"http://localhost:8080/admin", "http://127.0.0.1:8080/admin", "http://intranet/wiki",
+		"http://10.1.2.3/", "http://192.168.0.1/", "http://[::1]/", "http://[fe80::1]/", "http://169.254.169.254/latest/meta-data",
+		"http://0.0.0.0/",
+	} {
+		runner := &fakeRunner{}
+		_, _, err := FailureContext(context.Background(), address, "fetch failed", runner.run)
+		if !errors.Is(err, ErrLocalAddress) {
+			t.Errorf("%s: ожидался ErrLocalAddress, а %v", address, err)
+		}
+		if runner.args != nil {
+			t.Errorf("%s: webtext вызван на локальный адрес", address)
+		}
+	}
+	runner := &fakeRunner{code: 1, stdout: `{"ok":false}`}
+	if _, _, err := FailureContext(context.Background(), "https://132.70.196.109/x", "connect ECONNREFUSED", runner.run); err != nil || runner.args == nil {
+		t.Errorf("публичный IP должен идти в webtext: err %v, вызван %v", err, runner.args != nil)
+	}
+}

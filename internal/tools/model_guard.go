@@ -41,7 +41,7 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 	path := t.approvedPath()
 	models, reason := readApprovedModels(path)
 	if reason != "" {
-		return t.reject(reason, path), nil
+		return t.reject(reason), nil
 	}
 	var reasons []string
 	for _, c := range candidates {
@@ -54,7 +54,7 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 	if len(reasons) == 0 {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
-	return t.reject(strings.Join(reasons, "; "), path, models), nil
+	return t.reject(strings.Join(reasons, "; "), models), nil
 }
 
 type modelCandidate struct {
@@ -239,7 +239,7 @@ func normalizeModel(model string) string {
 	return model
 }
 
-func (t *ModelGuardTool) reject(reason, path string, models ...[]approvedModel) *core.ValidationResult {
+func (t *ModelGuardTool) reject(reason string, models ...[]approvedModel) *core.ValidationResult {
 	var list []string
 	if len(models) > 0 {
 		for _, m := range models[0] {

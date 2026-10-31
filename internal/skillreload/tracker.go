@@ -3,7 +3,9 @@ package skillreload
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -243,17 +245,17 @@ type candidate struct {
 // Code, хук откладывает до ответа модели и показывает сам, только если
 // заметки так и не было
 func (t tracker) notices(now time.Time) ([]Notice, []error) {
-	candidates, errs := t.candidates(now)
+	candidates, errs := t.candidates()
 	return t.deliver(candidates, now), errs
 }
 
 // candidates — правки всех файлов сессии до укладки в выдачу
-func (t tracker) candidates(now time.Time) ([]candidate, []error) {
+func (t tracker) candidates() ([]candidate, []error) {
 	var candidates []candidate
 	var errs []error
-	for _, path := range sortedKeys(t.state.Files) {
+	for _, path := range slices.Sorted(maps.Keys(t.state.Files)) {
 		w := t.state.Files[path]
-		c, ok, err := t.check(w, now)
+		c, ok, err := t.check(w)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s not checked: %w", w.Name, err))
 		}
@@ -350,7 +352,7 @@ func fitBudget(candidates []candidate, budget int) []Notice {
 
 // check сверяет файл с текстом в контексте; правка возвращается кандидатом,
 // база не трогается
-func (t tracker) check(w *watched, now time.Time) (candidate, bool, error) {
+func (t tracker) check(w *watched) (candidate, bool, error) {
 	view, err := t.view(w.Kind, w.Path)
 	if err != nil || !view.Exists {
 		return candidate{}, false, err

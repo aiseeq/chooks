@@ -14,3 +14,4 @@
 
 ## Журнал
 - 2026-10-31 15:47 открыт — chooks-master
+- 2026-11-01 00:03 note — chooks-master: Исправлено: sortedKeys → slices.Sorted(maps.Keys) на месте вызовов, сняты неиспользуемые now (tracker.check, tracker.candidates) и path (ModelGuardTool.reject). glint check ./... 0 находок, graft smoke зелёный. Не установлено (правило проекта: install хуков skillreload/model-guard - по разрешению; поведение не меняется).

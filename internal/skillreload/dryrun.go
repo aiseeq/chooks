@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -97,7 +99,7 @@ func DryRun(ctx context.Context, root string, days int, now time.Time) (*DryRunR
 
 	result := &DryRunResult{Since: since, Transcripts: len(scans)}
 	timelines, kinds := collectVersions(scans)
-	for _, path := range sortedKeys(kinds) {
+	for _, path := range slices.Sorted(maps.Keys(kinds)) {
 		external, problems := fileVersions(ctx, kinds[path], path)
 		result.Problems = append(result.Problems, problems...)
 		timelines[path] = mergeTimeline(external, timelines[path])
@@ -151,7 +153,7 @@ func replay(scan transcriptScan, timelines map[string][]version, since time.Time
 		switch ev.Kind {
 		case evHook:
 			announced = map[string]bool{}
-			candidates, errs := t.candidates(ev.At)
+			candidates, errs := t.candidates()
 			result.Problems = append(result.Problems, errs...)
 			raw := rawSize(candidates)
 			notices := t.deliver(candidates, ev.At)
@@ -511,17 +513,7 @@ func WriteDryRun(w io.Writer, r *DryRunResult) {
 
 // sortedByCount — ключи по убыванию счёта, при равенстве по имени
 func sortedByCount(counts map[string]int) []string {
-	keys := sortedKeys(counts)
+	keys := slices.Sorted(maps.Keys(counts))
 	sort.SliceStable(keys, func(i, j int) bool { return counts[keys[i]] > counts[keys[j]] })
-	return keys
-}
-
-// sortedKeys — ключи отображения по порядку: итог не зависит от порядка обхода
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
 	return keys
 }

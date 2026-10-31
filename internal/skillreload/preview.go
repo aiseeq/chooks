@@ -3,8 +3,10 @@ package skillreload
 import (
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -79,7 +81,7 @@ func WritePreview(w io.Writer, r *PreviewResult) {
 	}
 	fmt.Fprintf(w, "При установке (транскрипты с %s: %d): выдач %d в %d транскриптах\n",
 		r.Since.Local().Format("02.01 15:04 MST"), r.Transcripts, total, len(r.Notices))
-	for _, path := range sortedKeys(r.Notices) {
+	for _, path := range slices.Sorted(maps.Keys(r.Notices)) {
 		for i := range r.Notices[path] {
 			n := &r.Notices[path][i]
 			form := fmt.Sprintf("diff %d Б", n.DiffBytes)

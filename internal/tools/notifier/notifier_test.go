@@ -178,7 +178,7 @@ func TestDecodeProjectDir(t *testing.T) {
 
 	for encoded, expected := range tests {
 		t.Run(encoded, func(t *testing.T) {
-			if got := decodeProjectDir(encoded); got != expected {
+			if got := decodeProjectDir(encoded, testLogger(t)); got != expected {
 				t.Errorf("ожидалось %q, получено %q", expected, got)
 			}
 		})
@@ -194,7 +194,7 @@ func TestDecodeProjectDir_LeadingDashInName(t *testing.T) {
 	}
 
 	encoded := encodePathPart(root) + "--dashed-app"
-	if got := decodeProjectDir(encoded); got != nested {
+	if got := decodeProjectDir(encoded, testLogger(t)); got != nested {
 		t.Errorf("ожидалось %q, получено %q", nested, got)
 	}
 }
@@ -218,7 +218,7 @@ func TestDecodeProjectDir_DotsAndManyDashes(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := decodeProjectDir(encodePathPart(dir)); got != dir {
+	if got := decodeProjectDir(encodePathPart(dir), testLogger(t)); got != dir {
 		t.Errorf("ожидалось %q, получено %q", dir, got)
 	}
 }
@@ -231,7 +231,7 @@ func TestDecodeProjectDir_Ambiguous(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := decodeProjectDir(encodePathPart(root) + "-my-app"); got != "" {
+	if got := decodeProjectDir(encodePathPart(root)+"-my-app", testLogger(t)); got != "" {
 		t.Errorf("ожидалось пусто, получено %q", got)
 	}
 }
@@ -243,7 +243,7 @@ func TestDecodeProjectDir_RemovedTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := filepath.Join(root, "my-app", "gone", "sub")
-	if got := decodeProjectDir(encodePathPart(root) + "-my-app-gone-sub"); got != want {
+	if got := decodeProjectDir(encodePathPart(root)+"-my-app-gone-sub", testLogger(t)); got != want {
 		t.Errorf("ожидалось %q, получено %q", want, got)
 	}
 }

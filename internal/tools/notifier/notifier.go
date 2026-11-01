@@ -140,7 +140,7 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 func (n *Notifier) ProjectName(input *core.ToolInput) string {
 	if transcriptPath := input.TranscriptPath; transcriptPath != "" {
 		encoded := filepath.Base(filepath.Dir(transcriptPath))
-		if dir := decodeProjectDir(encoded); dir != "" {
+		if dir := decodeProjectDir(encoded, n.logger); dir != "" {
 			return core.ProjectNameForDir(dir)
 		}
 	}
@@ -166,7 +166,7 @@ func (n *Notifier) ProjectName(input *core.ToolInput) string {
 // на части. Два подходящих пути — неоднозначность, "" (ProjectName берёт
 // cwd); ни одного (каталог снесён или переименован) — от самого глубокого
 // найденного каталога остаток с дефисами-разделителями
-func decodeProjectDir(encoded string) string {
+func decodeProjectDir(encoded string, logger core.Logger) string {
 	rest := strings.TrimPrefix(encoded, "-")
 	if rest == "" || rest == "." || rest == string(filepath.Separator) {
 		return ""
@@ -184,6 +184,8 @@ func decodeProjectDir(encoded string) string {
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			// Нечитаемый каталог — тупик этой ветки, поиск идёт дальше
+			logger.Debug("project dir decode: unreadable directory", "dir", dir, "error", err)
 			return
 		}
 		for _, entry := range entries {

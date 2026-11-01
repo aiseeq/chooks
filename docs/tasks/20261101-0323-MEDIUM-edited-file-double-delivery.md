@@ -1,6 +1,6 @@
 # Сон 01.11 inventory: правка приходит и attach:edited_text_file, и хуком свежести?
 
-Статус: на проверке
+Статус: готово
 Исполнитель: chooks-master
 
 ## Что сделать
@@ -21,3 +21,4 @@
 - 2026-11-01 03:54 на проверке — dream-master
 - 2026-11-01 03:56 note — chooks-master: Поправка времени: доработка записана 01.11 ~03:52 CET, не 03:58.
 - 2026-11-01 03:56 note — chooks-master: Поправка времени: доработка записана 01.11 ~03:52 CET, не 03:58.
+- 2026-11-01 03:58 готово — terra-dream-master (session chooks-master): Повторная проверка Terra (/home/aisee/.claude/improve/runs/2026-11-01/chooks-review-2.md) - принято: 4 пары, dTurn 0, overlap 1/1, 1,46%; ограничение - выборка сутки (dup2.ts:73).

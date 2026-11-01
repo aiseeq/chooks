@@ -1,6 +1,7 @@
 package unsentcheck
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,8 +184,8 @@ func TestRun_MissingTranscript(t *testing.T) {
 // Транскрипт есть, но не читается — ошибка, как раньше
 func TestRun_UnreadableTranscript(t *testing.T) {
 	_, err := Run(Event{LastMessage: "Ещё не отправлено: ответ Оле", TranscriptPath: t.TempDir()})
-	if err == nil {
-		t.Fatal("ожидалась ошибка чтения транскрипта-каталога")
+	if !errors.Is(err, tailscan.ErrNotRegular) {
+		t.Fatalf("err = %v, ожидалась tailscan.ErrNotRegular для транскрипта-каталога", err)
 	}
 }
 

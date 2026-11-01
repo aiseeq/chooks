@@ -13,8 +13,8 @@ import (
 func TestScan_DirectoryIsError(t *testing.T) {
 	called := false
 	err := Scan(t.TempDir(), func([]byte) bool { called = true; return true })
-	if err == nil || called {
-		t.Fatalf("err = %v, called = %v; want error before reading", err, called)
+	if !errors.Is(err, ErrNotRegular) || called {
+		t.Fatalf("err = %v, called = %v; want ErrNotRegular before reading", err, called)
 	}
 }
 

@@ -5,6 +5,7 @@ package tailscan
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,11 @@ const (
 	// сообщений сессий
 	Max = 32 << 20
 )
+
+// ErrNotRegular — путь транскрипта ведёт не к обычному файлу (каталог,
+// устройство). Своя ошибка, а не ошибка чтения: на tmpfs чтение каталога
+// падает EISDIR, на btrfs пустой каталог читается без ошибки
+var ErrNotRegular = errors.New("not a regular file")
 
 // Scan отдаёт fn хвосты файла path по возрастанию окна, от Start до Max или
 // всего файла, пока fn не скажет, что нужное найдено. Окно не с начала файла
@@ -33,7 +39,7 @@ func Scan(path string, fn func(buf []byte) (done bool)) error {
 		return fmt.Errorf("stat transcript: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("transcript %s is not a regular file (%s)", path, info.Mode().Type())
+		return fmt.Errorf("transcript %s (%s): %w", path, info.Mode().Type(), ErrNotRegular)
 	}
 	size := info.Size()
 	for window := int64(Start); ; window *= 2 {

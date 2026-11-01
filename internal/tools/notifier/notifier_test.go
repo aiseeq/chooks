@@ -255,3 +255,24 @@ func TestEncodePathPart(t *testing.T) {
 		}
 	}
 }
+
+// Каталог с правом x без r (чужой home 711): списка нет, имя находится stat-ом,
+// как в прежнем декодере (находка независимой проверки 01.11)
+func TestDecodeProjectDir_ExecOnlyDir(t *testing.T) {
+	root := t.TempDir()
+	xonly := filepath.Join(root, "xonly")
+	want := filepath.Join(xonly, "my-app")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(xonly, 0o311); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(xonly, 0o755) })
+	if _, err := os.ReadDir(xonly); err == nil {
+		t.Skip("каталог без права чтения читается (root?)")
+	}
+	if got := decodeProjectDir(encodePathPart(want), testLogger(t)); got != want {
+		t.Errorf("ожидалось %q, получено %q", want, got)
+	}
+}

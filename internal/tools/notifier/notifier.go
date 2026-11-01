@@ -182,21 +182,9 @@ func decodeProjectDir(encoded string, logger core.Logger) string {
 		if len(dir) > len(deepest) {
 			deepest, deepestRest = dir, rest
 		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			// Нечитаемый каталог — тупик этой ветки, поиск идёт дальше
-			logger.Debug("project dir decode: unreadable directory", "dir", dir, "error", err)
-			return
-		}
-		for _, entry := range entries {
-			name := encodePathPart(entry.Name())
-			if rest != name && !strings.HasPrefix(rest, name+"-") {
-				continue
-			}
-			next := filepath.Join(dir, entry.Name())
-			if !entry.IsDir() && (entry.Type()&os.ModeSymlink == 0 || !isDir(next)) {
-				continue
-			}
+		for _, child := range childDirs(dir, rest, logger) {
+			name := encodePathPart(child)
+			next := filepath.Join(dir, child)
 			if rest == name {
 				found = append(found, next)
 				continue
@@ -214,6 +202,39 @@ func decodeProjectDir(encoded string, logger core.Logger) string {
 	default:
 		return ""
 	}
+}
+
+// childDirs — подкаталоги dir, чьё закодированное имя начинает остаток rest
+// целым сегментом. Каталог без права чтения (x без r, чужой home 711) списка не
+// даёт: тогда пробуются имена, где дефисы остатка — буквальные дефисы, через
+// stat, как в прежнем декодере
+func childDirs(dir, rest string, logger core.Logger) []string {
+	matches := func(name string) bool {
+		encoded := encodePathPart(name)
+		return rest == encoded || strings.HasPrefix(rest, encoded+"-")
+	}
+	var names []string
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		logger.Debug("project dir decode: directory not listable, probing names", "dir", dir, "error", err)
+		segments := strings.Split(rest, "-")
+		for k := 1; k <= len(segments); k++ {
+			name := strings.Join(segments[:k], "-")
+			if name != "" && isDir(filepath.Join(dir, name)) {
+				names = append(names, name)
+			}
+		}
+		return names
+	}
+	for _, entry := range entries {
+		if !matches(entry.Name()) {
+			continue
+		}
+		if entry.IsDir() || (entry.Type()&os.ModeSymlink != 0 && isDir(filepath.Join(dir, entry.Name()))) {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
 }
 
 // encodePathPart кодирует имя, как Claude Code каталог транскриптов: всё,

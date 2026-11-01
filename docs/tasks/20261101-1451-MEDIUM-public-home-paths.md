@@ -1,6 +1,6 @@
 # Домашние пути пользователя в публичном репо вне docs/tasks
 
-Статус: в работе
+Статус: готово
 Исполнитель: chooks-master
 
 ## Что сделать
@@ -20,3 +20,5 @@
 - 2026-11-01 14:51 открыт — chooks-master
 - 2026-11-01 14:52 в работе — chooks-master
 - 2026-11-01 14:52 note — chooks-master: Сделано: /home/aisee→/home/u, -home-aisee→-home-u, pgrep -u u; README и комментарии без имени; perf-фикстуры cwd/current_dir/project_dir → @REPO@, exec-ms.sh подставляет корень репо (проверено awk: cwd=/home/aisee/git/chooks при прогоне здесь). git grep aisee вне docs/tasks (кроме github.com/aiseeq) — пусто; graft smoke зелёный; exec-ms.sh --runs 1 statusline → 11.5 мс.
+- 2026-11-01 14:54 на проверке — chooks-master — Проверка Terra (worker ask, ревью) по коммиту 2ca0129 запущена 01.11 ~15:00 CET
+- 2026-11-01 14:54 готово — terra (session chooks-master): Terra (worker ask, ревью) ПРИНЯТО по 2ca0129: git grep aisee вне docs/tasks пуст (grep-exit=1); тесты получают home аргументом/заглушкой env HOME=/home/u (rm_guard_test.go:13); exec-ms.sh:43,64 подставляет корень репо в @REPO@, perf_test.go:107 идёт через скрипт. go test целиком зелёный — гейт graft commit 2ca0129.

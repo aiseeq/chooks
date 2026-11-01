@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aiseeq/chooks/internal/tailscan"
 )
 
 // Ответы сухого прогона work-admin 29.10 (hits.txt), остановленные бы им
@@ -190,7 +192,7 @@ func TestChatOpened_BeyondFirstWindow(t *testing.T) {
 	var b strings.Builder
 	b.WriteString(human + "\n" + history + "\n")
 	filler := `{"type":"assistant","uuid":"f","timestamp":"2026-10-29T10:01:00Z","message":{"content":[{"type":"text","text":"` + strings.Repeat("ж", 1000) + `"}]}}` + "\n"
-	for b.Len() < 3*tailWindowStart {
+	for b.Len() < 3*tailscan.Start {
 		b.WriteString(filler)
 	}
 	path := filepath.Join(t.TempDir(), "t.jsonl")

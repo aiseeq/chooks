@@ -157,51 +157,78 @@ func (n *Notifier) ProjectName(input *core.ToolInput) string {
 }
 
 // decodeProjectDir восстанавливает путь проекта из имени каталога транскриптов
-// Claude Code: /home/user/work/chooks → -home-user-work-chooks.
-// Кодирование неоднозначно — дефис может быть как разделителем каталогов,
-// так и частью имени, — поэтому вариант проверяется по файловой системе.
-// Так различаются ~/work/projecta/frontend/admin-app и ~/work/chooks
+// Claude Code: всё, кроме латинских букв и цифр, он заменяет дефисом
+// (/home/user/.cache/my-app → -home-user--cache-my-app, видно по
+// ~/.claude/projects). Кодирование неоднозначно, поэтому путь ищется по
+// записям каталогов: на каждом уровне — каталог, чьё закодированное имя
+// продолжает остаток, с возвратом из тупика. Так различаются
+// ~/work/projecta/frontend/admin-app и ~/work/chooks, а имя с UUID не рвётся
+// на части. Два подходящих пути — неоднозначность, "" (ProjectName берёт
+// cwd); ни одного (каталог снесён или переименован) — от самого глубокого
+// найденного каталога остаток с дефисами-разделителями
 func decodeProjectDir(encoded string) string {
-	if encoded == "" || encoded == "." || encoded == string(filepath.Separator) {
+	rest := strings.TrimPrefix(encoded, "-")
+	if rest == "" || rest == "." || rest == string(filepath.Separator) {
 		return ""
 	}
-
-	path := string(filepath.Separator)
-	// Пустой сегмент означает дефис в начале имени каталога: /tmp/x/-home-user
-	pendingDash := false
-
-	for i, segment := range strings.Split(encoded, "-") {
-		if segment == "" {
-			// Ведущий дефис задаёт абсолютный путь и сегмента не образует
-			pendingDash = i != 0
-			continue
+	root := string(filepath.Separator)
+	var found []string
+	deepest, deepestRest := root, rest
+	var walk func(dir, rest string)
+	walk = func(dir, rest string) {
+		if len(found) > 1 {
+			return
 		}
-
-		if pendingDash {
-			segment = "-" + segment
-			pendingDash = false
+		if len(dir) > len(deepest) {
+			deepest, deepestRest = dir, rest
 		}
-
-		nested := filepath.Join(path, segment)
-		if isDir(nested) {
-			path = nested
-			continue
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
 		}
-
-		// Дефис оказался частью имени текущего каталога
-		if joined := path + "-" + segment; isDir(joined) {
-			path = joined
-			continue
+		for _, entry := range entries {
+			name := encodePathPart(entry.Name())
+			if rest != name && !strings.HasPrefix(rest, name+"-") {
+				continue
+			}
+			next := filepath.Join(dir, entry.Name())
+			if !entry.IsDir() && (entry.Type()&os.ModeSymlink == 0 || !isDir(next)) {
+				continue
+			}
+			if rest == name {
+				found = append(found, next)
+				continue
+			}
+			walk(next, rest[len(name)+1:])
 		}
-
-		// Каталога с таким именем нет (снесён или переименован): считаем дефис разделителем
-		path = nested
 	}
+	walk(root, rest)
 
-	if path == string(filepath.Separator) {
+	switch len(found) {
+	case 1:
+		return found[0]
+	case 0:
+		return filepath.Join(deepest, strings.ReplaceAll(deepestRest, "-", string(filepath.Separator)))
+	default:
 		return ""
 	}
-	return path
+}
+
+// encodePathPart кодирует имя, как Claude Code каталог транскриптов: всё,
+// кроме латинских букв и цифр, — дефис, по одному на кодовую единицу UTF-16
+func encodePathPart(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			b.WriteString("--")
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 // isDir сообщает, существует ли каталог по указанному пути

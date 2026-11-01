@@ -92,7 +92,7 @@ func TestNotifierTool_ProjectName(t *testing.T) {
 			t.Fatalf("не удалось создать каталог: %v", err)
 		}
 	}
-	encodedHome := strings.ReplaceAll(home, "/", "-")
+	encodedHome := encodePathPart(home)
 
 	tests := []struct {
 		name     string
@@ -167,7 +167,7 @@ func TestDecodeProjectDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "my-app", "sub"), 0o755); err != nil {
 		t.Fatalf("не удалось создать каталог: %v", err)
 	}
-	encodedRoot := strings.ReplaceAll(root, "/", "-")
+	encodedRoot := encodePathPart(root)
 
 	tests := map[string]string{
 		encodedRoot + "-my-app":     filepath.Join(root, "my-app"),
@@ -193,7 +193,7 @@ func TestDecodeProjectDir_LeadingDashInName(t *testing.T) {
 		t.Fatalf("не удалось создать каталог: %v", err)
 	}
 
-	encoded := strings.ReplaceAll(root, "/", "-") + "--dashed-app"
+	encoded := encodePathPart(root) + "--dashed-app"
 	if got := decodeProjectDir(encoded); got != nested {
 		t.Errorf("ожидалось %q, получено %q", nested, got)
 	}
@@ -208,4 +208,50 @@ func testLogger(t *testing.T) core.Logger {
 		t.Fatalf("не удалось создать логгер: %v", err)
 	}
 	return logger
+}
+
+// Claude Code кодирует дефисом и точку, и дефис в имени: каталог с точкой и
+// UUID в пути не рвётся на части (DNS-проба Сна 01.11 с TMPDIR в scratchpad)
+func TestDecodeProjectDir_DotsAndManyDashes(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".cache", "0f7d5c09-e2d3-4f09-bf78-3b04ec6368d5", "scratchpad")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeProjectDir(encodePathPart(dir)); got != dir {
+		t.Errorf("ожидалось %q, получено %q", dir, got)
+	}
+}
+
+// Два каталога дают одно кодирование — неоднозначность: пусто, имя берётся из cwd
+func TestDecodeProjectDir_Ambiguous(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"my-app", filepath.Join("my", "app")} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := decodeProjectDir(encodePathPart(root) + "-my-app"); got != "" {
+		t.Errorf("ожидалось пусто, получено %q", got)
+	}
+}
+
+// Снесённый каталог: от последнего найденного остаток дефисами-разделителями
+func TestDecodeProjectDir_RemovedTail(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "my-app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "my-app", "gone", "sub")
+	if got := decodeProjectDir(encodePathPart(root) + "-my-app-gone-sub"); got != want {
+		t.Errorf("ожидалось %q, получено %q", want, got)
+	}
+}
+
+func TestEncodePathPart(t *testing.T) {
+	for in, want := range map[string]string{"/home/u/.cache": "-home-u--cache", "a_b c": "a-b-c", "дом": "---", "x😀": "x--"} {
+		if got := encodePathPart(in); got != want {
+			t.Errorf("encodePathPart(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

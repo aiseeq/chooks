@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/tailscan"
 )
 
 // stubJudge — судья-заглушка: живую модель тесты не зовут
@@ -396,7 +398,7 @@ func TestReadTailFindsHumanBeyondFirstWindow(t *testing.T) {
 	var b strings.Builder
 	b.WriteString(`{"type":"user","uuid":"u1","timestamp":"2026-10-23T10:00:00Z","origin":{"kind":"human"},"message":{"content":[{"type":"text","text":"далёкая реплика"}]}}` + "\n")
 	filler := `{"type":"api-request-blob","data":"` + strings.Repeat("x", 4096) + `"}` + "\n"
-	for b.Len() < 3*tailWindowStart {
+	for b.Len() < 3*tailscan.Start {
 		b.WriteString(filler)
 	}
 	b.WriteString(`{"type":"assistant","uuid":"m9","timestamp":"2026-10-23T10:00:00Z","message":{"content":[{"type":"text","text":"Делать?"}]}}` + "\n")

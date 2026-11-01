@@ -8,9 +8,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"regexp"
+
+	"github.com/aiseeq/chooks/internal/tailscan"
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/akit/transcript"
@@ -105,45 +106,18 @@ func blockReason(phrase string) string {
 		"Если фраза не про текст человеку в чате (письмо сессии, рассказ о механизме) — закончи ход как есть", phrase)
 }
 
-// Окно чтения хвоста: растёт вдвое, пока не найдено начало хода, как у
-// question-check — транскрипт бывает в сотни МБ
-const (
-	tailWindowStart = 1 << 20
-	tailWindowMax   = 32 << 20
-)
-
 // ChatOpened — вызывался ли в текущем ходе Bash с `reddy … history`. Ход —
 // от последней реплики человека, письма сессии или запроса программы
 // (`claude -p`, SDK: запись без origin); начала хода нет и в предельном
 // окне — смотрится всё окно
 func ChatOpened(path string) (bool, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return false, fmt.Errorf("open transcript: %w", err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return false, fmt.Errorf("stat transcript: %w", err)
-	}
-	size := info.Size()
-	for window := int64(tailWindowStart); ; window *= 2 {
-		window = min(window, size)
-		buf := make([]byte, window)
-		if _, err := file.ReadAt(buf, size-window); err != nil && err != io.EOF {
-			return false, fmt.Errorf("read transcript tail: %w", err)
-		}
-		// Первая строка окна обрезана, если окно не с начала файла
-		if window < size {
-			if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-				buf = buf[i+1:]
-			}
-		}
-		checked, turnFound := scanTurn(buf)
-		if checked || turnFound || window >= size || window >= tailWindowMax {
-			return checked, nil
-		}
-	}
+	var checked bool
+	err := tailscan.Scan(path, func(buf []byte) bool {
+		var turnFound bool
+		checked, turnFound = scanTurn(buf)
+		return checked || turnFound
+	})
+	return checked, err
 }
 
 // scanTurn идёт по строкам с конца до начала хода

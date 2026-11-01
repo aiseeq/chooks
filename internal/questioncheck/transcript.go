@@ -3,22 +3,13 @@ package questioncheck
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/aiseeq/akit/transcript"
-)
+	"github.com/aiseeq/chooks/internal/tailscan"
 
-// Окно чтения хвоста транскрипта: транскрипт сессии бывает в сотни МБ и
-// целиком в таймаут хука не укладывается, а нужное — последние записи. Окно
-// растёт вдвое, пока не найдены прошлая реплика человека и предыдущий ответ
-// агента или не исчерпан предел: у work-admin между репликами человека бывают
-// сотни сообщений сессий
-const (
-	tailWindowStart = 1 << 20
-	tailWindowMax   = 32 << 20
+	"github.com/aiseeq/akit/transcript"
 )
 
 // Tail — то, что проверке нужно из транскрипта
@@ -45,39 +36,18 @@ type Tail struct {
 // ReadTail читает хвост транскрипта: uuid последнего текста ассистента,
 // последнюю реплику человека — набранную в приглашении (type user,
 // origin human) или поставленную в очередь посреди хода (queued_command) — и
-// предыдущий ответ агента, отличный от проверяемого answer
+// предыдущий ответ агента, отличный от проверяемого answer. Окно растёт, пока
+// не найдены прошлая реплика человека и предыдущий ответ агента
 func ReadTail(path, answer string) (Tail, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return Tail{}, fmt.Errorf("open transcript: %w", err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return Tail{}, fmt.Errorf("stat transcript: %w", err)
-	}
-	size := info.Size()
-
 	var tail Tail
-	for window := int64(tailWindowStart); ; window *= 2 {
-		if window > size {
-			window = size
-		}
-		buf := make([]byte, window)
-		if _, err := file.ReadAt(buf, size-window); err != nil && err != io.EOF {
-			return Tail{}, fmt.Errorf("read transcript tail: %w", err)
-		}
-		// Первая строка окна обрезана, если окно не с начала файла
-		if window < size {
-			if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-				buf = buf[i+1:]
-			}
-		}
+	err := tailscan.Scan(path, func(buf []byte) bool {
 		tail = scanTail(buf, answer)
-		if (tail.HumanFound && tail.PrevFound) || window >= size || window >= tailWindowMax {
-			return tail, nil
-		}
+		return tail.HumanFound && tail.PrevFound
+	})
+	if err != nil {
+		return Tail{}, err
 	}
+	return tail, nil
 }
 
 // scanTail идёт по строкам с конца. uuid текста ассистента берётся только
@@ -188,12 +158,6 @@ func ReplayTail(path string, at time.Time) (Tail, string, error) {
 	if end < 0 {
 		return Tail{}, "", fmt.Errorf("no finished turn before %s in %s", at.Format(time.RFC3339), path)
 	}
-	buf := data[:min(end, len(data))]
-	if len(buf) > tailWindowMax {
-		buf = buf[len(buf)-tailWindowMax:]
-		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-			buf = buf[i+1:]
-		}
-	}
+	buf := tailscan.Clip(data[:min(end, len(data))])
 	return scanTail(buf, strings.TrimSpace(answer)), strings.TrimSpace(answer), nil
 }

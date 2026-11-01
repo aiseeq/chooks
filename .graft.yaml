@@ -5,7 +5,7 @@ version:
 gate:
   - task: smoke
   # glint падает кодом выхода на находках high и выше (fail_on по умолчанию).
-  - sh: GOWORK=off ~/bin/glint check .
+  - task: glint
 
 tools:
   glint:
@@ -75,6 +75,11 @@ tasks:
           fi
   glint:
     desc: проверить код glint
+    # heavy + remote: при занятом ноуте graft отправляет шаг на pc;
+    # вывод на pc и ноуте совпадает побайтно (сверка 02.11, тикет glint-gate-remote)
+    heavy: true
+    remote: true
+    env: {GOWORK: "off"}
     run: [glint check .]
   clean:
     desc: удалить артефакты сборки

@@ -28,7 +28,7 @@ type saidCase struct {
 	Message string                    `json:"message"`
 	Quotes  []questioncheck.SaidQuote `json:"quotes"`
 	// Turn — весь ход агента, Project — каталог проекта Claude Code
-	// (-home-aisee-work): для --turn и --said
+	// (-home-u-work): для --turn и --said
 	Turn    string `json:"turn"`
 	Project string `json:"project"`
 }

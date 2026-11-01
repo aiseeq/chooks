@@ -39,6 +39,8 @@ input=$2
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 transcript="$script_dir/testdata/transcript.jsonl"
 [[ -f $transcript ]] || { echo "Транскрипт не найден: $transcript" >&2; exit 2; }
+# @REPO@ во входе — корень этого репо: statusline и хуки видят живое git-дерево
+repo=$(cd -- "$script_dir/../.." && pwd)
 input=$(cd -- "$(dirname -- "$input")" && printf '%s/%s\n' "$PWD" "$(basename -- "$input")")
 unset KONSOLE_DBUS_SERVICE KONSOLE_DBUS_SESSION KONSOLE_DBUS_WINDOW CLAUDE_PID
 
@@ -59,7 +61,7 @@ for ((i = 0; i < runs; i++)); do
   run_dir=$(mktemp -d -t chooks-perf.XXXXXX)
   tmpdirs+=("$run_dir")
   mkdir -p "$run_dir/state" "$run_dir/config" "$run_dir/runtime"
-  awk -v transcript="$transcript" '{ gsub(/@TRANSCRIPT@/, transcript); print }' "$input" >"$run_dir/input.json"
+  awk -v transcript="$transcript" -v repo="$repo" '{ gsub(/@TRANSCRIPT@/, transcript); gsub(/@REPO@/, repo); print }' "$input" >"$run_dir/input.json"
   start=$(date +%s%N)
   if ! HOME="$run_dir" XDG_STATE_HOME="$run_dir/state" XDG_CONFIG_HOME="$run_dir/config" XDG_RUNTIME_DIR="$run_dir/runtime" \
     "$bin" "$subcommand" <"$run_dir/input.json" >/dev/null 2>"$run_dir/stderr"; then

@@ -14,7 +14,7 @@ func TestRunCorpusSweep(t *testing.T) {
 		`{"id":3,"command":"ls internal/"}`,
 	}, "\n")
 	var out, summary bytes.Buffer
-	if err := runCorpusSweep(&out, &summary, strings.NewReader(input), "command", "/home/aisee"); err != nil {
+	if err := runCorpusSweep(&out, &summary, strings.NewReader(input), "command", "/home/u"); err != nil {
 		t.Fatal(err)
 	}
 	var results []struct {
@@ -66,7 +66,7 @@ func TestRunCorpusSweepRejectsBadRows(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, summary bytes.Buffer
-			err := runCorpusSweep(&out, &summary, strings.NewReader(tc.input), "command", "/home/aisee")
+			err := runCorpusSweep(&out, &summary, strings.NewReader(tc.input), "command", "/home/u")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("ошибка = %v, нужна ошибка с %q", err, tc.want)
 			}

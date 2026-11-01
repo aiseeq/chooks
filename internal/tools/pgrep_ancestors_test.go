@@ -19,7 +19,7 @@ func TestRewritePgrepAncestors(t *testing.T) {
 		{"подоболочка в кавычках", `echo "живых: $(pgrep -f worker | wc -l)"`, `echo "живых: $(pgrep -A -f worker | wc -l)"`},
 		{"слитые ключи", `pgrep -af 'claude --model'`, `pgrep -A -af 'claude --model'`},
 		{"длинный ключ", `pgrep --full x`, `pgrep -A --full x`},
-		{"ключ со значением раньше -f", `pgrep -u aisee -f worker`, `pgrep -A -u aisee -f worker`},
+		{"ключ со значением раньше -f", `pgrep -u u -f worker`, `pgrep -A -u u -f worker`},
 		{"после префиксов", `timeout 600 sudo pgrep -f x`, `timeout 600 sudo pgrep -A -f x`},
 		{"после ||", `false || pgrep -f x`, `false || pgrep -A -f x`},
 		{"обёртка timeout и список", `timeout 5 pgrep -f x && pgrep -f y`, `timeout 5 pgrep -A -f x && pgrep -A -f y`},

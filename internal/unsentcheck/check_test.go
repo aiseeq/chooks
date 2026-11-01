@@ -65,19 +65,19 @@ const (
 func TestChatCall(t *testing.T) {
 	calls := []string{
 		// Формы из транскриптов за 7 дней (независимая проверка 29.10)
-		"R=/home/aisee/work/reddy/bin/reddy; $R history 2783119 --since '2026-10-29'",
-		`R="/home/aisee/work/reddy/bin/reddy" && "${R}" history Оля`,
+		"R=/home/u/work/reddy/bin/reddy; $R history 2783119 --since '2026-10-29'",
+		`R="/home/u/work/reddy/bin/reddy" && "${R}" history Оля`,
 		"which reddy && timeout 60 reddy history Оля",
 		"for c in 1 2; do reddy history $c; done",
 		`"$HOME/bin/reddy" history Оля`,
 		"for c in 1 2; do ./bin/reddy history $c; done",
 		"cd ~/work\nreddy history Оля | tail",
-		`R=/home/aisee/work/reddy/bin/reddy; f(){ $R history $1 --since "$2"; }; f 1 2`,
+		`R=/home/u/work/reddy/bin/reddy; f(){ $R history $1 --since "$2"; }; f 1 2`,
 		"reddy history 'Клиент - задачи'",
 		"reddy history --since 1d Оля | tail -20",
 		"cd ~ && reddy history Оля",
 		"reddy --json history Оля",
-		"/home/aisee/bin/reddy history Оля",
+		"/home/u/bin/reddy history Оля",
 		`echo "$(reddy history Оля)"`,
 	}
 	for _, command := range calls {
@@ -91,8 +91,8 @@ func TestChatCall(t *testing.T) {
 		"cat >> t.md <<'EOF'\nход без reddy history — блок\nEOF",
 		`claude -p "Сначала выполни Bash: reddy history Оля"`,
 		"git commit -m 'unsent-check: reddy history в ходе'",
-		"R=/home/aisee/work/reddy/bin/reddy; $R chats; echo history",
-		"R=/home/aisee/work/reddy/bin/reddy; $RX history",
+		"R=/home/u/work/reddy/bin/reddy; $R chats; echo history",
+		"R=/home/u/work/reddy/bin/reddy; $RX history",
 		// Строка heredoc с примером вызова в правке теста
 		"sub <<'EOF'\ncalls := []string{\n\t\"reddy history 'Клиент - задачи'\",\n}\nEOF",
 	}

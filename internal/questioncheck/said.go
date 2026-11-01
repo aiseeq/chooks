@@ -260,7 +260,7 @@ func unescapeSaid(field string) string {
 }
 
 // InForce — записи, сказанные до before, которые действуют в проекте project
-// (каталог проекта Claude Code: -home-aisee-work-projectB) и не отменены более
+// (каталог проекта Claude Code: -home-u-work-projectB) и не отменены более
 // поздней записью до before
 func InForce(records []SaidRecord, project, home string, before time.Time) []SaidRecord {
 	superseded := map[string]bool{}

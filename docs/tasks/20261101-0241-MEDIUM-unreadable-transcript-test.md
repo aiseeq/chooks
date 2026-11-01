@@ -1,6 +1,6 @@
 # Сон 01.11 tests: TestRun_UnreadableTranscript падает при TMPDIR на диске; DNS-проба; разбор тестов
 
-Статус: в работе
+Статус: готово
 Исполнитель: chooks-master
 
 ## Что сделать
@@ -19,3 +19,4 @@
 - 2026-11-01 02:58 в работе — chooks-master
 - 2026-11-01 03:27 note — chooks-master: Разбор тестов (боец Luna 1101-0305, 2 захода, отчёт /home/aisee/.cache/claude-tmp/claude-1000/-home-aisee-git-chooks/0f7d5c09-e2d3-4f09-bf78-3b04ec6368d5/scratchpad/tests-review-1101.md): стадии - gate=smoke(go build+go test)+glint, test вне gate - дубля нет; graft stats с 25.10 при load<16: gate 83 прогона, wall мед 3,9 с, CPU 5,8 с, TREE 170 MB, отказы 1%; smoke 101, 1,4 с, 2,6 с CPU. Фиксы октября 30, без теста 3 (b93d10d nolint, fa2a662 конфиг, 94ccb84 statusline). Ручные мутации 8 фиксов: красные 6 (d5b09e6, 29190dc, 2f013e8, e3262f2, 810056e, c501f70), зелёные 2: a541698 (Debug-лог, не поведение) и 361cf1b на tmpfs - тест каталога ловит любую ошибку, на tmpfs её даёт ReadAt (EISDIR); усилить: метка ErrNotRegular и errors.Is. Пустых тестов нет, дублей нет. Покрытие 72,5%; ниже 60% с фиксами - cmd/chooks 29,3% (4 фикса), без фиксов - internal/desktop 28,6%. Сеть и время - выше (DNS-проба).
 - 2026-11-01 03:30 note — chooks-master: Независимая проверка (суб-агент, бриф scratchpad 0f7d5c09 review-brief.md): п.1-4 прошли (btrfs и tmpfs зелёные; мутация IsRegular краснит на btrfs; окна 1..32 МБ по 40-МБ файлу; ReadAt только в tailscan.go). Находки: на tmpfs мутация зелёная (EISDIR) - усилено: tailscan.ErrNotRegular, оба теста проверяют errors.Is; мутация теперь краснит TestScan_DirectoryIsError и TestRun_UnreadableTranscript и на /tmp, и на btrfs. graft exec --heavy уводит go test на pc без TMPDIR - команда приёмки исправлена на --local; мои доказательства шли локально (мутация - прямой go test, DNS-проба - unshare: «on this machine»).
+- 2026-11-01 03:34 готово — review-subagent-ad6941a (session chooks-master): Суб-агент-проверяющий (бриф scratchpad 0f7d5c09 review-brief.md, 2 прохода, прогоны --local): 361cf1b+4ae9f49 - TestRun_UnreadableTranscript и TestScan_DirectoryIsError зелёные на tmpfs и btrfs; мутация IsRegular краснит оба на обеих ФС (tmpfs: «is a directory» вместо ErrNotRegular; btrfs: err=nil); окна 1..32 МБ на 40-МБ файле; ReadAt только в tailscan.go:42. DNS-проба полного набора - зелёная (журнал). Разбор тестов - в журнале.

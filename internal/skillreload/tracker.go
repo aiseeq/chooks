@@ -82,6 +82,11 @@ func (t tracker) loadSkill(ev transcriptEvent) error {
 		// Урезанная сжатием копия — тот же вызов: дочитать его Claude Code
 		// предлагает агенту сам
 		w.Base = w.LoadBase
+		// Запись прежней версии хука времени вызова не хранит: LoadedAt
+		// остаётся прежним до следующего вызова скилла
+		if !w.LoadBaseAt.IsZero() {
+			w.LoadedAt = w.LoadBaseAt
+		}
 		return nil
 	}
 	if ev.Kind == evSkillReinject && truncatedCopy(ev.Text) {
@@ -107,6 +112,7 @@ func (t tracker) loadSkill(ev transcriptEvent) error {
 	w.Base = base
 	w.Snapshot = snapshot
 	w.LoadBase = base
+	w.LoadBaseAt = ev.At
 	// Вызов скилла Claude Code за файлом следить не заставляет; прежнее
 	// чтение файла инструментом — заставляет, оно остаётся в силе
 	w.Deferred = ""

@@ -366,7 +366,13 @@ func TestCompactionRestoresOldSnapshot(t *testing.T) {
 		"type":   "invoked_skills",
 		"skills": []map[string]string{{"name": "demo", "path": "userSettings:demo", "content": loadHeader + f.skillDir + "\n\nСнимок."}},
 	}))
-	wantDiff(t, f.check(Event{}), []string{"-Снимок.", "+Правка."}, nil)
+	got := f.check(Event{})
+	wantDiff(t, got, []string{"-Снимок.", "+Правка."}, nil)
+	// Сессия 7ec55eed 01.11 04:24: в выдаче «текст в контексте от» стояло время
+	// прошлой выдачи (позже правки), хотя в контексте снова текст вызова
+	if loaded := got[0].LoadedAt; loaded.Sub(base.Add(time.Minute)).Abs() > time.Second {
+		t.Fatalf("текст в контексте — снимок вызова %s, а в выдаче %s", localTime(base.Add(time.Minute)), localTime(loaded))
+	}
 }
 
 func TestOwnEditIsNotShown(t *testing.T) {

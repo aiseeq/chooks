@@ -29,6 +29,9 @@ type watched struct {
 	// возвращается к нему
 	Snapshot string `json:"snapshot,omitempty"`
 	LoadBase string `json:"load_base,omitempty"`
+	// LoadBaseAt — время вызова, к тексту которого возвращается база: после
+	// сжатия «текст в контексте от» — это время, а не прошлой выдачи
+	LoadBaseAt time.Time `json:"load_base_at,omitzero"`
 	// Native — Claude Code сам следит за файлом и покажет агенту ближайшую
 	// правку заметкой «changed on disk»: хук ждёт её, а не пишет второй раз
 	Native bool `json:"native,omitempty"`

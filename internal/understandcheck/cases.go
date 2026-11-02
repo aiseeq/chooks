@@ -116,6 +116,12 @@ type Collector struct {
 	// lastFinal — последний текст агента, которым кончился ход (end_turn):
 	// его видел пользователь, когда писал; lastText — любой последний текст
 	lastFinal, lastText string
+	// anchored — неотвеченные реплики идут после завершённого ответа агента,
+	// который виден в событиях: prev и начало реплик известны. Нет — события
+	// начались посреди реплик (окно хвоста транскрипта)
+	anchored bool
+	// peerLast — последний ход начат письмом другой сессии
+	peerLast bool
 }
 
 // maxHumans — сколько неотвеченных реплик подряд отдавать судье
@@ -138,6 +144,7 @@ func (c *Collector) Add(e transcript.Event) {
 		}
 		c.open = nil
 		if c.answered || len(c.humans) == 0 {
+			c.anchored = c.answered
 			c.humans = nil
 			c.prev = c.lastFinal
 			if c.prev == "" {
@@ -151,9 +158,15 @@ func (c *Collector) Add(e transcript.Event) {
 		}
 		c.humanAt = e.Time
 		c.inTurn = true
+		c.peerLast = false
 	case transcript.Peer:
-		// письмо другой сессии начинает ход не по слову пользователя
-		c.inTurn = false
+		// письмо другой сессии начинает ход не по слову пользователя; письмо
+		// посреди хода, пока реплики не отвечены, ход не меняет: агент ещё
+		// исполняет их (противник Terra 02.11, сценарий 1)
+		if c.answered || len(c.humans) == 0 {
+			c.inTurn = false
+			c.peerLast = true
+		}
 	case transcript.Agent:
 		t := strings.TrimSpace(e.Text)
 		if t == "" {
@@ -192,6 +205,32 @@ func (c *Collector) Add(e transcript.Event) {
 // Cases — собранные случаи
 func (c *Collector) Cases() []Case {
 	return c.cases
+}
+
+// Turn — ход к моменту после последнего события: что отдать судье
+type Turn struct {
+	// InTurn — ход начат репликой пользователя, не письмом другой сессии
+	InTurn  bool
+	Human   string
+	HumanAt time.Time
+	Prev    string
+	// Anchored — реплики идут после завершённого ответа агента в событиях
+	Anchored bool
+	// Decided — событий хватает: ход начат письмом другой сессии или реплики
+	// пользователя идут после завершённого ответа агента
+	Decided bool
+}
+
+// Turn — текущий ход по событиям, поданным в Add
+func (c *Collector) Turn() Turn {
+	return Turn{
+		InTurn:   c.inTurn,
+		Human:    c.human(),
+		HumanAt:  c.humanAt,
+		Prev:     c.prev,
+		Anchored: c.anchored,
+		Decided:  c.peerLast || (c.inTurn && c.anchored),
+	}
 }
 
 // classify решает, уносит ли вызов инструмента слово пользователя дальше, и

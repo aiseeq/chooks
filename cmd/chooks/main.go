@@ -70,6 +70,7 @@ func execute() int {
 		newHookCmd(hookUserPromptSubmit, "Обработать UserPromptSubmit hook", &exitCode),
 		newHookCmd(hookPostToolBatch, "Обработать PostToolBatch hook", &exitCode),
 		newHookCmd(hookQuestionCheck, "Проверить вопросы пользователю в конце хода (Stop)", &exitCode),
+		newHookCmd(hookUnderstandCheck, "Сверить письмо другой сессии или правку инструкций с репликой пользователя (PreToolUse)", &exitCode),
 		newHookCmd(hookWebFetchFallback, "Подменить отказ сайта в ответе WebFetch текстом из webtext (PostToolUse), на упавший WebFetch добавить его контекстом (PostToolUseFailure)", &exitCode),
 		newHookCmd(hookNoPrompt, "Отказать окну, ждущему ввода человека (PermissionRequest, Elicitation)", &exitCode),
 		newHookCmd(hookUnsentCheck, "Не выпустить ответ «текст не отправлен» без reddy history в ходе (Stop)", &exitCode),
@@ -146,6 +147,7 @@ const (
 	hookUserPromptSubmit = "user-prompt-submit"
 	hookPostToolBatch    = "post-tool-batch"
 	hookQuestionCheck    = "question-check"
+	hookUnderstandCheck  = "understand-check"
 	hookWebFetchFallback = "webfetch-fallback"
 	hookNoPrompt         = "no-prompt"
 	hookUnsentCheck      = "unsent-check"
@@ -220,6 +222,9 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		return exitAllowed, nil
 	case hookQuestionCheck:
 		runQuestionCheck(ctx, parseSessionInput(logger, hookType, data), config, logger, os.Stdout)
+		return exitAllowed, nil
+	case hookUnderstandCheck:
+		runUnderstandCheck(ctx, data, config, logger, os.Stdout)
 		return exitAllowed, nil
 	case hookWebFetchFallback:
 		runWebFetchFallback(ctx, data, config, logger, os.Stdout)

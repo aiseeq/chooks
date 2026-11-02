@@ -194,12 +194,13 @@ func (c Checker) fillTail(entry *Entry, event Event) Tail {
 
 // write дописывает строку журнала. Сбой записи — в лог хука: вердикт важнее
 func (c Checker) write(entry Entry) {
-	if err := appendJSONL(c.JournalPath, entry); err != nil {
+	if err := AppendJSONL(c.JournalPath, entry); err != nil {
 		c.Warn("question check journal not written", "path", c.JournalPath, "error", err)
 	}
 }
 
-func appendJSONL(path string, entry Entry) error {
+// AppendJSONL дописывает запись строкой JSON в журнал, создавая каталог
+func AppendJSONL(path string, entry any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create journal dir: %w", err)
 	}

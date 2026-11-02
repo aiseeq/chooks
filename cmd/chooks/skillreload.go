@@ -68,6 +68,10 @@ func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Con
 		logger.Warn("skill reload skipped: hook budget spent", "hook", eventName, "session", input.SessionID, "agent", input.AgentID)
 		return
 	}
+	if errors.Is(err, core.ErrLockBusy) {
+		logger.Warn("skill reload skipped: state locked by another hook", "hook", eventName, "session", input.SessionID, "agent", input.AgentID, "error", err)
+		return
+	}
 	if err != nil {
 		logger.Warn("skill reload check failed", "hook", eventName, "session", input.SessionID, "agent", input.AgentID, "error", err)
 		return

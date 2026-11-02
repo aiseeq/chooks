@@ -555,3 +555,18 @@ func TestReplayTail(t *testing.T) {
 		t.Error("до первого хода — ошибка, а не пустой ответ")
 	}
 }
+
+// Чужая ошибка в другом событии settings.json не снимает регистрацию:
+// иначе Stop звонил бы сам вместе с проверкой
+func TestRegistered_OtherEventBroken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	settings := `{"hooks":{"Stop":[{"hooks":[{"command":"$HOME/bin/chooks question-check","timeout":60}]}],
+		"PostToolUse":[{"hooks":[{"command":"x y","timeout":"3"}]}]}}`
+	if err := os.WriteFile(path, []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registered, err := Registered(path)
+	if !registered {
+		t.Errorf("запись в Stop есть, получено false, %v", err)
+	}
+}

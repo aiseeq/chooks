@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -39,6 +40,7 @@ type hookTimer struct {
 	current string
 	stages  []string
 	logger  core.Logger
+	session string
 	// startErr — старт процесса не прочитан, отсчёт идёт от main
 	startErr error
 	now      func() time.Time
@@ -74,6 +76,13 @@ func (t *hookTimer) stage(name string) {
 	t.current = name
 }
 
+// setSession — сессия известна после разбора входа
+func (t *hookTimer) setSession(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.session = id
+}
+
 // setLogger — лог появляется после чтения конфига
 func (t *hookTimer) setLogger(logger core.Logger) {
 	t.mu.Lock()
@@ -96,10 +105,11 @@ func (t *hookTimer) watchTermination() {
 		t.mu.Lock()
 		elapsed := t.now().Sub(t.start)
 		current := t.current
+		session := t.session
 		stages := append(append([]string{}, t.stages...), formatStage(current+"(running)", t.now().Sub(t.mark)))
 		logger := t.logger
 		t.mu.Unlock()
-		args := []string{"hook", t.hook, "elapsed_ms", strconv.FormatInt(elapsed.Milliseconds(), 10),
+		args := []string{"hook", t.hook, "session", session, "elapsed_ms", strconv.FormatInt(elapsed.Milliseconds(), 10),
 			"stage", current, "stages", strings.Join(stages, ",")}
 		if logger != nil {
 			logger.Warn("hook killed by SIGTERM (timeout)", toAny(args)...)
@@ -118,12 +128,13 @@ func (t *hookTimer) finish() {
 	elapsed := now.Sub(t.start)
 	stages := strings.Join(t.stages, ",")
 	logger := t.logger
+	session := t.session
 	t.mu.Unlock()
 
 	if elapsed < slowFloor || logger == nil {
 		return
 	}
-	args := []any{"hook", t.hook, "elapsed_ms", elapsed.Milliseconds(), "stages", stages}
+	args := []any{"hook", t.hook, "session", session, "elapsed_ms", elapsed.Milliseconds(), "stages", stages}
 	if t.startErr != nil {
 		args = append(args, "process_start_error", t.startErr)
 	}
@@ -144,10 +155,8 @@ func (t *hookTimer) finish() {
 
 // hookTimeout — самый короткий таймаут подкоманды в settings.json
 func hookTimeout(settingsPath, subcommand string) (time.Duration, error) {
-	hooks, err := core.SettingsHooks(settingsPath)
-	if err != nil {
-		return 0, err
-	}
+	// Ошибка в другом событии не отменяет найденный таймаут
+	hooks, parseErr := core.SettingsHooks(settingsPath)
 	var shortest time.Duration
 	for _, hook := range hooks {
 		if hook.Subcommand != subcommand {
@@ -161,7 +170,7 @@ func hookTimeout(settingsPath, subcommand string) (time.Duration, error) {
 		}
 	}
 	if shortest == 0 {
-		return 0, fmt.Errorf("hook %s is not in %s", subcommand, settingsPath)
+		return 0, errors.Join(fmt.Errorf("hook %s is not in %s", subcommand, settingsPath), parseErr)
 	}
 	return shortest, nil
 }

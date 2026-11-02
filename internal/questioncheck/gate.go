@@ -72,14 +72,12 @@ const HookSubcommand = "question-check"
 // оповещений отдаёт ей звонок только тогда: установленный бинарник без
 // записи в settings.json иначе заглушил бы конец хода, и не позвонил бы никто
 func Registered(settingsPath string) (bool, error) {
+	// Ошибка в другом событии не отменяет найденную запись в Stop
 	hooks, err := core.SettingsHooks(settingsPath)
-	if err != nil {
-		return false, err
-	}
 	for _, hook := range hooks {
 		if hook.Event == "Stop" && hook.Subcommand == HookSubcommand {
 			return true, nil
 		}
 	}
-	return false, nil
+	return false, err
 }

@@ -77,6 +77,17 @@ func TestSettingsHooks(t *testing.T) {
 		t.Errorf("дробный таймаут: %+v", h)
 	}
 
+	// Чужая ошибка в одном событии не прячет остальные
+	broken := filepath.Join(t.TempDir(), "broken.json")
+	if err := os.WriteFile(broken, []byte(`{"hooks":{"Stop":[{"hooks":[{"command":"chooks stop","timeout":3}]}],"Odd":{"x":1},
+		"Bad":[{"hooks":[{"command":"chooks bad","timeout":"3"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := SettingsHooks(broken)
+	if err == nil || len(partial) != 1 || partial[0].Subcommand != "stop" {
+		t.Errorf("ожидались stop и ошибка разбора двух событий, получено %+v, %v", partial, err)
+	}
+
 	missing, err := SettingsHooks(filepath.Join(t.TempDir(), "none.json"))
 	if err != nil || missing != nil {
 		t.Errorf("нет файла — нет хуков без ошибки, получено %v, %v", missing, err)

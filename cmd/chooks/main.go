@@ -201,6 +201,7 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		// бы незамеченным), и напоминает о скиллах, изменённых после вызова.
 		// Срабатывает и на сообщение другой сессии, и посреди хода
 		input := parseSessionInput(logger, hookType, data)
+		timer.setSession(input.SessionID)
 		timer.stage("state")
 		saveState(logger, input.SessionID, core.StateWorking)
 		timer.stage("skills")
@@ -213,6 +214,7 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		// UserPromptSubmit, а пакет после ответа значит, что работа идёт.
 		// Пакет субагента — не ответ: главный ход может стоять на вопросе
 		input := parseSessionInput(logger, hookType, data)
+		timer.setSession(input.SessionID)
 		timer.stage("state")
 		if input.AgentID == "" {
 			if _, err := core.SwapSessionState(input.SessionID, core.StateWaiting, core.StateWorking); err != nil {

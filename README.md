@@ -375,6 +375,14 @@ scripts/perf/hook-ms.sh --q 95 stop      # p95 хука за 24 ч по тран
 scripts/perf/exec-ms.sh statusline scripts/perf/testdata/statusline.json  # медиана до 5 запусков за 45 с в пустом HOME, мс
 ```
 
+Ручная проба подкоманды хука — только через `scripts/probe/hook-probe.sh`: HOME, конфиг, состояние и лог
+во временной папке. Живой `~/.claude/logs/chooks.log` считает Сон (строки `hook killed by SIGTERM`
+и `hook slow`), строка пробы там выглядит как настоящий таймаут.
+
+```bash
+echo '{"session_id":"probe"}' | scripts/probe/hook-probe.sh user-prompt-submit   # --bin свой бинарь, --dir готовая папка (например, с занятой блокировкой)
+```
+
 `hook-ms.sh` видит Stop-хуки всегда. У остальных хуков он видит только вызовы, в которых хук что-то вывел:
 Claude Code пишет время тихого вызова в транскрипт только для Stop-хуков.
 

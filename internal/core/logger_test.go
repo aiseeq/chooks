@@ -85,14 +85,3 @@ func TestNewLogger_FileOutputRequiresPath(t *testing.T) {
 		t.Error("output: file без пути должен приводить к ошибке")
 	}
 }
-
-// testLogger — логгер для тестов пакета: пишет в stderr, который go test
-// показывает только при провале
-func testLogger(t *testing.T) Logger {
-	t.Helper()
-	logger, err := NewLogger(LoggerConfig{Level: "debug"})
-	if err != nil {
-		t.Fatalf("не удалось создать логгер: %v", err)
-	}
-	return logger
-}

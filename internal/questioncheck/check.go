@@ -126,7 +126,7 @@ func (c Checker) Run(ctx context.Context, event Event) Result {
 		// Ход после остановки: повторно не блокировать. В журнал — что агент
 		// дописал, по этому итог недели видит, нашёл ли он ответ сам
 		entry.Verdict = VerdictAfterBlock
-		entry.Message = clipMarked(event.LastMessage, afterBlockRunes)
+		entry.Message = ClipMarked(event.LastMessage, afterBlockRunes)
 		c.fillTail(&entry, event)
 		c.write(entry)
 		return Result{Skip: gate.Skip}

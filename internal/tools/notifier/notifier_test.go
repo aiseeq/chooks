@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/desktop"
 )
 
 func newNotifier(t *testing.T, config core.ToolConfig) *Notifier {
@@ -45,6 +46,20 @@ func TestNotifier_BuildAlert(t *testing.T) {
 		}
 		if !strings.Contains(alert.Message, "my-project") {
 			t.Errorf("сообщение: %q", alert.Message)
+		}
+	})
+
+	// Нулевое значение Urgency — low: хук должен задавать normal явно,
+	// иначе его уведомления тихо станут незаметнее
+	t.Run("хуки шлют обычную срочность", func(t *testing.T) {
+		for _, event := range []string{core.EventStop, core.EventStopFailure, core.EventNotification} {
+			alert, err := notifier.buildAlert(event, &core.ToolInput{}, "my-project")
+			if err != nil {
+				t.Fatalf("%s: %v", event, err)
+			}
+			if alert.Urgency != desktop.UrgencyNormal {
+				t.Errorf("%s: срочность %s, ожидалась normal", event, alert.Urgency)
+			}
 		}
 	})
 

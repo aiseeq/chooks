@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,7 +43,7 @@ type hookContextOutput struct {
 // инструкций, сделанные после того, как их текст попал в контекст: diff, а
 // при большой правке — просьбу перечитать. Сбой только логируется: выдача не
 // повод показывать человеку ошибку хука на каждом ходу
-func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger) {
+func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, deadline time.Time) {
 	if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
 		return
 	}
@@ -55,13 +56,18 @@ func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Con
 		return
 	}
 
-	checker := skillreload.Checker{StateDir: stateDir, ScanBudget: skillScanBudget}
+	checker := skillreload.Checker{StateDir: stateDir, ScanBudget: skillScanBudget, Deadline: deadline}
 	result, err := checker.Check(skillreload.Event{
 		SessionID:      input.SessionID,
 		AgentID:        input.AgentID,
 		AgentType:      input.AgentType,
 		TranscriptPath: input.TranscriptPath,
 	})
+	if errors.Is(err, skillreload.ErrNoTime) {
+		// Напоминание придёт следующим событием: запись сессии не тронута
+		logger.Warn("skill reload skipped: hook budget spent", "hook", eventName, "session", input.SessionID, "agent", input.AgentID)
+		return
+	}
 	if err != nil {
 		logger.Warn("skill reload check failed", "hook", eventName, "session", input.SessionID, "agent", input.AgentID, "error", err)
 		return

@@ -9,8 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // watched — скилл или файл инструкций в контексте сессии и что о нём уже
@@ -91,9 +92,6 @@ const stateTTL = 30 * 24 * time.Hour
 // дважды. Оба держат её миллисекунды
 const lockWait = time.Second
 
-// lockPoll — шаг ожидания блокировки
-const lockPoll = 10 * time.Millisecond
-
 // DefaultStateDir — каталог записей: $XDG_STATE_HOME/chooks/skill-reload.
 // Не каталог времени выполнения: сессию продолжают после перезагрузки
 func DefaultStateDir() (string, error) {
@@ -143,8 +141,9 @@ type lockedState struct {
 	Recovered error
 }
 
-// openState открывает запись сессии под исключительной блокировкой
-func openState(dir, name string) (*lockedState, error) {
+// openState открывает запись сессии под исключительной блокировкой,
+// ожидая её не дольше lockDeadline
+func openState(dir, name string, lockDeadline time.Time) (*lockedState, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create state dir: %w", err)
 	}
@@ -153,9 +152,9 @@ func openState(dir, name string) (*lockedState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot open state %s: %w", path, err)
 	}
-	if err := lockFile(file); err != nil {
+	if err := core.LockFile(file, lockDeadline); err != nil {
 		file.Close()
-		return nil, err
+		return nil, fmt.Errorf("state is locked by another hook: %w", err)
 	}
 
 	data, err := io.ReadAll(file)
@@ -201,24 +200,6 @@ func migrate(old sessionState) sessionState {
 		state.Announced[filepath.Join(dir, skillFileName)] = skill.Notified
 	}
 	return state
-}
-
-// lockFile ждёт блокировку не дольше lockWait
-func lockFile(file *os.File) error {
-	deadline := time.Now().Add(lockWait)
-	for {
-		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			return fmt.Errorf("cannot lock state %s: %w", file.Name(), err)
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("state %s is locked by another hook", file.Name())
-		}
-		time.Sleep(lockPoll)
-	}
 }
 
 // save записывает запись на место старой, не снимая блокировку

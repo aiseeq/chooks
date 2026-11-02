@@ -168,11 +168,16 @@ func newHookCmd(hookType, short string, exitCode *int) *cobra.Command {
 
 // runHook выполняет основную логику хука
 func runHook(ctx context.Context, hookType string) (int, error) {
+	timer := newHookTimer(hookType)
+	timer.watchTermination()
+	defer timer.finish()
+
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return exitError, fmt.Errorf("failed to read input: %w", err)
 	}
 
+	timer.stage("config")
 	config, err := core.LoadConfig(configPath)
 	if err != nil {
 		return exitError, fmt.Errorf("failed to load config: %w", err)
@@ -182,7 +187,9 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 	if err != nil {
 		return exitError, fmt.Errorf("failed to create logger: %w", err)
 	}
+	timer.setLogger(logger)
 
+	timer.stage("work")
 	switch hookType {
 	case hookPreToolUse:
 		hookCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -194,8 +201,10 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		// бы незамеченным), и напоминает о скиллах, изменённых после вызова.
 		// Срабатывает и на сообщение другой сессии, и посреди хода
 		input := parseSessionInput(logger, hookType, data)
+		timer.stage("state")
 		saveState(logger, input.SessionID, core.StateWorking)
-		remindStaleSkills(eventUserPromptSubmit, input, config, logger)
+		timer.stage("skills")
+		remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget))
 		return exitAllowed, nil
 	case hookPostToolBatch:
 		// Пакет инструментов — место напоминания в длинном ходе и у субагентов,
@@ -204,12 +213,14 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		// UserPromptSubmit, а пакет после ответа значит, что работа идёт.
 		// Пакет субагента — не ответ: главный ход может стоять на вопросе
 		input := parseSessionInput(logger, hookType, data)
+		timer.stage("state")
 		if input.AgentID == "" {
 			if _, err := core.SwapSessionState(input.SessionID, core.StateWaiting, core.StateWorking); err != nil {
 				logger.Warn("session state not resumed", "session", input.SessionID, "error", err)
 			}
 		}
-		remindStaleSkills(eventPostToolBatch, input, config, logger)
+		timer.stage("skills")
+		remindStaleSkills(eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget))
 		return exitAllowed, nil
 	case hookStop:
 		runSessionEvent(core.EventStop, data, config, logger)

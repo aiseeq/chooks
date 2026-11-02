@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -124,6 +123,10 @@ func SwapSessionState(sessionID string, from, to SessionState) (bool, error) {
 	return swapped, err
 }
 
+// stateLockWait — сколько ждать блокировку каталога состояний: её держат
+// на запись файла в несколько байт, миллисекунды
+const stateLockWait = time.Second
+
 // withStateLock выполняет fn под блокировкой каталога состояний
 func withStateLock(fn func() error) error {
 	dir := stateDir()
@@ -135,7 +138,7 @@ func withStateLock(fn func() error) error {
 		return fmt.Errorf("cannot open session state dir: %w", err)
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	if err := LockFile(lock, time.Now().Add(stateLockWait)); err != nil {
 		return fmt.Errorf("cannot lock session state dir: %w", err)
 	}
 	return fn()

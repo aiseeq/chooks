@@ -1,12 +1,9 @@
 package questioncheck
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"os"
-	"strings"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // Scope — чьи концы хода проверка берёт на себя
@@ -75,30 +72,13 @@ const HookSubcommand = "question-check"
 // оповещений отдаёт ей звонок только тогда: установленный бинарник без
 // записи в settings.json иначе заглушил бы конец хода, и не позвонил бы никто
 func Registered(settingsPath string) (bool, error) {
-	data, err := os.ReadFile(settingsPath)
+	hooks, err := core.SettingsHooks(settingsPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read settings: %w", err)
+		return false, err
 	}
-	var settings struct {
-		Hooks struct {
-			Stop []struct {
-				Hooks []struct {
-					Command string `json:"command"`
-				} `json:"hooks"`
-			} `json:"Stop"`
-		} `json:"hooks"`
-	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return false, fmt.Errorf("parse settings %s: %w", settingsPath, err)
-	}
-	for _, group := range settings.Hooks.Stop {
-		for _, hook := range group.Hooks {
-			if fields := strings.Fields(hook.Command); len(fields) > 1 && fields[len(fields)-1] == HookSubcommand {
-				return true, nil
-			}
+	for _, hook := range hooks {
+		if hook.Event == "Stop" && hook.Subcommand == HookSubcommand {
+			return true, nil
 		}
 	}
 	return false, nil

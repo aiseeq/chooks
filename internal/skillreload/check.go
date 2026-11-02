@@ -35,8 +35,15 @@ type Checker struct {
 	// Первое чтение сессии в сотни МБ растягивается на несколько событий.
 	// Ноль — без ограничения
 	ScanBudget time.Duration
-	Now        func() time.Time
+	// Deadline — когда проверка должна уступить: хук ограничен таймаутом
+	// Claude Code, а напоминание необязательно. Ожидание блокировки и чтение
+	// транскрипта не заходят за него. Нулевое — без общего срока
+	Deadline time.Time
+	Now      func() time.Time
 }
+
+// ErrNoTime — срок проверки наступил до её начала
+var ErrNoTime = errors.New("skill reload check skipped: hook budget spent")
 
 // forkAgentType — тип субагента, который наследует контекст родителя вместе
 // со снимками скиллов: в его транскрипте этих вызовов нет
@@ -54,7 +61,10 @@ func (c Checker) Check(event Event) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	locked, err := openState(c.StateDir, name)
+	if !c.Deadline.IsZero() && !c.now().Before(c.Deadline) {
+		return Result{}, ErrNoTime
+	}
+	locked, err := openState(c.StateDir, name, c.within(c.now().Add(lockWait)))
 	if err != nil {
 		return Result{}, err
 	}
@@ -157,7 +167,9 @@ func (c Checker) update(state *sessionState, transcript string) (scanResult, err
 
 	var deadline time.Time
 	if c.ScanBudget > 0 {
-		deadline = c.now().Add(c.ScanBudget)
+		deadline = c.within(c.now().Add(c.ScanBudget))
+	} else if !c.Deadline.IsZero() {
+		deadline = c.Deadline
 	}
 	scan, err := scanTranscript(transcript, state.Offset, deadline, false)
 	state.Offset = scan.Offset
@@ -249,6 +261,14 @@ func (n *Notice) formatSections(subject string) string {
 // localTime — время в поясе машины с его именем
 func localTime(t time.Time) string {
 	return t.Local().Format("02.01 15:04 MST")
+}
+
+// within — срок t, не позже общего срока проверки
+func (c Checker) within(t time.Time) time.Time {
+	if !c.Deadline.IsZero() && c.Deadline.Before(t) {
+		return c.Deadline
+	}
+	return t
 }
 
 func (c Checker) now() time.Time {

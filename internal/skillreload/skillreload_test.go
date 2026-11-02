@@ -3,11 +3,13 @@ package skillreload
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -939,5 +941,48 @@ func TestOversizedNoticeAloneIsReloadOnce(t *testing.T) {
 	}
 	if got := f.check(Event{}); len(got) != 0 {
 		t.Fatalf("о той же правке сказали повторно: %d", len(got))
+	}
+}
+
+// Срок хука наступил — проверка не начинается и запись сессии не трогает
+func TestCheck_DeadlinePassed(t *testing.T) {
+	f := newFixture(t)
+	f.writeFile(f.transcript, "", time.Now())
+	f.checker.Deadline = time.Now().Add(-time.Millisecond)
+	_, err := f.checker.Check(Event{SessionID: "sess-1", TranscriptPath: f.transcript})
+	if !errors.Is(err, ErrNoTime) {
+		t.Fatalf("ожидалась ErrNoTime, получено %v", err)
+	}
+	if entries, _ := os.ReadDir(f.checker.StateDir); len(entries) != 0 {
+		t.Errorf("запись сессии создана без времени на проверку: %d файлов", len(entries))
+	}
+}
+
+// Блокировку записи держит другой хук: ожидание не заходит за срок хука,
+// хотя своё ожидание блокировки — секунда
+func TestCheck_LockWaitBoundedByDeadline(t *testing.T) {
+	f := newFixture(t)
+	f.writeFile(f.transcript, "", time.Now())
+	if err := os.MkdirAll(f.checker.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := os.OpenFile(filepath.Join(f.checker.StateDir, "sess-1.json"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now()
+	f.checker.Deadline = started.Add(150 * time.Millisecond)
+	_, err = f.checker.Check(Event{SessionID: "sess-1", TranscriptPath: f.transcript})
+	waited := time.Since(started)
+	if !errors.Is(err, core.ErrLockBusy) {
+		t.Fatalf("ожидалась занятая блокировка, получено %v", err)
+	}
+	if waited > 600*time.Millisecond {
+		t.Errorf("ждали блокировку %s при сроке 150ms", waited)
 	}
 }

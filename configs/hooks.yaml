@@ -35,6 +35,16 @@ tools:
   question_check:
     enabled: true
 
+  # Проверка понимания перед письмом другой сессии (SendMessage) и правкой файла
+  # инструкций (Edit, Write, MultiEdit, Bash с sub, sed -i, tee, перенаправлением):
+  # судья-модель сверяет действие с репликой пользователя, на расхождение — один
+  # отказ, повтор того же вызова проходит (PreToolUse, подкоманда
+  # understand-check). Проба до 09.11 15:30; журнал —
+  # ~/.local/state/chooks/understand-check.jsonl. Включает регистрация подкоманды
+  # в settings.json; без ключа включено
+  understand_check:
+    enabled: true
+
   # На отказ сайта в ответе WebFetch (403, 429, страница проверки) подставляет
   # текст страницы из утилиты akit webtext (PostToolUse, подкоманда
   # webfetch-fallback), на упавший WebFetch добавляет его контекстом

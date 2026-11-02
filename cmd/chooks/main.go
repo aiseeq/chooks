@@ -559,6 +559,7 @@ func newNotifyCmd() *cobra.Command {
 		alert     desktop.Alert
 		windowPID int
 		activate  bool
+		urgency   string
 	)
 
 	cmd := &cobra.Command{
@@ -569,11 +570,18 @@ func newNotifyCmd() *cobra.Command {
 Окно определяется по процессу: указанному через --window-pid либо самому вызывающему.
 Команда возвращает управление сразу, не дожидаясь ни звука, ни клика.
 
+Срочность --urgency critical — уведомление, которое не закрывается само
+(в KDE Plasma — с оранжевой полосой): висит, пока его не закроют; --timeout
+с ним не задаётся.
+
 Пример вызова из плагина стороннего агента:
   chooks notify --title "opencode ждёт ответа" --message "Проект: projecta" --window-pid $$`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if alert.Title == "" {
 				return fmt.Errorf("не задан --title")
+			}
+			if err := applyNotifyUrgency(&alert, urgency, cmd.Flags().Changed("timeout")); err != nil {
+				return err
 			}
 
 			if activate {
@@ -605,7 +613,8 @@ func newNotifyCmd() *cobra.Command {
 	flags.StringVar(&alert.Message, "message", "", "текст уведомления")
 	flags.StringVar(&alert.AppName, "app-name", "chooks", "имя приложения в уведомлении")
 	flags.StringVar(&alert.Icon, "icon", "utilities-terminal", "значок уведомления")
-	flags.DurationVar(&alert.Timeout, "timeout", 30*time.Second, "время показа уведомления")
+	flags.DurationVar(&alert.Timeout, "timeout", 30*time.Second, "время показа уведомления (не для critical)")
+	flags.StringVar(&urgency, "urgency", desktop.UrgencyNormal.String(), "срочность: low, normal или critical (не закрывается само)")
 	flags.BoolVar(&alert.Sound, "sound", true, "проиграть звук")
 	flags.BoolVar(&alert.Desktop, "desktop", true, "показать уведомление")
 	flags.IntVar(&windowPID, "window-pid", 0, "процесс, чьё окно активируется по клику (по умолчанию — вызывающий)")
@@ -623,6 +632,7 @@ func newDeliverAlertCmd() *cobra.Command {
 		alert       desktop.Alert
 		pids        string
 		actionLabel string
+		urgency     string
 	)
 
 	cmd := &cobra.Command{
@@ -636,6 +646,10 @@ func newDeliverAlertCmd() *cobra.Command {
 			}
 			alert.ActivatePIDs = activatePIDs
 			alert.ActionLabel = actionLabel
+			alert.Urgency, err = desktop.ParseUrgency(urgency)
+			if err != nil {
+				return err
+			}
 			return desktop.Deliver(cmd.Context(), alert)
 		},
 	}
@@ -650,8 +664,28 @@ func newDeliverAlertCmd() *cobra.Command {
 	flags.BoolVar(&alert.Desktop, "desktop", true, "показать уведомление")
 	flags.StringVar(&pids, "pids", "", "процессы, чьё окно активируется по клику")
 	flags.StringVar(&actionLabel, "action-label", "", "подпись действия уведомления")
+	flags.StringVar(&urgency, "urgency", "", "срочность: low, normal или critical")
 
 	return cmd
+}
+
+// applyNotifyUrgency выставляет срочность уведомления команды notify.
+// Критичное не истекает само (таймаут 0), поэтому явный --timeout с ним —
+// противоречие, а не повод молча выбрать одно из двух
+func applyNotifyUrgency(alert *desktop.Alert, name string, timeoutSet bool) error {
+	urgency, err := desktop.ParseUrgency(name)
+	if err != nil {
+		return fmt.Errorf("--urgency: %w", err)
+	}
+	alert.Urgency = urgency
+	if urgency != desktop.UrgencyCritical {
+		return nil
+	}
+	if timeoutSet {
+		return fmt.Errorf("--timeout не задаётся с --urgency critical: такое уведомление висит, пока его не закроют")
+	}
+	alert.Timeout = 0
+	return nil
 }
 
 // newStatusLineCmd создает команду отрисовки строки статуса Claude Code

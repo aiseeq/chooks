@@ -124,3 +124,27 @@ func TestSelectTabOutsideKonsole(t *testing.T) {
 		t.Errorf("вне Konsole: %v", err)
 	}
 }
+
+func TestParseUrgency_RoundTrip(t *testing.T) {
+	for _, urgency := range []Urgency{UrgencyLow, UrgencyNormal, UrgencyCritical} {
+		got, err := ParseUrgency(urgency.String())
+		if err != nil {
+			t.Fatalf("%s: %v", urgency, err)
+		}
+		if got != urgency {
+			t.Errorf("%s: получено %s", urgency, got)
+		}
+	}
+	// значение hint по спецификации freedesktop: critical — 2
+	if byte(UrgencyCritical) != 2 {
+		t.Errorf("critical должен уходить в D-Bus как 2, а не %d", byte(UrgencyCritical))
+	}
+}
+
+func TestParseUrgency_RejectsUnknown(t *testing.T) {
+	for _, name := range []string{"", "high", "Critical", "2"} {
+		if got, err := ParseUrgency(name); err == nil {
+			t.Errorf("%q должно давать ошибку, получено %s", name, got)
+		}
+	}
+}

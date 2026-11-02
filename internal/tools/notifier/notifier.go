@@ -88,6 +88,7 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 	alert := desktop.Alert{
 		AppName:     "Claude Code",
 		Icon:        "utilities-terminal",
+		Urgency:     desktop.UrgencyNormal,
 		Sound:       n.sound,
 		Desktop:     n.desktop,
 		ActionLabel: "Перейти к окну",

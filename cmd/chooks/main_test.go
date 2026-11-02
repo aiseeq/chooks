@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
 
 // stopInput собирает вход Stop по схеме Claude Code 2.1.284
@@ -154,5 +156,69 @@ func TestStyleCmdExitCodes(t *testing.T) {
 
 	if _, code := runStyle(t, "", filepath.Join(t.TempDir(), "missing.txt")); code != exitStyleError {
 		t.Fatalf("непрочитанный файл: код %d, нужно %d", code, exitStyleError)
+	}
+}
+
+func TestApplyNotifyUrgency(t *testing.T) {
+	tests := []struct {
+		name        string
+		urgency     string
+		timeoutSet  bool
+		want        desktop.Urgency
+		wantTimeout time.Duration
+		wantErr     bool
+	}{
+		{name: "normal keeps timeout", urgency: "normal", want: desktop.UrgencyNormal, wantTimeout: 30 * time.Second},
+		{name: "low with timeout", urgency: "low", timeoutSet: true, want: desktop.UrgencyLow, wantTimeout: 30 * time.Second},
+		{name: "critical never expires", urgency: "critical", want: desktop.UrgencyCritical, wantTimeout: 0},
+		{name: "critical with explicit timeout", urgency: "critical", timeoutSet: true, wantErr: true},
+		{name: "unknown urgency", urgency: "orange", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			alert := desktop.Alert{Timeout: 30 * time.Second}
+			err := applyNotifyUrgency(&alert, tt.urgency, tt.timeoutSet)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ожидалась ошибка, получено %+v", alert)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if alert.Urgency != tt.want || alert.Timeout != tt.wantTimeout {
+				t.Errorf("получено %s/%s, ожидалось %s/%s", alert.Urgency, alert.Timeout, tt.want, tt.wantTimeout)
+			}
+		})
+	}
+}
+
+// Срочность доходит до фоновой подкоманды: её флаги принимают то,
+// что собирает WatchArgs
+func TestWatchArgsCarryUrgency(t *testing.T) {
+	alert := desktop.Alert{Title: "t", Urgency: desktop.UrgencyCritical, ActivatePIDs: []int{1, 2}, ActionLabel: "go"}
+	args := desktop.WatchArgs(notifier.WatchCommand, alert)
+	if args[0] != notifier.WatchCommand {
+		t.Fatalf("первым аргументом должна быть подкоманда, получено %q", args[0])
+	}
+
+	cmd := newDeliverAlertCmd()
+	if err := cmd.ParseFlags(args[1:]); err != nil {
+		t.Fatalf("подкоманда не принимает свои аргументы: %v", err)
+	}
+	urgency, err := cmd.Flags().GetString("urgency")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if urgency != "critical" {
+		t.Errorf("--urgency: получено %q", urgency)
+	}
+	timeout, err := cmd.Flags().GetDuration("timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timeout != 0 {
+		t.Errorf("--timeout: получено %s, ожидался 0", timeout)
 	}
 }

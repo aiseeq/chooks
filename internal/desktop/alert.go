@@ -13,9 +13,16 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// maxWatchLifetime ограничивает время жизни фонового наблюдателя:
-// уведомление к этому моменту давно закрыто, а процесс висеть не должен
-const maxWatchLifetime = 5 * time.Minute
+const (
+	// maxWatchLifetime ограничивает время жизни фонового наблюдателя:
+	// уведомление к этому моменту давно закрыто, а процесс висеть не должен
+	maxWatchLifetime = 5 * time.Minute
+	// maxCriticalWatchLifetime — критичное уведомление KDE не закрывает само,
+	// и клик по нему должен переводить к окну, даже если пользователь вернулся
+	// к машине через ночь (до суток); раньше наблюдатель завершится сигналом
+	// NotificationClosed, когда уведомление закроют
+	maxCriticalWatchLifetime = 24 * time.Hour
+)
 
 // soundCandidate способ воспроизведения звука в порядке приоритета
 type soundCandidate struct {
@@ -38,7 +45,9 @@ type Alert struct {
 	Message string
 	AppName string
 	Icon    string
+	// Timeout 0 — уведомление не истекает само
 	Timeout time.Duration
+	Urgency Urgency
 
 	Sound   bool
 	Desktop bool
@@ -70,7 +79,7 @@ func Deliver(ctx context.Context, alert Alert) error {
 
 // deliverDesktop показывает уведомление и ждёт клика по нему
 func deliverDesktop(ctx context.Context, alert Alert) error {
-	watchCtx, cancel := context.WithTimeout(ctx, maxWatchLifetime)
+	watchCtx, cancel := context.WithTimeout(ctx, watchLifetime(alert.Urgency))
 	defer cancel()
 
 	conn, err := dbus.SessionBus()
@@ -86,6 +95,7 @@ func deliverDesktop(ctx context.Context, alert Alert) error {
 		Title:   alert.Title,
 		Message: alert.Message,
 		Timeout: alert.Timeout,
+		Urgency: alert.Urgency,
 	}
 	if canActivate {
 		notification.ActionLabel = alert.ActionLabel
@@ -113,10 +123,26 @@ func deliverDesktop(ctx context.Context, alert Alert) error {
 	return errors.Join(SelectTab(conn), ActivateWindowByPIDs(conn, alert.ActivatePIDs))
 }
 
+// watchLifetime — сколько наблюдатель ждёт клика по уведомлению этой срочности
+func watchLifetime(urgency Urgency) time.Duration {
+	if urgency == UrgencyCritical {
+		return maxCriticalWatchLifetime
+	}
+	return maxWatchLifetime
+}
+
 // DeliverInBackground запускает доставку оповещения в отдельном процессе и сразу
 // возвращает управление: хук не должен ждать ни звука, ни тем более клика.
 // executable — путь к собственному бинарю, watchCommand — имя его скрытой подкоманды
 func DeliverInBackground(executable, watchCommand string, alert Alert) error {
+	if err := StartDetached(exec.Command(executable, WatchArgs(watchCommand, alert)...)); err != nil {
+		return fmt.Errorf("notification watcher: %w", err)
+	}
+	return nil
+}
+
+// WatchArgs собирает аргументы скрытой подкоманды, которая доставляет alert
+func WatchArgs(watchCommand string, alert Alert) []string {
 	args := []string{
 		watchCommand,
 		"--title", alert.Title,
@@ -124,17 +150,14 @@ func DeliverInBackground(executable, watchCommand string, alert Alert) error {
 		"--app-name", alert.AppName,
 		"--icon", alert.Icon,
 		"--timeout", alert.Timeout.String(),
+		"--urgency", alert.Urgency.String(),
 		"--sound=" + strconv.FormatBool(alert.Sound),
 		"--desktop=" + strconv.FormatBool(alert.Desktop),
 	}
 	if len(alert.ActivatePIDs) > 0 {
 		args = append(args, "--pids", joinInts(alert.ActivatePIDs), "--action-label", alert.ActionLabel)
 	}
-
-	if err := StartDetached(exec.Command(executable, args...)); err != nil {
-		return fmt.Errorf("notification watcher: %w", err)
-	}
-	return nil
+	return args
 }
 
 // playSound проигрывает звук первым доступным способом и не ждёт его окончания.

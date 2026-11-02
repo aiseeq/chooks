@@ -19,13 +19,49 @@ const (
 	defaultActionKey = "default"
 )
 
+// Urgency — срочность уведомления по спецификации freedesktop (hint urgency)
+type Urgency byte
+
+const (
+	UrgencyLow    Urgency = 0
+	UrgencyNormal Urgency = 1
+	// UrgencyCritical — KDE Plasma показывает такое уведомление с оранжевой
+	// полосой и не закрывает само, пока его не закроет пользователь
+	UrgencyCritical Urgency = 2
+)
+
+// String возвращает имя срочности, которое принимает ParseUrgency
+func (u Urgency) String() string {
+	switch u {
+	case UrgencyLow:
+		return "low"
+	case UrgencyNormal:
+		return "normal"
+	case UrgencyCritical:
+		return "critical"
+	}
+	return fmt.Sprintf("urgency(%d)", byte(u))
+}
+
+// ParseUrgency разбирает имя срочности: low, normal или critical
+func ParseUrgency(name string) (Urgency, error) {
+	for _, urgency := range []Urgency{UrgencyLow, UrgencyNormal, UrgencyCritical} {
+		if urgency.String() == name {
+			return urgency, nil
+		}
+	}
+	return 0, fmt.Errorf("unknown urgency %q: want low, normal or critical", name)
+}
+
 // Notification описывает отправляемое уведомление
 type Notification struct {
 	AppName string
 	Icon    string
 	Title   string
 	Message string
+	// Timeout 0 — уведомление не истекает само
 	Timeout time.Duration
+	Urgency Urgency
 	// ActionLabel непустой, если по клику нужно выполнить действие
 	ActionLabel string
 }
@@ -38,7 +74,7 @@ func Send(conn *dbus.Conn, notification Notification) (uint32, error) {
 	}
 
 	hints := map[string]dbus.Variant{
-		"urgency": dbus.MakeVariant(byte(1)),
+		"urgency": dbus.MakeVariant(byte(notification.Urgency)),
 	}
 
 	var id uint32

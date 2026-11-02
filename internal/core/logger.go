@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -131,6 +132,26 @@ func openLogWriter(config LoggerConfig) (io.Writer, error) {
 	default:
 		return os.Stderr, nil
 	}
+}
+
+// AppendLine дописывает строку в файл с той же ротацией, что у лога.
+// Одна запись O_APPEND короче страницы не перемешивается со строками других
+// процессов
+func AppendLine(path string, maxSizeMB int, line string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("cannot create directory for %s: %w", path, err)
+	}
+	if err := rotateLogIfNeeded(path, maxSizeMB); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("cannot open %s: %w", path, err)
+	}
+	if _, err := file.WriteString(line + "\n"); err != nil {
+		return errors.Join(fmt.Errorf("cannot write %s: %w", path, err), file.Close())
+	}
+	return file.Close()
 }
 
 // rotateLogIfNeeded переименовывает лог в *.1 при превышении порога размера.

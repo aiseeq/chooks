@@ -28,10 +28,11 @@ const optionalBudget = 2 * time.Second
 // killedExitCode — код выхода по SIGTERM, как у процесса без обработчика
 const killedExitCode = 128 + int(syscall.SIGTERM)
 
-// hookTimer отмечает стадии хука. Успешный запуск Claude Code и так пишет
-// в транскрипт с длительностью, а убитый по таймауту — нигде: его стадии
-// и время уходят в лог при SIGTERM, а запуск дольше половины таймаута —
-// строкой при завершении
+// hookTimer отмечает стадии хука. Claude Code пишет длительность в
+// транскрипт только у Stop-хуков и у запусков, которые что-то вывели, а
+// убитый по таймауту — нигде. Поэтому длительность каждого запуска уходит
+// строкой в файл длительностей, а стадии — в лог: при SIGTERM и у запуска
+// дольше половины таймаута
 type hookTimer struct {
 	mu      sync.Mutex
 	hook    string
@@ -46,7 +47,15 @@ type hookTimer struct {
 	now      func() time.Time
 	// settingsPath — где взять таймаут хука; читается только у медленного
 	settingsPath func() (string, error)
+	startup      time.Duration
+	// durations — файл длительностей; пусто — лог не в файле (тесты, отладка)
+	durations      string
+	durationsMaxMB int
 }
+
+// durationsFile — файл длительностей рядом с логом: в основной лог строка
+// на каждый запуск (порядка 100 тыс. в сутки) вытеснила бы остальное
+const durationsFile = "chooks-hooks.tsv"
 
 // newHookTimer начинает отсчёт со старта процесса: запуск бинаря под
 // свопом — тоже часть таймаута
@@ -61,7 +70,8 @@ func newHookTimer(hook string) *hookTimer {
 		t.startErr = err
 	}
 	t.start = start
-	t.stages = append(t.stages, formatStage("startup", t.mark.Sub(start)))
+	t.startup = t.mark.Sub(start)
+	t.stages = append(t.stages, formatStage("startup", t.startup))
 	t.current = "input"
 	return t
 }
@@ -90,6 +100,35 @@ func (t *hookTimer) setLogger(logger core.Logger) {
 	t.logger = logger
 }
 
+// setDurations включает файл длительностей рядом с файлом лога
+func (t *hookTimer) setDurations(logger core.LoggerConfig) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if logger.Output != "file" || logger.LogFile == "" {
+		return
+	}
+	t.durations = filepath.Join(filepath.Dir(logger.LogFile), durationsFile)
+	t.durationsMaxMB = logger.MaxSizeMB
+}
+
+// recordDuration пишет строку TSV: время, хук, сессия, мс всего, мс запуска,
+// исход (ok или killed). Сбой записи — в лог: хук от него не страдает
+func (t *hookTimer) recordDuration(at time.Time, session string, elapsed time.Duration, status string) {
+	t.mu.Lock()
+	path, maxMB, logger, startup := t.durations, t.durationsMaxMB, t.logger, t.startup
+	t.mu.Unlock()
+	if path == "" {
+		return
+	}
+	line := strings.Join([]string{
+		at.Format("2006-01-02T15:04:05.000Z07:00"), t.hook, session,
+		strconv.FormatInt(elapsed.Milliseconds(), 10), strconv.FormatInt(startup.Milliseconds(), 10), status,
+	}, "\t")
+	if err := core.AppendLine(path, maxMB, line); err != nil && logger != nil {
+		logger.Warn("hook duration not recorded", "hook", t.hook, "error", err)
+	}
+}
+
 // deadline — срок необязательной работы от старта процесса
 func (t *hookTimer) deadline(budget time.Duration) time.Time {
 	return t.start.Add(budget)
@@ -103,7 +142,8 @@ func (t *hookTimer) watchTermination() {
 	go func() {
 		<-signals
 		t.mu.Lock()
-		elapsed := t.now().Sub(t.start)
+		at := t.now()
+		elapsed := at.Sub(t.start)
 		current := t.current
 		session := t.session
 		stages := append(append([]string{}, t.stages...), formatStage(current+"(running)", t.now().Sub(t.mark)))
@@ -116,11 +156,13 @@ func (t *hookTimer) watchTermination() {
 		} else {
 			fmt.Fprintf(os.Stderr, "chooks: hook killed by SIGTERM: %s\n", strings.Join(args, " "))
 		}
+		t.recordDuration(at, session, elapsed, "killed")
 		os.Exit(killedExitCode)
 	}()
 }
 
-// finish пишет строку, если хук шёл дольше половины своего таймаута
+// finish пишет длительность запуска, а в лог — строку, если хук шёл дольше
+// половины своего таймаута
 func (t *hookTimer) finish() {
 	t.mu.Lock()
 	now := t.now()
@@ -131,6 +173,7 @@ func (t *hookTimer) finish() {
 	session := t.session
 	t.mu.Unlock()
 
+	t.recordDuration(now, session, elapsed, "ok")
 	if elapsed < slowFloor || logger == nil {
 		return
 	}

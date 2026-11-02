@@ -165,6 +165,8 @@ func TestHookTimerHelper(t *testing.T) {
 		t.Skip("помощник для TestHookTimer_SIGTERM")
 	}
 	timer := newHookTimer("user-prompt-submit")
+	timer.setSession("helper-session")
+	timer.setDurations(core.LoggerConfig{Output: "file", LogFile: os.Getenv("CHOOKS_HOOKTIMER_LOG")})
 	timer.watchTermination()
 	timer.stage("skills")
 	fmt.Println("ready")
@@ -178,7 +180,8 @@ func TestHookTimerHelper(t *testing.T) {
 // Claude Code по таймауту шлёт хуку SIGTERM: хук пишет стадию и выходит 143
 func TestHookTimer_SIGTERM(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHookTimerHelper$")
-	cmd.Env = append(os.Environ(), "CHOOKS_HOOKTIMER_HELPER=1")
+	logDir := t.TempDir()
+	cmd.Env = append(os.Environ(), "CHOOKS_HOOKTIMER_HELPER=1", "CHOOKS_HOOKTIMER_LOG="+filepath.Join(logDir, "chooks.log"))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -213,5 +216,45 @@ func TestHookTimer_SIGTERM(t *testing.T) {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("в stderr нет %q: %s", want, stderr.String())
 		}
+	}
+	durations, err := os.ReadFile(filepath.Join(logDir, durationsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Split(strings.TrimSpace(string(durations)), "\t")
+	if len(fields) != 6 || fields[1] != "user-prompt-submit" || fields[2] != "helper-session" || fields[5] != "killed" {
+		t.Errorf("строка длительности убитого хука: %q", durations)
+	}
+}
+
+// Длительность пишется на каждый запуск, и быстрый тоже: Claude Code
+// не пишет в транскрипт тихие запуски не-Stop хуков
+func TestHookTimer_RecordsEveryRun(t *testing.T) {
+	timer, clock, logger := newTestTimer(t, "post-tool-batch", upsSettings)
+	logDir := t.TempDir()
+	timer.setDurations(core.LoggerConfig{Output: "file", LogFile: filepath.Join(logDir, "chooks.log")})
+	timer.setSession("s1")
+	clock.advance(12 * time.Millisecond)
+	timer.finish()
+
+	data, err := os.ReadFile(filepath.Join(logDir, durationsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "2026-11-02T18:45:23.012Z\tpost-tool-batch\ts1\t12\t0\tok\n"
+	if string(data) != want {
+		t.Errorf("получено %q, ожидалось %q", data, want)
+	}
+	if len(logger.warns) != 0 {
+		t.Errorf("быстрый запуск не пишет в лог: %q", logger.warns)
+	}
+
+	// Лог не в файле (stderr) — файла длительностей нет
+	quiet, clock, _ := newTestTimer(t, "stop", upsSettings)
+	quiet.setDurations(core.LoggerConfig{Output: "stderr"})
+	clock.advance(time.Millisecond)
+	quiet.finish()
+	if quiet.durations != "" {
+		t.Errorf("без файла лога длительности некуда писать: %q", quiet.durations)
 	}
 }

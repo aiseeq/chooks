@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -177,6 +178,8 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		return exitError, fmt.Errorf("failed to read input: %w", err)
 	}
 
+	timer.setSession(sessionIDOf(data))
+
 	timer.stage("config")
 	config, err := core.LoadConfig(configPath)
 	if err != nil {
@@ -188,6 +191,7 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		return exitError, fmt.Errorf("failed to create logger: %w", err)
 	}
 	timer.setLogger(logger)
+	timer.setDurations(config.Logger)
 
 	timer.stage("work")
 	switch hookType {
@@ -201,7 +205,6 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		// бы незамеченным), и напоминает о скиллах, изменённых после вызова.
 		// Срабатывает и на сообщение другой сессии, и посреди хода
 		input := parseSessionInput(logger, hookType, data)
-		timer.setSession(input.SessionID)
 		timer.stage("state")
 		saveState(logger, input.SessionID, core.StateWorking)
 		timer.stage("skills")
@@ -214,7 +217,6 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 		// UserPromptSubmit, а пакет после ответа значит, что работа идёт.
 		// Пакет субагента — не ответ: главный ход может стоять на вопросе
 		input := parseSessionInput(logger, hookType, data)
-		timer.setSession(input.SessionID)
 		timer.stage("state")
 		if input.AgentID == "" {
 			if _, err := core.SwapSessionState(input.SessionID, core.StateWaiting, core.StateWorking); err != nil {
@@ -254,6 +256,19 @@ func runHook(ctx context.Context, hookType string) (int, error) {
 	default:
 		return exitError, fmt.Errorf("unknown hook type: %s", hookType)
 	}
+}
+
+// sessionIDOf — сессия события для строк о длительности. Нечитаемый вход
+// разбирает и пишет в лог сам обработчик хука; здесь он — пустая сессия
+func sessionIDOf(data []byte) string {
+	var head struct {
+		SessionID string `json:"session_id"`
+	}
+	//nolint:silent-error-handling // вход целиком разбирает обработчик хука и пишет сбой в лог сам; сессия здесь — только подпись строки длительности
+	if err := json.Unmarshal(data, &head); err != nil {
+		return ""
+	}
+	return head.SessionID
 }
 
 // runPreToolUse прогоняет вызов инструмента через проверки

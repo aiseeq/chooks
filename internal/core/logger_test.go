@@ -85,3 +85,26 @@ func TestNewLogger_FileOutputRequiresPath(t *testing.T) {
 		t.Error("output: file без пути должен приводить к ошибке")
 	}
 }
+
+func TestAppendLine_Rotates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs", "durations.tsv")
+	if err := AppendLine(path, 1, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, 1024*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendLine(path, 1, "second"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "second\n" {
+		t.Errorf("после ротации в файле %q", data)
+	}
+	if info, err := os.Stat(path + ".1"); err != nil || info.Size() != 1024*1024 {
+		t.Errorf("прежний файл не ушёл в .1: %v", err)
+	}
+}

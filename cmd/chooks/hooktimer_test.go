@@ -69,7 +69,7 @@ func TestHookTimer_SlowOverHalfTimeout(t *testing.T) {
 	clock.advance(1600 * time.Millisecond)
 	timer.stage("skills")
 	clock.advance(20 * time.Millisecond)
-	timer.finish()
+	timer.finish("ok")
 
 	if len(logger.warns) != 1 {
 		t.Fatalf("ожидалась одна строка о медленном хуке, получено %q", logger.warns)
@@ -87,7 +87,7 @@ func TestHookTimer_QuietWhenFast(t *testing.T) {
 	timer, clock, logger := newTestTimer(t, "user-prompt-submit", upsSettings)
 	timer.settingsPath = func() (string, error) { return "", errors.New("must not be read") }
 	clock.advance(1400 * time.Millisecond)
-	timer.finish()
+	timer.finish("ok")
 	if len(logger.warns) != 0 {
 		t.Errorf("быстрый хук не пишет: %q", logger.warns)
 	}
@@ -95,7 +95,7 @@ func TestHookTimer_QuietWhenFast(t *testing.T) {
 	// 2 с при таймауте 60 с — меньше половины
 	timer, clock, logger = newTestTimer(t, "question-check", upsSettings)
 	clock.advance(2 * time.Second)
-	timer.finish()
+	timer.finish("ok")
 	if len(logger.warns) != 0 {
 		t.Errorf("question-check 2 с из 60 не медленный: %q", logger.warns)
 	}
@@ -104,7 +104,7 @@ func TestHookTimer_QuietWhenFast(t *testing.T) {
 func TestHookTimer_TimeoutUnknown(t *testing.T) {
 	timer, clock, logger := newTestTimer(t, "post-tool-batch", upsSettings)
 	clock.advance(2 * time.Second)
-	timer.finish()
+	timer.finish("ok")
 	if len(logger.warns) != 1 || !strings.Contains(logger.warns[0], "timeout unknown") {
 		t.Errorf("хука нет в settings — строка с ошибкой, получено %q", logger.warns)
 	}
@@ -235,7 +235,7 @@ func TestHookTimer_RecordsEveryRun(t *testing.T) {
 	timer.setDurations(core.LoggerConfig{Output: "file", LogFile: filepath.Join(logDir, "chooks.log")})
 	timer.setSession("s1")
 	clock.advance(12 * time.Millisecond)
-	timer.finish()
+	timer.finish("ok")
 
 	data, err := os.ReadFile(filepath.Join(logDir, durationsFile))
 	if err != nil {
@@ -253,8 +253,40 @@ func TestHookTimer_RecordsEveryRun(t *testing.T) {
 	quiet, clock, _ := newTestTimer(t, "stop", upsSettings)
 	quiet.setDurations(core.LoggerConfig{Output: "stderr"})
 	clock.advance(time.Millisecond)
-	quiet.finish()
+	quiet.finish("ok")
 	if quiet.durations != "" {
 		t.Errorf("без файла лога длительности некуда писать: %q", quiet.durations)
+	}
+}
+
+// Хук, вернувший ошибку, помечен error: «ok» значит, что хук отработал
+func TestRunHook_ErrorStatus(t *testing.T) {
+	logDir := t.TempDir()
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	writeConfig := "logger:\n  output: \"file\"\n  file: \"" + filepath.Join(logDir, "chooks.log") + "\"\n"
+	if err := os.WriteFile(configFile, []byte(writeConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := configPath
+	configPath = configFile
+	t.Cleanup(func() { configPath = previous })
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	oldStdin := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	if _, err := runHook(t.Context(), "no-such-hook"); err == nil {
+		t.Fatal("неизвестный хук должен давать ошибку")
+	}
+	data, err := os.ReadFile(filepath.Join(logDir, durationsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fields := strings.Split(strings.TrimSpace(string(data)), "\t"); len(fields) != 6 || fields[1] != "no-such-hook" || fields[5] != "error" {
+		t.Errorf("строка длительности: %q", data)
 	}
 }

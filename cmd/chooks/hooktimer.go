@@ -112,7 +112,9 @@ func (t *hookTimer) setDurations(logger core.LoggerConfig) {
 }
 
 // recordDuration пишет строку TSV: время, хук, сессия, мс всего, мс запуска,
-// исход (ok или killed). Сбой записи — в лог: хук от него не страдает
+// исход (ok, error или killed). Запуск, убитый или упавший до чтения конфига,
+// строки не оставляет: путь файла — из конфига. Сбой записи — в лог: хук от
+// него не страдает
 func (t *hookTimer) recordDuration(at time.Time, session string, elapsed time.Duration, status string) {
 	t.mu.Lock()
 	path, maxMB, logger, startup := t.durations, t.durationsMaxMB, t.logger, t.startup
@@ -163,7 +165,7 @@ func (t *hookTimer) watchTermination() {
 
 // finish пишет длительность запуска, а в лог — строку, если хук шёл дольше
 // половины своего таймаута
-func (t *hookTimer) finish() {
+func (t *hookTimer) finish(status string) {
 	t.mu.Lock()
 	now := t.now()
 	t.stages = append(t.stages, formatStage(t.current, now.Sub(t.mark)))
@@ -173,7 +175,7 @@ func (t *hookTimer) finish() {
 	session := t.session
 	t.mu.Unlock()
 
-	t.recordDuration(now, session, elapsed, "ok")
+	t.recordDuration(now, session, elapsed, status)
 	if elapsed < slowFloor || logger == nil {
 		return
 	}

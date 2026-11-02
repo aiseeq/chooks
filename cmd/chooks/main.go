@@ -168,10 +168,16 @@ func newHookCmd(hookType, short string, exitCode *int) *cobra.Command {
 }
 
 // runHook выполняет основную логику хука
-func runHook(ctx context.Context, hookType string) (int, error) {
+func runHook(ctx context.Context, hookType string) (code int, err error) {
 	timer := newHookTimer(hookType)
 	timer.watchTermination()
-	defer timer.finish()
+	defer func() {
+		status := "ok"
+		if err != nil || code == exitError {
+			status = "error"
+		}
+		timer.finish(status)
+	}()
 
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {

@@ -363,3 +363,46 @@ func TestHook_BadSessionIDLetsThrough(t *testing.T) {
 		t.Fatalf("bad session id must let through with error: %+v", out)
 	}
 }
+
+// Значение из реплики, предыдущего ответа и действия не доходит ни до судьи,
+// ни до журнала, в том числе начало ключа после среза
+func TestHook_HidesSecrets(t *testing.T) {
+	body := "Qz7Xw2Rt9Lm4Vb6Nc1Pk8Jh3Gf5Ds0Ay"
+	key := "sk_live" + "_" + body
+	f := newHookFixture(t, `{"verdict":"ok"}`,
+		agentLine(1, key+" Передать мастерам?", "end_turn"),
+		humanLine(2, strings.Repeat("я", humanRunes-len("sk_live_Qz"))+key),
+	)
+	out := f.hook.Run(context.Background(), f.send("x", "ключ "+key))
+	if out.Deny || out.Verdict != VerdictOK {
+		t.Fatalf("ok must pass: %+v", out)
+	}
+	entries := f.journal(t)
+	if len(entries) != 1 || len(f.judge.inputs) != 1 {
+		t.Fatalf("journal %+v, inputs %d", entries, len(f.judge.inputs))
+	}
+	for where, text := range map[string]string{
+		"судья":            f.judge.inputs[0],
+		"журнал: реплика":  entries[0].Human,
+		"журнал: ответ":    entries[0].Prev,
+		"журнал: действие": entries[0].Action,
+	} {
+		for _, part := range []string{body[:4], "sk_live" + "_"} {
+			if strings.Contains(text, part) {
+				t.Errorf("%s: %q passed", where, part)
+			}
+		}
+	}
+	if !strings.Contains(entries[0].Action, "[скрыто:sk_live]") {
+		t.Errorf("action must show what was hidden: %q", entries[0].Action)
+	}
+}
+
+// Срез конца сообщения агента посреди ключа не оставляет его хвост
+func TestClipHeadHidesSecretTail(t *testing.T) {
+	body := "Qz7Xw2Rt9Lm4Vb6Nc1Pk8Jh3Gf5Ds0Ay"
+	text := "sk_live" + "_" + body + strings.Repeat("я", 20)
+	if got := clipHead(text, 25); strings.Contains(got, body[len(body)-4:]) {
+		t.Errorf("key tail passed: %q", got)
+	}
+}

@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/aiseeq/akit/secretmask"
 )
 
 var (
@@ -141,11 +143,12 @@ func isTerminator(r rune) bool {
 	return r == '.' || r == '!' || r == '?' || r == '…'
 }
 
-// Texts — тексты вопросов для журнала
+// Texts — тексты вопросов для журнала, без значений секретов
 func Texts(questions []Question) []string {
 	texts := make([]string, 0, len(questions))
 	for _, question := range questions {
-		texts = append(texts, question.Text)
+		text, _ := secretmask.Mask(question.Text)
+		texts = append(texts, text)
 	}
 	return texts
 }

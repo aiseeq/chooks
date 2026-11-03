@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/akit/secretmask"
 )
 
 // JudgeRev — версия судьи в журнале (judge_rev): итог опыта 30.10 делит
@@ -83,7 +85,7 @@ func (c Case) Input() string {
 	if c.HumanReply == "" {
 		b.WriteString("(не найдена)\n")
 	} else {
-		b.WriteString(ClipMarked(c.HumanReply, humanReplyRunes))
+		b.WriteString(Excerpt(c.HumanReply, humanReplyRunes))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n[Журнал реплик пользователя: выдержки по словам вопроса]\n")
@@ -113,11 +115,11 @@ func (c Case) Input() string {
 		default:
 			b.WriteString("(написан до прошлой реплики пользователя)\n")
 		}
-		b.WriteString(ClipMarked(c.PrevAnswer, prevAnswerRunes))
+		b.WriteString(Excerpt(c.PrevAnswer, prevAnswerRunes))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n[Финальный ответ агента]\n")
-	b.WriteString(ClipMarked(c.Answer, answerRunes))
+	b.WriteString(Excerpt(c.Answer, answerRunes))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -161,7 +163,7 @@ func ParseVerdict(text string) (Verdict, error) {
 	start := strings.Index(text, "{")
 	end := strings.LastIndex(text, "}")
 	if start < 0 || end < start {
-		return Verdict{}, fmt.Errorf("no JSON object in judge answer: %q", ClipMarked(text, 200))
+		return Verdict{}, fmt.Errorf("no JSON object in judge answer: %q", Excerpt(text, 200))
 	}
 	var verdict Verdict
 	if err := json.Unmarshal([]byte(text[start:end+1]), &verdict); err != nil {
@@ -217,8 +219,11 @@ func (j CLIJudge) Judge(ctx context.Context, input string) (Verdict, Usage, erro
 	return verdict, usage, err
 }
 
-// Ask отдаёт модели промпт и случай и возвращает её ответ как есть
+// Ask отдаёт модели промпт и случай и возвращает её ответ как есть. Это
+// единственная дверь к модели: значения секретов скрываются здесь для любого
+// входа, у моделей кроме opus текст уходит другому поставщику
 func (j CLIJudge) Ask(ctx context.Context, input string) (string, Usage, error) {
+	input, _ = secretmask.Mask(input)
 	if j.Name == "opus" {
 		return j.askClaude(ctx, input)
 	}
@@ -274,7 +279,7 @@ func (j CLIJudge) askClaude(ctx context.Context, input string) (string, Usage, e
 		OutputTokens:      result.Usage.OutputTokens,
 	}
 	if result.IsError {
-		return "", usage, fmt.Errorf("claude returned an error: %s", ClipMarked(result.Result, 300))
+		return "", usage, fmt.Errorf("claude returned an error: %s", Excerpt(result.Result, 300))
 	}
 	return result.Result, usage, nil
 }
@@ -342,7 +347,7 @@ func runCLI(cmd *exec.Cmd, dir, stdin string) ([]byte, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("%s failed: %w: %s", cmd.Args[0], err, ClipMarked(strings.TrimSpace(stderr.String()), 300))
+		return nil, fmt.Errorf("%s failed: %w: %s", cmd.Args[0], err, Excerpt(strings.TrimSpace(stderr.String()), 300))
 	}
 	return out, nil
 }

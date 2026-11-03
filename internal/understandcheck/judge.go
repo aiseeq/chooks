@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aiseeq/akit/secretmask"
 	"github.com/aiseeq/chooks/internal/questioncheck"
 )
 
@@ -106,11 +107,13 @@ func (c Case) Input() string {
 }
 
 // clip оставляет начало текста
-var clip = questioncheck.ClipMarked
+var clip = questioncheck.Excerpt
 
 // clipHead оставляет конец текста: судье нужен конец сообщения агента —
-// вопрос или предложение, на которое ответил пользователь
+// вопрос или предложение, на которое ответил пользователь. Значения секретов
+// скрываются до среза, как в questioncheck.Excerpt: иначе остался бы хвост ключа
 func clipHead(text string, limit int) string {
+	text, _ = secretmask.Mask(text)
 	runes := []rune(text)
 	if len(runes) <= limit {
 		return text

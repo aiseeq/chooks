@@ -85,7 +85,7 @@ func (c SaidCase) Input() string {
 	if c.Human == "" {
 		b.WriteString("(не найдена)\n")
 	} else {
-		b.WriteString(ClipMarked(c.Human, humanReplyRunes))
+		b.WriteString(Excerpt(c.Human, humanReplyRunes))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n[Прежние слова пользователя]\n")
@@ -102,10 +102,10 @@ func (c SaidCase) Input() string {
 	}
 	if c.Turn != "" {
 		b.WriteString("\n[Ход агента]\n")
-		b.WriteString(ClipMarked(c.Turn, turnRunes))
+		b.WriteString(Excerpt(c.Turn, turnRunes))
 	} else {
 		b.WriteString("\n[Сообщение агента]\n")
-		b.WriteString(ClipMarked(c.Message, answerRunes))
+		b.WriteString(Excerpt(c.Message, answerRunes))
 	}
 	b.WriteString("\n")
 	return b.String()
@@ -136,7 +136,7 @@ func ParseSaidVerdict(text string) (SaidVerdict, error) {
 	start := strings.Index(text, "{")
 	end := strings.LastIndex(text, "}")
 	if start < 0 || end < start {
-		return SaidVerdict{}, fmt.Errorf("no JSON object in judge answer: %q", ClipMarked(text, 200))
+		return SaidVerdict{}, fmt.Errorf("no JSON object in judge answer: %q", Excerpt(text, 200))
 	}
 	var verdict SaidVerdict
 	if err := json.Unmarshal([]byte(text[start:end+1]), &verdict); err != nil {
@@ -176,7 +176,7 @@ func (j Journals) FindSaid(message string, before time.Time, limit int) ([]SaidQ
 		if strings.HasPrefix(body, "в ответ на:") {
 			_, body, _ = strings.Cut(body, "\n")
 		}
-		quote := SaidQuote{Source: "user-replies.md", Text: ClipMarked(strings.TrimSpace(body), saidQuoteRunes)}
+		quote := SaidQuote{Source: "user-replies.md", Text: Excerpt(strings.TrimSpace(body), saidQuoteRunes)}
 		if m := replyHeader.FindStringSubmatch(header); m != nil {
 			quote.Time = m[1]
 		}
@@ -314,5 +314,5 @@ func RankSaid(records []SaidRecord, text string, limit int) []SaidRecord {
 
 // AsQuote — запись в виде слова для судьи сверки
 func (r SaidRecord) AsQuote() SaidQuote {
-	return SaidQuote{Time: r.Time.Format(time.RFC3339), Source: r.Ref, Kind: r.Kind, Text: ClipMarked(r.Quote, saidQuoteRunes)}
+	return SaidQuote{Time: r.Time.Format(time.RFC3339), Source: r.Ref, Kind: r.Kind, Text: Excerpt(r.Quote, saidQuoteRunes)}
 }

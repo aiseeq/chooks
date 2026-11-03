@@ -10,6 +10,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/aiseeq/akit/secretmask"
 )
 
 // Бюджет выдержек в промпте судьи: сухой прогон оценивал вызов с журналами в
@@ -230,7 +232,7 @@ func best(entries, keys []string, limit, runes int) []string {
 	indexes := bestIndexes(entries, keys, limit)
 	result := make([]string, 0, len(indexes))
 	for _, index := range indexes {
-		result = append(result, ClipMarked(entries[index], runes))
+		result = append(result, Excerpt(entries[index], runes))
 	}
 	return result
 }
@@ -296,9 +298,12 @@ func bestIndexes(entries, keys []string, limit int) []int {
 	return indexes
 }
 
-// ClipMarked обрезает текст до limit знаков с пометкой «…[обрезано]»: судья
-// должен знать, что видит не всё
-func ClipMarked(text string, limit int) string {
+// Excerpt — выдержка для судьи и журнала: без значений секретов, до limit
+// знаков с пометкой «…[обрезано]», судья должен знать, что видит не всё.
+// Значения скрываются до среза: начало ключа после него короче образца и
+// прошло бы и дверь Ask
+func Excerpt(text string, limit int) string {
+	text, _ = secretmask.Mask(text)
 	runes := []rune(text)
 	if len(runes) <= limit {
 		return text

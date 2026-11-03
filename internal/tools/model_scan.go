@@ -170,9 +170,8 @@ func unguardedModelMentions(command, path string) []string {
 	var out []string
 	for _, pattern := range []*regexp.Regexp{longModelMentionPattern, shortModelMentionPattern} {
 		for _, match := range pattern.FindAllStringSubmatch(command, -1) {
-			candidate := normalizeModel(match[1])
-			if !isApproved(candidate, models) {
-				out = append(out, candidate)
+			if !isApproved(match[1], models) {
+				out = append(out, normalizeModel(match[1]))
 			}
 		}
 	}

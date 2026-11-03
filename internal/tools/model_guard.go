@@ -208,6 +208,9 @@ func readApprovedModels(path string) ([]approvedModel, string) {
 		if len(fields) != 2 {
 			return nil, fmt.Sprintf("список одобренных моделей %s, строка %d: ожидаются ровно два поля", path, line)
 		}
+		if strings.HasSuffix(fields[1], "/") {
+			return nil, fmt.Sprintf("список одобренных моделей %s, строка %d: id кончается на «/»", path, line)
+		}
 		models = append(models, approvedModel{fields[0], fields[1]})
 	}
 	if err := s.Err(); err != nil {
@@ -220,21 +223,35 @@ func readApprovedModels(path string) ([]approvedModel, string) {
 }
 
 func isApproved(candidate string, models []approvedModel) bool {
-	candidate = normalizeModel(candidate)
 	for _, m := range models {
-		if strings.EqualFold(candidate, m.name) || strings.EqualFold(candidate, normalizeModel(m.id)) {
+		if strings.EqualFold(normalizeModel(candidate), m.name) || matchesModelID(candidate, m.id) {
 			return true
 		}
 	}
 	return false
 }
 
+// matchesModelID сравнивает кандидата с id из списка. id без «/» не называет
+// маршрут: префикс провайдера у кандидата не важен. id с «/» называет его:
+// кандидат с префиксом должен совпасть целиком, тот же конец под другим
+// префиксом - другой маршрут; голое имя сравнивается с концом id
+func matchesModelID(candidate, id string) bool {
+	if strings.Contains(candidate, "/") && strings.Contains(id, "/") {
+		return strings.EqualFold(withoutModelVariant(candidate), id)
+	}
+	return strings.EqualFold(normalizeModel(candidate), normalizeModel(id))
+}
+
 func normalizeModel(model string) string {
 	if i := strings.LastIndex(model, "/"); i >= 0 {
 		model = model[i+1:]
 	}
+	return withoutModelVariant(model)
+}
+
+func withoutModelVariant(model string) string {
 	if i := strings.Index(model, "["); i >= 0 && strings.HasSuffix(model, "]") {
-		model = model[:i]
+		return model[:i]
 	}
 	return model
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -71,7 +72,7 @@ func TestModelGuard(t *testing.T) {
 }
 
 func TestModelGuardApprovedListErrors(t *testing.T) {
-	for _, tc := range []struct{ name, contents, want string }{{"missing", "\x00", "не найден"}, {"empty", "# models\n", "пуст"}, {"bad line", "opus claude-opus-5-5 extra\n", "строка 1"}} {
+	for _, tc := range []struct{ name, contents, want string }{{"missing", "\x00", "не найден"}, {"empty", "# models\n", "пуст"}, {"bad line", "opus claude-opus-5-5 extra\n", "строка 1"}, {"id на слэш", "x waibee/\n", "строка 1: id кончается"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			tool := modelGuardForTest(t, tc.contents)
 			got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "claude --model sonnet"})
@@ -136,14 +137,44 @@ func TestModelGuardApprovedIDWithSlash(t *testing.T) {
 		{"deepseek-v4.1-flash-1017", true},
 		{"deepseek", true},
 		{"anthropic/claude-opus-5-5", true},
+		{"waibee/deepseek/deepseek-v4.1-flash-1017[1m]", true},
+		{"openai/opus", true},
 		{"waibee/openai/gpt-x", false},
 		{"waibee/deepseek/deepseek-v4", false},
 		{"waibee", false},
+		{"", false},
+		{"any/", false},
+		// Шлюз назван в строке списка: тот же конец id под другим префиксом - другой маршрут.
+		{"openrouter/deepseek/deepseek-v4.1-flash-1017", false},
+		{"deepseek/deepseek-v4.1-flash-1017", false},
+		{"other/deepseek-v4.1-flash-1017", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.candidate, func(t *testing.T) {
 			if got := isApproved(tc.candidate, models); got != tc.want {
 				t.Fatalf("isApproved(%q) = %v, want %v", tc.candidate, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnguardedMentionsKeepRoute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "approved")
+	if err := os.WriteFile(path, []byte("deepseek waibee/deepseek/deepseek-v4.1-flash-1017\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		command string
+		want    []string
+	}{
+		{"echo --model waibee/deepseek/deepseek-v4.1-flash-1017", nil},
+		{"echo --model deepseek-v4.1-flash-1017", nil},
+		{"echo --model openrouter/deepseek/deepseek-v4.1-flash-1017", []string{"deepseek-v4.1-flash-1017"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.command, func(t *testing.T) {
+			if got := unguardedModelMentions(tc.command, path); !slices.Equal(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
 	}

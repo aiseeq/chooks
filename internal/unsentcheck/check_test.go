@@ -57,6 +57,14 @@ const (
 	toolResult = `{"type":"user","uuid":"r2","timestamp":"2026-10-29T10:02:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"history пуста"}]}}`
 	notice     = `{"type":"user","uuid":"n1","timestamp":"2026-10-29T10:03:00Z","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>…"}}`
 	// Запрос claude -p и SDK пишется без origin
+	// Запись Claude Code после остановки Stop-хуком (тот же вид в транскрипте 51e69c95 02.11 12:31)
+	ownFeedback   = `{"type":"user","uuid":"s1","timestamp":"2026-10-29T10:04:00Z","isMeta":true,"message":{"content":"Stop hook feedback:\nВ ответе сказано, что текст человеку не отправлен («x»), а чат в этом ходе не открывался: ` + "`reddy history`" + ` не вызывался."}}`
+	otherFeedback = `{"type":"user","uuid":"s2","timestamp":"2026-10-29T10:04:00Z","isMeta":true,"message":{"content":"Stop hook feedback:\nВопрос пользователю не нужен: ответ есть в тикете."}}`
+	// Вызов history завершился ошибкой (t1 — history, t4 — ветка, не дошедшая до reddy)
+	historyFailed = `{"type":"user","uuid":"r1","timestamp":"2026-10-29T10:01:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"Exit code 1"}]}}`
+	branchHistory = `{"type":"assistant","uuid":"m4","timestamp":"2026-10-29T10:01:00Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t4","name":"Bash","input":{"command":"false && reddy history chat"}}]}}`
+	branchFailed  = `{"type":"user","uuid":"r4","timestamp":"2026-10-29T10:01:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"t4","is_error":true,"content":"Exit code 1"}]}}`
+
 	program = `{"type":"user","uuid":"p1","timestamp":"2026-10-29T10:00:00Z","entrypoint":"sdk-cli","message":{"content":"что с ответом?"}}`
 	// Правка тикета, где слова reddy и history — текст, а не вызов
 	ticketEdit = `{"type":"assistant","uuid":"m3","timestamp":"2026-10-29T10:02:00Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"cat >> docs/tasks/t.md <<'EOF'\n- ход без reddy history — блок\nEOF"}}]}}`
@@ -151,7 +159,14 @@ func TestRun(t *testing.T) {
 		{name: "чат открыт в ходе программы", event: Event{LastMessage: answer}, lines: []string{program, history, otherBash}},
 		{name: "reddy history в тексте правки", event: Event{LastMessage: answer}, lines: []string{human, ticketEdit}, wantBlock: true},
 		{name: "фразы нет", event: Event{LastMessage: "Ответ Ане отправлен."}, lines: []string{human}},
-		{name: "повторный Stop", event: Event{LastMessage: answer, StopHookActive: true}, lines: []string{human}, wantSkip: "stop hook active"},
+		{name: "history завершился ошибкой", event: Event{LastMessage: answer}, lines: []string{human, history, historyFailed}, wantBlock: true},
+		{name: "ветка не дошла до history", event: Event{LastMessage: answer}, lines: []string{human, branchHistory, branchFailed}, wantBlock: true},
+		{name: "ошибка, затем удачный history", event: Event{LastMessage: answer}, lines: []string{human, branchHistory, branchFailed, history}},
+		{name: "повторный Stop после своей остановки", event: Event{LastMessage: answer, StopHookActive: true}, lines: []string{human, ownFeedback}, wantSkip: "stop hook active"},
+		{name: "повторный Stop после чужой остановки, чат не открыт", event: Event{LastMessage: answer, StopHookActive: true}, lines: []string{human, otherFeedback}, wantBlock: true},
+		{name: "повторный Stop после чужой остановки, чат открыт", event: Event{LastMessage: answer, StopHookActive: true}, lines: []string{human, history, otherFeedback}},
+		{name: "своя остановка в прошлом ходе не считается", event: Event{LastMessage: answer, StopHookActive: true}, lines: []string{ownFeedback, human, otherFeedback}, wantBlock: true},
+		{name: "своя подсказка без повторного Stop не пропускает", event: Event{LastMessage: answer}, lines: []string{human, ownFeedback}, wantBlock: true},
 		{name: "субагент", event: Event{LastMessage: answer, AgentID: "a1"}, lines: []string{human}, wantSkip: "subagent"},
 	}
 	for _, tc := range cases {
@@ -200,11 +215,11 @@ func TestChatOpened_BeyondFirstWindow(t *testing.T) {
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checked, err := ChatOpened(path)
+	turn, err := ReadTurn(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !checked {
+	if !turn.ChatOpened {
 		t.Error("reddy history за первым окном не найден")
 	}
 }

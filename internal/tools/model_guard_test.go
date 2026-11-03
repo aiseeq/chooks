@@ -72,7 +72,7 @@ func TestModelGuard(t *testing.T) {
 }
 
 func TestModelGuardApprovedListErrors(t *testing.T) {
-	for _, tc := range []struct{ name, contents, want string }{{"missing", "\x00", "не найден"}, {"empty", "# models\n", "пуст"}, {"bad line", "opus claude-opus-5-5 extra\n", "строка 1"}, {"id на слэш", "x waibee/\n", "строка 1: id кончается"}} {
+	for _, tc := range []struct{ name, contents, want string }{{"missing", "\x00", "не найден"}, {"empty", "# models\n", "пуст"}, {"bad line", "opus claude-opus-5-5 extra\n", "строка 1"}, {"id на слэш", "x waibee/\n", "строка 1: id без имени модели"}, {"id только вариант", "x [1m]\n", "строка 1: id без имени модели"}, {"id на слэш с вариантом", "x waibee/[1m]\n", "строка 1: id без имени модели"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			tool := modelGuardForTest(t, tc.contents)
 			got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "claude --model sonnet"})
@@ -155,6 +155,18 @@ func TestModelGuardApprovedIDWithSlash(t *testing.T) {
 				t.Fatalf("isApproved(%q) = %v, want %v", tc.candidate, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestModelGuardApprovedIDWithVariant(t *testing.T) {
+	models := []approvedModel{{"opus", "anthropic/claude-opus-5-5[1m]"}}
+	for _, candidate := range []string{"anthropic/claude-opus-5-5[1m]", "anthropic/claude-opus-5-5", "claude-opus-5-5[1m]", "claude-opus-5-5"} {
+		if !isApproved(candidate, models) {
+			t.Errorf("isApproved(%q) = false, want true", candidate)
+		}
+	}
+	if isApproved("other/claude-opus-5-5[1m]", models) {
+		t.Error("другой префикс при id с вариантом пропущен")
 	}
 }
 

@@ -208,8 +208,8 @@ func readApprovedModels(path string) ([]approvedModel, string) {
 		if len(fields) != 2 {
 			return nil, fmt.Sprintf("список одобренных моделей %s, строка %d: ожидаются ровно два поля", path, line)
 		}
-		if strings.HasSuffix(fields[1], "/") {
-			return nil, fmt.Sprintf("список одобренных моделей %s, строка %d: id кончается на «/»", path, line)
+		if normalizeModel(fields[1]) == "" {
+			return nil, fmt.Sprintf("список одобренных моделей %s, строка %d: id без имени модели", path, line)
 		}
 		models = append(models, approvedModel{fields[0], fields[1]})
 	}
@@ -237,7 +237,7 @@ func isApproved(candidate string, models []approvedModel) bool {
 // префиксом - другой маршрут; голое имя сравнивается с концом id
 func matchesModelID(candidate, id string) bool {
 	if strings.Contains(candidate, "/") && strings.Contains(id, "/") {
-		return strings.EqualFold(withoutModelVariant(candidate), id)
+		return strings.EqualFold(withoutModelVariant(candidate), withoutModelVariant(id))
 	}
 	return strings.EqualFold(normalizeModel(candidate), normalizeModel(id))
 }

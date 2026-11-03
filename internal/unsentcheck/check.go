@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strings"
 
 	"github.com/aiseeq/chooks/internal/tailscan"
 
@@ -72,20 +71,21 @@ type Event struct {
 	LastMessage    string
 }
 
-// Run проверяет конец хода. Повторный Stop (stop_hook_active) пропускается,
-// только если в этом ходе останавливал сам unsent-check: подсказка уже была,
-// а ложная фраза (письмо сессии, рассказ о механизме) иначе держала бы ход по
-// кругу. После остановки другим хуком (question-check) проверка в силе:
-// продолжение может содержать новое утверждение (work-admin 23.10 11:08)
+// Run проверяет конец хода. Повторный Stop после остановки
+// (stop_hook_active) пропускается: подсказка уже была, а ложная фраза (письмо
+// сессии, рассказ о механизме) иначе держала бы ход по кругу
 func Run(event Event) (Result, error) {
-	if event.AgentID != "" {
+	switch {
+	case event.AgentID != "":
 		return Result{Skip: "subagent"}, nil
+	case event.StopHookActive:
+		return Result{Skip: "stop hook active"}, nil
 	}
 	phrase := Claim(event.LastMessage)
 	if phrase == "" {
 		return Result{}, nil
 	}
-	turn, err := ReadTurn(event.TranscriptPath)
+	checked, err := ChatOpened(event.TranscriptPath)
 	if errors.Is(err, os.ErrNotExist) {
 		// `claude -p --no-session-persistence` (ночные шаги Сна) передаёт путь,
 		// но транскрипт не пишет: проверять нечего, это не сбой
@@ -94,53 +94,34 @@ func Run(event Event) (Result, error) {
 	if err != nil {
 		return Result{Claim: phrase}, err
 	}
-	if turn.ChatOpened {
+	if checked {
 		return Result{Claim: phrase}, nil
-	}
-	if event.StopHookActive && turn.Blocked {
-		return Result{Claim: phrase, Skip: "stop hook active"}, nil
 	}
 	return Result{Block: true, Claim: phrase, Reason: blockReason(phrase)}, nil
 }
 
-// blockMark — часть подсказки, по которой своя остановка узнаётся в
-// транскрипте: Claude Code пишет её записью isMeta «Stop hook feedback»
-const blockMark = "а чат в этом ходе не открывался"
-
 func blockReason(phrase string) string {
-	return fmt.Sprintf("В ответе сказано, что текст человеку не отправлен («%s»), "+blockMark+": `reddy history` не вызывался. "+
+	return fmt.Sprintf("В ответе сказано, что текст человеку не отправлен («%s»), а чат в этом ходе не открывался: `reddy history` не вызывался. "+
 		"Открой чат адресата (`reddy history <чат>`), проверь по истории, ушёл ли текст, и напиши статус по ней. "+
 		"Если фраза не про текст человеку в чате (письмо сессии, рассказ о механизме) — закончи ход как есть", phrase)
 }
 
-// Turn — что известно о текущем ходе из транскрипта
-type Turn struct {
-	// ChatOpened — Bash с `reddy … history` вызывался и не завершился ошибкой.
-	// Код выхода — всё, что видно: `reddy history x | tail` при сбое reddy
-	// выходит с нулём и считается открытием чата
-	ChatOpened bool
-	// Blocked — в ходе уже была подсказка unsent-check
-	Blocked bool
-}
-
-// ReadTurn читает текущий ход. Ход — от последней реплики человека, письма
-// сессии или запроса программы (`claude -p`, SDK: запись без origin); начала
-// хода нет и в предельном окне — смотрится всё окно
-func ReadTurn(path string) (Turn, error) {
-	var turn Turn
+// ChatOpened — вызывался ли в текущем ходе Bash с `reddy … history`. Ход —
+// от последней реплики человека, письма сессии или запроса программы
+// (`claude -p`, SDK: запись без origin); начала хода нет и в предельном
+// окне — смотрится всё окно
+func ChatOpened(path string) (bool, error) {
+	var checked bool
 	err := tailscan.Scan(path, func(buf []byte) bool {
 		var turnFound bool
-		turn, turnFound = scanTurn(buf)
-		return turnFound
+		checked, turnFound = scanTurn(buf)
+		return checked || turnFound
 	})
-	return turn, err
+	return checked, err
 }
 
-// scanTurn идёт по строкам с конца до начала хода или открытия чата. Вывод
-// инструмента в транскрипте идёт после вызова, поэтому при обратном проходе
-// ошибка известна раньше вызова
-func scanTurn(buf []byte) (turn Turn, turnFound bool) {
-	failed := map[string]bool{}
+// scanTurn идёт по строкам с конца до начала хода
+func scanTurn(buf []byte) (checked, turnFound bool) {
 	lines := bytes.Split(buf, []byte("\n"))
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := lines[i]
@@ -151,31 +132,26 @@ func scanTurn(buf []byte) (turn Turn, turnFound bool) {
 		}
 		// Нечитаемая строка — обрезанная или дописываемая — без событий
 		if events, err := transcript.NewParser().Parse(line); err == nil {
-			if scanEvents(events, failed, &turn) {
-				return turn, true
+			if checked, turnFound := scanEvents(events); turnFound {
+				return checked, true
 			}
 		}
 	}
-	return turn, false
+	return false, false
 }
 
-// scanEvents идёт по событиям одной записи с конца и копит сведения о ходе;
-// true — дальше смотреть незачем: начало хода или открытый чат
-func scanEvents(events []transcript.Event, failed map[string]bool, turn *Turn) bool {
+// scanEvents идёт по событиям одной записи с конца: вызов reddy history или
+// начало хода
+func scanEvents(events []transcript.Event) (checked, turnFound bool) {
 	for j := len(events) - 1; j >= 0; j-- {
 		event := &events[j]
 		switch {
 		case event.Sidechain:
 		case event.Role == transcript.User || event.Role == transcript.Peer || (event.Role == transcript.Note && event.Who == "prompt"):
-			return true
-		case event.Role == transcript.Note && event.Who == "meta" && strings.Contains(event.Text, blockMark):
-			turn.Blocked = true
-		case event.Role == transcript.Out && event.Error:
-			failed[event.CallID] = true
-		case event.Role == transcript.Cmd && event.Who == "Bash" && !failed[event.CallID] && chatCall(event.Text):
-			turn.ChatOpened = true
-			return true
+			return false, true
+		case event.Role == transcript.Cmd && event.Who == "Bash" && chatCall(event.Text):
+			return true, true
 		}
 	}
-	return false
+	return false, false
 }

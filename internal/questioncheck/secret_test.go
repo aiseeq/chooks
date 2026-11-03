@@ -193,3 +193,35 @@ func TestGluedKeyIsHidden(t *testing.T) {
 		})
 	}
 }
+
+// Вопросы режутся по строкам и теряют цитаты и код: маска после этого не узнала
+// бы тело закрытого ключа без BEGIN и ключ, приклеенный к замене цитаты
+func TestQuestionsHideSecretsBeforeSplit(t *testing.T) {
+	key := "sk-" + "proj-" + fakeBody
+	body := "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+	armor := "-----" + "BEGIN PRIVATE KEY" + "-----\n" + body + "?\n-----" + "END PRIVATE KEY" + "-----\n"
+	for name, message := range map[string]string{
+		"кавычки":         `Ключ "а"` + key + " удалить?",
+		"вставка кода":    "Ключ `а`" + key + " удалить?",
+		"ёлочки":          "Ключ «а»" + key + " удалить?",
+		"тело ключа":      armor + "Удалить?",
+		"просьба с телом": armor + "ждёт твоего «да»",
+	} {
+		t.Run(name, func(t *testing.T) {
+			questions := Questions(message)
+			if len(questions) == 0 {
+				t.Fatalf("no questions in %q", message)
+			}
+			for _, part := range []string{fakeBody[:4], body[:8]} {
+				for _, question := range questions {
+					if strings.Contains(question.Text, part) || strings.Contains(question.Line, part) {
+						t.Errorf("%q passed: %+v", part, question)
+					}
+				}
+				if joined := strings.Join(Texts(questions), "\n"); strings.Contains(joined, part) {
+					t.Errorf("%q in journal: %s", part, joined)
+				}
+			}
+		})
+	}
+}

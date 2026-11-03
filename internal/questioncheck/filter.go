@@ -52,8 +52,11 @@ type Question struct {
 // Questions возвращает вопросы и просьбы к пользователю из сообщения агента:
 // предложения с «?» вне кода, цитат и пересказа чужих реплик, и предложения с
 // маркером просьбы («ждёт твоего «да»», «нужно твоё решение»). Пустой
-// результат — вопроса нет, судью звать незачем
+// результат — вопроса нет, судью звать незачем. Значения секретов скрываются
+// до разбора: строка без BEGIN и ключ, приклеенный к замене цитаты, образцу уже
+// не видны
 func Questions(text string) []Question {
+	text, _ = secretmask.Mask(text)
 	// Маркеры ищутся до вырезания цитат: «да» в «ждёт твоего «да»» — тоже кавычки
 	plain := stripCode(text)
 	var found []Question
@@ -143,12 +146,11 @@ func isTerminator(r rune) bool {
 	return r == '.' || r == '!' || r == '?' || r == '…'
 }
 
-// Texts — тексты вопросов для журнала, без значений секретов
+// Texts — тексты вопросов для журнала
 func Texts(questions []Question) []string {
 	texts := make([]string, 0, len(questions))
 	for _, question := range questions {
-		text, _ := secretmask.Mask(question.Text)
-		texts = append(texts, text)
+		texts = append(texts, question.Text)
 	}
 	return texts
 }

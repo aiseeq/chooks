@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -557,12 +558,7 @@ func showConfig() error {
 	}
 
 	fmt.Println("Инструменты:")
-	names := make([]string, 0, len(config.Tools))
-	for name := range config.Tools {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
+	for _, name := range slices.Sorted(maps.Keys(config.Tools)) {
 		fmt.Printf("  %-20s %s\n", name, enabledLabel(config.Tools[name].Enabled))
 	}
 

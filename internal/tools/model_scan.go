@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -189,21 +190,11 @@ func firstCommand(command string) string {
 // WriteModelScan печатает сводку и примеры стабильным порядком.
 func WriteModelScan(w io.Writer, result *ModelScanResult) {
 	fmt.Fprintf(w, "Проверено вызовов: %d\nОтклонено бы: %d\n", result.Checked, result.Rejected)
-	models := make([]string, 0, len(result.ByModel))
-	for m := range result.ByModel {
-		models = append(models, m)
-	}
-	sort.Strings(models)
 	fmt.Fprintln(w, "По моделям и проектам:")
-	for _, m := range models {
+	for _, m := range slices.Sorted(maps.Keys(result.ByModel)) {
 		b := result.ByModel[m]
 		fmt.Fprintf(w, "  %s: %d; проекты:", m, b.count)
-		projects := make([]string, 0, len(b.projects))
-		for p := range b.projects {
-			projects = append(projects, p)
-		}
-		sort.Strings(projects)
-		for _, p := range projects {
+		for _, p := range slices.Sorted(maps.Keys(b.projects)) {
 			fmt.Fprintf(w, " %s=%d", p, b.projects[p])
 		}
 		fmt.Fprint(w, "; примеры:")

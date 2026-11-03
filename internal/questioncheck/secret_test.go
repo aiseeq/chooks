@@ -225,3 +225,29 @@ func TestQuestionsHideSecretsBeforeSplit(t *testing.T) {
 		})
 	}
 }
+
+// Ключ формы sk-: отличительные префиксы приклеены к чему угодно, общий — после
+// кодировок и управляющих последовательностей. Голая буква или цифра перед общим
+// скрытой не считается: её не отличить от task-…, risk-…
+func TestGluedDashKeyIsHidden(t *testing.T) {
+	everywhere := []string{`\n`, `\t`, `\f`, "_", "x", "0", "%20", "%3D", `=`, "\x1b[32m", `\e[32m`, "KEY=", "Bearer%20"}
+	encoded := []string{`\n`, `\t`, `\f`, "_", "%20", "%3D", `=`, "\x1b[32m", `\e[32m`, "KEY=", "Bearer%20"}
+	for kind, prefixes := range map[string][]string{
+		"sk-" + "proj-": everywhere,
+		"sk-" + "ant-":  everywhere,
+		"sk-":           encoded,
+	} {
+		key := kind + fakeBody
+		for _, prefix := range prefixes {
+			t.Run(kind+prefix, func(t *testing.T) {
+				text := Excerpt("ключ "+prefix+key+" хвост", 200)
+				if strings.Contains(text, fakeBody[:4]) {
+					t.Errorf("value passed: %q", text)
+				}
+				if !strings.Contains(text, "ключ "+prefix) || !strings.Contains(text, " хвост") {
+					t.Errorf("text around the key lost: %q", text)
+				}
+			})
+		}
+	}
+}

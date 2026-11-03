@@ -179,3 +179,17 @@ func TestCheckerJournalHidesSecrets(t *testing.T) {
 		t.Errorf("after block text: %q", got)
 	}
 }
+
+// Ключ, приклеенный к символу слова: литеральный \n в строке оболочки или
+// JSON, «_», буква, %20 перед ключом. Граница слова перед образцом его не видит
+func TestGluedKeyIsHidden(t *testing.T) {
+	for _, prefix := range []string{`\n`, `\t`, "_", "x", "%20", "KEY="} {
+		t.Run(prefix, func(t *testing.T) {
+			text := Excerpt("ключ "+prefix+fakeKey()+" хвост", 200)
+			assertNoSecret(t, "выдержка", text)
+			if !strings.Contains(text, "ключ "+prefix) || !strings.Contains(text, " хвост") {
+				t.Errorf("text around the key lost: %q", text)
+			}
+		})
+	}
+}

@@ -226,19 +226,17 @@ func TestQuestionsHideSecretsBeforeSplit(t *testing.T) {
 	}
 }
 
-// Ключ формы sk-: отличительные префиксы приклеены к чему угодно, общий — после
-// кодировок и управляющих последовательностей. Голая буква или цифра перед общим
-// скрытой не считается: её не отличить от task-…, risk-…
+// Ключ формы sk- со случайным телом скрыт при любом соседе: экранирования любой
+// записи, управляющие последовательности, голая буква или цифра
 func TestGluedDashKeyIsHidden(t *testing.T) {
-	everywhere := []string{`\n`, `\t`, `\f`, "_", "x", "0", "%20", "%3D", `=`, "\x1b[32m", `\e[32m`, "KEY=", "Bearer%20"}
-	encoded := []string{`\n`, `\t`, `\f`, "_", "%20", "%3D", `=`, "\x1b[32m", `\e[32m`, "KEY=", "Bearer%20"}
-	for kind, prefixes := range map[string][]string{
-		"sk-" + "proj-": everywhere,
-		"sk-" + "ant-":  everywhere,
-		"sk-":           encoded,
-	} {
+	neighbours := []string{
+		`\n`, `\t`, `\f`, `\v`, `\x20`, ` `, "_", "x", "0", "KEY=", "Bearer%20",
+		"%20", "%3D", "%2520", `=`, "=3D", "&#61;", "&#x3D;",
+		"\x1b[32m", "\x1b[2K", `\e[32m`, `\E[1m`, `\033[0m`, `\33[0m`, `\x1B[32m`, `\u001b[32m`,
+	}
+	for _, kind := range []string{"sk-" + "proj-", "sk-" + "ant-", "sk-"} {
 		key := kind + fakeBody
-		for _, prefix := range prefixes {
+		for _, prefix := range neighbours {
 			t.Run(kind+prefix, func(t *testing.T) {
 				text := Excerpt("ключ "+prefix+key+" хвост", 200)
 				if strings.Contains(text, fakeBody[:4]) {
@@ -249,5 +247,26 @@ func TestGluedDashKeyIsHidden(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Имена, похожие на префикс ключа, но без случайного тела, остаются текстом:
+// судья и журнал видят их такими, как написал автор
+func TestNamesLikeKeyPrefixAreKept(t *testing.T) {
+	for _, name := range []string{
+		"network_test" + "_ConnectionTimeoutCase",
+		"framework_test" + "_HandlesEmptyInput",
+		"xoxo" + "-hugs-and-kisses",
+		"xoxb" + "-hugs-and-kisses",
+		"task-" + "proj-overview-page",
+		"ask-" + "ant-colony-question",
+		"task_" + "ThisIsLongDescriptiveName",
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := "имя " + name + " хвост"
+			if got := Excerpt(text, 200); got != text {
+				t.Errorf("name changed: %q", got)
+			}
+		})
 	}
 }

@@ -100,7 +100,8 @@ func TestExecMSIsolationAndFailure(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "mock.sh")
 	result := filepath.Join(root, "env.txt")
-	content := "#!/usr/bin/env bash\necho 1\n[[ -z ${COUNT_FILE-} ]] || echo run >>\"$COUNT_FILE\"\nprintf '%s|%s|%s\\n' \"$HOME\" \"${KONSOLE_DBUS_SERVICE-unset}\" \"${CLAUDE_PID-unset}\" >\"$CHECK_FILE\"\nexit \"${MOCK_EXIT:-0}\"\n"
+	stdinCopy := filepath.Join(root, "stdin.txt")
+	content := "#!/usr/bin/env bash\necho 1\ncat >\"" + stdinCopy + "\"\nprintf '%s|%s|%s\\n' \"$HOME\" \"${KONSOLE_DBUS_SERVICE-unset}\" \"${CLAUDE_PID-unset}\" >\"$CHECK_FILE\"\nexit \"${MOCK_EXIT:-0}\"\n"
 	if err := os.WriteFile(bin, []byte(content), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +109,7 @@ func TestExecMSIsolationAndFailure(t *testing.T) {
 	if _, err := os.Stat(input); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("./exec-ms.sh", "--runs", "1", "--bin", bin, "statusline", input)
+	cmd := exec.Command("./exec-ms.sh", "--bin", bin, "statusline", input)
 	cmd.Env = append(os.Environ(), "TMPDIR="+filepath.Join(root, "tmp"), "CHECK_FILE="+result, "KONSOLE_DBUS_SERVICE=must-be-removed", "CLAUDE_PID=must-be-removed")
 	if err := os.Mkdir(filepath.Join(root, "tmp"), 0700); err != nil {
 		t.Fatal(err)
@@ -129,33 +130,22 @@ func TestExecMSIsolationAndFailure(t *testing.T) {
 		t.Fatalf("окружение mock бинаря: %q", data)
 	}
 
-	for _, tc := range []struct {
-		args []string
-		runs int
-	}{
-		{[]string{"--bin", bin, "statusline", input}, 5},
-		{[]string{"--budget", "0", "--bin", bin, "statusline", input}, 1},
-	} {
-		count := filepath.Join(root, fmt.Sprintf("count-%d.txt", tc.runs))
-		cmd = exec.Command("./exec-ms.sh", tc.args...)
-		cmd.Env = append(os.Environ(), "TMPDIR="+filepath.Join(root, "tmp"), "CHECK_FILE="+result, "COUNT_FILE="+count)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("прогоны %v: %v: %s", tc.args, err, out)
-		}
-		data, err := os.ReadFile(count)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := strings.Count(string(data), "run"); got != tc.runs {
-			t.Fatalf("прогоны %v: %d, ожидалось %d", tc.args, got, tc.runs)
-		}
+	stdin, err := os.ReadFile(stdinCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stdin) == 0 || strings.Contains(string(stdin), "@REPO@") {
+		t.Fatalf("вход подкоманды не подготовлен: %q", stdin)
 	}
 
-	cmd = exec.Command("./exec-ms.sh", "--runs", "1", "--bin", bin, "--", "statusline", input)
-	cmd.Env = append(os.Environ(), "TMPDIR="+filepath.Join(root, "tmp"), "CHECK_FILE="+result, "MOCK_EXIT=7")
-	out, err = cmd.CombinedOutput()
-	exit, ok := err.(*exec.ExitError)
-	if !ok || exit.ExitCode() != 2 || strings.TrimSpace(string(out)) != "Ошибка запуска подкоманды: statusline" {
-		t.Fatalf("ошибка подкоманды: out=%q err=%v", out, err)
+	// Код 3 у ночного обхода значит «мало данных»: сбой подкоманды с этим кодом им не становится
+	for _, code := range []string{"7", "3"} {
+		cmd = exec.Command("./exec-ms.sh", "--bin", bin, "--", "statusline", input)
+		cmd.Env = append(os.Environ(), "TMPDIR="+filepath.Join(root, "tmp"), "CHECK_FILE="+result, "MOCK_EXIT="+code)
+		out, err = cmd.CombinedOutput()
+		exit, ok := err.(*exec.ExitError)
+		if !ok || exit.ExitCode() != 2 || !strings.HasSuffix(strings.TrimSpace(string(out)), "Ошибка запуска подкоманды: statusline") {
+			t.Fatalf("ошибка подкоманды с кодом %s: out=%q err=%v", code, out, err)
+		}
 	}
 }

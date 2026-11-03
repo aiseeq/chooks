@@ -222,7 +222,7 @@ func readApprovedModels(path string) ([]approvedModel, string) {
 func isApproved(candidate string, models []approvedModel) bool {
 	candidate = normalizeModel(candidate)
 	for _, m := range models {
-		if strings.EqualFold(candidate, m.name) || strings.EqualFold(candidate, m.id) {
+		if strings.EqualFold(candidate, m.name) || strings.EqualFold(candidate, normalizeModel(m.id)) {
 			return true
 		}
 	}

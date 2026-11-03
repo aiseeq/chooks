@@ -120,3 +120,31 @@ func TestModelGuardScan(t *testing.T) {
 		t.Fatal(out.String())
 	}
 }
+
+// Строка списка с id через шлюз: id содержит «/», кандидат нормализуется.
+func TestModelGuardApprovedIDWithSlash(t *testing.T) {
+	models := []approvedModel{
+		{"opus", "claude-opus-5-5"},
+		{"deepseek", "waibee/deepseek/deepseek-v4.1-flash-1017"},
+	}
+	cases := []struct {
+		candidate string
+		want      bool
+	}{
+		{"waibee/deepseek/deepseek-v4.1-flash-1017", true},
+		{"WAIBEE/deepseek/DeepSeek-v4.1-flash-1017", true},
+		{"deepseek-v4.1-flash-1017", true},
+		{"deepseek", true},
+		{"anthropic/claude-opus-5-5", true},
+		{"waibee/openai/gpt-x", false},
+		{"waibee/deepseek/deepseek-v4", false},
+		{"waibee", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.candidate, func(t *testing.T) {
+			if got := isApproved(tc.candidate, models); got != tc.want {
+				t.Fatalf("isApproved(%q) = %v, want %v", tc.candidate, got, tc.want)
+			}
+		})
+	}
+}

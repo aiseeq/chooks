@@ -43,8 +43,15 @@ func runNoPrompt(data []byte, logger core.Logger, out io.Writer) error {
 	default:
 		return fmt.Errorf("no-prompt: unsupported hook event %q", event.HookEventName)
 	}
+	// Неразборчивый tool_input не отменяет отказ, только оставляет строку без команды
+	command := ""
+	if input, err := core.ParseToolInput(data); err != nil {
+		logger.Warn("prompt denied, command unreadable", "error", err)
+	} else {
+		command = deniedCommand(input)
+	}
 	logger.Info("prompt denied", "session", event.SessionID, "hook", event.HookEventName, "tool", event.ToolName,
-		"command", promptDeniedCommand(data, logger), "mcp_server", event.MCPServerName, "mode", event.Mode,
+		"command", command, "mcp_server", event.MCPServerName, "mode", event.Mode,
 		"permission_mode", event.PermissionMode, "agent", event.AgentID)
 	if err := json.NewEncoder(out).Encode(map[string]any{"hookSpecificOutput": output}); err != nil {
 		return fmt.Errorf("print output: %w", err)

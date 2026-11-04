@@ -19,14 +19,3 @@ func deniedCommand(input *core.ToolInput) string {
 	}
 	return questioncheck.Excerpt(text, deniedCommandRunes)
 }
-
-// promptDeniedCommand — то же для события окна разрешения. Неразборчивый
-// tool_input не отменяет отказ, только оставляет строку без команды
-func promptDeniedCommand(data []byte, logger core.Logger) string {
-	input, err := core.ParseToolInput(data)
-	if err != nil {
-		logger.Warn("prompt denied, command unreadable", "error", err)
-		return ""
-	}
-	return deniedCommand(input)
-}

@@ -139,3 +139,86 @@ func TestDeniedCommand(t *testing.T) {
 		})
 	}
 }
+
+// Строки пробы из тикета akit secretmask-command-context (и формы из выпуска v1.37.0):
+// значение hunter2pass не должно дойти до журнала ни в Bash, ни в tool_input другого инструмента
+var commandsWithPassword = []string{
+	`curl -H 'Authorization: Bearer hunter2pass' https://x`,
+	`curl -H "Authorization: Bearer hunter2pass" https://x`,
+	`curl -u admin:hunter2pass https://x`,
+	`curl -su admin:hunter2pass https://x`,
+	`PGPASSWORD=hunter2pass psql -h db`,
+	`mysql --password=hunter2pass -u root`,
+	`mysql --password hunter2pass -u root`,
+	`mysql -phunter2pass`,
+	`mariadb -phunter2pass`,
+	`sshpass -p hunter2pass ssh host`,
+	`psql postgres://u:` + "hunter2pass" + `@db/x`, // по частям, как fakeGitHubToken: целиком в исходнике ключа нет
+	`export API_TOKEN=hunter2pass`,
+	`curl -d 'password=hunter2pass' x`,
+	`curl -d '{"password":"hunter2pass"}' x`,
+	`curl -d '{"Authorization":"Bearer hunter2pass"}' x`,
+	`ssh h "mysql -phunter2pass"`,
+	`deploy --token hunter2pass`,
+	"mysql \\\n  --password=hunter2pass -u root",
+}
+
+func TestDeniedCommand_HidesPasswordsAndTokens(t *testing.T) {
+	for _, command := range commandsWithPassword {
+		t.Run(command, func(t *testing.T) {
+			toolInput, err := json.Marshal(map[string]string{"content": command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inputs := map[string]*core.ToolInput{
+				"bash":  {ToolName: "Bash", Command: command},
+				"other": {ToolName: "Write", ToolInput: toolInput},
+			}
+			for tool, input := range inputs {
+				got := deniedCommand(input)
+				if strings.Contains(got, "hunter2pass") {
+					t.Errorf("%s: secret value in %q", tool, got)
+				}
+				if !strings.Contains(got, "[скрыто:") {
+					t.Errorf("%s: no mask in %q", tool, got)
+				}
+			}
+		})
+	}
+}
+
+// Журналу нужна команда как есть: обычные команды маска не трогает
+func TestDeniedCommand_KeepsPlainCommands(t *testing.T) {
+	for _, command := range []string{`psql -h db -p 5432`, `grep -p foo`, `TOKEN_COUNT=5`, `go test ./...`} {
+		if got := deniedCommand(&core.ToolInput{ToolName: "Bash", Command: command}); got != command {
+			t.Errorf("got %q, want %q", got, command)
+		}
+	}
+}
+
+// Вся дорога до файла: отказ хука с паролем в команде оставляет в журнале команду без значения
+func TestRunPreToolUse_DenyLogHidesPassword(t *testing.T) {
+	config := &core.Config{Tools: map[string]core.ToolConfig{"kill_guard": {Enabled: true}}}
+	logger, path := fileLogger(t)
+	data, err := json.Marshal(map[string]any{
+		"session_id": "sess-4",
+		"tool_name":  "Bash",
+		"tool_input": map[string]string{"command": `mysql -phunter2pass; pkill -f "$NAME"`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, err := runPreToolUse(context.Background(), data, config, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != exitBlocked {
+		t.Fatalf("exit code %d, want the call denied", code)
+	}
+	log := readLog(t, path)
+	assertDenyLine(t, log, "hook blocked operation", "session=sess-4", "tool=Bash", "pkill", "[скрыто:password]")
+	if strings.Contains(log, "hunter2pass") {
+		t.Errorf("secret value in the log:\n%s", log)
+	}
+}

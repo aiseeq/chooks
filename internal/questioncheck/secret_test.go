@@ -200,12 +200,14 @@ func TestQuestionsHideSecretsBeforeSplit(t *testing.T) {
 	key := "sk-" + "proj-" + fakeBody
 	body := "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
 	armor := "-----" + "BEGIN PRIVATE KEY" + "-----\n" + body + "?\n-----" + "END PRIVATE KEY" + "-----\n"
+	pgpArmor := "-----" + "BEGIN PGP PRIVATE KEY BLOCK" + "-----\n\n" + body + "?\n-----" + "END PGP PRIVATE KEY BLOCK" + "-----\n"
 	for name, message := range map[string]string{
 		"кавычки":         `Ключ "а"` + key + " удалить?",
 		"вставка кода":    "Ключ `а`" + key + " удалить?",
 		"ёлочки":          "Ключ «а»" + key + " удалить?",
 		"тело ключа":      armor + "Удалить?",
 		"просьба с телом": armor + "ждёт твоего «да»",
+		"блок PGP":        pgpArmor + "Удалить?",
 	} {
 		t.Run(name, func(t *testing.T) {
 			questions := Questions(message)
@@ -226,13 +228,16 @@ func TestQuestionsHideSecretsBeforeSplit(t *testing.T) {
 	}
 }
 
-// Ключ формы sk- со случайным телом скрыт при любом соседе: экранирования любой
-// записи, управляющие последовательности, голая буква или цифра
+// Ключ формы sk- с длинным отрезком букв и цифр скрыт при этих соседях:
+// экранирования и управляющие последовательности из грамматики границ secretmask,
+// голая буква или цифра. Короткие отрезки после голой буквы или цифры, бесцифровые
+// общие sk, экранирования вне грамматики - объявленная цена, doc comment пакета
 func TestGluedDashKeyIsHidden(t *testing.T) {
 	neighbours := []string{
 		`\n`, `\t`, `\f`, `\v`, `\x20`, ` `, "_", "x", "0", "KEY=", "Bearer%20",
 		"%20", "%3D", "%2520", `=`, "=3D", "&#61;", "&#x3D;",
 		"\x1b[32m", "\x1b[2K", `\e[32m`, `\E[1m`, `\033[0m`, `\33[0m`, `\x1B[32m`, `\u001b[32m`,
+		`\u{1b}[32m`, `\U0000003d`, `^[[32m`, "␛[32m", "\x1b(B", "[32m", "[0;32m",
 	}
 	for _, kind := range []string{"sk-" + "proj-", "sk-" + "ant-", "sk-"} {
 		key := kind + fakeBody
@@ -243,6 +248,28 @@ func TestGluedDashKeyIsHidden(t *testing.T) {
 					t.Errorf("value passed: %q", text)
 				}
 				if !strings.Contains(text, "ключ "+prefix) || !strings.Contains(text, " хвост") {
+					t.Errorf("text around the key lost: %q", text)
+				}
+			})
+		}
+	}
+}
+
+// Настоящий ключ стоит вплотную за словом с тем же началом («task-» + ключ):
+// совпадение от начала слова отклоняется и не должно съесть ключ вместе с собой
+func TestKeyAfterRejectedMatchIsHidden(t *testing.T) {
+	body := "aB3-xY9_kL2-mN4_pQ7-rS1_tU5"
+	for _, word := range []string{
+		"ta" + "sk-", "ta" + "sk_", "ri" + "sk-", "de" + "sk-note_", "ta" + "sk-letters-",
+		"ta" + "sk-" + strings.Repeat("letters", 4) + "-",
+	} {
+		for _, kind := range []string{"sk-", "sk_"} {
+			t.Run(word+kind, func(t *testing.T) {
+				text := Excerpt("начало "+word+kind+body+" хвост", 300)
+				if strings.Contains(text, body[:4]) {
+					t.Errorf("value passed: %q", text)
+				}
+				if !strings.Contains(text, "начало ") || !strings.Contains(text, " хвост") {
 					t.Errorf("text around the key lost: %q", text)
 				}
 			})

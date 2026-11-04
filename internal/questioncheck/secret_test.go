@@ -277,6 +277,36 @@ func TestKeyAfterRejectedMatchIsHidden(t *testing.T) {
 	}
 }
 
+// Ключ настоящей формы с телом без цифры скрыт, когда стоит сам по себе. Рядом с
+// буквой, цифрой, «-» или «_» такой не скрывается: объявленная цена, doc comment пакета
+func TestDigitFreeKeyIsHidden(t *testing.T) {
+	letters := strings.Repeat("QzXwRtLmVbNcPkJhGfDsAy", 2)
+	for _, form := range []struct {
+		prefix string
+		length int
+	}{
+		{"sk_" + "live_", 24}, {"sk_" + "test_", 24}, {"rk_" + "live_", 24}, {"rk_" + "test_", 24},
+		{"pk_" + "live_", 24}, {"pk_" + "test_", 24},
+		{"gh" + "p_", 36}, {"gh" + "o_", 36}, {"gh" + "u_", 36}, {"gh" + "s_", 36}, {"gh" + "r_", 36},
+		{"AI" + "za", 35},
+	} {
+		body := letters[:form.length]
+		for _, prefix := range []string{
+			"", " ", "\n", `\n`, `"`, "=", "KEY=", "Bearer ", "%20", "\x1b[32m",
+		} {
+			t.Run(form.prefix+prefix, func(t *testing.T) {
+				text := Excerpt("ключ\n"+prefix+form.prefix+body+" хвост", 200)
+				if strings.Contains(text, body[:8]) {
+					t.Errorf("value passed: %q", text)
+				}
+				if !strings.Contains(text, "ключ\n"+prefix) || !strings.Contains(text, " хвост") {
+					t.Errorf("text around the key lost: %q", text)
+				}
+			})
+		}
+	}
+}
+
 // Имена, похожие на префикс ключа, но без случайного тела, остаются текстом:
 // судья и журнал видят их такими, как написал автор
 func TestNamesLikeKeyPrefixAreKept(t *testing.T) {

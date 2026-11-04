@@ -34,6 +34,24 @@ func ProcessAncestors(pid int) ([]int, error) {
 	return ancestors, nil
 }
 
+// processNames возвращает имена процесса и его предков, начиная с самого процесса
+func processNames(pid int) ([]string, error) {
+	ancestors, err := ProcessAncestors(pid)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(ancestors))
+	for _, ancestor := range ancestors {
+		commPath := "/proc/" + strconv.Itoa(ancestor) + "/comm"
+		data, err := os.ReadFile(commPath)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read %s: %w", commPath, err)
+		}
+		names = append(names, strings.TrimSpace(string(data)))
+	}
+	return names, nil
+}
+
 // parentPID читает PPid процесса из /proc/<pid>/stat
 func parentPID(pid int) (int, error) {
 	statPath := "/proc/" + strconv.Itoa(pid) + "/stat"

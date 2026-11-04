@@ -25,7 +25,11 @@ const (
 // последовательность OSC при этом игнорирует, поэтому шаблон заменяется целиком
 // через D-Bus. Для прочих терминалов остаётся OSC — его понимают почти все.
 // Ошибка означает, что заголовок Konsole поставить не удалось; работу хука
-// это не останавливает — решает вызывающий
+// это не останавливает — решает вызывающий.
+//
+// Адрес вкладки в окружении наследуется, поэтому сессия claude, запущенная
+// внутри tmux или другого claude, видит адрес чужой вкладки. Её заголовок идёт
+// через OSC: туда, где она на самом деле работает
 func SetTerminalTitle(title string) error {
 	title = sanitizeTitle(title)
 	if title == "" {
@@ -33,7 +37,13 @@ func SetTerminalTitle(title string) error {
 	}
 
 	if service, session, ok := konsoleSession(); ok {
-		return setKonsoleTitle(service, session, title)
+		names, err := processNames(os.Getpid())
+		if err != nil {
+			return fmt.Errorf("konsole tab owner unknown: %w", err)
+		}
+		if ownsKonsoleTab(names) {
+			return setKonsoleTitle(service, session, title)
+		}
 	}
 
 	// Заголовок ставится через stderr: stdout у хука и строки статуса занят данными
@@ -69,6 +79,22 @@ func setKonsoleTitle(service, session, title string) error {
 	}
 
 	return nil
+}
+
+// ownsKonsoleTab сообщает, что вкладка из окружения принадлежит этой сессии:
+// по цепочке процессов от хука вверх есть konsole и не больше одного claude.
+// tmux отрывает цепочку от konsole, вложенный claude даёт второго claude
+func ownsKonsoleTab(names []string) bool {
+	konsole, claude := false, 0
+	for _, name := range names {
+		switch name {
+		case "konsole":
+			konsole = true
+		case "claude":
+			claude++
+		}
+	}
+	return konsole && claude <= 1
 }
 
 // sanitizeTitle убирает из заголовка то, что исказит его при выводе:

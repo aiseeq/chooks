@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/aiseeq/akit/secretmask"
 )
 
 // defaultMaxLogSizeMB размер лога, после которого выполняется ротация.
@@ -77,8 +79,9 @@ func NewLogger(config LoggerConfig) (Logger, error) {
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
 				a.Value = slog.StringValue(a.Value.Time().Format("2006-01-02 15:04:05"))
+				return a
 			}
-			return a
+			return maskAttr(a)
 		},
 	}
 
@@ -90,6 +93,23 @@ func NewLogger(config LoggerConfig) (Logger, error) {
 	}
 
 	return &slogLogger{logger: slog.New(handler)}, nil
+}
+
+// maskAttr скрывает секреты в значении поля: журнал читают обходы и суб-агенты, а поля
+// вроде message и error бывают с куском команды. Значение Any (error, Stringer) идёт строкой
+func maskAttr(a slog.Attr) slog.Attr {
+	var text string
+	switch value := a.Value.Resolve(); value.Kind() {
+	case slog.KindString:
+		text = value.String()
+	case slog.KindAny:
+		text = fmt.Sprintf("%+v", value.Any())
+	default:
+		return a
+	}
+	masked, _ := secretmask.Mask(text)
+	a.Value = slog.StringValue(masked)
+	return a
 }
 
 // parseLogLevel преобразует текстовый уровень в slog.Level

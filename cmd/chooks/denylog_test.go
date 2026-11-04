@@ -36,6 +36,15 @@ func readLog(t *testing.T, path string) string {
 // fakeGitHubToken собран из частей: целиком в исходнике его не должно быть
 func fakeGitHubToken() string { return "ghp" + "_" + "abcDEF123456789xyzQWEabcDEF12345678" }
 
+func maskedCommand(t *testing.T, input *core.ToolInput) string {
+	t.Helper()
+	got, err := deniedCommand(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
 func assertDenyLine(t *testing.T, log string, want ...string) {
 	t.Helper()
 	for _, part := range want {
@@ -133,7 +142,7 @@ func TestDeniedCommand(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			if got := deniedCommand(tt.input); got != tt.want {
+			if got := maskedCommand(t, tt.input); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
@@ -175,7 +184,7 @@ func TestDeniedCommand_HidesPasswordsAndTokens(t *testing.T) {
 				"other": {ToolName: "Write", ToolInput: toolInput},
 			}
 			for tool, input := range inputs {
-				got := deniedCommand(input)
+				got := maskedCommand(t, input)
 				if strings.Contains(got, "hunter2pass") {
 					t.Errorf("%s: secret value in %q", tool, got)
 				}
@@ -190,7 +199,7 @@ func TestDeniedCommand_HidesPasswordsAndTokens(t *testing.T) {
 // Журналу нужна команда как есть: обычные команды маска не трогает
 func TestDeniedCommand_KeepsPlainCommands(t *testing.T) {
 	for _, command := range []string{`psql -h db -p 5432`, `grep -p foo`, `TOKEN_COUNT=5`, `go test ./...`} {
-		if got := deniedCommand(&core.ToolInput{ToolName: "Bash", Command: command}); got != command {
+		if got := maskedCommand(t, &core.ToolInput{ToolName: "Bash", Command: command}); got != command {
 			t.Errorf("got %q, want %q", got, command)
 		}
 	}
@@ -218,6 +227,62 @@ func TestRunPreToolUse_DenyLogHidesPassword(t *testing.T) {
 	}
 	log := readLog(t, path)
 	assertDenyLine(t, log, "hook blocked operation", "session=sess-4", "tool=Bash", "pkill", "[скрыто:password]")
+	if strings.Contains(log, "hunter2pass") {
+		t.Errorf("secret value in the log:\n%s", log)
+	}
+}
+
+// Перевод строки в tool_input — литерал \n в сыром JSON: маска должна видеть его переводом строки
+func TestDeniedCommand_HidesPasswordInMultilineToolInput(t *testing.T) {
+	tests := map[string]map[string]any{
+		"Write, curl":   {"file_path": "/x/a.sh", "content": "#!/bin/sh\ncurl -u admin:hunter2pass https://x\n"},
+		"Write, mysql":  {"content": "cd /x\nmysql -phunter2pass\n"},
+		"Monitor, tab":  {"command": "cd /x\n\tsshpass -p hunter2pass ssh host"},
+		"Agent, prompt": {"prompt": "запусти\nmysql -p'hunter2pass'"},
+		"вложенное":     {"edits": []any{map[string]any{"new_string": "x\ncurl -u a:hunter2pass y"}}},
+		"поле по ключу": {"password": "hunter2pass"},
+	}
+	for name, fields := range tests {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := maskedCommand(t, &core.ToolInput{ToolName: "Write", ToolInput: raw})
+			if strings.Contains(got, "hunter2pass") {
+				t.Errorf("secret value in %q", got)
+			}
+			if !strings.Contains(got, "[скрыто:") {
+				t.Errorf("no mask in %q", got)
+			}
+		})
+	}
+}
+
+func TestDeniedCommand_ToolInputStaysReadable(t *testing.T) {
+	tests := map[string]struct{ raw, want string }{
+		"число, & и не-ASCII как есть": {`{"a":"x && y","n":5000000,"z":"я"}`, `{"a":"x && y","n":5000000,"z":"я"}`},
+		"пустой": {``, ``},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := maskedCommand(t, &core.ToolInput{ToolName: "Write", ToolInput: json.RawMessage(tt.raw)})
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Неразобранный tool_input в журнал не идёт: в строке об отказе вместо команды причина
+func TestDeniedCallFields_UnreadableToolInputNotLogged(t *testing.T) {
+	logger, path := fileLogger(t)
+	input := &core.ToolInput{SessionID: "sess-5", ToolName: "Write", ToolInput: json.RawMessage(`{"secret":"hunter2pass"`)}
+
+	logger.Info("denied", deniedCallFields(input)...)
+
+	log := readLog(t, path)
+	assertDenyLine(t, log, "session=sess-5", "tool=Write", "command_error=")
 	if strings.Contains(log, "hunter2pass") {
 		t.Errorf("secret value in the log:\n%s", log)
 	}

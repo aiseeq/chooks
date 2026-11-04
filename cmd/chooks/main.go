@@ -458,14 +458,11 @@ func taskTypes(tasks []core.BackgroundTask) string {
 func printResponse(logger core.Logger, input *core.ToolInput, response *core.HookResponse) {
 	switch response.Action {
 	case core.HookActionBlock, core.HookActionWarn:
-		logger.Warn("hook blocked operation",
-			"session", input.SessionID,
-			"tool", input.ToolName,
-			"command", deniedCommand(input),
+		logger.Warn("hook blocked operation", append(deniedCallFields(input),
 			"action", string(response.Action),
 			"message", response.Message,
 			"violations", len(response.Violations),
-		)
+		)...)
 
 		fmt.Fprintln(os.Stderr, response.Message)
 		for _, suggestion := range response.Suggestions {

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,5 +107,31 @@ func TestAppendLine_Rotates(t *testing.T) {
 	}
 	if info, err := os.Stat(path + ".1"); err != nil || info.Size() != 1024*1024 {
 		t.Errorf("прежний файл не ушёл в .1: %v", err)
+	}
+}
+
+// Маска стоит в логгере: поле с куском команды (message, error, value) не проходит мимо неё
+func TestLogger_HidesSecretsInEveryField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chooks.log")
+	logger, err := NewLogger(LoggerConfig{Level: "debug", Output: "file", LogFile: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Warn("hook blocked", "message", `модель "password=hunter2pass" не одобрена`, "count", 7)
+	logger.Error("broken", "error", errors.New("PGPASSWORD=hunter2pass psql"))
+	logger.With("value", `{"password":"hunter2pass"}`).Info("with field")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	if strings.Contains(log, "hunter2pass") {
+		t.Errorf("secret value in the log:\n%s", log)
+	}
+	for _, want := range []string{"level=WARN", "level=ERROR", "level=INFO", "count=7", "[скрыто:password]", "hook blocked", "with field"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("no %q in the log:\n%s", want, log)
+		}
 	}
 }

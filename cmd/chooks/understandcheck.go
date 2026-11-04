@@ -66,7 +66,7 @@ func runUnderstandCheck(ctx context.Context, data []byte, config *core.Config, l
 func writeUnderstandOutcome(outcome understandcheck.Outcome, input *core.ToolInput, logger core.Logger, out io.Writer) {
 	switch {
 	case outcome.Deny:
-		logger.Info("understand check denied call", "session", input.SessionID, "tool", input.ToolName)
+		logger.Info("understand check denied call", "session", input.SessionID, "tool", input.ToolName, "command", deniedCommand(input))
 		deny := preToolDenyOutput{HookSpecificOutput: preToolDeny{
 			HookEventName:            "PreToolUse",
 			PermissionDecision:       "deny",

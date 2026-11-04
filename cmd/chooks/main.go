@@ -296,7 +296,7 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 		return exitError, err
 	}
 
-	printResponse(logger, response)
+	printResponse(logger, input, response)
 
 	if response.Action == core.HookActionAllow {
 		rewritePgrep(input, config, logger, os.Stdout)
@@ -455,10 +455,13 @@ func taskTypes(tasks []core.BackgroundTask) string {
 }
 
 // printResponse выводит результат: stderr читает Claude Code при exit-коде 2
-func printResponse(logger core.Logger, response *core.HookResponse) {
+func printResponse(logger core.Logger, input *core.ToolInput, response *core.HookResponse) {
 	switch response.Action {
 	case core.HookActionBlock, core.HookActionWarn:
 		logger.Warn("hook blocked operation",
+			"session", input.SessionID,
+			"tool", input.ToolName,
+			"command", deniedCommand(input),
 			"action", string(response.Action),
 			"message", response.Message,
 			"violations", len(response.Violations),

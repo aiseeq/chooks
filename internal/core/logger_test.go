@@ -118,6 +118,7 @@ func TestLogger_HidesSecretsInEveryField(t *testing.T) {
 		t.Fatal(err)
 	}
 	logger.Warn("hook blocked", "message", `модель "password=hunter2pass" не одобрена`, "count", 7)
+	logger.Warn("hook blocked", "message", `модель "x\ncurl -u admin:hunter2pass https://x" не одобрена`)
 	logger.Error("broken", "error", errors.New("PGPASSWORD=hunter2pass psql"))
 	logger.With("value", `{"password":"hunter2pass"}`).Info("with field")
 

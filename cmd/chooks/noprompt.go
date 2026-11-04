@@ -45,12 +45,10 @@ func runNoPrompt(data []byte, logger core.Logger, out io.Writer) error {
 	}
 	// Неразборчивый tool_input не отменяет отказ, только оставляет строку без команды
 	command := ""
-	input, err := core.ParseToolInput(data)
-	if err == nil {
-		command, err = deniedCommand(input)
-	}
-	if err != nil {
+	if input, err := core.ParseToolInput(data); err != nil {
 		logger.Warn("prompt denied, command unreadable", "error", err)
+	} else {
+		command = deniedCommand(input)
 	}
 	logger.Info("prompt denied", "session", event.SessionID, "hook", event.HookEventName, "tool", event.ToolName,
 		"command", command, "mcp_server", event.MCPServerName, "mode", event.Mode,

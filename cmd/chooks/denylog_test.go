@@ -36,6 +36,15 @@ func readLog(t *testing.T, path string) string {
 // fakeGitHubToken собран из частей: целиком в исходнике его не должно быть
 func fakeGitHubToken() string { return "ghp" + "_" + "abcDEF123456789xyzQWEabcDEF12345678" }
 
+func maskedCommand(t *testing.T, input *core.ToolInput) string {
+	t.Helper()
+	got, err := deniedCommand(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
 func assertDenyLine(t *testing.T, log string, want ...string) {
 	t.Helper()
 	for _, part := range want {
@@ -133,7 +142,7 @@ func TestDeniedCommand(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			if got := deniedCommand(tt.input); got != tt.want {
+			if got := maskedCommand(t, tt.input); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
@@ -175,7 +184,7 @@ func TestDeniedCommand_HidesPasswordsAndTokens(t *testing.T) {
 				"other": {ToolName: "Write", ToolInput: toolInput},
 			}
 			for tool, input := range inputs {
-				got := deniedCommand(input)
+				got := maskedCommand(t, input)
 				if strings.Contains(got, "hunter2pass") {
 					t.Errorf("%s: secret value in %q", tool, got)
 				}
@@ -190,7 +199,7 @@ func TestDeniedCommand_HidesPasswordsAndTokens(t *testing.T) {
 // Журналу нужна команда как есть: обычные команды маска не трогает
 func TestDeniedCommand_KeepsPlainCommands(t *testing.T) {
 	for _, command := range []string{`psql -h db -p 5432`, `grep -p foo`, `TOKEN_COUNT=5`, `go test ./...`} {
-		if got := deniedCommand(&core.ToolInput{ToolName: "Bash", Command: command}); got != command {
+		if got := maskedCommand(t, &core.ToolInput{ToolName: "Bash", Command: command}); got != command {
 			t.Errorf("got %q, want %q", got, command)
 		}
 	}
@@ -223,7 +232,7 @@ func TestRunPreToolUse_DenyLogHidesPassword(t *testing.T) {
 	}
 }
 
-// Перевод строки в tool_input — литерал \n в сыром JSON: маска узнаёт инструмент и после него (akit v1.37.1)
+// Перевод строки в tool_input — литерал \n в сыром JSON: маска должна видеть его переводом строки
 func TestDeniedCommand_HidesPasswordInMultilineToolInput(t *testing.T) {
 	tests := map[string]map[string]any{
 		"Write, curl":   {"file_path": "/x/a.sh", "content": "#!/bin/sh\ncurl -u admin:hunter2pass https://x\n"},
@@ -239,7 +248,7 @@ func TestDeniedCommand_HidesPasswordInMultilineToolInput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := deniedCommand(&core.ToolInput{ToolName: "Write", ToolInput: raw})
+			got := maskedCommand(t, &core.ToolInput{ToolName: "Write", ToolInput: raw})
 			if strings.Contains(got, "hunter2pass") {
 				t.Errorf("secret value in %q", got)
 			}
@@ -258,9 +267,39 @@ func TestDeniedCommand_HidesPasswordInOddToolInput(t *testing.T) {
 		"массив":    `["#!/bin/sh\ncurl -u admin:hunter2pass https://x"]`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := deniedCommand(&core.ToolInput{ToolName: "Write", ToolInput: json.RawMessage(raw)})
+			got := maskedCommand(t, &core.ToolInput{ToolName: "Write", ToolInput: json.RawMessage(raw)})
 			if strings.Contains(got, "hunter2pass") {
 				t.Errorf("secret value in %q", got)
+			}
+		})
+	}
+}
+
+// Что маска скрывает в команде, она скрывает и в строке tool_input. Формы третьей независимой
+// проверки: в сыром JSON каждая оставляет значение видным, b15d848 это вернул
+func TestDeniedCommand_ToolInputHidesWhatBashHides(t *testing.T) {
+	forms := []string{
+		"api_token: abcdefghij\npassword: hunter2pass\n",
+		"secret: abcdefghij\npassword: hunter2pass\n",
+		"API_TOKEN=$VAULT_TOKEN\nPASSWORD=hunter2pass\n",
+		"mysql --password \\\n  hunter2pass -u root",
+		"deploy --password\thunter2pass",
+		"sshpass -V\nsshpass -p hunter2pass ssh host",
+		`curl -u admin:"hunter2pass x" https://y`,
+	}
+	for _, form := range forms {
+		t.Run(form, func(t *testing.T) {
+			if got := maskedCommand(t, &core.ToolInput{ToolName: "Bash", Command: form}); strings.Contains(got, "hunter2pass") {
+				t.Fatalf("bash: secret value in %q", got)
+			}
+			for _, field := range []string{"content", "new_string", "prompt"} {
+				raw, err := json.Marshal(map[string]string{field: form})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := maskedCommand(t, &core.ToolInput{ToolName: "Write", ToolInput: raw}); strings.Contains(got, "hunter2pass") {
+					t.Errorf("%s: secret value in %q", field, got)
+				}
 			}
 		})
 	}
@@ -273,10 +312,24 @@ func TestDeniedCommand_ToolInputStaysReadable(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			got := deniedCommand(&core.ToolInput{ToolName: "Write", ToolInput: json.RawMessage(tt.raw)})
+			got := maskedCommand(t, &core.ToolInput{ToolName: "Write", ToolInput: json.RawMessage(tt.raw)})
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// Неразобранный tool_input в журнал не идёт: в строке об отказе вместо команды причина
+func TestDeniedCallFields_UnreadableToolInputNotLogged(t *testing.T) {
+	logger, path := fileLogger(t)
+	input := &core.ToolInput{SessionID: "sess-5", ToolName: "Write", ToolInput: json.RawMessage(`{"secret":"hunter2pass"`)}
+
+	logger.Info("denied", deniedCallFields(input)...)
+
+	log := readLog(t, path)
+	assertDenyLine(t, log, "session=sess-5", "tool=Write", "command_error=")
+	if strings.Contains(log, "hunter2pass") {
+		t.Errorf("secret value in the log:\n%s", log)
 	}
 }

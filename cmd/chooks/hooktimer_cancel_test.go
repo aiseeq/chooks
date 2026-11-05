@@ -4,9 +4,53 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/core"
 )
+
+// Отмена — INFO и cancelled, таймаут — WARN и killed: dreamstats считает убитых
+// в логе по подстроке сообщения, а отмена не должна заводить ночное задание
+func TestHookTimer_ReportTermination(t *testing.T) {
+	cases := []struct {
+		name         string
+		hook         string
+		elapsed      time.Duration
+		status       string
+		wantInfo     string
+		wantWarnPart string
+	}{
+		{"отмена", "question-check", 1055 * time.Millisecond, statusCancelled, "hook cancelled by SIGTERM before timeout", ""},
+		{"таймаут", "user-prompt-submit", 3100 * time.Millisecond, statusKilled, "", "hook killed by SIGTERM (timeout)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			timer, clock, logger := newTestTimer(t, c.hook, upsSettings)
+			logDir := t.TempDir()
+			timer.setDurations(core.LoggerConfig{Output: "file", LogFile: filepath.Join(logDir, "chooks.log")})
+			clock.advance(c.elapsed)
+			timer.reportTermination()
+
+			if got := strings.Join(logger.infos, "|"); got != c.wantInfo {
+				t.Errorf("INFO %q, ожидался %q", got, c.wantInfo)
+			}
+			got := strings.Join(logger.warns, "|")
+			if c.wantWarnPart == "" && got != "" || !strings.Contains(got, c.wantWarnPart) {
+				t.Errorf("WARN %q, ожидалось %q", got, c.wantWarnPart)
+			}
+			line, err := os.ReadFile(filepath.Join(logDir, durationsFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fields := strings.Split(strings.TrimSpace(string(line)), "\t")
+			if len(fields) != 6 || fields[5] != c.status {
+				t.Errorf("строка длительности %q, ожидался статус %s", line, c.status)
+			}
+		})
+	}
+}
 
 // Claude Code шлёт SIGTERM и на отмену хода (Esc), не только по таймауту:
 // 04.11 understand-check получил его на 1055 мс при таймауте 40 с

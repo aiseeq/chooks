@@ -17,14 +17,19 @@ import (
 	"github.com/aiseeq/chooks/internal/core"
 )
 
-// captureLogger запоминает предупреждения
+// captureLogger запоминает предупреждения и сообщения INFO
 type captureLogger struct {
 	mu    sync.Mutex
 	warns []string
+	infos []string
 }
 
 func (l *captureLogger) Debug(string, ...any) {}
-func (l *captureLogger) Info(string, ...any)  {}
+func (l *captureLogger) Info(msg string, _ ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.infos = append(l.infos, msg)
+}
 func (l *captureLogger) Error(string, ...any) {}
 func (l *captureLogger) Warn(msg string, args ...any) {
 	l.mu.Lock()

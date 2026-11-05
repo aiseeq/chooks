@@ -147,6 +147,67 @@ func TestBashRuleFile(t *testing.T) {
 	}
 }
 
+// Слово редактора или перенаправления в тексте — не правка: лишний вызов судьи
+// и ложный случай в выборке пробы (повторная проверка лида 05.11)
+func TestBashRuleFile_WordInText(t *testing.T) {
+	for _, command := range []string{
+		`git commit -m "add sub notes to CLAUDE.md"`,
+		`git commit -m 'tee and sub' -- CLAUDE.md`,
+		`grep -n sub CLAUDE.md`,
+		`grep -n tee ~/.claude/decisions.md`,
+		`echo "sed -i 's/a/b/' CLAUDE.md"`,
+		`git log --grep 'perl -pi' -- CLAUDE.md`,
+		`sed -n '1,5p' CLAUDE.md`,
+		`perl -ne 'print' CLAUDE.md`,
+		`sed --debug 's/a/b/' CLAUDE.md`,
+	} {
+		if got := bashRuleFile(command); got != "" {
+			t.Errorf("%q: got %q, want no rule file", command, got)
+		}
+	}
+}
+
+// Правка в любой форме вызова по-прежнему ловится
+func TestBashRuleFile_RealEdit(t *testing.T) {
+	cases := map[string]string{
+		"cat > /tmp/fix.pl <<'EOF'\nsub once { 1 }\nEOF\nperl /tmp/fix.pl ~/.claude/skills/x/SKILL.md": "~/.claude/skills/x/SKILL.md",
+		"bash <<'EOF'\nsed -i x CLAUDE.md\nEOF":                                                        "CLAUDE.md",
+		"sub a b CLAUDE.md":                                                                            "CLAUDE.md",
+		"/home/u/bin/sub a b CLAUDE.md":                                                                "CLAUDE.md",
+		"cd ~/.claude/skills/chat && sub a b notes.md":                                                 "~/.claude/skills/chat",
+		"F=~/.claude/decisions.md; sub a b \"$F\"":                                                     "~/.claude/decisions.md",
+		"bash -c 'sub a b CLAUDE.md'":                                                                  "CLAUDE.md",
+		"echo x | tee CLAUDE.md > /dev/null":                                                           "CLAUDE.md",
+		"echo x | sudo tee -a /etc/x CLAUDE.md":                                                        "CLAUDE.md",
+		"sed -i.bak 's/a/b/' CLAUDE.md":                                                                "CLAUDE.md",
+		"perl -0pi -e 's/a/b/' SKILL.md":                                                               "SKILL.md",
+		"sed -E -i 's/a/b/' CLAUDE.md":                                                                 "CLAUDE.md",
+		"sed -Ei 's/a/b/' CLAUDE.md":                                                                   "CLAUDE.md",
+		"sed --in-place 's/a/b/' CLAUDE.md":                                                            "CLAUDE.md",
+		"sed 's/a/b/' -i CLAUDE.md":                                                                    "CLAUDE.md",
+		"perl -pi -e 's/a/b/' CLAUDE.md":                                                               "CLAUDE.md",
+		"perl -p -i -e 's/a/b/' CLAUDE.md":                                                             "CLAUDE.md",
+		"grep -l x CLAUDE.md | xargs sed -i 's/a/b/' AGENTS.md":                                        "AGENTS.md",
+		"find . -name CLAUDE.md -exec sed -i 's/a/b/' {} +":                                            "CLAUDE.md",
+		"timeout 5 sub a b SKILL.md":                                                                   "SKILL.md",
+		"echo x > CLAUDE.md":                                                                           "CLAUDE.md",
+		"echo x &>> CLAUDE.md":                                                                         "CLAUDE.md",
+		"{ echo a; echo b; } >> CLAUDE.md":                                                             "CLAUDE.md",
+		"for f in a b; do echo $f; done > CLAUDE.md":                                                   "CLAUDE.md",
+		"(echo a) > CLAUDE.md":                                                                         "CLAUDE.md",
+		"> CLAUDE.md":                                                                                  "CLAUDE.md",
+		"if true; then sub a b CLAUDE.md; fi":                                                          "CLAUDE.md",
+		"echo x | tee >(sub a b CLAUDE.md) >/dev/null":                                                 "CLAUDE.md",
+		"r=$(sub a b CLAUDE.md)":                                                                       "CLAUDE.md",
+		"ssh pc 'sub a b CLAUDE.md'":                                                                   "CLAUDE.md",
+	}
+	for command, want := range cases {
+		if got := bashRuleFile(command); got != want {
+			t.Errorf("%q: got %q, want %q", command, got, want)
+		}
+	}
+}
+
 func TestClassify_EditOutsideInstructions(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{"file_path": "/home/u/git/x/main.go", "old_string": "a", "new_string": "b"})
 	if _, _, _, ok := classify("Edit", raw); ok {

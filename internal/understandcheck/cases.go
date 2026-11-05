@@ -2,12 +2,15 @@ package understandcheck
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/akit/transcript"
 )
 
@@ -76,20 +79,62 @@ func IsInstructionFile(path string) bool {
 // bashPath — путь к файлу инструкций в команде Bash
 var bashPath = regexp.MustCompile(`[~\w./-]*(?:CLAUDE\.md|AGENTS\.md|SKILL\.md|\.claude/(?:skills|rules|agents|hooks|improve/prompts)/[\w./-]+|\.claude/projects/[^/\s]+/memory/[\w./-]+|\.claude/decisions\.md|\.claude/settings(?:\.local)?\.json)`)
 
-// bashEditor — команда правит файлы, названные в ней: sub из akit, sed -i,
-// perl -i, tee
-var bashEditor = regexp.MustCompile(`(?:^|[\s;&|(])(?:sub|tee)(?:\s|$)|\bsed\s+(?:-\w+\s+)*-i|\bperl\s+(?:-\w+\s+)*-\w*i`)
+// inPlaceFlag — флаг правки на месте у sed и perl: -i, -i.bak, -Ei, -pi, -0pi, --in-place
+var inPlaceFlag = regexp.MustCompile(`^-\w*i|^--in-place`)
 
-// bashRedirect — перенаправление вывода в файл инструкций
+// isEditor — программа с аргументами правит файлы, названные в команде: sub из
+// akit, tee, sed -i, perl -i, они же под find -exec (его shellcmd не снимает)
+func isEditor(name string, args []string) bool {
+	switch name {
+	case "sub", "tee":
+		return true
+	case "sed", "perl":
+		return slices.ContainsFunc(args, inPlaceFlag.MatchString)
+	case "find":
+		for i, arg := range args[:max(len(args)-1, 0)] {
+			switch arg {
+			case "-exec", "-execdir", "-ok", "-okdir":
+				if isEditor(filepath.Base(args[i+1]), args[i+2:]) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// heredocEditor — редактор в теле heredoc. Тело — часто скрипт, который команда
+// тут же запускает, и не всегда на оболочке: разбор shellcmd его не видит, ищется
+// текстом. Лишний вызов судьи дешевле пропущенной правки (сухой прогон 05.11 за
+// 7 дней: без этого из 3 ушедших случаев 2 — настоящие правки файлов скиллов
+// скриптом perl)
+var heredocEditor = regexp.MustCompile(`(?:^|[\s;&|(])(?:sub|tee)(?:\s|$)|\bsed\s+(?:-\w+\s+)*-i|\bperl\s+(?:-\w+\s+)*-\w*i`)
+
+// callEdits — вызов правит файлы сам или телом heredoc
+func callEdits(call shellcmd.Call) bool {
+	return isEditor(call.Name, call.Args) || slices.ContainsFunc(call.Redirs, func(redir shellcmd.Redir) bool {
+		return heredocEditor.MatchString(redir.Body)
+	})
+}
+
+// bashRedirect — перенаправление вывода в файл инструкций. Регулярка, не
+// shellcmd.Call.Redirs: те знают только простые команды, а `{ …; } >> файл`,
+// `( … ) > файл`, `done > файл` и голый `> файл` — тоже правка
 var bashRedirect = regexp.MustCompile(`>{1,2}\s*["']?(` + bashPath.String() + `)`)
 
 // bashRuleFile — файл инструкций, который меняет команда Bash; пусто — команда
-// такой файл не меняет
+// такой файл не меняет. Редактор ищется разбором оболочки: его имя в кавычках и
+// аргументах правкой не считается
 func bashRuleFile(command string) string {
 	if m := bashRedirect.FindStringSubmatch(command); m != nil {
 		return m[1]
 	}
-	if bashEditor.MatchString(command) {
+	calls, err := shellcmd.Calls(command)
+	var nested *shellcmd.NestedError
+	if err != nil && !errors.As(err, &nested) {
+		return "" // shellcmd не разбирает только то, что отвергает и bash -n: такую команду оболочка не выполнит
+	}
+	if slices.ContainsFunc(calls, callEdits) {
 		// последний путь — файл правки: первые бывают каталогом в cd
 		if all := bashPath.FindAllString(command, -1); len(all) > 0 {
 			return all[len(all)-1]

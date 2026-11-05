@@ -173,31 +173,37 @@ func (t *hookTimer) watchTermination() {
 	signal.Notify(signals, syscall.SIGTERM)
 	go func() {
 		<-signals
-		t.mu.Lock()
-		at := t.now()
-		elapsed := at.Sub(t.start)
-		current := t.current
-		session := t.session
-		stages := append(append([]string{}, t.stages...), formatStage(current+"(running)", t.now().Sub(t.mark)))
-		logger := t.logger
-		t.mu.Unlock()
-		args := []string{"hook", t.hook, "session", session, "elapsed_ms", strconv.FormatInt(elapsed.Milliseconds(), 10),
-			"stage", current, "stages", strings.Join(stages, ",")}
-		status, statusErr := t.terminationStatus(elapsed)
-		if statusErr != nil {
-			args = append(args, "timeout_error", statusErr.Error())
-		}
-		switch {
-		case logger == nil:
-			fmt.Fprintf(os.Stderr, "chooks: hook terminated by SIGTERM, %s: %s\n", status, strings.Join(args, " "))
-		case status == statusCancelled:
-			logger.Info("hook cancelled by SIGTERM before timeout", toAny(args)...)
-		default:
-			logger.Warn("hook killed by SIGTERM (timeout)", toAny(args)...)
-		}
-		t.recordDuration(at, session, elapsed, status)
+		t.reportTermination()
 		os.Exit(killedExitCode)
 	}()
+}
+
+// reportTermination пишет исход запуска, оборванного SIGTERM, в лог и в файл
+// длительностей
+func (t *hookTimer) reportTermination() {
+	t.mu.Lock()
+	at := t.now()
+	elapsed := at.Sub(t.start)
+	current := t.current
+	session := t.session
+	stages := append(append([]string{}, t.stages...), formatStage(current+"(running)", t.now().Sub(t.mark)))
+	logger := t.logger
+	t.mu.Unlock()
+	args := []string{"hook", t.hook, "session", session, "elapsed_ms", strconv.FormatInt(elapsed.Milliseconds(), 10),
+		"stage", current, "stages", strings.Join(stages, ",")}
+	status, statusErr := t.terminationStatus(elapsed)
+	if statusErr != nil {
+		args = append(args, "timeout_error", statusErr.Error())
+	}
+	switch {
+	case logger == nil:
+		fmt.Fprintf(os.Stderr, "chooks: hook terminated by SIGTERM, %s: %s\n", status, strings.Join(args, " "))
+	case status == statusCancelled:
+		logger.Info("hook cancelled by SIGTERM before timeout", toAny(args)...)
+	default:
+		logger.Warn("hook killed by SIGTERM (timeout)", toAny(args)...)
+	}
+	t.recordDuration(at, session, elapsed, status)
 }
 
 // finish пишет длительность запуска, а в лог — строку, если хук шёл дольше

@@ -147,29 +147,6 @@ func TestBashRuleFile(t *testing.T) {
 	}
 }
 
-// Слово редактора или перенаправления в тексте — не правка: лишний вызов судьи
-// и ложный случай в выборке пробы (повторная проверка лида 05.11)
-func TestBashRuleFile_WordInText(t *testing.T) {
-	for _, command := range []string{
-		`git commit -m "add sub notes to CLAUDE.md"`,
-		`git commit -m 'tee and sub' -- CLAUDE.md`,
-		`grep -n sub CLAUDE.md`,
-		`grep -n tee ~/.claude/decisions.md`,
-		`echo "sed -i 's/a/b/' CLAUDE.md"`,
-		`git log --grep 'perl -pi' -- CLAUDE.md`,
-		"git commit -m \"$(cat <<'EOF'\nfix: sub notes in CLAUDE.md\nEOF\n)\" 2>&1 | tail -3",
-		`graft commit -m "tee in CLAUDE.md" > /dev/null`,
-		`tk note slug "sub a b CLAUDE.md"`,
-		`sed -n '1,5p' CLAUDE.md`,
-		`perl -ne 'print' CLAUDE.md`,
-		`sed --debug 's/a/b/' CLAUDE.md`,
-	} {
-		if got := bashRuleFile(command); got != "" {
-			t.Errorf("%q: got %q, want no rule file", command, got)
-		}
-	}
-}
-
 // Правка в любой форме вызова по-прежнему ловится
 func TestBashRuleFile_RealEdit(t *testing.T) {
 	cases := map[string]string{

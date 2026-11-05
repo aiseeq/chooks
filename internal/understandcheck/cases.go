@@ -5,11 +5,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
-	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/akit/transcript"
 )
 
@@ -79,56 +77,14 @@ func IsInstructionFile(path string) bool {
 var bashPath = regexp.MustCompile(`[~\w./-]*(?:CLAUDE\.md|AGENTS\.md|SKILL\.md|\.claude/(?:skills|rules|agents|hooks|improve/prompts)/[\w./-]+|\.claude/projects/[^/\s]+/memory/[\w./-]+|\.claude/decisions\.md|\.claude/settings(?:\.local)?\.json)`)
 
 // bashEditor — команда правит файлы, названные в ней: sub из akit, sed -i,
-// perl -i, tee
+// perl -i, tee. Ищется в тексте, и слово в кавычках тоже срабатывает: это один
+// лишний вызов судьи. Исключения по разбору оболочки пробовались и сняты (тикет
+// understand-bash-editor-quoted, aa76883, 93aa24c): пропускали настоящие правки,
+// а на 132 случаях за 7 дней не сработали ни разу
 var bashEditor = regexp.MustCompile(`(?:^|[\s;&|(])(?:sub|tee)(?:\s|$)|\bsed\s+(?:-\w+\s+)*-i|\bperl\s+(?:-\w+\s+)*-\w*i`)
 
 // bashRedirect — перенаправление вывода в файл инструкций
 var bashRedirect = regexp.MustCompile(`>{1,2}\s*["']?(` + bashPath.String() + `)`)
-
-// inertPrograms — программы, которые не исполняют свои аргументы и сами не
-// правят файлы: слово редактора в их аргументах — текст
-var inertPrograms = map[string]bool{
-	"echo": true, "printf": true, "cat": true, "grep": true, "head": true,
-	"tail": true, "wc": true, "cut": true, "ls": true, "tk": true, "tl": true,
-}
-
-// inertSubcommands — то же для подкоманд: первым аргументом, так что git -c и
-// graft exec, способные исполнить команду, сюда не попадают
-var inertSubcommands = map[string]map[string]bool{
-	"git":   {"add": true, "blame": true, "commit": true, "diff": true, "log": true, "show": true, "status": true},
-	"graft": {"commit": true},
-}
-
-// fdOrNull — цель перенаправления, не оставляющая файла: дескриптор или /dev/null
-var fdOrNull = regexp.MustCompile(`^(?:\d+|-|/dev/null)$`)
-
-// inertCall — вызов только читает или печатает: программа из списков, вывод не
-// уходит в файл (`cat > run.sh <<EOF` со словом редактора в теле — скрипт на запуск)
-func inertCall(call shellcmd.Call) bool {
-	if subcommands, ok := inertSubcommands[call.Name]; ok {
-		if len(call.Args) == 0 || !subcommands[call.Args[0]] {
-			return false
-		}
-	} else if !inertPrograms[call.Name] {
-		return false
-	}
-	return !slices.ContainsFunc(call.Redirs, func(redir shellcmd.Redir) bool {
-		return strings.Contains(redir.Op, ">") && !fdOrNull.MatchString(redir.Target)
-	})
-}
-
-// onlyText — слово редактора в команде заведомо текст: она разобрана без ошибок
-// и все её вызовы инертны. Любое сомнение — не текст: лишний вызов судьи дешевле
-// пропущенной правки. Bash исполняет построчно, поэтому и неразобранная команда
-// могла что-то поправить; eval, `| bash`, python3 -c и неизвестные обёртки
-// правят файл через аргумент или ввод и в списки не входят (проверка aa76883)
-func onlyText(command string) bool {
-	calls, err := shellcmd.Calls(command)
-	if err != nil || len(calls) == 0 {
-		return false
-	}
-	return !slices.ContainsFunc(calls, func(call shellcmd.Call) bool { return !inertCall(call) })
-}
 
 // bashRuleFile — файл инструкций, который меняет команда Bash; пусто — команда
 // такой файл не меняет
@@ -136,7 +92,7 @@ func bashRuleFile(command string) string {
 	if m := bashRedirect.FindStringSubmatch(command); m != nil {
 		return m[1]
 	}
-	if bashEditor.MatchString(command) && !onlyText(command) {
+	if bashEditor.MatchString(command) {
 		// последний путь — файл правки: первые бывают каталогом в cd
 		if all := bashPath.FindAllString(command, -1); len(all) > 0 {
 			return all[len(all)-1]

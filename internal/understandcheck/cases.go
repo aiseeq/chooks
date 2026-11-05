@@ -2,7 +2,6 @@ package understandcheck
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -79,62 +78,65 @@ func IsInstructionFile(path string) bool {
 // bashPath — путь к файлу инструкций в команде Bash
 var bashPath = regexp.MustCompile(`[~\w./-]*(?:CLAUDE\.md|AGENTS\.md|SKILL\.md|\.claude/(?:skills|rules|agents|hooks|improve/prompts)/[\w./-]+|\.claude/projects/[^/\s]+/memory/[\w./-]+|\.claude/decisions\.md|\.claude/settings(?:\.local)?\.json)`)
 
-// inPlaceFlag — флаг правки на месте у sed и perl: -i, -i.bak, -Ei, -pi, -0pi, --in-place
-var inPlaceFlag = regexp.MustCompile(`^-\w*i|^--in-place`)
+// bashEditor — команда правит файлы, названные в ней: sub из akit, sed -i,
+// perl -i, tee
+var bashEditor = regexp.MustCompile(`(?:^|[\s;&|(])(?:sub|tee)(?:\s|$)|\bsed\s+(?:-\w+\s+)*-i|\bperl\s+(?:-\w+\s+)*-\w*i`)
 
-// isEditor — программа с аргументами правит файлы, названные в команде: sub из
-// akit, tee, sed -i, perl -i, они же под find -exec (его shellcmd не снимает)
-func isEditor(name string, args []string) bool {
-	switch name {
-	case "sub", "tee":
-		return true
-	case "sed", "perl":
-		return slices.ContainsFunc(args, inPlaceFlag.MatchString)
-	case "find":
-		for i, arg := range args[:max(len(args)-1, 0)] {
-			switch arg {
-			case "-exec", "-execdir", "-ok", "-okdir":
-				if isEditor(filepath.Base(args[i+1]), args[i+2:]) {
-					return true
-				}
-			}
-		}
-	}
-	return false
+// bashRedirect — перенаправление вывода в файл инструкций
+var bashRedirect = regexp.MustCompile(`>{1,2}\s*["']?(` + bashPath.String() + `)`)
+
+// inertPrograms — программы, которые не исполняют свои аргументы и сами не
+// правят файлы: слово редактора в их аргументах — текст
+var inertPrograms = map[string]bool{
+	"echo": true, "printf": true, "cat": true, "grep": true, "head": true,
+	"tail": true, "wc": true, "cut": true, "ls": true, "tk": true, "tl": true,
 }
 
-// heredocEditor — редактор в теле heredoc. Тело — часто скрипт, который команда
-// тут же запускает, и не всегда на оболочке: разбор shellcmd его не видит, ищется
-// текстом. Лишний вызов судьи дешевле пропущенной правки (сухой прогон 05.11 за
-// 7 дней: без этого из 3 ушедших случаев 2 — настоящие правки файлов скиллов
-// скриптом perl)
-var heredocEditor = regexp.MustCompile(`(?:^|[\s;&|(])(?:sub|tee)(?:\s|$)|\bsed\s+(?:-\w+\s+)*-i|\bperl\s+(?:-\w+\s+)*-\w*i`)
+// inertSubcommands — то же для подкоманд: первым аргументом, так что git -c и
+// graft exec, способные исполнить команду, сюда не попадают
+var inertSubcommands = map[string]map[string]bool{
+	"git":   {"add": true, "blame": true, "commit": true, "diff": true, "log": true, "show": true, "status": true},
+	"graft": {"commit": true},
+}
 
-// callEdits — вызов правит файлы сам или телом heredoc
-func callEdits(call shellcmd.Call) bool {
-	return isEditor(call.Name, call.Args) || slices.ContainsFunc(call.Redirs, func(redir shellcmd.Redir) bool {
-		return heredocEditor.MatchString(redir.Body)
+// fdOrNull — цель перенаправления, не оставляющая файла: дескриптор или /dev/null
+var fdOrNull = regexp.MustCompile(`^(?:\d+|-|/dev/null)$`)
+
+// inertCall — вызов только читает или печатает: программа из списков, вывод не
+// уходит в файл (`cat > run.sh <<EOF` со словом редактора в теле — скрипт на запуск)
+func inertCall(call shellcmd.Call) bool {
+	if subcommands, ok := inertSubcommands[call.Name]; ok {
+		if len(call.Args) == 0 || !subcommands[call.Args[0]] {
+			return false
+		}
+	} else if !inertPrograms[call.Name] {
+		return false
+	}
+	return !slices.ContainsFunc(call.Redirs, func(redir shellcmd.Redir) bool {
+		return strings.Contains(redir.Op, ">") && !fdOrNull.MatchString(redir.Target)
 	})
 }
 
-// bashRedirect — перенаправление вывода в файл инструкций. Регулярка, не
-// shellcmd.Call.Redirs: те знают только простые команды, а `{ …; } >> файл`,
-// `( … ) > файл`, `done > файл` и голый `> файл` — тоже правка
-var bashRedirect = regexp.MustCompile(`>{1,2}\s*["']?(` + bashPath.String() + `)`)
+// onlyText — слово редактора в команде заведомо текст: она разобрана без ошибок
+// и все её вызовы инертны. Любое сомнение — не текст: лишний вызов судьи дешевле
+// пропущенной правки. Bash исполняет построчно, поэтому и неразобранная команда
+// могла что-то поправить; eval, `| bash`, python3 -c и неизвестные обёртки
+// правят файл через аргумент или ввод и в списки не входят (проверка aa76883)
+func onlyText(command string) bool {
+	calls, err := shellcmd.Calls(command)
+	if err != nil || len(calls) == 0 {
+		return false
+	}
+	return !slices.ContainsFunc(calls, func(call shellcmd.Call) bool { return !inertCall(call) })
+}
 
 // bashRuleFile — файл инструкций, который меняет команда Bash; пусто — команда
-// такой файл не меняет. Редактор ищется разбором оболочки: его имя в кавычках и
-// аргументах правкой не считается
+// такой файл не меняет
 func bashRuleFile(command string) string {
 	if m := bashRedirect.FindStringSubmatch(command); m != nil {
 		return m[1]
 	}
-	calls, err := shellcmd.Calls(command)
-	var nested *shellcmd.NestedError
-	if err != nil && !errors.As(err, &nested) {
-		return "" // shellcmd не разбирает только то, что отвергает и bash -n: такую команду оболочка не выполнит
-	}
-	if slices.ContainsFunc(calls, callEdits) {
+	if bashEditor.MatchString(command) && !onlyText(command) {
 		// последний путь — файл правки: первые бывают каталогом в cd
 		if all := bashPath.FindAllString(command, -1); len(all) > 0 {
 			return all[len(all)-1]

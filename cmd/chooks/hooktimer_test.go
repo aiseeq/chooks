@@ -177,11 +177,12 @@ func TestHookTimerHelper(t *testing.T) {
 	t.Fatal("stdin закрыт без SIGTERM")
 }
 
-// Claude Code по таймауту шлёт хуку SIGTERM: хук пишет стадию и выходит 143
+// Claude Code по таймауту шлёт хуку SIGTERM: хук пишет стадию и выходит 143.
+// Таймаут в пустом settings не прочитан — запуск считается убитым по таймауту
 func TestHookTimer_SIGTERM(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHookTimerHelper$")
 	logDir := t.TempDir()
-	cmd.Env = append(os.Environ(), "CHOOKS_HOOKTIMER_HELPER=1", "CHOOKS_HOOKTIMER_LOG="+filepath.Join(logDir, "chooks.log"))
+	cmd.Env = append(os.Environ(), "CHOOKS_HOOKTIMER_HELPER=1", "CHOOKS_HOOKTIMER_LOG="+filepath.Join(logDir, "chooks.log"), "CLAUDE_CONFIG_DIR="+t.TempDir())
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +213,7 @@ func TestHookTimer_SIGTERM(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != killedExitCode {
 		t.Fatalf("ожидался выход %d, получено %v", killedExitCode, err)
 	}
-	for _, want := range []string{"killed by SIGTERM", "stage skills", "skills(running)="} {
+	for _, want := range []string{"terminated by SIGTERM, killed", "stage skills", "skills(running)=", "timeout_error"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("в stderr нет %q: %s", want, stderr.String())
 		}

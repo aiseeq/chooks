@@ -28,6 +28,17 @@ const optionalBudget = 2 * time.Second
 // killedExitCode — код выхода по SIGTERM, как у процесса без обработчика
 const killedExitCode = 128 + int(syscall.SIGTERM)
 
+// Исход запуска, оборванного SIGTERM, в файле длительностей
+const (
+	statusKilled    = "killed"    // по таймауту
+	statusCancelled = "cancelled" // отмена хода, до таймаута
+)
+
+// timeoutSlack — насколько раньше своего таймаута SIGTERM считается всё же
+// таймаутом: таймер Claude Code стартует раньше процесса, отсчёт которого под
+// нагрузкой отстаёт (запуск до 269 мс за окно 03-05.11)
+const timeoutSlack = time.Second
+
 // hookTimer отмечает стадии хука. Claude Code пишет длительность в
 // транскрипт только у Stop-хуков и у запусков, которые что-то вывели, а
 // убитый по таймауту — нигде. Поэтому длительность каждого запуска уходит
@@ -112,7 +123,7 @@ func (t *hookTimer) setDurations(logger core.LoggerConfig) {
 }
 
 // recordDuration пишет строку TSV: время, хук, сессия, мс всего, мс запуска,
-// исход (ok, error или killed). Запуск, убитый или упавший до чтения конфига,
+// исход (ok, error, killed или cancelled). Запуск, убитый или упавший до чтения конфига,
 // строки не оставляет: путь файла — из конфига. Сбой записи — в лог: хук от
 // него не страдает
 func (t *hookTimer) recordDuration(at time.Time, session string, elapsed time.Duration, status string) {
@@ -136,8 +147,27 @@ func (t *hookTimer) deadline(budget time.Duration) time.Time {
 	return t.start.Add(budget)
 }
 
-// watchTermination пишет в лог, на какой стадии хук убит по таймауту:
-// Claude Code шлёт SIGTERM (проба 02.11, claude 2.1.316) и выбрасывает вывод
+// terminationStatus отличает таймаут от отмены хода по таймауту хука из
+// settings. Явный failover: таймаут не прочитан — считается таймаутом, ошибка
+// уходит в лог той же строкой: лишняя тревога лучше пропущенной
+func (t *hookTimer) terminationStatus(elapsed time.Duration) (string, error) {
+	settingsPath, err := t.settingsPath()
+	if err != nil {
+		return statusKilled, err
+	}
+	timeout, err := hookTimeout(settingsPath, t.hook)
+	if err != nil {
+		return statusKilled, err
+	}
+	if elapsed < timeout-timeoutSlack {
+		return statusCancelled, nil
+	}
+	return statusKilled, nil
+}
+
+// watchTermination пишет в лог, на какой стадии хук оборван: Claude Code шлёт
+// SIGTERM по таймауту (проба 02.11, claude 2.1.316) и при отмене хода
+// (hook_cancelled в транскрипте, 04.11, claude 2.1.317) и выбрасывает вывод
 func (t *hookTimer) watchTermination() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM)
@@ -153,12 +183,19 @@ func (t *hookTimer) watchTermination() {
 		t.mu.Unlock()
 		args := []string{"hook", t.hook, "session", session, "elapsed_ms", strconv.FormatInt(elapsed.Milliseconds(), 10),
 			"stage", current, "stages", strings.Join(stages, ",")}
-		if logger != nil {
-			logger.Warn("hook killed by SIGTERM (timeout)", toAny(args)...)
-		} else {
-			fmt.Fprintf(os.Stderr, "chooks: hook killed by SIGTERM: %s\n", strings.Join(args, " "))
+		status, statusErr := t.terminationStatus(elapsed)
+		if statusErr != nil {
+			args = append(args, "timeout_error", statusErr.Error())
 		}
-		t.recordDuration(at, session, elapsed, "killed")
+		switch {
+		case logger == nil:
+			fmt.Fprintf(os.Stderr, "chooks: hook terminated by SIGTERM, %s: %s\n", status, strings.Join(args, " "))
+		case status == statusCancelled:
+			logger.Info("hook cancelled by SIGTERM before timeout", toAny(args)...)
+		default:
+			logger.Warn("hook killed by SIGTERM (timeout)", toAny(args)...)
+		}
+		t.recordDuration(at, session, elapsed, status)
 		os.Exit(killedExitCode)
 	}()
 }

@@ -143,7 +143,6 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	limit := input.RateLimits.SevenDay
 	if week, ok := limit.usage(); ok {
 		smp := sample{week: week, session: input.SessionID, account: store.ActiveEmail()}
-
 		res, err := recordLimits(smp, now)
 		switch {
 		case err != nil:

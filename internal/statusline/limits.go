@@ -205,7 +205,6 @@ func (s *limitsSnapshot) merge(smp sample, now time.Time) mergeResult {
 		}
 		s.pickTop(active)
 	}
-
 	return res
 }
 
@@ -502,7 +501,7 @@ func lockFile(path string) (func(), error) {
 }
 
 // WriteLimits печатает сводку для мастеров и калибровки: учётки хранилища
-// по почте с неделей, пятью часами и сроком входа, неопознанные недели по
+// по почте с неделей и сроком входа, неопознанные недели по
 // сбросу, а при steps — журнал шагов одной таблицей с табуляцией
 func WriteLimits(w io.Writer, steps bool) error {
 	path, snapshot, journal, err := readLimits()
@@ -596,7 +595,6 @@ func writeAccount(w io.Writer, info accounts.Info, snapshot *limitsSnapshot, sho
 	} else {
 		fmt.Fprintln(w, "  неделя неизвестна или не начата")
 	}
-
 	switch {
 	case info.Dead != "":
 		fmt.Fprintf(w, "  вход мёртв: %s\n", info.Dead)
@@ -635,7 +633,6 @@ func accountUsage(s *limitsSnapshot, now time.Time) map[string]accounts.Usage {
 		}
 		out[rec.Account] = u
 	}
-
 	return out
 }
 

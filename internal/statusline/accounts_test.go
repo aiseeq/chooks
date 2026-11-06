@@ -151,6 +151,22 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 	}
 }
 
+// Неначатая неделя (API без сброса) в снимок не попадает: нулевой сброс не
+// неделя
+func TestRecordSkipsWeekNotStarted(t *testing.T) {
+	isolateRender(t)
+	if err := (SnapshotLimits{}).Record("work@example.com", accounts.Window{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	path, err := LimitsFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("снимок создан замером без недели: %v", err)
+	}
+}
+
 // Пятичасового окна нет (Ultra, живой /api/oauth/usage 06.11: five_hour null):
 // старый снимок с fiveHours и вход с five_hour не делают учётку пустой, сводка
 // о пяти часах молчит, следующая запись снимка убирает поле

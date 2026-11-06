@@ -45,7 +45,24 @@ func TestRefreshKeepsRefreshToken(t *testing.T) {
 	}
 }
 
-// Неначатое окно приходит без сброса; сброс округляется до минуты
+// Неначатая неделя приходит без сброса
+func TestUsageWeekNotStarted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		fmt.Fprint(w, `{"five_hour":null,"seven_day":{"utilization":0,"resets_at":null}}`)
+	}))
+	defer srv.Close()
+	client := NewClient("test")
+	client.APIBase, client.HTTP = srv.URL, srv.Client()
+	got, err := client.Usage(context.Background(), "t", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Week.Used != 0 || !got.Week.ResetsAt.IsZero() {
+		t.Errorf("неначатая неделя: %+v", got.Week)
+	}
+}
+
+// Сброс округляется до минуты
 func TestUsageWindows(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		fmt.Fprint(w, `{"five_hour":null,"seven_day":{"utilization":95,"resets_at":"2026-10-26T09:59:59.950000+00:00"}}`)

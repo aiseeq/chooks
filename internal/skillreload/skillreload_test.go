@@ -986,3 +986,62 @@ func TestCheck_LockWaitBoundedByDeadline(t *testing.T) {
 		t.Errorf("ждали блокировку %s при сроке 150ms", waited)
 	}
 }
+
+// Давние записи убирает первое событие суток, а не каждое: обход каталога
+// стоит первому событию сессии десятки мс. Метка из будущего чистку не держит
+func TestCleanupAtMostDaily(t *testing.T) {
+	f := newFixture(t)
+	if err := os.MkdirAll(f.checker.StateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	f.checker.Now = func() time.Time { return now }
+	stale := func(name string) string {
+		path := filepath.Join(f.checker.StateDir, name)
+		f.writeFile(path, "{}", now.Add(-stateTTL-time.Hour))
+		return path
+	}
+	fresh := func() {
+		t.Helper()
+		if errs := f.checker.prepareFresh(Event{SessionID: "s"}, &sessionState{}); len(errs) != 0 {
+			t.Fatalf("сбои чистки: %v", errs)
+		}
+	}
+	gone := func(path string) bool {
+		_, err := os.Stat(path)
+		return os.IsNotExist(err)
+	}
+
+	first := stale("first.json")
+	fresh()
+	if !gone(first) {
+		t.Error("без метки чистка не прошла")
+	}
+
+	second := stale("second.json")
+	now = now.Add(cleanupEvery - time.Minute)
+	f.writeFile(second, "{}", now.Add(-stateTTL-time.Hour))
+	fresh()
+	if gone(second) {
+		t.Error("чистка раньше суток")
+	}
+
+	now = now.Add(2 * time.Minute)
+	fresh()
+	if !gone(second) {
+		t.Error("через сутки чистка не прошла")
+	}
+
+	third := stale("third.json")
+	mark := filepath.Join(f.checker.StateDir, cleanupMark)
+	if err := os.Chtimes(mark, now.Add(48*time.Hour), now.Add(48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	fresh()
+	if !gone(third) {
+		t.Error("метка из будущего задержала чистку")
+	}
+	if info, err := os.Stat(mark); err != nil || !info.ModTime().Equal(now) {
+		t.Errorf("метка не поправлена: %v %v", info, err)
+	}
+}

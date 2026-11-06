@@ -87,6 +87,16 @@ func newSessionState() sessionState {
 // и продолжаются через --resume; запись в несколько килобайт не мешает
 const stateTTL = 30 * 24 * time.Hour
 
+// cleanupEvery — чистка давних записей не чаще раза в сутки: обход каталога в
+// 9153 файла стоил первому событию сессии 72 мс против 16, под нагрузкой до
+// 2,4 с, а первых событий ночью 22% отправок запроса (замер 06.11). Срок
+// хранения в 30 суток сутки запаздывания не меняют
+const cleanupEvery = 24 * time.Hour
+
+// cleanupMark — метка прошлой чистки в каталоге записей; точка в начале — вне
+// имён записей `<сессия>.json`
+const cleanupMark = ".last-cleanup"
+
 // lockWait — сколько ждать блокировку записи: UserPromptSubmit и
 // PostToolBatch срабатывают почти одновременно, и без неё напоминание ушло бы
 // дважды. Оба держат её миллисекунды
@@ -240,6 +250,31 @@ func readStateUnlocked(dir, name string) (sessionState, error) {
 		return sessionState{}, fmt.Errorf("state %s has schema %d, want %d", name, state.Schema, stateSchema)
 	}
 	return state, nil
+}
+
+// cleanupDue отвечает, пора ли чистить, и сразу двигает метку: одновременные
+// события видят её свежей и обход не повторяют. Хук, убитый посреди чистки,
+// доделает её через сутки: за это время набегает лишь суточная порция файлов.
+// Метка не прочитана или не записана — чистка идёт, сбой уходит вызывающему
+func cleanupDue(dir string, now time.Time) (bool, error) {
+	mark := filepath.Join(dir, cleanupMark)
+	info, err := os.Stat(mark)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return true, fmt.Errorf("cannot read cleanup mark: %w", err)
+	}
+	if err == nil {
+		// Метка из будущего (часы перевели назад) чистку не откладывает
+		if age := now.Sub(info.ModTime()); age >= 0 && age < cleanupEvery {
+			return false, nil
+		}
+	}
+	if err := os.WriteFile(mark, nil, 0o644); err != nil {
+		return true, fmt.Errorf("cannot write cleanup mark: %w", err)
+	}
+	if err := os.Chtimes(mark, now, now); err != nil {
+		return true, fmt.Errorf("cannot stamp cleanup mark: %w", err)
+	}
+	return true, nil
 }
 
 // cleanupStale удаляет файлы каталога (записи сессий, тексты), не тронутые

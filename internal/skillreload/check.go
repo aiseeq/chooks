@@ -116,11 +116,17 @@ func (c Checker) Check(event Event) (Result, error) {
 // записи и тексты и засевает форк текстами родителя
 func (c Checker) prepareFresh(event Event, state *sessionState) []error {
 	var errs []error
-	if err := cleanupStale(c.StateDir, c.now()); err != nil {
+	due, err := cleanupDue(c.StateDir, c.now())
+	if err != nil {
 		errs = append(errs, err)
 	}
-	if err := cleanupStale(newDirStore(c.StateDir).dir, c.now()); err != nil {
-		errs = append(errs, err)
+	if due {
+		if err := cleanupStale(c.StateDir, c.now()); err != nil {
+			errs = append(errs, err)
+		}
+		if err := cleanupStale(newDirStore(c.StateDir).dir, c.now()); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if event.AgentID == "" || event.AgentType != forkAgentType {
 		return errs

@@ -88,8 +88,8 @@ func newSessionState() sessionState {
 const stateTTL = 30 * 24 * time.Hour
 
 // cleanupEvery — чистка давних записей не чаще раза в сутки: обход каталога в
-// 9153 файла стоил первому событию сессии 72 мс против 16, под нагрузкой до
-// 2,4 с, а первых событий ночью 22% отправок запроса (замер 06.11). Срок
+// 9153 файла стоил первому событию сессии 41,5 мс против 9,2 (стенд 06.11,
+// load 10), а первых событий за сутки 05.11 было 22% отправок запроса. Срок
 // хранения в 30 суток сутки запаздывания не меняют
 const cleanupEvery = 24 * time.Hour
 
@@ -268,7 +268,7 @@ func cleanupDue(dir string, now time.Time) (bool, error) {
 			return false, nil
 		}
 	}
-	if err := os.WriteFile(mark, nil, 0o644); err != nil {
+	if err := os.WriteFile(mark, nil, 0o600); err != nil {
 		return true, fmt.Errorf("cannot write cleanup mark: %w", err)
 	}
 	if err := os.Chtimes(mark, now, now); err != nil {

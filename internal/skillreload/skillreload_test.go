@@ -987,6 +987,29 @@ func TestCheck_LockWaitBoundedByDeadline(t *testing.T) {
 	}
 }
 
+// Метку не записать — чистка всё равно идёт, сбой виден вызывающему
+func TestCleanupRunsWhenMarkUnwritable(t *testing.T) {
+	f := newFixture(t)
+	mark := filepath.Join(f.checker.StateDir, cleanupMark)
+	if err := os.MkdirAll(mark, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(mark, now.Add(-2*cleanupEvery), now.Add(-2*cleanupEvery)); err != nil {
+		t.Fatal(err)
+	}
+	f.checker.Now = func() time.Time { return now }
+	old := filepath.Join(f.checker.StateDir, "old.json")
+	f.writeFile(old, "{}", now.Add(-stateTTL-time.Hour))
+	errs := f.checker.prepareFresh(Event{SessionID: "s"}, &sessionState{})
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "cleanup mark") {
+		t.Errorf("сбой метки: %v", errs)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("чистка не прошла: %v", err)
+	}
+}
+
 // Давние записи убирает первое событие суток, а не каждое: обход каталога
 // стоит первому событию сессии десятки мс. Метка из будущего чистку не держит
 func TestCleanupAtMostDaily(t *testing.T) {
@@ -1013,22 +1036,35 @@ func TestCleanupAtMostDaily(t *testing.T) {
 	}
 
 	first := stale("first.json")
+	textsDir := newDirStore(f.checker.StateDir).dir
+	if err := os.MkdirAll(textsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleText := func(name string) string {
+		path := filepath.Join(textsDir, name)
+		f.writeFile(path, "текст", now.Add(-stateTTL-time.Hour))
+		return path
+	}
+	text := staleText("first.txt")
 	fresh()
-	if !gone(first) {
+	if !gone(first) || !gone(text) {
 		t.Error("без метки чистка не прошла")
 	}
+	text = staleText("second.txt")
 
 	second := stale("second.json")
 	now = now.Add(cleanupEvery - time.Minute)
 	f.writeFile(second, "{}", now.Add(-stateTTL-time.Hour))
 	fresh()
-	if gone(second) {
+	f.writeFile(text, "текст", now.Add(-stateTTL-time.Hour))
+	fresh()
+	if gone(second) || gone(text) {
 		t.Error("чистка раньше суток")
 	}
 
 	now = now.Add(2 * time.Minute)
 	fresh()
-	if !gone(second) {
+	if !gone(second) || !gone(text) {
 		t.Error("через сутки чистка не прошла")
 	}
 

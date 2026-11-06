@@ -294,10 +294,10 @@ func (l *fakeLimits) Usage() (map[string]Usage, error) {
 	return out, nil
 }
 
-func (l *fakeLimits) Record(email string, week, five Window, _ time.Time) error {
+func (l *fakeLimits) Record(email string, week Window, _ time.Time) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.usage[email] = Usage{Email: email, Week: week, FiveHour: five}
+	l.usage[email] = Usage{Email: email, Week: week}
 	return nil
 }
 

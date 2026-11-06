@@ -2,6 +2,7 @@ package statusline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,10 +62,10 @@ func writeStore(t *testing.T, autoOff bool) {
 	}
 }
 
-func renderInput(t *testing.T, session string, week int, weekResets time.Time, five int, fiveResets time.Time) string {
+func renderInput(t *testing.T, session string, week int, weekResets time.Time) string {
 	t.Helper()
-	input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"rate_limits":{"seven_day":{"used_percentage":%d,"resets_at":%d},"five_hour":{"used_percentage":%d,"resets_at":%d}}}`,
-		session, t.TempDir(), week, weekResets.Unix(), five, fiveResets.Unix())
+	input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"rate_limits":{"seven_day":{"used_percentage":%d,"resets_at":%d}}}`,
+		session, t.TempDir(), week, weekResets.Unix())
 	line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
 	if err != nil {
 		t.Fatal(err)
@@ -79,9 +80,8 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 	writeStore(t, false)
 	now := time.Now()
 	workNext := now.Add(4 * 24 * time.Hour).Truncate(time.Hour)
-	fiveNext := now.Add(2 * time.Hour).Truncate(time.Minute)
 
-	if line := renderInput(t, "s1", 40, workNext, 12, fiveNext); !strings.Contains(line, "work@example.com") || !strings.Contains(line, "40%") || strings.Contains(line, "нед") {
+	if line := renderInput(t, "s1", 40, workNext); !strings.Contains(line, "work@example.com") || !strings.Contains(line, "40%") || strings.Contains(line, "нед") {
 		t.Errorf("полоса недели: %q", line)
 	}
 	path, err := LimitsFile()
@@ -92,9 +92,7 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 	if len(snap.Weeks) != 1 || snap.Weeks[0].Account != "work@example.com" {
 		t.Fatalf("неделя не приписана рабочей: %+v", snap.Weeks)
 	}
-	if len(snap.FiveHours) != 1 || snap.FiveHours[0].Account != "work@example.com" || snap.FiveHours[0].Used != 12 {
-		t.Errorf("пять часов: %+v", snap.FiveHours)
-	}
+
 	_, _, steps, err := readLimitsAt(path)
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +104,7 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 		t.Fatalf("ротация запрошена %d раз", len(*calls))
 	}
 	call := (*calls)[0]
-	if u := call.usage["work@example.com"]; u.Week.Used != 40 || u.FiveHour.Used != 12 {
+	if u := call.usage["work@example.com"]; u.Week.Used != 40 {
 		t.Errorf("расход для ротации: %+v", call.usage)
 	}
 	if strings.Join(call.args, " ") != "account rotate" {
@@ -126,11 +124,11 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 	if err := os.WriteFile(paths.Store(), []byte(strings.Replace(string(data), `"active":"u-work"`, `"active":"u-personal"`, 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if line := renderInput(t, "s2", 40, workNext, 12, fiveNext); !strings.Contains(line, "work@example.com") {
+	if line := renderInput(t, "s2", 40, workNext); !strings.Contains(line, "work@example.com") {
 		t.Errorf("старая сессия: %q", line)
 	}
 	personalNext := now.Add(6 * 24 * time.Hour).Truncate(time.Hour)
-	if line := renderInput(t, "s3", 1, personalNext, 1, fiveNext.Add(time.Hour)); !strings.Contains(line, "personal@example.com") {
+	if line := renderInput(t, "s3", 1, personalNext); !strings.Contains(line, "personal@example.com") {
 		t.Errorf("новая неделя активной: %q", line)
 	}
 	snap = readSnapshot(t, path)
@@ -143,7 +141,7 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{"work@example.com\n  неделя 40%", "пять часов 12%", "personal@example.com  ← сейчас у Claude Code\n  неделя 1%", "Автопереключение: включено"} {
+	for _, want := range []string{"work@example.com\n  неделя 40%", "personal@example.com  ← сейчас у Claude Code\n  неделя 1%", "Автопереключение: включено"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("в сводке нет %q:\n%s", want, text)
 		}
@@ -153,18 +151,78 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 	}
 }
 
+// Пятичасового окна нет (Ultra, живой /api/oauth/usage 06.11: five_hour null):
+// старый снимок с fiveHours и вход с five_hour не делают учётку пустой, сводка
+// о пяти часах молчит, следующая запись снимка убирает поле
+func TestFiveHourWindowIgnored(t *testing.T) {
+	isolateRender(t)
+	writeStore(t, true)
+	now := time.Now()
+	workNext := now.Add(4 * 24 * time.Hour).Truncate(time.Hour)
+	renderInput(t, "s1", 40, workNext)
+
+	path, err := LimitsFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy["fiveHours"] = []map[string]any{{"account": "work@example.com", "resetsAt": now.Add(time.Hour), "usedPercentage": 96, "seenAt": now}}
+	raw, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	usage, err := SnapshotLimits{}.Usage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := usage["work@example.com"]; u.Week.Used != 40 || !u.Week.ResetsAt.Equal(workNext) {
+		t.Errorf("расход для выбора: %+v", usage)
+	}
+	var out strings.Builder
+	if err := WriteLimits(&out, false); err != nil {
+		t.Fatal(err)
+	}
+	if text := out.String(); strings.Contains(text, "пят") || !strings.Contains(text, "неделя 40%") {
+		t.Errorf("сводка:\n%s", text)
+	}
+
+	input := fmt.Sprintf(`{"session_id":"s2","cwd":%q,"rate_limits":{"seven_day":{"used_percentage":41,"resets_at":%d},"five_hour":{"used_percentage":96,"resets_at":%d}}}`,
+		t.TempDir(), workNext.Unix(), now.Add(time.Hour).Unix())
+	if _, err := Render(context.Background(), strings.NewReader(input), testLogger(t)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "fiveHours") {
+		t.Errorf("поле осталось в снимке: %s", raw)
+	}
+}
+
 // Одна учётка или без хранилища — полоса прежняя, без почты
 func TestRenderSingleAccountLabel(t *testing.T) {
 	isolateRender(t)
 	now := time.Now()
-	if line := renderInput(t, "s", 10, now.Add(3*24*time.Hour).Truncate(time.Hour), 1, now.Add(time.Hour)); !strings.Contains(line, "нед ▓") {
+	if line := renderInput(t, "s", 10, now.Add(3*24*time.Hour).Truncate(time.Hour)); !strings.Contains(line, "нед ▓") {
 		t.Errorf("полоса без хранилища: %q", line)
 	}
 	path, err := LimitsFile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap := readSnapshot(t, path); len(snap.FiveHours) != 0 || snap.Weeks[0].Account != "" {
+	if snap := readSnapshot(t, path); snap.Weeks[0].Account != "" {
 		t.Errorf("без хранилища учётка не известна: %+v", snap)
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "accounts.json")); !os.IsNotExist(err) {
@@ -178,8 +236,8 @@ func TestSnapshotLimitsRecordExact(t *testing.T) {
 	writeStore(t, true)
 	now := time.Now()
 	resets := now.Add(3 * 24 * time.Hour).Truncate(time.Hour)
-	renderInput(t, "s", 50, resets, 5, now.Add(time.Hour))
-	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 7, ResetsAt: resets}, accounts.Window{}, now); err != nil {
+	renderInput(t, "s", 50, resets)
+	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 7, ResetsAt: resets}, now); err != nil {
 		t.Fatal(err)
 	}
 	usage, err := (SnapshotLimits{}).Usage()
@@ -202,10 +260,9 @@ func TestRenderForeignWeekAfterSwitch(t *testing.T) {
 	now := time.Now()
 	workNext := now.Add(4 * 24 * time.Hour).Truncate(time.Hour)
 	personalNext := now.Add(6 * 24 * time.Hour).Truncate(time.Hour)
-	five := now.Add(2 * time.Hour).Truncate(time.Minute)
-	renderInput(t, "lead", 96, workNext, 3, five)
+	renderInput(t, "lead", 96, workNext)
 
-	line := renderInput(t, "other-project", 0, personalNext, 0, five.Add(time.Hour))
+	line := renderInput(t, "other-project", 0, personalNext)
 	if !strings.Contains(line, "work@example.com") || !strings.Contains(line, "96%") {
 		t.Errorf("полоса — неделя рабочей, что у Claude Code: %q", line)
 	}
@@ -222,14 +279,9 @@ func TestRenderForeignWeekAfterSwitch(t *testing.T) {
 	if !snap.ResetsAt.Equal(workNext) || snap.SevenDay != 96 {
 		t.Errorf("верхние поля — неделя рабочей: %v %v", snap.SevenDay, snap.ResetsAt)
 	}
-	for _, f := range snap.FiveHours {
-		if f.Account == "work@example.com" && f.Used != 3 {
-			t.Errorf("пять часов рабочей затёрты чужими: %+v", f)
-		}
-	}
 
 	// Замер API токеном личной забирает её неделю; верхние поля не меняет
-	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 0, ResetsAt: personalNext}, accounts.Window{}, now); err != nil {
+	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 0, ResetsAt: personalNext}, now); err != nil {
 		t.Fatal(err)
 	}
 	snap = readSnapshot(t, path)
@@ -273,7 +325,7 @@ func TestRecordExactRepairsMisattributedWeek(t *testing.T) {
 	if err := saveLimits(path, broken); err != nil {
 		t.Fatal(err)
 	}
-	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 0, ResetsAt: personalNext}, accounts.Window{}, now); err != nil {
+	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 0, ResetsAt: personalNext}, now); err != nil {
 		t.Fatal(err)
 	}
 	usage, err := (SnapshotLimits{}).Usage()
@@ -293,7 +345,7 @@ func TestRecordExactRepairsMisattributedWeek(t *testing.T) {
 	// Замер API рабочей с другим сбросом: прежняя неделя рабочей ошибочна
 	// и становится неопознанной
 	other := workNext.Add(time.Hour)
-	if err := (SnapshotLimits{}).Record("work@example.com", accounts.Window{Used: 10, ResetsAt: other}, accounts.Window{}, now); err != nil {
+	if err := (SnapshotLimits{}).Record("work@example.com", accounts.Window{Used: 10, ResetsAt: other}, now); err != nil {
 		t.Fatal(err)
 	}
 	for _, rec := range readSnapshot(t, path).Weeks {
@@ -309,7 +361,7 @@ func TestRenderWithoutRateLimitsShowsActiveWeek(t *testing.T) {
 	isolateRender(t)
 	writeStore(t, true)
 	now := time.Now()
-	renderInput(t, "s", 96, now.Add(4*24*time.Hour).Truncate(time.Hour), 3, now.Add(time.Hour))
+	renderInput(t, "s", 96, now.Add(4*24*time.Hour).Truncate(time.Hour))
 	input := fmt.Sprintf(`{"session_id":"fresh","cwd":%q}`, t.TempDir())
 	line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
 	if err != nil {
@@ -345,7 +397,7 @@ func TestRenderColorsByPool(t *testing.T) {
 	if err := os.WriteFile(limitsHistory(path), []byte(history.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 50, ResetsAt: personalNext}, accounts.Window{}, now); err != nil {
+	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 50, ResetsAt: personalNext}, now); err != nil {
 		t.Fatal(err)
 	}
 	// Сама неделя активной зелёная бы: 20% за двое суток — 70% к сбросу

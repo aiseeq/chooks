@@ -59,11 +59,10 @@ func (w weeklyUsage) limit() *WeeklyLimit {
 // Верхние поля — неделя, доля которой выросла последней: учётка, что тратит
 // сейчас. Их форма прежняя, чтобы читатели снимка не менялись
 type limitsSnapshot struct {
-	At        time.Time    `json:"at"`
-	SevenDay  float64      `json:"sevenDayUsedPercentage"`
-	ResetsAt  time.Time    `json:"sevenDayResetsAt"`
-	Weeks     []weekRecord `json:"weeks"`
-	FiveHours []fiveRecord `json:"fiveHours,omitempty"`
+	At       time.Time    `json:"at"`
+	SevenDay float64      `json:"sevenDayUsedPercentage"`
+	ResetsAt time.Time    `json:"sevenDayResetsAt"`
+	Weeks    []weekRecord `json:"weeks"`
 }
 
 // weekRecord — неделя одной учётки. At — когда доля впервые дошла до
@@ -82,14 +81,6 @@ type weekRecord struct {
 	Account  string    `json:"account,omitempty"`
 }
 
-// fiveRecord — пятичасовое окно учётки: последнее известное
-type fiveRecord struct {
-	Account  string    `json:"account"`
-	ResetsAt time.Time `json:"resetsAt"`
-	Used     float64   `json:"usedPercentage"`
-	SeenAt   time.Time `json:"seenAt"`
-}
-
 // limitStep — строка журнала: доля недели выросла или началась новая неделя
 type limitStep struct {
 	At       time.Time `json:"at"`
@@ -101,10 +92,7 @@ type limitStep struct {
 
 // sample — замер одной отрисовки или одного ответа API
 type sample struct {
-	// week — неделя; nil — недели в замере нет (учётка ещё не тратила)
-	week *weeklyUsage
-	// five — пятичасовое окно; nil — нет
-	five    *weeklyUsage
+	week    weeklyUsage
 	session string
 	// account — для строки статуса учётка, чьи токены сейчас у Claude Code:
 	// ей отходит неделя, которой снимок ещё не видел. Для замера API —
@@ -168,10 +156,7 @@ func recordLimits(smp sample, now time.Time) (mergeResult, error) {
 // mergeLimits сводит замер со снимком под блокировкой: сессии рисуются
 // одновременно, и без неё одна затирала бы выросшую долю другой
 func mergeLimits(path string, smp sample, now time.Time) (mergeResult, error) {
-	res := mergeResult{verdict: weekRaised}
-	if smp.week != nil {
-		res.merged = *smp.week
-	}
+	res := mergeResult{verdict: weekRaised, merged: smp.week}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return res, fmt.Errorf("cannot create the limits directory: %w", err)
@@ -188,7 +173,7 @@ func mergeLimits(path string, smp sample, now time.Time) (mergeResult, error) {
 	}
 	res = snapshot.merge(smp, now)
 	res.snapshot = snapshot
-	if smp.week != nil && res.verdict == weekRaised {
+	if res.verdict == weekRaised {
 		step := limitStep{At: now.Truncate(time.Second), ResetsAt: res.merged.resetsAt, SevenDay: res.merged.used, Session: smp.session, Account: res.owner}
 		if err := appendStep(limitsHistory(path), step); err != nil {
 			return res, err
@@ -197,8 +182,8 @@ func mergeLimits(path string, smp sample, now time.Time) (mergeResult, error) {
 	return res, saveLimits(path, snapshot)
 }
 
-// merge вносит замер в неделю его сброса и пятичасовое окно его учётки,
-// убирает прошедшие окна и пересчитывает верхние поля
+// merge вносит замер в неделю его сброса, убирает прошедшие недели и
+// пересчитывает верхние поля
 func (s *limitsSnapshot) merge(smp sample, now time.Time) mergeResult {
 	stamp := now.Truncate(time.Second)
 	kept := s.Weeks[:0]
@@ -208,18 +193,9 @@ func (s *limitsSnapshot) merge(smp sample, now time.Time) mergeResult {
 		}
 	}
 	s.Weeks = kept
-	keptFive := s.FiveHours[:0]
-	for _, rec := range s.FiveHours {
-		if rec.ResetsAt.After(now) {
-			keptFive = append(keptFive, rec)
-		}
-	}
-	s.FiveHours = keptFive
 
-	res := mergeResult{verdict: weekRaised, owner: smp.account}
-	if smp.week != nil {
-		res.merged, res.verdict, res.owner = s.mergeWeek(*smp.week, smp, stamp)
-	}
+	var res mergeResult
+	res.merged, res.verdict, res.owner = s.mergeWeek(smp.week, smp, stamp)
 	if !smp.exact || !s.ResetsAt.After(now) {
 		// Замер API — обычно неактивной учётки: верхние поля (учётка, что
 		// тратит сейчас) он не меняет, пока их неделя не кончилась
@@ -229,9 +205,7 @@ func (s *limitsSnapshot) merge(smp sample, now time.Time) mergeResult {
 		}
 		s.pickTop(active)
 	}
-	if smp.five != nil && res.owner != "" {
-		s.mergeFive(res.owner, *smp.five, stamp)
-	}
+
 	return res
 }
 
@@ -361,25 +335,6 @@ func (s *limitsSnapshot) weeksOf(account string) int {
 		}
 	}
 	return n
-}
-
-// mergeFive вносит пятичасовое окно учётки: внутри окна доля только растёт,
-// окно с более поздним сбросом сменяет прежнее, более раннее — старый ответ
-func (s *limitsSnapshot) mergeFive(account string, five weeklyUsage, stamp time.Time) {
-	for i := range s.FiveHours {
-		rec := &s.FiveHours[i]
-		if rec.Account != account {
-			continue
-		}
-		switch {
-		case five.resetsAt.After(rec.ResetsAt):
-			rec.ResetsAt, rec.Used, rec.SeenAt = five.resetsAt, five.used, stamp
-		case five.resetsAt.Equal(rec.ResetsAt):
-			rec.Used, rec.SeenAt = max(rec.Used, five.used), stamp
-		}
-		return
-	}
-	s.FiveHours = append(s.FiveHours, fiveRecord{Account: account, ResetsAt: five.resetsAt, Used: five.used, SeenAt: stamp})
 }
 
 // pickTop ставит в верхние поля неделю учётки active, что сейчас у Claude
@@ -587,8 +542,8 @@ func WriteLimits(w io.Writer, steps bool) error {
 		if store.AutoOff {
 			auto = "выключено (chooks account auto on)"
 		}
-		fmt.Fprintf(w, "Автопереключение: %s; учётка пуста с %g%% недели или %d%% пяти часов, из непустых — ближайший сброс недели\n",
-			auto, accounts.WeekEmptyPercent, accounts.FiveHourEmptyPercent)
+		fmt.Fprintf(w, "Автопереключение: %s; учётка пуста с %g%% недели, из непустых — ближайший сброс недели\n",
+			auto, accounts.WeekEmptyPercent)
 		f, err := forecastPool(store, snapshot, limitsHistory(path), now)
 		if err != nil {
 			fmt.Fprintf(w, "Пул учёток: прогноза нет — %v\n", err)
@@ -620,7 +575,7 @@ func WriteLimits(w io.Writer, steps bool) error {
 	return nil
 }
 
-// writeAccount печатает учётку: почта, неделя, пять часов, срок входа
+// writeAccount печатает учётку: почта, неделя, срок входа
 func writeAccount(w io.Writer, info accounts.Info, snapshot *limitsSnapshot, shown map[int]bool, now time.Time) {
 	mark := ""
 	if info.Active {
@@ -641,11 +596,7 @@ func writeAccount(w io.Writer, info accounts.Info, snapshot *limitsSnapshot, sho
 	} else {
 		fmt.Fprintln(w, "  неделя неизвестна или не начата")
 	}
-	for _, rec := range snapshot.FiveHours {
-		if rec.Account == info.Email && rec.ResetsAt.After(now) {
-			fmt.Fprintf(w, "  пять часов %g%%, сброс %s\n", rec.Used, accounts.ShortTime(rec.ResetsAt))
-		}
-	}
+
 	switch {
 	case info.Dead != "":
 		fmt.Fprintf(w, "  вход мёртв: %s\n", info.Dead)
@@ -670,8 +621,8 @@ func latestWeek(weeks []weekRecord) int {
 	return latest
 }
 
-// accountUsage — расход учёток по снимку: свежайшая неделя и пять часов
-// каждой опознанной учётки
+// accountUsage — расход учёток по снимку: свежайшая неделя каждой опознанной
+// учётки
 func accountUsage(s *limitsSnapshot, now time.Time) map[string]accounts.Usage {
 	out := map[string]accounts.Usage{}
 	for _, rec := range s.Weeks {
@@ -684,14 +635,7 @@ func accountUsage(s *limitsSnapshot, now time.Time) map[string]accounts.Usage {
 		}
 		out[rec.Account] = u
 	}
-	for _, rec := range s.FiveHours {
-		if rec.Account == "" || !rec.ResetsAt.After(now) {
-			continue
-		}
-		u := out[rec.Account]
-		u.Email, u.FiveHour = rec.Account, accounts.Window{Used: rec.Used, ResetsAt: rec.ResetsAt}
-		out[rec.Account] = u
-	}
+
 	return out
 }
 
@@ -714,17 +658,11 @@ func (SnapshotLimits) Usage() (map[string]accounts.Usage, error) {
 
 // Record вписывает расход учётки, спрошенный у API её токеном: учётка
 // известна точно. Окно без сброса (неделя не начата) не пишется
-func (SnapshotLimits) Record(email string, week, fiveHour accounts.Window, now time.Time) error {
-	smp := sample{session: "api", account: email, exact: true}
-	if !week.ResetsAt.IsZero() {
-		smp.week = &weeklyUsage{used: week.Used, resetsAt: week.ResetsAt}
-	}
-	if !fiveHour.ResetsAt.IsZero() {
-		smp.five = &weeklyUsage{used: fiveHour.Used, resetsAt: fiveHour.ResetsAt}
-	}
-	if smp.week == nil && smp.five == nil {
+func (SnapshotLimits) Record(email string, week accounts.Window, now time.Time) error {
+	if week.ResetsAt.IsZero() {
 		return nil
 	}
+	smp := sample{week: weeklyUsage{used: week.Used, resetsAt: week.ResetsAt}, session: "api", account: email, exact: true}
 	_, err := recordLimits(smp, now)
 	return err
 }

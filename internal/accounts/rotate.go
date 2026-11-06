@@ -37,7 +37,7 @@ const (
 // и куда пишет расход, спрошенный у API
 type Limits interface {
 	Usage() (map[string]Usage, error)
-	Record(email string, week, fiveHour Window, now time.Time) error
+	Record(email string, week Window, now time.Time) error
 }
 
 // Rotator ведёт хранилище и переключает учётки
@@ -276,7 +276,7 @@ func (r *Rotator) fetchUsage(ctx context.Context, s *Store, a *Account) error {
 	if err != nil {
 		return err
 	}
-	return r.Limits.Record(a.Email, u.Week, u.FiveHour, now)
+	return r.Limits.Record(a.Email, u.Week, now)
 }
 
 // Switch переключает на учётку вручную и выключает автоматическое

@@ -79,14 +79,7 @@ func TestChoose(t *testing.T) {
 			usage: map[string]Usage{"a": week(100, day), "b": week(100, 2*day), "c": week(99.5, 3*day)},
 			want:  "a", reason: "все учётки пусты",
 		},
-		{
-			name: "пять часов на исходе — пустая", active: "a",
-			usage: map[string]Usage{
-				"a": {Week: Window{Used: 10, ResetsAt: now.Add(day)}, FiveHour: Window{Used: 96, ResetsAt: now.Add(time.Hour)}},
-				"b": week(10, 2*day), "c": week(10, 3*day),
-			},
-			want: "b", reason: "пять часов",
-		},
+
 		{
 			name: "мёртвый вход не выбирается", active: "a", dead: "b",
 			usage: map[string]Usage{"a": week(99, 5*day), "b": week(10, day), "c": week(10, 3*day)},

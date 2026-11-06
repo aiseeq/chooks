@@ -89,7 +89,6 @@ type Input struct {
 
 	RateLimits struct {
 		SevenDay *WeeklyLimit `json:"seven_day"`
-		FiveHour *WeeklyLimit `json:"five_hour"`
 	} `json:"rate_limits"`
 }
 
@@ -143,10 +142,8 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	var snapshot *limitsSnapshot
 	limit := input.RateLimits.SevenDay
 	if week, ok := limit.usage(); ok {
-		smp := sample{week: &week, session: input.SessionID, account: store.ActiveEmail()}
-		if five, ok := input.RateLimits.FiveHour.usage(); ok {
-			smp.five = &five
-		}
+		smp := sample{week: week, session: input.SessionID, account: store.ActiveEmail()}
+
 		res, err := recordLimits(smp, now)
 		switch {
 		case err != nil:

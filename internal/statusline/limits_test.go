@@ -33,7 +33,7 @@ func readSnapshot(t *testing.T, path string) limitsSnapshot {
 
 func merge(t *testing.T, path string, used float64, resets time.Time, session string, now time.Time) (weeklyUsage, weekVerdict) {
 	t.Helper()
-	res, err := mergeLimits(path, sample{week: &weeklyUsage{used: used, resetsAt: resets}, session: session}, now)
+	res, err := mergeLimits(path, sample{week: weeklyUsage{used: used, resetsAt: resets}, session: session}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestMergeWeeklyLimitConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(used float64) {
 			defer wg.Done()
-			if _, err := mergeLimits(path, sample{week: &weeklyUsage{used: used, resetsAt: workResets}, session: "s"}, now); err != nil {
+			if _, err := mergeLimits(path, sample{week: weeklyUsage{used: used, resetsAt: workResets}, session: "s"}, now); err != nil {
 				errs <- err
 			}
 		}(float64(i))

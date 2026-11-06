@@ -103,8 +103,8 @@ func TestRotateSwitchesFromEmptyAccount(t *testing.T) {
 	f.now = f.now.Add(usageStale)
 	f.limits.set(work.email, 100, f.now.Add(4*day))
 	resets := f.now.Add(2 * day).Truncate(time.Minute)
-	f.usage["personal"] = fmt.Sprintf(`{"five_hour":{"utilization":3,"resets_at":%q},"seven_day":{"utilization":10,"resets_at":%q}}`,
-		f.now.Add(time.Hour).Format(time.RFC3339), resets.Add(-50*time.Millisecond).Format(time.RFC3339Nano))
+	f.usage["personal"] = fmt.Sprintf(`{"five_hour":null,"seven_day":{"utilization":10,"resets_at":%q}}`,
+		resets.Add(-50*time.Millisecond).Format(time.RFC3339Nano))
 
 	if _, err := f.r.Rotate(context.Background(), Options{}); err != nil {
 		t.Fatal(err)

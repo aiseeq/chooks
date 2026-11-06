@@ -11,12 +11,8 @@ import (
 // статуса отдаёт долю целым числом: на пороге 99.5 переключение срабатывало
 // только на целом 100, когда запросы уже отклонялись (22.10: 13:52:52 доля
 // 99, 14:00:11 — 100 и 429), порог 99 срабатывает на целом 99 (пользователь
-// 22.10: «Сместим на пол-процента планку?»). Пять часов: окно меньше, запрос
-// в нём весомее — 95%
-const (
-	WeekEmptyPercent     = 99.0
-	FiveHourEmptyPercent = 95
-)
+// 22.10: «Сместим на пол-процента планку?»)
+const WeekEmptyPercent = 99.0
 
 // weekWindow — недельное окно: неначатая неделя кончится не раньше
 const weekWindow = 168 * time.Hour
@@ -27,9 +23,8 @@ const loginMargin = time.Hour
 
 // Usage — расход учётки по снимку строки статуса (по почте учётки)
 type Usage struct {
-	Email    string
-	Week     Window
-	FiveHour Window
+	Email string
+	Week  Window
 }
 
 // state — что ротация знает об учётке сейчас
@@ -101,11 +96,8 @@ func statesWith(s *Store, usage map[string]Usage, now time.Time, usable func(*Ac
 		if u.Week.ResetsAt.After(now) {
 			st.week, st.weekKnown, st.resets = u.Week, true, u.Week.ResetsAt
 		}
-		switch {
-		case st.weekKnown && st.week.Used >= WeekEmptyPercent:
+		if st.weekKnown && st.week.Used >= WeekEmptyPercent {
 			st.empty = fmt.Sprintf("неделя %.0f%%", st.week.Used)
-		case u.FiveHour.ResetsAt.After(now) && u.FiveHour.Used >= FiveHourEmptyPercent:
-			st.empty = fmt.Sprintf("пять часов %.0f%% до %s", u.FiveHour.Used, ShortTime(u.FiveHour.ResetsAt))
 		}
 		out = append(out, st)
 	}

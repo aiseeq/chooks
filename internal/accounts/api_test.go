@@ -48,7 +48,7 @@ func TestRefreshKeepsRefreshToken(t *testing.T) {
 // Неначатое окно приходит без сброса; сброс округляется до минуты
 func TestUsageWindows(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		fmt.Fprint(w, `{"five_hour":{"utilization":0,"resets_at":null},"seven_day":{"utilization":95,"resets_at":"2026-10-26T09:59:59.950000+00:00"}}`)
+		fmt.Fprint(w, `{"five_hour":null,"seven_day":{"utilization":95,"resets_at":"2026-10-26T09:59:59.950000+00:00"}}`)
 	}))
 	defer srv.Close()
 	client := NewClient("test")
@@ -57,7 +57,7 @@ func TestUsageWindows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.FiveHour.ResetsAt.IsZero() || got.Week.Used != 95 || !got.Week.ResetsAt.Equal(time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)) {
+	if got.Week.Used != 95 || !got.Week.ResetsAt.Equal(time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)) {
 		t.Errorf("окна: %+v", got)
 	}
 }

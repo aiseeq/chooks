@@ -77,11 +77,10 @@ type Window struct {
 	ResetsAt time.Time
 }
 
-// usage — недельное и пятичасовое окна учётки
+// usage — недельное окно учётки
 type usage struct {
-	Week     Window
-	FiveHour Window
-	At       time.Time
+	Week Window
+	At   time.Time
 }
 
 // Usage читает расход учётки: /api/oauth/usage, тот же ответ видит /usage
@@ -91,7 +90,6 @@ func (c *Client) Usage(ctx context.Context, accessToken string, now time.Time) (
 		ResetsAt    *string  `json:"resets_at"`
 	}
 	var body struct {
-		FiveHour *window `json:"five_hour"`
 		SevenDay *window `json:"seven_day"`
 	}
 	headers := map[string]string{"anthropic-beta": usageBeta}
@@ -121,11 +119,7 @@ func (c *Client) Usage(ctx context.Context, accessToken string, now time.Time) (
 	if err != nil {
 		return usage{}, err
 	}
-	five, err := convert("five_hour", body.FiveHour)
-	if err != nil {
-		return usage{}, err
-	}
-	return usage{Week: week, FiveHour: five, At: now}, nil
+	return usage{Week: week, At: now}, nil
 }
 
 // refreshed — ответ обновления токена

@@ -255,7 +255,6 @@ func stopEvent(t *testing.T, env *questionEnv, input *core.ToolInput) bool {
 // На проверяемом конце хода Stop-хук молчит и состояние не пишет: его
 // запишет question-check после вердикта
 func TestStopMutedWhileQuestionCheckJudges(t *testing.T) {
-
 	env := newQuestionEnv(t, "lead", true)
 	input := env.input("muted", questionText, false)
 
@@ -295,7 +294,6 @@ func TestQuestionCheckSilentWhenStateChangedDuringCheck(t *testing.T) {
 // функцией: на проверяемом конце хода пишет и звонит только question-check,
 // на остальных — только Stop-хук. Звонок ровно один, состояние — done
 func TestParallelStopHooksRingOnce(t *testing.T) {
-
 	cases := []struct {
 		name, message string
 		stopRings     bool

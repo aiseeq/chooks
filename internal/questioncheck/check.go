@@ -224,13 +224,13 @@ func AppendJSONL(path string, entry any) error {
 // делит записи по ней. 1 (поля нет) — до 26.10, 2 — снятый вопрос агент
 // показывает строкой «Хотел спросить…» (пользователь 26.10: «если я мог бы
 // видеть что-то типа: "Я хотел спросить Х, но нашёл в Y что ответ Z" - это
-// было бы лучшим вариантом»)
-const BlockRev = 2
+// было бы лучшим вариантом»), 3 — с 07.11 в первой строке нет срока пробы
+const BlockRev = 3
 
 // BlockReason — текст, который агент получит вместо конца хода
 func BlockReason(verdict Verdict) string {
 	var b strings.Builder
-	b.WriteString("Проверка вопросов (эксперимент до 06.11): судья счёл вопрос пользователю лишним.\n")
+	b.WriteString("Проверка вопросов: судья счёл вопрос пользователю лишним.\n")
 	for _, finding := range verdict.Lishnie {
 		fmt.Fprintf(&b, "- «%s»: %s", finding.Quote, finding.Why)
 		if finding.Where != "" {

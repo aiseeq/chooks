@@ -233,6 +233,13 @@ func TestBashRuleFile_MissedForms(t *testing.T) {
 		"perl -pe s/a/b/ -i CLAUDE.md",
 		"perl -I/lib -pi -e s/a/b/ CLAUDE.md",
 		"awk 'BEGIN{system(\"sub a b CLAUDE.md\")}'",
+		// ; | & в кавычках скрипта, перенос строки, \n перед sed: проверка b3f4859
+		"sed -e 's/a/b/; s/c/d/' -i CLAUDE.md",
+		"sed -E 's/(a|b)/c/' CLAUDE.md -i",
+		"perl -pe 's/a/b/; s/c/d/' -i CLAUDE.md",
+		"sed 's/&/x/' -i CLAUDE.md",
+		"sed -e 's/a/b/' \\\n-i CLAUDE.md",
+		"printf 'cd /x\\nsed -i s/a/b/ CLAUDE.md\\n' | sh",
 	}
 	for _, command := range commands {
 		if got := bashRuleFile(command); got != "CLAUDE.md" {

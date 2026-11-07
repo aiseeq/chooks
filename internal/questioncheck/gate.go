@@ -1,8 +1,6 @@
 package questioncheck
 
 import (
-	"time"
-
 	"github.com/aiseeq/chooks/internal/core"
 )
 
@@ -16,7 +14,7 @@ type Scope struct {
 type GateStatus int
 
 const (
-	// GateSkip — не её конец хода: срок, субагент, чужая сессия, нет вопроса
+	// GateSkip — не её конец хода: субагент, чужая сессия, нет вопроса
 	GateSkip GateStatus = iota
 	// GateAfterBlock — ход после остановки: только запись в журнал
 	GateAfterBlock
@@ -34,11 +32,11 @@ type Gate struct {
 
 // Gate решает, позовёт ли проверка судью. Им же пользуется Stop-хук
 // оповещений: на GateJudge он не звонит, звонит question-check после
-// вердикта. Транскрипт не читается — только вход хука и запись сессии
-func (s Scope) Gate(now time.Time, event Event) Gate {
-	if !now.Before(Until) {
-		return Gate{Skip: "эксперимент окончен " + Until.Format("02.01 15:04 MST")}
-	}
+// вердикта. Транскрипт не читается — только вход хука и запись сессии.
+// Срока нет: проба кончилась 07.11, и пользователь оставил проверку как есть
+// (07.11 «Вроде бы фича полезная и работает», decisions.md
+// question-checker-tune)
+func (s Scope) Gate(event Event) Gate {
 	if event.AgentID != "" {
 		return Gate{Skip: "субагент"}
 	}

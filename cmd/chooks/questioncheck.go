@@ -54,7 +54,7 @@ func runQuestionCheck(ctx context.Context, input *core.ToolInput, config *core.C
 		return
 	}
 	// Тем же решением Stop-хук только что отдал звонок сюда
-	awaited := stopAwaitsQuestionCheck(input, config, logger, started)
+	awaited := stopAwaitsQuestionCheck(input, config, logger)
 	checker, err := newQuestionChecker(logger)
 	if err != nil {
 		logger.Warn("question check unavailable", "error", err)
@@ -122,7 +122,7 @@ func ringAfterQuestionCheck(input *core.ToolInput, config *core.Config, logger c
 // questioncheck.Scope.Gate — та же функция, что внутри проверки; сверх неё —
 // включена ли проверка в config.yaml и стоит ли она в settings.json. Любая
 // неясность — звонит сам Stop-хук
-func stopAwaitsQuestionCheck(input *core.ToolInput, config *core.Config, logger core.Logger, now time.Time) bool {
+func stopAwaitsQuestionCheck(input *core.ToolInput, config *core.Config, logger core.Logger) bool {
 	if !questionCheckEnabled(config) {
 		return false
 	}
@@ -131,7 +131,7 @@ func stopAwaitsQuestionCheck(input *core.ToolInput, config *core.Config, logger 
 		logger.Warn("question check scope unknown, stop rings itself", "error", err)
 		return false
 	}
-	if defaultScope(home).Gate(now, questionCheckEvent(input)).Status != questioncheck.GateJudge {
+	if defaultScope(home).Gate(questionCheckEvent(input)).Status != questioncheck.GateJudge {
 		return false
 	}
 	registered, err := questioncheck.Registered(filepath.Join(home, ".claude", "settings.json"))

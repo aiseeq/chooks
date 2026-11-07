@@ -106,7 +106,7 @@ func DefaultJournalPath() (string, error) {
 // сбой судьи не повод держать человека без ответа
 func (c Checker) Run(ctx context.Context, event Event) Result {
 	now := c.Now()
-	gate := c.Scope.Gate(now, event)
+	gate := c.Scope.Gate(event)
 	if gate.Status == GateSkip {
 		return Result{Skip: gate.Skip}
 	}

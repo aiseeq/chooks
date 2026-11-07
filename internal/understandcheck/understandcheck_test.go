@@ -207,6 +207,51 @@ func TestBashRuleFile_RealEdit(t *testing.T) {
 	}
 }
 
+// Формы вызова редактора, которые регулярка пропускала (тикет
+// understand-bash-editor-missed-forms, проверка 05.11)
+func TestBashRuleFile_MissedForms(t *testing.T) {
+	commands := []string{
+		"'sub' a b CLAUDE.md",
+		"\"sub\" a b CLAUDE.md",
+		"\\sub a b CLAUDE.md",
+		"~/bin/sub a b CLAUDE.md",
+		"$HOME/bin/sub a b CLAUDE.md",
+		"\"$HOME/bin/tee\" CLAUDE.md",
+		"bash -c \"sub a b CLAUDE.md\"",
+		"bash --norc -c 'tee CLAUDE.md </dev/null'",
+		"zsh -c 'sub a b CLAUDE.md'",
+		"fish -c 'sub a b CLAUDE.md'",
+		"timeout 5 bash -c 'sub a b CLAUDE.md'",
+		"bash -c $'sub a b CLAUDE.md'",
+		"bash -c \"bash -c 'sub a b CLAUDE.md'\"",
+		"E=sub; $E a b CLAUDE.md",
+		"r=`sub a b CLAUDE.md`",
+		"sed --in-place=.bak s/a/b/ CLAUDE.md",
+		"sed -nEi s/a/b/p CLAUDE.md",
+		"sed -e s/a/b/ -i CLAUDE.md",
+		"sed s/a/b/ CLAUDE.md -i",
+		"perl -pe s/a/b/ -i CLAUDE.md",
+		"perl -I/lib -pi -e s/a/b/ CLAUDE.md",
+		"awk 'BEGIN{system(\"sub a b CLAUDE.md\")}'",
+	}
+	for _, command := range commands {
+		if got := bashRuleFile(command); got != "CLAUDE.md" {
+			t.Errorf("%q: got %q, want CLAUDE.md", command, got)
+		}
+	}
+	// Цель перенаправления с переменной, без слова редактора в команде
+	redirects := map[string]string{
+		"{ echo x; } >> \"$HOME/.claude/CLAUDE.md\"": "$HOME/.claude/CLAUDE.md",
+		"echo x > \"$D/CLAUDE.md\"":                  "$D/CLAUDE.md",
+		"echo x > ${D}/CLAUDE.md":                    "${D}/CLAUDE.md",
+	}
+	for command, want := range redirects {
+		if got := bashRuleFile(command); got != want {
+			t.Errorf("%q: got %q, want %q", command, got, want)
+		}
+	}
+}
+
 func TestClassify_EditOutsideInstructions(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{"file_path": "/home/u/git/x/main.go", "old_string": "a", "new_string": "b"})
 	if _, _, _, ok := classify("Edit", raw); ok {

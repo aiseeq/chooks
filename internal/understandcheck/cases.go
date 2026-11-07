@@ -73,15 +73,20 @@ func IsInstructionFile(path string) bool {
 	return instructionFile.MatchString(filepath.Clean(path))
 }
 
-// bashPath — путь к файлу инструкций в команде Bash
-var bashPath = regexp.MustCompile(`[~\w./-]*(?:CLAUDE\.md|AGENTS\.md|SKILL\.md|\.claude/(?:skills|rules|agents|hooks|improve/prompts)/[\w./-]+|\.claude/projects/[^/\s]+/memory/[\w./-]+|\.claude/decisions\.md|\.claude/settings(?:\.local)?\.json)`)
+// bashPath — путь к файлу инструкций в команде Bash; переменная в пути
+// ($HOME, ${D}) — его часть
+var bashPath = regexp.MustCompile(`[~$\w{}./-]*(?:CLAUDE\.md|AGENTS\.md|SKILL\.md|\.claude/(?:skills|rules|agents|hooks|improve/prompts)/[\w./-]+|\.claude/projects/[^/\s]+/memory/[\w./-]+|\.claude/decisions\.md|\.claude/settings(?:\.local)?\.json)`)
 
 // bashEditor — команда правит файлы, названные в ней: sub из akit, sed -i,
 // perl -i, tee. Ищется в тексте, и слово в кавычках тоже срабатывает: это один
 // лишний вызов судьи. Исключения по разбору оболочки пробовались и сняты (тикет
 // understand-bash-editor-quoted, aa76883, 93aa24c): пропускали настоящие правки,
-// а на 132 случаях за 7 дней не сработали ни разу
-var bashEditor = regexp.MustCompile(`(?:^|[\s;&|(])(?:sub|tee)(?:\s|$)|\bsed\s+(?:-\w+\s+)*-i|\bperl\s+(?:-\w+\s+)*-\w*i`)
+// а на 132 случаях за 7 дней не сработали ни разу. Имя редактора — и в
+// кавычках, после пути, \, = и обратного апострофа (bash -c "sub …", ~/bin/sub,
+// E=sub); флаг -i и --in-place у sed и perl — в любом месте до конца простой
+// команды (тикет understand-bash-editor-missed-forms). Лишнее срабатывание
+// стоит вызова судьи, и только когда в команде назван файл инструкций
+var bashEditor = regexp.MustCompile(`(?:^|[\s;&|(\x60'"\\/=])(?:sub|tee)(?:[\s;'"\x60]|$)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-\w*i|--in-place)`)
 
 // bashRedirect — перенаправление вывода в файл инструкций
 var bashRedirect = regexp.MustCompile(`>{1,2}\s*["']?(` + bashPath.String() + `)`)

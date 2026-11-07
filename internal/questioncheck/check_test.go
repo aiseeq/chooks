@@ -219,14 +219,16 @@ func TestRun_SubagentIsNoop(t *testing.T) {
 	}
 }
 
-// Проба кончилась 07.11 00:00, проверка осталась без срока: решение
-// пользователя 07.11 «Вроде бы фича полезная и работает» (decisions.md
-// question-checker-tune)
-func TestRun_JudgesAfterProbeEnd(t *testing.T) {
+func TestRun_AfterDeadlineIsNoop(t *testing.T) {
 	f := newFixture(t, "lead", "~")
-	f.checker.Now = func() time.Time { return time.Date(2026, time.November, 7, 13, 0, 0, 0, time.Local) }
-	if result := f.checker.Run(context.Background(), f.event(questionMessage)); result.Skip != "" || f.judge.calls != 1 {
-		t.Fatalf("07.11 13:00: result = %+v, calls = %d", result, f.judge.calls)
+	f.checker.Now = func() time.Time { return Until }
+	if result := f.checker.Run(context.Background(), f.event(questionMessage)); result.Skip == "" || f.judge.calls != 0 {
+		t.Fatalf("result = %+v, calls = %d", result, f.judge.calls)
+	}
+	f.checker.Now = func() time.Time { return Until.Add(-time.Minute) }
+	f.checker.Run(context.Background(), f.event(questionMessage))
+	if f.judge.calls != 1 {
+		t.Fatalf("06.11 23:59 still in the experiment, calls = %d", f.judge.calls)
 	}
 }
 

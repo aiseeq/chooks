@@ -16,8 +16,7 @@ import (
 	"github.com/aiseeq/chooks/internal/questioncheck"
 )
 
-// questionDay — время записи в журнал проверки: решения в тестах от часов не
-// зависят
+// questionDay — день внутри эксперимента: решения в тестах от часов не зависят
 var questionDay = time.Date(2026, 10, 23, 12, 0, 0, 0, time.Local)
 
 const questionText = "Посчитал. Поменять лимит на 200?"
@@ -114,7 +113,7 @@ func (e *questionEnv) checker(judge questioncheck.Judge) questioncheck.Checker {
 // check прогоняет question-check так, как после отданного звонка
 func (e *questionEnv) check(t *testing.T, judge questioncheck.Judge, input *core.ToolInput) (questioncheck.Result, string, bool) {
 	t.Helper()
-	awaited := stopAwaitsQuestionCheck(input, e.config, e.logger)
+	awaited := stopAwaitsQuestionCheck(input, e.config, e.logger, questionDay)
 	var out strings.Builder
 	result, decision := checkStop(context.Background(), e.checker(judge), stopCheck{
 		input: input, config: e.config, logger: e.logger, out: &out, awaited: awaited, started: time.Now(),
@@ -189,15 +188,17 @@ func TestStopAwaitsQuestionCheck(t *testing.T) {
 		message    string
 		afterBlock bool
 		subagent   bool
+		now        time.Time
 		awaits     bool
 	}{
-		{name: "вопрос в сессии лида", session: "lead", registered: true, message: questionText, awaits: true},
-		{name: "чужая сессия", session: "projectA-master", registered: true, message: questionText},
-		{name: "без вопроса", session: "lead", registered: true, message: "Готово, коммит abc123."},
-		{name: "ход после остановки", session: "lead", registered: true, message: questionText, afterBlock: true},
-		{name: "субагент", session: "lead", registered: true, message: questionText, subagent: true},
-		{name: "не стоит в settings.json", session: "lead", message: questionText},
-		{name: "выключен в config.yaml", session: "lead", registered: true, disabled: true, message: questionText},
+		{name: "вопрос в сессии лида", session: "lead", registered: true, message: questionText, now: questionDay, awaits: true},
+		{name: "чужая сессия", session: "projectA-master", registered: true, message: questionText, now: questionDay},
+		{name: "без вопроса", session: "lead", registered: true, message: "Готово, коммит abc123.", now: questionDay},
+		{name: "ход после остановки", session: "lead", registered: true, message: questionText, afterBlock: true, now: questionDay},
+		{name: "субагент", session: "lead", registered: true, message: questionText, subagent: true, now: questionDay},
+		{name: "после срока", session: "lead", registered: true, message: questionText, now: questioncheck.Until},
+		{name: "не стоит в settings.json", session: "lead", message: questionText, now: questionDay},
+		{name: "выключен в config.yaml", session: "lead", registered: true, disabled: true, message: questionText, now: questionDay},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -209,7 +210,7 @@ func TestStopAwaitsQuestionCheck(t *testing.T) {
 			if tc.subagent {
 				input.AgentID = "agent-1"
 			}
-			if got := stopAwaitsQuestionCheck(input, env.config, env.logger); got != tc.awaits {
+			if got := stopAwaitsQuestionCheck(input, env.config, env.logger, tc.now); got != tc.awaits {
 				t.Errorf("stopAwaitsQuestionCheck = %v, ожидалось %v", got, tc.awaits)
 			}
 		})
@@ -255,6 +256,9 @@ func stopEvent(t *testing.T, env *questionEnv, input *core.ToolInput) bool {
 // На проверяемом конце хода Stop-хук молчит и состояние не пишет: его
 // запишет question-check после вердикта
 func TestStopMutedWhileQuestionCheckJudges(t *testing.T) {
+	if !time.Now().Before(questioncheck.Until) {
+		t.Skip("эксперимент окончен: Stop-хук больше не отдаёт звонок")
+	}
 	env := newQuestionEnv(t, "lead", true)
 	input := env.input("muted", questionText, false)
 
@@ -294,6 +298,9 @@ func TestQuestionCheckSilentWhenStateChangedDuringCheck(t *testing.T) {
 // функцией: на проверяемом конце хода пишет и звонит только question-check,
 // на остальных — только Stop-хук. Звонок ровно один, состояние — done
 func TestParallelStopHooksRingOnce(t *testing.T) {
+	if !time.Now().Before(questioncheck.Until) {
+		t.Skip("эксперимент окончен: Stop-хук больше не отдаёт звонок")
+	}
 	cases := []struct {
 		name, message string
 		stopRings     bool

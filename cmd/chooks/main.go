@@ -318,7 +318,7 @@ func runSessionEvent(eventName string, data []byte, config *core.Config, logger 
 	// вердикт «лишний» агент продолжит. Звонит тогда question-check после
 	// вердикта, а состояние сессии до него не трогается — им же решается
 	// переход, по которому звонят
-	if eventName == core.EventStop && stopAwaitsQuestionCheck(input, config, logger) {
+	if eventName == core.EventStop && stopAwaitsQuestionCheck(input, config, logger, time.Now()) {
 		logger.Info("alert muted", "hook", eventName, "session", input.SessionID, "reason", reasonAwaitsQuestionCheck)
 		return
 	}

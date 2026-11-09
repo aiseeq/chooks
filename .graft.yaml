@@ -51,7 +51,8 @@ tasks:
   test:
     desc: тесты
     usage: <флаги go test, например -run TestX>
-    run: ['go test {args} ./...']
+    tests: go
+    run: ['go test -json {args} ./...']
   test-race:
     desc: тесты с детектором гонок
     run: [go test -race ./...]
@@ -86,11 +87,12 @@ tasks:
     run: [rm -rf bin coverage.out]
   smoke:
     desc: гейт коммита, сборка и тесты
+    tests: go
     # Без remote: go test здесь идёт из кеша 0–1 с, на PC с холодным кешем
     # 9–14 с; ожидание гейта - допуск местных шагов (graft-master 31.10)
     run:
       - go build ./...
-      - go test ./...
+      - go test -json ./...
 
 # go fix -diff ./... после go vet: модернизаторы тулчейна не оставляют правок.
 go_fix:

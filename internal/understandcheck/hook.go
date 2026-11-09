@@ -20,14 +20,6 @@ import (
 	"github.com/aiseeq/chooks/internal/tailscan"
 )
 
-// Until — конец пробы: после него хук ничего не делает. «Да» пользователя
-// 02.11 15:15 CET в сессии лида (tl 2a879c2d:1734: «"Нужно твоё «да»" -
-// ставь») на «Включаю на неделю пробой?» (tl 2a879c2d:1672). Итог — по
-// журналу, тикет understand-check-probe
-//
-//nolint:magic-number // дата конца пробы — сама настройка, имя ей Until
-var Until = time.Date(2026, time.November, 9, 15, 30, 0, 0, time.Local)
-
 // Исходы в журнале
 const (
 	VerdictOK       = "ok"
@@ -120,9 +112,6 @@ func DefaultPaths() (journal, denied string, err error) {
 // проверки не повод держать агента
 func (h Hook) Run(ctx context.Context, call Call) Outcome {
 	started := h.Now()
-	if !started.Before(Until) {
-		return Outcome{Skip: "проба кончилась " + Until.Format("02.01 15:04")}
-	}
 	if call.AgentID != "" {
 		return Outcome{Skip: "суб-агент"}
 	}

@@ -39,7 +39,7 @@ tools:
   # инструкций (Edit, Write, MultiEdit, Bash с sub, sed -i, tee, перенаправлением):
   # судья-модель сверяет действие с репликой пользователя, на расхождение — один
   # отказ, повтор того же вызова проходит (PreToolUse, подкоманда
-  # understand-check). Проба до 09.11 15:30; журнал —
+  # understand-check); журнал —
   # ~/.local/state/chooks/understand-check.jsonl. Включает регистрация подкоманды
   # в settings.json; без ключа включено
   understand_check:

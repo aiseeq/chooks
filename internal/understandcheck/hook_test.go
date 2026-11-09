@@ -169,7 +169,7 @@ func newHookFixture(t *testing.T, answer string, lines ...string) hookFixture {
 			JournalPath: filepath.Join(dir, "journal.jsonl"),
 			DeniedDir:   filepath.Join(dir, "denied"),
 			Budget:      time.Second,
-			Now:         func() time.Time { return Until.Add(-time.Hour) },
+			Now:         func() time.Time { return time.Date(2026, time.November, 9, 14, 30, 0, 0, time.Local) },
 			Warn:        func(string, ...any) {},
 		},
 		judge: judge,
@@ -315,23 +315,18 @@ func TestHook_SkipsWithoutJudge(t *testing.T) {
 		name  string
 		lines []string
 		call  func(f hookFixture) Call
-		now   time.Time
 	}{
-		{"subagent", nil, func(f hookFixture) Call { c := f.send("x", "t"); c.AgentID = "a1"; return c }, time.Time{}},
+		{"subagent", nil, func(f hookFixture) Call { c := f.send("x", "t"); c.AgentID = "a1"; return c }},
 		{"edit outside instructions", nil, func(f hookFixture) Call {
 			return Call{SessionID: "sess-1", TranscriptPath: f.path, Tool: "Edit", Input: edit}
-		}, time.Time{}},
+		}},
 		{"plain bash", nil, func(f hookFixture) Call {
 			return Call{SessionID: "sess-1", TranscriptPath: f.path, Tool: "Bash", Input: bash}
-		}, time.Time{}},
-		{"peer turn", peerTurn, func(f hookFixture) Call { return f.send("lead", "итог") }, time.Time{}},
-		{"probe over", nil, func(f hookFixture) Call { return f.send("x", "t") }, Until},
+		}},
+		{"peer turn", peerTurn, func(f hookFixture) Call { return f.send("lead", "итог") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHookFixture(t, fixAnswer, tc.lines...)
-			if !tc.now.IsZero() {
-				f.hook.Now = func() time.Time { return tc.now }
-			}
 			out := f.hook.Run(context.Background(), tc.call(f))
 			if out.Deny || out.Skip == "" || f.judge.calls != 0 {
 				t.Fatalf("must skip without judge: %+v, calls %d", out, f.judge.calls)

@@ -401,3 +401,20 @@ func TestClipHeadHidesSecretTail(t *testing.T) {
 		t.Errorf("key tail passed: %q", got)
 	}
 }
+
+// Отказ несёт поправку судьи и не помечен пробой со сроком: хук действует без
+// даты конца (пользователь 10.11: «следует вычистить это "проба" отовсюду»)
+func TestDenyReasonCarriesFixWithoutTrialMark(t *testing.T) {
+	got := DenyReason(Verdict{Verdict: "fix", Fixes: []Fix{{Quote: "поставь таймер", Action: "CronCreate", Why: "просил таймер на час.", Fix: "срок 1 час."}}})
+	if !strings.HasPrefix(got, "Проверка понимания: судья") {
+		t.Errorf("начало отказа: %q", got)
+	}
+	if strings.Contains(strings.ToLower(got), "проба") {
+		t.Errorf("в отказе пометка пробы: %q", got)
+	}
+	for _, want := range []string{"Реплика: «поставь таймер»", "Действие: «CronCreate»", "Расхождение: просил таймер на час\n", "Как исправить: срок 1 час\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("в отказе нет %q: %q", want, got)
+		}
+	}
+}

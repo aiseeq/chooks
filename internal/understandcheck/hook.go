@@ -69,8 +69,8 @@ type Outcome struct {
 	Verdict string
 }
 
-// Entry — строка журнала: по нему итог пробы считает поправки, override,
-// сбои и задержку
+// Entry — строка журнала: по нему считаются поправки, override, сбои и
+// задержка
 type Entry struct {
 	Time       string `json:"time"`
 	Session    string `json:"session,omitempty"`
@@ -286,14 +286,14 @@ func callKey(tool string, input json.RawMessage, human string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)[:16]), nil
 }
 
-// DenyRev — версия текста отказа: итог пробы делит записи по ней, если
-// текст поменяется
-const DenyRev = 1
+// DenyRev — версия текста отказа: разбор журнала делит записи по ней, если
+// текст поменяется (2 — без пометки о сроке)
+const DenyRev = 2
 
 // DenyReason — текст, который агент получит вместо вызова
 func DenyReason(verdict Verdict) string {
 	var b strings.Builder
-	b.WriteString("Проверка понимания (проба до 09.11): судья без контекста беседы видит, что действие расходится с репликой пользователя.\n")
+	b.WriteString("Проверка понимания: судья без контекста беседы видит, что действие расходится с репликой пользователя.\n")
 	for _, fix := range verdict.Fixes {
 		fmt.Fprintf(&b, "- Реплика: «%s»\n  Действие: «%s»\n  Расхождение: %s\n  Как исправить: %s\n",
 			fix.Quote, fix.Action, strings.TrimSuffix(fix.Why, "."), strings.TrimSuffix(fix.Fix, "."))

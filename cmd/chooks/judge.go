@@ -11,12 +11,12 @@ import (
 
 // newJudge — судья из списка одобренных моделей, запускаемый в пустом
 // каталоге времени выполнения: там нет CLAUDE.md и AGENTS.md
-func newJudge(home, model, effort string) (questioncheck.CLIJudge, error) {
+func newJudge(model, effort string) (questioncheck.CLIJudge, error) {
 	dir := filepath.Join(core.RuntimeDir(), "question-judge")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return questioncheck.CLIJudge{}, fmt.Errorf("create judge dir: %w", err)
 	}
-	return questioncheck.NewCLIJudge(filepath.Join(home, ".config", "models", "approved"), model, effort, dir)
+	return questioncheck.NewCLIJudge(model, effort, dir)
 }
 
 // stopBlockOutput — ответ Stop-хука, который не даёт ходу закончиться:

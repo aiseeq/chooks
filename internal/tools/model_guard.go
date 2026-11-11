@@ -1,14 +1,14 @@
 package tools
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/aiseeq/chooks/internal/approved"
 	"github.com/aiseeq/chooks/internal/core"
 )
 
@@ -172,52 +172,33 @@ func codexConfigCandidate(config word) (modelCandidate, bool) {
 }
 
 func (t *ModelGuardTool) approvedPath() string {
-	if p := os.Getenv("MODELS_APPROVED"); p != "" {
-		return p
-	}
-	if t.path != "" {
+	if os.Getenv("MODELS_APPROVED") == "" && t.path != "" {
 		return t.path
 	}
-	home, err := os.UserHomeDir()
+	path, err := approved.Path()
 	if err != nil {
 		t.Logger().Warn("не удалось определить домашний каталог для списка моделей", "error", err)
 		return defaultApprovedModelsPath
 	}
-	return filepath.Join(home, ".config", "models", "approved")
+	return path
 }
 
 func readApprovedModels(path string) ([]approvedModel, string) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Sprintf("список одобренных моделей %s не найден", path)
-		}
-		return nil, fmt.Sprintf("список одобренных моделей %s не читается: %v", path, err)
-	}
-	defer f.Close()
-	// Список короткий, но читаем строками с увеличенным пределом Scanner.
-	s := bufio.NewScanner(f)
-	s.Buffer(make([]byte, 4096), 1024*1024)
-	var models []approvedModel
-	for line := 1; s.Scan(); line++ {
-		text := strings.TrimSpace(strings.SplitN(s.Text(), "#", 2)[0])
-		if text == "" {
-			continue
-		}
-		fields := strings.Fields(text)
-		if len(fields) != 2 {
-			return nil, fmt.Sprintf("список одобренных моделей %s, строка %d: ожидаются ровно два поля", path, line)
-		}
-		if normalizeModel(fields[1]) == "" {
-			return nil, fmt.Sprintf("список одобренных моделей %s, строка %d: id без имени модели", path, line)
-		}
-		models = append(models, approvedModel{fields[0], fields[1]})
-	}
-	if err := s.Err(); err != nil {
-		return nil, fmt.Sprintf("список одобренных моделей %s не читается: %v", path, err)
-	}
-	if len(models) == 0 {
+	list, err := approved.Read(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, fmt.Sprintf("список одобренных моделей %s не найден", path)
+	case errors.Is(err, approved.ErrEmpty):
 		return nil, fmt.Sprintf("список одобренных моделей %s пуст", path)
+	case err != nil:
+		return nil, fmt.Sprintf("список одобренных моделей не читается: %v", err)
+	}
+	models := make([]approvedModel, 0, len(list))
+	for _, m := range list {
+		if normalizeModel(m.ID) == "" {
+			return nil, fmt.Sprintf("список одобренных моделей %s, строка %d: id без имени модели", path, m.Line)
+		}
+		models = append(models, approvedModel{m.Name, m.ID})
 	}
 	return models, ""
 }

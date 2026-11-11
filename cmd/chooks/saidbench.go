@@ -82,7 +82,7 @@ func newSaidBenchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if bench.judge, err = newJudge(home, model, effort); err != nil {
+			if bench.judge, err = newJudge(model, effort); err != nil {
 				return err
 			}
 			bench.judge.Prompt = questioncheck.SaidPrompt

@@ -128,11 +128,7 @@ kind, action) и спрашивает судью, расходится ли де
 встроено: это сухой прогон до решения. Тяжёлое: через graft exec --heavy.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return err
-			}
-			judge, err := newJudge(home, model, effort)
+			judge, err := newJudge(model, effort)
 			if err != nil {
 				return err
 			}

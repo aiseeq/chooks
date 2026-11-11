@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -106,15 +105,11 @@ func understandCall(input *core.ToolInput, logger core.Logger) understandcheck.C
 
 // newUnderstandHook собирает проверку с путями по умолчанию
 func newUnderstandHook(logger core.Logger) (understandcheck.Hook, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return understandcheck.Hook{}, fmt.Errorf("cannot resolve home dir: %w", err)
-	}
 	journal, denied, err := understandcheck.DefaultPaths()
 	if err != nil {
 		return understandcheck.Hook{}, err
 	}
-	judge, err := newJudge(home, understandModel, understandEffort)
+	judge, err := newJudge(understandModel, understandEffort)
 	if err != nil {
 		return understandcheck.Hook{}, err
 	}

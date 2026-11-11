@@ -131,13 +131,15 @@ func parsedBashRuleFile(command string) (string, bool, error) {
 	cwd := ""
 	for _, call := range calls {
 		if call.Name == "cd" {
-			cwd = ""
+			next := ""
 			for _, arg := range call.Args {
 				if !strings.HasPrefix(arg, "-") {
-					cwd = shellAbs(arg, cwd)
+					// второй cd считается от первого: cd ~/.claude && cd rules
+					next = shellAbs(arg, cwd)
 					break
 				}
 			}
+			cwd = next
 			continue
 		}
 		if call.Name == "git" {
@@ -166,11 +168,34 @@ func knownReadOnlyShellCommand(calls []shellcmd.Call) bool {
 		if len(call.Via) != 0 || (call.Name != "cat" && call.Name != "grep" && call.Name != "head" && call.Name != "tail" && call.Name != "tee") {
 			return false
 		}
+		// путь из переменной ("$F") разбор не видит: куда пишут tee и >,
+		// неизвестно, решает прежний текстовый поиск
+		if hasExpansion(call.Args) || redirectExpands(call.Redirs) {
+			return false
+		}
 		if call.Name == "grep" || call.Name == "tee" {
 			seen = true
 		}
 	}
 	return seen
+}
+
+func hasExpansion(words []string) bool {
+	for _, w := range words {
+		if strings.ContainsAny(w, "$`") {
+			return true
+		}
+	}
+	return false
+}
+
+func redirectExpands(redirs []shellcmd.Redir) bool {
+	for _, r := range redirs {
+		if strings.ContainsAny(r.Target, "$`") {
+			return true
+		}
+	}
+	return false
 }
 
 func textBashRuleFile(command string) string {
@@ -204,7 +229,13 @@ func shellAbs(file, cwd string) string {
 }
 
 func isRulePath(file, cwd string) bool {
-	return IsInstructionFile(shellAbs(file, cwd))
+	path := shellAbs(file, cwd)
+	if !filepath.IsAbs(path) {
+		// .claude/rules/x.md от неизвестного каталога: шаблоны путей
+		// инструкций ждут / перед .claude
+		path = "/" + path
+	}
+	return IsInstructionFile(path)
 }
 
 func shellWrite(c shellcmd.Call, cwd string) string {
@@ -217,7 +248,7 @@ func shellWrite(c shellcmd.Call, cwd string) string {
 			args = append(args, arg)
 		}
 	}
-	candidates := shellWriteCandidates(c, args)
+	candidates := shellWriteCandidates(c, args, cwd)
 	for _, file := range candidates {
 		if isRulePath(file, cwd) {
 			return shellAbs(file, cwd)
@@ -229,7 +260,11 @@ func shellWrite(c shellcmd.Call, cwd string) string {
 func redirectRuleWrite(redirs []shellcmd.Redir, cwd string) string {
 	for _, redir := range redirs {
 		switch redir.Op {
-		case ">", ">>", ">|", "&>", "&>>":
+		case ">", ">>", ">|", "&>", "&>>", ">&":
+			// 2>&1, >&- — дескриптор, не файл
+			if strings.Trim(redir.Target, "0123456789-") == "" {
+				continue
+			}
 			if isRulePath(redir.Target, cwd) {
 				return shellAbs(redir.Target, cwd)
 			}
@@ -238,13 +273,11 @@ func redirectRuleWrite(redirs []shellcmd.Redir, cwd string) string {
 	return ""
 }
 
-func shellWriteCandidates(c shellcmd.Call, args []string) []string {
+func shellWriteCandidates(c shellcmd.Call, args []string, cwd string) []string {
 	var candidates []string
 	switch c.Name {
-	case "cp", "mv", "install":
-		if len(args) > 1 {
-			candidates = args[len(args)-1:]
-		}
+	case "cp", "mv", "install", "ln":
+		candidates = copyTargets(c.Args, args, cwd)
 	case "tee", "sponge":
 		candidates = args
 	case "sub":
@@ -332,12 +365,49 @@ func gitRuleWrite(c shellcmd.Call, cwd string) string {
 	}
 	if sep < 0 {
 		for i, arg := range args {
-			if arg == "restore" {
-				return rulePathInArgs(args[i+1:], cwd)
+			// git checkout HEAD~1 CLAUDE.md: без -- ревизия и пути вперемешку,
+			// ревизия на файл инструкций не похожа
+			if arg == "restore" || arg == "checkout" {
+				return rulePathInArgs(args[i+1:], gitDir)
 			}
 		}
 	}
 	return ""
+}
+
+// copyTargets пути, в которые пишут cp, mv, install, ln: последний операнд,
+// а если это каталог инструкций (cp x.md ~/.claude/rules/, -t DIR,
+// --target-directory=DIR) — файлы в нём. CLAUDE.md, скопированный в /tmp,
+// правкой не считается: каталог-цель сам не из инструкций
+func copyTargets(all, operands []string, cwd string) []string {
+	dir := ""
+	for i, a := range all {
+		switch {
+		case a == "-t" && i+1 < len(all):
+			dir = all[i+1]
+		case strings.HasPrefix(a, "--target-directory="):
+			dir = strings.TrimPrefix(a, "--target-directory=")
+		}
+	}
+	sources := operands
+	if dir == "" {
+		if len(operands) < 2 {
+			return nil
+		}
+		dir = operands[len(operands)-1]
+		sources = operands[:len(operands)-1]
+	}
+	targets := []string{dir}
+	if !isRulePath(filepath.Join(dir, "x"), cwd) {
+		return targets
+	}
+	for _, src := range sources {
+		if src == dir {
+			continue
+		}
+		targets = append(targets, filepath.Join(dir, filepath.Base(src)))
+	}
+	return targets
 }
 
 func rulePathInArgs(args []string, cwd string) string {

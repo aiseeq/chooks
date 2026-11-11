@@ -172,6 +172,27 @@ func TestBashRuleFile_WriteSemantics(t *testing.T) {
 		{"cd other redirect", "cd ~/.claude && cat > /tmp/settings.json <<EOF\n{}\nEOF", false},
 		{"eval fallback", `eval "sed -i s/a/b/ CLAUDE.md"`, true},
 		{"bash pipe fallback", `echo 'sed -i s/a/b/ CLAUDE.md' | bash`, true},
+		// регрессии f3bcb7c из независимой проверки: tee и > в «чтении»
+		{"cat | tee relative", "cat a | tee .claude/rules/x.md", true},
+		{"tee relative < src", "tee .claude/rules/a.md < src", true},
+		{"tee heredoc settings.local", "tee .claude/settings.local.json <<'EOF'\n{}\nEOF", true},
+		{"grep | tee -a ./", "grep x a | tee -a ./.claude/rules/a.md", true},
+		{"grep > relative", "grep -v x CLAUDE.md > .claude/rules/x.md", true},
+		{"grep; tee", "grep -c x a; tee .claude/rules/x.md < src", true},
+		{"grep | tee $F", `F=~/.claude/rules/a.md; grep x b | tee "$F"`, true},
+		{"grep || tee -a $F", `F=/home/aisee/git/x/CLAUDE.md; grep -q x "$F" || tee -a "$F" < y`, true},
+		// прежние дыры: каталог-цель, второй cd, >&, git без --
+		{"cp into rules dir", "cp x.md ~/.claude/rules/", true},
+		{"mv into agents dir", "mv new.md /home/aisee/.claude/agents", true},
+		{"cp -t rules", "cp -t ~/.claude/rules x.md", true},
+		{"cp --target-directory", "cp --target-directory=/home/aisee/.claude/rules x.md", true},
+		{"cp relative target", "cp x .claude/settings.json", true},
+		{"cd twice", "cd ~/.claude && cd rules && cp /tmp/x a.md", true},
+		{"redirect >&", "echo x >& /home/aisee/CLAUDE.md", true},
+		{"2>&1 in skills dir", "cd ~/.claude/skills/dream && ls 2>&1 | head", false},
+		{"git checkout no --", "git checkout HEAD~1 CLAUDE.md", true},
+		{"git -C restore", "git -C ~/.claude restore rules/a.md", true},
+		{"ln -sf", "ln -sf /tmp/x.md ~/.claude/rules/a.md", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

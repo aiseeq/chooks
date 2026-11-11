@@ -53,16 +53,3 @@ func TestScan_GrowsUntilFound(t *testing.T) {
 		t.Fatalf("windows = %v, want 3 with the last = whole file %d", windows, b.Len())
 	}
 }
-
-func TestClip(t *testing.T) {
-	short := []byte("a\nb\n")
-	if got := Clip(short); string(got) != string(short) {
-		t.Fatalf("Clip(short) = %q", got)
-	}
-	// Срез Max байт с конца приходится на «z»: обрезанная строка снимается
-	long := []byte("h\n" + strings.Repeat("yz\n", Max/3+1))
-	got := Clip(long)
-	if len(got) > Max || got[0] != 'y' {
-		t.Fatalf("Clip(long): len %d, first %q", len(got), got[0])
-	}
-}

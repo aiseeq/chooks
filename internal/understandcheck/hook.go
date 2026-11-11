@@ -98,13 +98,12 @@ type Entry struct {
 }
 
 // DefaultPaths — $XDG_STATE_HOME/chooks/understand-check.jsonl и каталог
-// ключей рядом с журналом question-check
+// ключей рядом с ним
 func DefaultPaths() (journal, denied string, err error) {
-	path, err := questioncheck.DefaultJournalPath()
+	dir, err := questioncheck.StateDir()
 	if err != nil {
 		return "", "", err
 	}
-	dir := filepath.Dir(path)
 	return filepath.Join(dir, "understand-check.jsonl"), filepath.Join(dir, "understand-check"), nil
 }
 

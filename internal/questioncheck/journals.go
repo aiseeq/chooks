@@ -1,9 +1,7 @@
 package questioncheck
 
 import (
-	"fmt"
 	"math"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -14,47 +12,29 @@ import (
 	"github.com/aiseeq/akit/secretmask"
 )
 
-// Бюджет выдержек в промпте судьи: сухой прогон оценивал вызов с журналами в
-// 3–3.5 тыс. токенов
+// Поиск по словам: сколько основ слов берётся и сколько записей считаются
+// редкими (best)
 const (
-	replyExcerpts     = 6
-	replyExcerptRunes = 700
-	decisionExcerpts  = 3
-	decisionRunes     = 1200
-	maxKeywords       = 10
-	rareEntries       = 3
+	maxKeywords = 10
+	rareEntries = 3
 )
 
-// Journals — журналы, где агент обязан искать ответ до вопроса пользователю
-// (~/.claude/CLAUDE.md, правило про вопросы): реплики пользователя во всех
-// переписках и журнал его решений
+// Journals — журнал реплик пользователя во всех переписках
 type Journals struct {
-	RepliesPath   string
-	DecisionsPath string
+	RepliesPath string
 }
 
 // DefaultJournals — пути журналов в ~/.claude
 func DefaultJournals(claudeDir string) Journals {
 	return Journals{
-		RepliesPath:   claudeDir + "/user-replies.md",
-		DecisionsPath: claudeDir + "/decisions.md",
+		RepliesPath: claudeDir + "/user-replies.md",
 	}
-}
-
-// Excerpts — найденное в журналах по словам вопроса
-type Excerpts struct {
-	Replies   []string
-	Decisions []string
 }
 
 var (
 	wordPattern = regexp.MustCompile(`[\p{L}\p{N}][\p{L}\p{N}_-]*`)
 	// replyHeader — заголовок блока журнала реплик: «### 2026-10-22T14:33:15.508Z (…) · ~ · claude …»
 	replyHeader = regexp.MustCompile(`^### (\d{4}-\d{2}-\d{2}T[0-9:.]+Z)`)
-	// decisionDate — дата «16.10» в записи журнала решений, с временем, если
-	// оно есть: «22.10 ~22:10 CEST»; isoDate — «2026-10-26» в «Применялось»
-	decisionDate = regexp.MustCompile(`\b(\d{2})\.(\d{2})(?: ~?(\d{1,2}):(\d{2}))?\b`)
-	isoDate      = regexp.MustCompile(`\b(\d{4})-(\d{2})-(\d{2})\b`)
 )
 
 // stopWords — частые слова вопросов, которые ничего не находят
@@ -69,53 +49,22 @@ var stopWords = map[string]bool{
 	"вопрос": true, "вопросы": true, "открытый": true, "открытых": true, "скажи": true,
 }
 
-// Find ищет в журналах записи по словам вопросов. Записи журнала реплик не
-// позже before (нулевое — без ограничения): прогон по прошлым ответам не
-// должен видеть ответ пользователя на сам вопрос
-func (j Journals) Find(questions []Question, before time.Time) (Excerpts, error) {
-	keys := keywords(questions)
-	if len(keys) == 0 {
-		return Excerpts{}, nil
-	}
-	var excerpts Excerpts
-
-	replies, err := os.ReadFile(j.RepliesPath)
-	if err != nil {
-		return Excerpts{}, fmt.Errorf("read user replies: %w", err)
-	}
-	blocks := replyBlocks(string(replies), before)
-	excerpts.Replies = best(blocks, keys, replyExcerpts, replyExcerptRunes)
-
-	decisions, err := os.ReadFile(j.DecisionsPath)
-	if err != nil {
-		return Excerpts{}, fmt.Errorf("read decisions: %w", err)
-	}
-	entries, err := decisionEntries(string(decisions), before)
-	if err != nil {
-		return Excerpts{}, err
-	}
-	excerpts.Decisions = best(entries, keys, decisionExcerpts, decisionRunes)
-	return excerpts, nil
-}
-
-// keywords — основы значимых слов строк с вопросами: без окончания, чтобы
+// keywords — основы значимых слов текста: без окончания, чтобы
 // «артефакт» находил «артефакта». Длинные и редкие слова полезнее, вес — по
 // редкости в самих журналах (best)
-func keywords(questions []Question) []string {
+func keywords(text string) []string {
 	seen := map[string]bool{}
 	var keys []string
-	for _, question := range questions {
-		for _, word := range wordPattern.FindAllString(strings.ToLower(question.Line), -1) {
-			if utf8.RuneCountInString(word) < 4 || stopWords[word] {
-				continue
-			}
-			key := stem(word)
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			keys = append(keys, key)
+	for _, word := range wordPattern.FindAllString(strings.ToLower(text), -1) {
+		if utf8.RuneCountInString(word) < 4 || stopWords[word] {
+			continue
 		}
+		key := stem(word)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		keys = append(keys, key)
 	}
 	// Длинные слова вперёд: короткие чаще общие
 	sort.SliceStable(keys, func(a, b int) bool {
@@ -171,55 +120,6 @@ func replyBlocks(text string, before time.Time) []string {
 	}
 	flush()
 	return blocks
-}
-
-// decisionEntries режет журнал решений на записи «## slug». Шапка журнала —
-// не запись. С before отбрасываются записи, в которых есть дата позже before:
-// запись дописывают (уточнения, новые ответы, «Применялось»), и в момент
-// before её последних строк ещё не было (стенд 27.10: «Да, давай 3» 11:12 в
-// записи от 10:48 снимало вопрос 10:49). Дата «16.10» без года — год before,
-// время местное; дата без времени в день before — позже: когда, неизвестно.
-// Срок в будущем («до 30.10») тоже скрывает запись: стенд скорее недосчитает
-// остановки, чем припишет судье знание из будущего
-func decisionEntries(text string, before time.Time) ([]string, error) {
-	var entries []string
-	parts := strings.Split(text, "\n## ")
-	for _, part := range parts[1:] {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "Записи") || strings.HasPrefix(part, "Как ") || strings.HasPrefix(part, "Формат") {
-			continue
-		}
-		if !before.IsZero() {
-			latest, ok := latestDate(part, before.In(time.Local).Year())
-			if !ok || latest.After(before) {
-				continue
-			}
-		}
-		entries = append(entries, "## "+part)
-	}
-	return entries, nil
-}
-
-// latestDate — самая поздняя дата записи журнала решений; дата без времени —
-// конец дня. Не дата («12.50», «31.02») пропускается
-func latestDate(part string, year int) (time.Time, bool) {
-	var latest time.Time
-	take := func(layout, value string) {
-		if at, err := time.ParseInLocation(layout, value, time.Local); err == nil && at.After(latest) {
-			latest = at
-		}
-	}
-	for _, m := range decisionDate.FindAllStringSubmatch(part, -1) {
-		clock := "23:59"
-		if m[3] != "" {
-			clock = fmt.Sprintf("%02s:%s", m[3], m[4])
-		}
-		take("02.01.2006 15:04", fmt.Sprintf("%s.%s.%d %s", m[1], m[2], year, clock))
-	}
-	for _, m := range isoDate.FindAllStringSubmatch(part, -1) {
-		take("2006-01-02 15:04", m[0]+" 23:59")
-	}
-	return latest, !latest.IsZero()
 }
 
 // best выбирает записи по BM25 с бинарной частотой: вес основы —

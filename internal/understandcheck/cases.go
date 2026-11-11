@@ -20,7 +20,7 @@ type Kind string
 const (
 	KindSend  Kind = "send"  // SendMessage: письмо другой сессии или агенту
 	KindAgent Kind = "agent" // Agent: бриф суб-агенту
-	KindRule  Kind = "rule"  // Edit, Write, MultiEdit или правка из Bash файла инструкций
+	KindRule  Kind = "rule"  // Edit, Write или правка из Bash файла инструкций
 	// KindReply — ответ пользователю с пересказом и планом: хук его не видит,
 	// вид нужен разбору исторических случаев, где ошибка была в ответе
 	KindReply Kind = "reply"
@@ -268,21 +268,6 @@ func classify(tool string, raw json.RawMessage) (Kind, string, string, bool) {
 			return "", "", "", false
 		}
 		return KindRule, file, "Файл: " + file + "\nБыло:\n" + str("old_string") + "\nСтало:\n" + str("new_string"), true
-	case "MultiEdit":
-		file := str("file_path")
-		if !IsInstructionFile(file) {
-			return "", "", "", false
-		}
-		var b strings.Builder
-		b.WriteString("Файл: " + file)
-		edits, _ := in["edits"].([]any)
-		for _, item := range edits {
-			edit, _ := item.(map[string]any)
-			old, _ := edit["old_string"].(string)
-			repl, _ := edit["new_string"].(string)
-			b.WriteString("\nБыло:\n" + old + "\nСтало:\n" + repl)
-		}
-		return KindRule, file, b.String(), true
 	case "Write":
 		file := str("file_path")
 		if !IsInstructionFile(file) {

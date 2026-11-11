@@ -56,7 +56,7 @@ const (
 	evNote
 	// evRead — агент прочёл файл целиком
 	evRead
-	// evEdit — агент сам изменил файл (Edit, Write, MultiEdit)
+	// evEdit — агент сам изменил файл (Edit, Write)
 	evEdit
 	// evAssistant — ответ модели: Claude Code уже собрал вложения хода
 	evAssistant
@@ -208,7 +208,7 @@ type contentBlock struct {
 	Input json.RawMessage `json:"input"`
 }
 
-// toolInput — поля вызова Read, Edit, Write, MultiEdit, нужные хуку
+// toolInput — поля вызова Read, Edit, Write, нужные хуку
 type toolInput struct {
 	FilePath string `json:"file_path"`
 	Offset   *int   `json:"offset"`
@@ -347,10 +347,9 @@ func parseAssistant(rec record, at time.Time) ([]transcriptEvent, error) {
 
 // toolKinds — инструменты, после которых текст файла у агента известен
 var toolKinds = map[string]eventKind{
-	"Read":      evRead,
-	"Edit":      evEdit,
-	"MultiEdit": evEdit,
-	"Write":     evEdit,
+	"Read":  evRead,
+	"Edit":  evEdit,
+	"Write": evEdit,
 }
 
 // parseAttachment — файлы инструкций в контексте, заметки Claude Code об

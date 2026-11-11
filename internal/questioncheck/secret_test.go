@@ -31,32 +31,6 @@ func straddling(limit int) string {
 	return strings.Repeat("я", limit-len("sk_live_Qz")) + fakeKey() + " хвост"
 }
 
-func TestCaseInputHidesSecrets(t *testing.T) {
-	tests := map[string]Case{
-		"реплика":          {HumanReply: "вот ключ " + fakeKey()},
-		"прошлый ответ":    {PrevAnswer: "вот ключ " + fakeKey()},
-		"ответ":            {Answer: "вот ключ " + fakeKey()},
-		"срез реплики":     {HumanReply: straddling(humanReplyRunes)},
-		"срез прошлого":    {PrevAnswer: straddling(prevAnswerRunes)},
-		"срез ответа":      {Answer: straddling(answerRunes)},
-		"выдержка реплики": {Excerpts: Excerpts{Replies: []string{"вот ключ " + fakeKey()}}},
-		"выдержка решения": {Excerpts: Excerpts{Decisions: []string{"вот ключ " + fakeKey()}}},
-	}
-	for name, input := range tests {
-		t.Run(name, func(t *testing.T) {
-			got, _ := (&recordingCLI{}).capture(t, "opus", input.Input())
-			assertNoSecret(t, name, got)
-		})
-	}
-	// Срез сам по себе, без двери к модели: журнал пишет выдержки напрямую
-	for name, text := range map[string]string{
-		"реплика": (Case{HumanReply: straddling(humanReplyRunes)}).Input(),
-		"ответ":   (Case{Answer: straddling(answerRunes)}).Input(),
-	} {
-		assertNoSecret(t, "вход без двери: "+name, text)
-	}
-}
-
 func TestSaidInputHidesSecrets(t *testing.T) {
 	quotes := []SaidQuote{{Time: "t", Text: Excerpt(straddling(saidQuoteRunes), saidQuoteRunes)}}
 	for name, input := range map[string]SaidCase{
@@ -68,36 +42,6 @@ func TestSaidInputHidesSecrets(t *testing.T) {
 	}
 	record := SaidRecord{Time: time.Now(), Ref: "r", Kind: "rule", Quote: straddling(saidQuoteRunes)}
 	assertNoSecret(t, "запись said", record.AsQuote().Text)
-}
-
-// Ключ в журналах: выдержка реплики, запись решения, поиск сверки
-func TestJournalExcerptsHideSecrets(t *testing.T) {
-	dir := t.TempDir()
-	replies := filepath.Join(dir, "user-replies.md")
-	decisions := filepath.Join(dir, "decisions.md")
-	writeFile(t, replies, "# Реплики\n\n### 2026-10-20T14:01:16.007Z (20.10 16:01 CEST) · ~/work · claude x\n"+
-		"в ответ на: Какой артефакт удалить?\nудали артефакт Xq7pTz3mKd9LbWv2, ключ "+fakeKey()+"\n\n")
-	writeFile(t, decisions, "# Журнал решений\n\n## Записи\n\n## artifact-Xq7pTz3mKd9LbWv2\n- Решение: удалить, ключ "+fakeKey()+"\n")
-	journals := Journals{RepliesPath: replies, DecisionsPath: decisions}
-
-	excerpts, err := journals.Find([]Question{{Line: "Артефакт Xq7pTz3mKd9LbWv2 удалить?"}}, time.Time{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(excerpts.Replies) != 1 || len(excerpts.Decisions) != 1 {
-		t.Fatalf("journals not found: %+v", excerpts)
-	}
-	assertNoSecret(t, "реплика", excerpts.Replies[0])
-	assertNoSecret(t, "решение", excerpts.Decisions[0])
-
-	quotes, err := journals.FindSaid("Артефакт Xq7pTz3mKd9LbWv2 удалить?", time.Now(), 3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(quotes) != 1 {
-		t.Fatalf("said not found: %+v", quotes)
-	}
-	assertNoSecret(t, "сверка", quotes[0].Text)
 }
 
 // recordingCLI подменяет claude и codex в PATH: скрипт пишет stdin в файл и
@@ -117,7 +61,7 @@ func (*recordingCLI) capture(t *testing.T, model, input string) (string, string)
 	script("claude", `{"result":"{\"verdict\":\"pass\"}"}`)
 	script("codex", `{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"pass\"}"}}`)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	judge := CLIJudge{Name: model, ID: "id-" + model, Effort: "low", Dir: bin}
+	judge := CLIJudge{Name: model, ID: "id-" + model, Effort: "low", Dir: bin, Prompt: SaidPrompt}
 	answer, _, err := judge.Ask(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
@@ -158,28 +102,6 @@ func TestExcerptKeepsOrdinaryText(t *testing.T) {
 	}
 }
 
-// В журнале question-check нет значения, ни в вопросах, ни в тексте хода после
-// остановки; судья его тоже не видит
-func TestCheckerJournalHidesSecrets(t *testing.T) {
-	f := newFixture(t, "lead", "~")
-	message := "Ключ " + fakeKey() + " удалить?"
-	result := f.checker.Run(context.Background(), f.event(message))
-	if result.Skip != "" {
-		t.Fatalf("skipped: %+v", result)
-	}
-	assertNoSecret(t, "судья", f.judge.input)
-	entries := f.journal(t)
-	if len(entries) != 1 {
-		t.Fatalf("journal: %+v", entries)
-	}
-	assertNoSecret(t, "журнал", strings.Join(entries[0].Questions, "\n")+entries[0].Message)
-
-	// Текст хода после остановки пишется в журнал через тот же срез
-	if got := Excerpt(straddling(afterBlockRunes), afterBlockRunes); strings.Contains(got, fakeBody[:4]) {
-		t.Errorf("after block text: %q", got)
-	}
-}
-
 // Ключ, приклеенный к символу слова: литеральный \n в строке оболочки или
 // JSON, «_», буква, %20 перед ключом. Граница слова перед образцом его не видит
 func TestGluedKeyIsHidden(t *testing.T) {
@@ -189,40 +111,6 @@ func TestGluedKeyIsHidden(t *testing.T) {
 			assertNoSecret(t, "выдержка", text)
 			if !strings.Contains(text, "ключ "+prefix) || !strings.Contains(text, " хвост") {
 				t.Errorf("text around the key lost: %q", text)
-			}
-		})
-	}
-}
-
-// Вопросы режутся по строкам и теряют цитаты и код: маска после этого не узнала
-// бы тело закрытого ключа без BEGIN и ключ, приклеенный к замене цитаты
-func TestQuestionsHideSecretsBeforeSplit(t *testing.T) {
-	key := "sk-" + "proj-" + fakeBody
-	body := "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
-	armor := "-----" + "BEGIN PRIVATE KEY" + "-----\n" + body + "?\n-----" + "END PRIVATE KEY" + "-----\n"
-	pgpArmor := "-----" + "BEGIN PGP PRIVATE KEY BLOCK" + "-----\n\n" + body + "?\n-----" + "END PGP PRIVATE KEY BLOCK" + "-----\n"
-	for name, message := range map[string]string{
-		"кавычки":         `Ключ "а"` + key + " удалить?",
-		"вставка кода":    "Ключ `а`" + key + " удалить?",
-		"ёлочки":          "Ключ «а»" + key + " удалить?",
-		"тело ключа":      armor + "Удалить?",
-		"просьба с телом": armor + "ждёт твоего «да»",
-		"блок PGP":        pgpArmor + "Удалить?",
-	} {
-		t.Run(name, func(t *testing.T) {
-			questions := Questions(message)
-			if len(questions) == 0 {
-				t.Fatalf("no questions in %q", message)
-			}
-			for _, part := range []string{fakeBody[:4], body[:8]} {
-				for _, question := range questions {
-					if strings.Contains(question.Text, part) || strings.Contains(question.Line, part) {
-						t.Errorf("%q passed: %+v", part, question)
-					}
-				}
-				if joined := strings.Join(Texts(questions), "\n"); strings.Contains(joined, part) {
-					t.Errorf("%q in journal: %s", part, joined)
-				}
 			}
 		})
 	}

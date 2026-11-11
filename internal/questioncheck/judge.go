@@ -1,3 +1,8 @@
+// Package questioncheck — судья-модель для проверок хуков: вызов одобренной
+// модели через её CLI (CLIJudge), выдержки из журнала реплик пользователя и
+// сверка сообщения агента с его словами (said-bench), журнал срабатываний.
+// Имя — от снятой 07.11 проверки вопросов (question-check), из которой это
+// выросло
 package questioncheck
 
 import (
@@ -14,172 +19,12 @@ import (
 	"github.com/aiseeq/akit/secretmask"
 )
 
-// JudgeRev — версия судьи в журнале (judge_rev): итог опыта 30.10 делит
-// записи по ней. 1 (поля нет) — судья 22.10, 2 — с предыдущим ответом агента
-// (пользователь 25.10: «да, сделай сейчас и продолжаем наблюдать»), 3 — с
-// порядком реплики и предыдущего ответа (lead 27.10 23:31; разметка 31
-// остановки и сухой прогон 28.10 — тикет question-check-reply-order), 4 — с
-// сессией ответа, «Применялось», вариантом пользователя, пробами и правами
-// своей учётки (разбор 26 ошибок разметки 30.10, тикет question-judge-tune)
-const JudgeRev = 4
-
-// JudgePrompt — промпт судьи из сухого прогона 22.10
-// (~/.claude/improve/runs/2026-10-22/question-checker-dryrun.md), абзац о
-// выдержках из журналов, которых у судьи прогона не было, и строка о
-// предыдущем ответе (JudgeRev 2)
-const JudgePrompt = `Ты проверяешь финальный ответ агента пользователю до показа. Пользователь — техлид: решает приоритеты, траты, прод, тексты от своего имени, доступы и правила для агентов; продуктовые и бизнес-решения (что видит оператор, тарифы, комиссии, как считать и учитывать деньги клиентов) принимают заказчик, операторы, дефайщики.
-
-Найди в ответе вопросы и просьбы к пользователю, включая «Делать?», «ждёт твоего да», «нужно твоё решение», «скажи, если». Цитата чужого вопроса и пример — не вопрос пользователю; вопрос коллеге в черновике — проверяй так же.
-
-НУЖНЫЙ: намерение, вкус или приоритет пользователя, которых нет в его прошлых репликах (вкус — и название, и вид того, что смотрит он сам); то, что видит только он (физический мир, его аккаунты); «да» на выкатку и правку prod, траты, действие с переводами и деньгами клиентов на любой среде, удаление и затирание, постоянную смену настроек его машины, текст наружу (сообщение, комментарий, тикет в Jira), правку хуков, settings и правил, расширение доступа людям и чужим учёткам.
-ЛИШНИЙ: ответ есть в прошлых репликах или в самом ответе; факт о мире (кто, где, сколько, есть ли, что решили раньше), который агент может найти в коде, тикетах, чатах, логах, журнале решений и реплик; технический выбор в зоне агента (как сделать, в каком порядке, кто из агентов; обратимая проба на машине, в том числе с sudo, с откатом сразу; временное повышение прав своей учётки на среде с возвратом ради поручённой работы); продуктовый вопрос не к нему — агент спрашивает того, кто решает; повтор вопроса, на который уже ответили.
-
-Если пользователь в прошлой реплике сам сказал, как бы сделал («я бы сократил до 1 дня», «может, вместо этого статистику», «можно убрать»), пусть с оговоркой или вопросом, а агент проверил оговорку и советует ровно это, — «делаю так?» ЛИШНИЙ, если само действие не из НУЖНЫХ: делать и сообщить. Выбор между несколькими вариантами агента — не этот случай. «Скажи, если хочешь иначе» после выбора, который агент уже сделал в своей зоне, — тоже ЛИШНИЙ: выбор сообщают фактом.
-
-Ниже, кроме ответа, — выдержки, которые агент мог найти сам: прошлые реплики пользователя (~/.claude/user-replies.md) и записи журнала решений (~/.claude/decisions.md), найденные по словам вопроса. Если ответ на вопрос там есть, вопрос ЛИШНИЙ — в "where" укажи файл и время реплики или slug записи. Выдержка не по теме ничего не доказывает.
-
-В записи журнала решений ответ — слова пользователя в «Решение» в границах «Действует» и «Не действует»; «Применялось» — заметки агентов, не его слово. Поручение в реплике («дай задачу своим мастерам», «сделай») — для сессии, где оно сказано (папка в строке реплики), и того раунда работы; решение о предмете (что делать с ключом, тикетом, правилом) действует в любой сессии. Сессия ответа — в начале входа. Ответ на часть вопроса (кто исполнитель, чья зона) не снимает другую часть, если она просит «да» из НУЖНЫХ.
-
-Вопрос, который ссылается на рекомендацию или варианты из предыдущего ответа агента, не считай вопросом «без рекомендации».
-
-Согласие в реплике пользователя («да», «ок», «делаем») — ответ только на то, что было написано до неё. Если предыдущий ответ агента написан после прошлой реплики, её «да» не согласие на вопросы этого ответа, даже с той же формулой («"Делаем так?" - да»): вопрос не повторный. Сказанное в реплике по существу — намерение, предпочтение, факт — действует и для вопросов, заданных позже. Реплика из журнала отвечает на то, что в её строке «в ответ на».
-
-Ответ — одна строка JSON: {"verdict":"pass"|"block","lishnie":[{"quote":"…","why":"…","where":"где искать"}]}. block — только если есть хотя бы один ЛИШНИЙ.`
-
-// Case — то, что судья видит о сообщении
-type Case struct {
-	// Session — сессия ответа: поручение в реплике действует для сессии из её
-	// заголовка (разбор 30.10, тикет question-judge-tune). Пустая — не указана
-	Session    Target
-	HumanReply string
-	// PrevAnswer — предыдущий ответ агента; пусто — не найден
-	PrevAnswer string
-	// PrevAfterReply — предыдущий ответ написан после прошлой реплики
-	PrevAfterReply bool
-	Answer         string
-	Excerpts       Excerpts
-}
-
-// Финальный ответ агента режется до этого размера: судье хватает вопросов и
-// контекста вокруг них, а длинный отчёт растит цену и задержку
-const answerRunes = 12000
-
-// humanReplyRunes — сколько прошлой реплики пользователя видит судья: длинная
-// реплика — обычно вставленный лог или чужой текст
-const humanReplyRunes = 3000
-
-// prevAnswerRunes — сколько предыдущего ответа агента видит судья: его дело —
-// рекомендация и варианты, на которые ссылается вопрос, а не отчёт целиком
-const prevAnswerRunes = 6000
-
-// Input — текст для судьи после промпта
-func (c Case) Input() string {
-	var b strings.Builder
-	b.WriteString("[Сессия ответа]\n")
-	if c.Session.Name == "" {
-		b.WriteString("(не указана)\n\n")
-	} else {
-		fmt.Fprintf(&b, "%s, папка %s\n\n", c.Session.Name, c.Session.Dir)
-	}
-	b.WriteString("[Прошлая реплика пользователя]\n")
-	if c.HumanReply == "" {
-		b.WriteString("(не найдена)\n")
-	} else {
-		b.WriteString(Excerpt(c.HumanReply, humanReplyRunes))
-		b.WriteString("\n")
-	}
-	b.WriteString("\n[Журнал реплик пользователя: выдержки по словам вопроса]\n")
-	if len(c.Excerpts.Replies) == 0 {
-		b.WriteString("(ничего не найдено)\n")
-	}
-	for _, excerpt := range c.Excerpts.Replies {
-		b.WriteString(excerpt)
-		b.WriteString("\n\n")
-	}
-	b.WriteString("\n[Журнал решений: записи по словам вопроса]\n")
-	if len(c.Excerpts.Decisions) == 0 {
-		b.WriteString("(ничего не найдено)\n")
-	}
-	for _, excerpt := range c.Excerpts.Decisions {
-		b.WriteString(excerpt)
-		b.WriteString("\n\n")
-	}
-	b.WriteString("\n[Предыдущий ответ агента]\n")
-	if c.PrevAnswer == "" {
-		b.WriteString("(не найден)\n")
-	} else {
-		switch {
-		case c.HumanReply == "":
-		case c.PrevAfterReply:
-			b.WriteString("(написан после прошлой реплики пользователя: её «да» не про вопросы этого ответа, а сказанное в ней по существу — предпочтение, намерение — действует)\n")
-		default:
-			b.WriteString("(написан до прошлой реплики пользователя)\n")
-		}
-		b.WriteString(Excerpt(c.PrevAnswer, prevAnswerRunes))
-		b.WriteString("\n")
-	}
-	b.WriteString("\n[Финальный ответ агента]\n")
-	b.WriteString(Excerpt(c.Answer, answerRunes))
-	b.WriteString("\n")
-	return b.String()
-}
-
-// Finding — лишний вопрос по мнению судьи
-type Finding struct {
-	Quote string `json:"quote"`
-	Why   string `json:"why"`
-	Where string `json:"where"`
-}
-
-// Verdict — ответ судьи
-type Verdict struct {
-	Verdict string    `json:"verdict"`
-	Lishnie []Finding `json:"lishnie"`
-}
-
-// Block — судья нашёл лишний вопрос
-func (v Verdict) Block() bool {
-	return v.Verdict == "block"
-}
-
 // Usage — токены вызова: по ним итог недели считает цену по ценам модели
 type Usage struct {
 	InputTokens       int `json:"input_tokens"`
 	CachedInputTokens int `json:"cached_input_tokens,omitempty"`
 	CacheWriteTokens  int `json:"cache_write_tokens,omitempty"`
 	OutputTokens      int `json:"output_tokens"`
-}
-
-// Judge — судья: модель, которой отдают промпт и случай
-type Judge interface {
-	Model() string
-	Judge(ctx context.Context, input string) (Verdict, Usage, error)
-}
-
-// ParseVerdict достаёт вердикт из ответа модели: JSON-объект, возможно в
-// блоке кода или с текстом вокруг. Вердикт вне pass/block и block без
-// единого лишнего вопроса — ошибка: такой ответ не повод останавливать агента
-func ParseVerdict(text string) (Verdict, error) {
-	start := strings.Index(text, "{")
-	end := strings.LastIndex(text, "}")
-	if start < 0 || end < start {
-		return Verdict{}, fmt.Errorf("no JSON object in judge answer: %q", Excerpt(text, 200))
-	}
-	var verdict Verdict
-	if err := json.Unmarshal([]byte(text[start:end+1]), &verdict); err != nil {
-		return Verdict{}, fmt.Errorf("judge answer is not a verdict: %w", err)
-	}
-	switch verdict.Verdict {
-	case "pass":
-		return verdict, nil
-	case "block":
-		if len(verdict.Lishnie) == 0 {
-			return Verdict{}, fmt.Errorf("judge blocked without naming a redundant question")
-		}
-		return verdict, nil
-	default:
-		return Verdict{}, fmt.Errorf("unknown verdict %q", verdict.Verdict)
-	}
 }
 
 // CLIJudge зовёт модель через её CLI: opus — `claude -p` без инструментов и
@@ -193,15 +38,8 @@ type CLIJudge struct {
 	Effort string
 	// Dir — пустой каталог запуска: в нём нет CLAUDE.md и AGENTS.md
 	Dir string
-	// Prompt — промпт судьи; пусто — JudgePrompt проверки вопросов
+	// Prompt — промпт судьи
 	Prompt string
-}
-
-func (j CLIJudge) prompt() string {
-	if j.Prompt == "" {
-		return JudgePrompt
-	}
-	return j.Prompt
 }
 
 // Model — имя модели для журнала
@@ -209,20 +47,13 @@ func (j CLIJudge) Model() string {
 	return j.Name + "/" + j.Effort
 }
 
-// Judge отдаёт модели промпт и случай и разбирает вердикт
-func (j CLIJudge) Judge(ctx context.Context, input string) (Verdict, Usage, error) {
-	answer, usage, err := j.Ask(ctx, input)
-	if err != nil {
-		return Verdict{}, usage, err
-	}
-	verdict, err := ParseVerdict(answer)
-	return verdict, usage, err
-}
-
 // Ask отдаёт модели промпт и случай и возвращает её ответ как есть. Это
 // единственная дверь к модели: значения секретов скрываются здесь для любого
 // входа, у моделей кроме opus текст уходит другому поставщику
 func (j CLIJudge) Ask(ctx context.Context, input string) (string, Usage, error) {
+	if j.Prompt == "" {
+		return "", Usage{}, fmt.Errorf("judge %s has no prompt", j.Model())
+	}
 	input, _ = secretmask.Mask(input)
 	if j.Name == "opus" {
 		return j.askClaude(ctx, input)
@@ -247,7 +78,7 @@ func judgeEnv() []string {
 func (j CLIJudge) askClaude(ctx context.Context, input string) (string, Usage, error) {
 	cmd := exec.CommandContext(ctx, "claude", "-p",
 		"--model", j.Name,
-		"--system-prompt", j.prompt(),
+		"--system-prompt", j.Prompt,
 		"--tools", "",
 		"--setting-sources", "",
 		"--strict-mcp-config",
@@ -294,7 +125,7 @@ func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, er
 		"-c", `web_search="disabled"`,
 		"-c", "project_doc_max_bytes=0",
 		"-")
-	out, err := runCLI(cmd, j.Dir, j.prompt()+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input)
+	out, err := runCLI(cmd, j.Dir, j.Prompt+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input)
 	if err != nil {
 		return "", Usage{}, err
 	}

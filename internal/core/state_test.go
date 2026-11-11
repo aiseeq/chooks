@@ -150,26 +150,6 @@ func TestLoadSessionStateUnreadableIsAnError(t *testing.T) {
 	}
 }
 
-func TestSessionStateChangedSince(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-
-	if changed, err := SessionStateChangedSince("fresh", time.Now()); err != nil || changed {
-		t.Fatalf("сессия без записи не менялась: %v, %v", changed, err)
-	}
-
-	saveState(t, "fresh", StateWorking)
-	since := time.Now()
-	if changed, err := SessionStateChangedSince("fresh", since); err != nil || changed {
-		t.Fatalf("запись до отметки — не изменение: %v, %v", changed, err)
-	}
-
-	time.Sleep(10 * time.Millisecond)
-	saveState(t, "fresh", StateWorking)
-	if changed, err := SessionStateChangedSince("fresh", since); err != nil || !changed {
-		t.Fatalf("запись после отметки — изменение, даже того же состояния: %v, %v", changed, err)
-	}
-}
-
 func TestSwapSessionState(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 

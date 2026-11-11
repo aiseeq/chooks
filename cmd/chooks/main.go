@@ -71,7 +71,7 @@ func execute() int {
 		newHookCmd(hookNotification, "Обработать Notification hook", &exitCode),
 		newHookCmd(hookUserPromptSubmit, "Обработать UserPromptSubmit hook", &exitCode),
 		newHookCmd(hookPostToolBatch, "Обработать PostToolBatch hook", &exitCode),
-		newHookCmd(hookQuestionCheck, "Проверить вопросы пользователю в конце хода (Stop)", &exitCode),
+
 		newHookCmd(hookUnderstandCheck, "Сверить письмо другой сессии или правку инструкций с репликой пользователя (PreToolUse)", &exitCode),
 		newHookCmd(hookWebFetchFallback, "Подменить отказ сайта в ответе WebFetch текстом из webtext (PostToolUse), на упавший WebFetch добавить его контекстом (PostToolUseFailure)", &exitCode),
 		newHookCmd(hookNoPrompt, "Отказать окну, ждущему ввода человека (PermissionRequest, Elicitation)", &exitCode),
@@ -85,7 +85,7 @@ func execute() int {
 		newStyleCmd(&exitCode),
 		newModelScanCmd(),
 		newSkillScanCmd(),
-		newQuestionBenchCmd(),
+
 		newSaidBenchCmd(),
 		newUnderstandCasesCmd(),
 		newUnderstandBenchCmd(),
@@ -148,7 +148,7 @@ const (
 	hookNotification     = "notification"
 	hookUserPromptSubmit = "user-prompt-submit"
 	hookPostToolBatch    = "post-tool-batch"
-	hookQuestionCheck    = "question-check"
+
 	hookUnderstandCheck  = "understand-check"
 	hookWebFetchFallback = "webfetch-fallback"
 	hookNoPrompt         = "no-prompt"
@@ -242,9 +242,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	case hookNotification:
 		runSessionEvent(core.EventNotification, data, config, logger)
 		return exitAllowed, nil
-	case hookQuestionCheck:
-		runQuestionCheck(ctx, parseSessionInput(logger, hookType, data), config, logger, os.Stdout)
-		return exitAllowed, nil
+
 	case hookUnderstandCheck:
 		runUnderstandCheck(ctx, data, config, logger, os.Stdout)
 		return exitAllowed, nil
@@ -312,22 +310,11 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 // только логируются: событие сессии нечего блокировать, а ошибка хука
 // показалась бы человеку в интерфейсе на каждой остановке
 func runSessionEvent(eventName string, data []byte, config *core.Config, logger core.Logger) {
-	input := parseSessionInput(logger, eventName, data)
-
-	// Конец хода, который проверит question-check, может не наступить: на
-	// вердикт «лишний» агент продолжит. Звонит тогда question-check после
-	// вердикта, а состояние сессии до него не трогается — им же решается
-	// переход, по которому звонят
-	if eventName == core.EventStop && stopAwaitsQuestionCheck(input, config, logger, time.Now()) {
-		logger.Info("alert muted", "hook", eventName, "session", input.SessionID, "reason", reasonAwaitsQuestionCheck)
-		return
-	}
-	announceSessionEvent(eventName, input, config, logger)
+	announceSessionEvent(eventName, parseSessionInput(logger, eventName, data), config, logger)
 }
 
 // announceSessionEvent решает по событию сессии, запоминает состояние и зовёт
-// человека. Общий путь Stop-хука и question-check после вердикта: оповещение
-// у них одно — тот же текст, звук и клик
+// человека
 func announceSessionEvent(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger) notifier.Decision {
 	// Неинтерактивную сессию человек не ждёт вовсе — ни её остановку, ни её
 	// вопросы: ответить в неё всё равно некому

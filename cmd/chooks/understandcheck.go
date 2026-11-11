@@ -14,8 +14,8 @@ import (
 	"github.com/aiseeq/chooks/internal/understandcheck"
 )
 
-// understandCheckTool — ключ в config.yaml. Отсутствие ключа — включено, как у
-// question-check: включает проверку строка хука в settings.json
+// understandCheckTool — ключ в config.yaml. Отсутствие ключа — включено:
+// включает проверку строка хука в settings.json
 const understandCheckTool = "understand_check"
 
 // Судья проверки понимания — сравнение на 182 случаях сухого прогона 02.11

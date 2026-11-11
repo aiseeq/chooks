@@ -110,9 +110,7 @@ func DefaultConfig() *Config {
 			"skill_reload": {
 				Enabled: true,
 			},
-			"question_check": {
-				Enabled: true,
-			},
+
 			"notifier": {
 				Enabled:         true,
 				Sound:           true,

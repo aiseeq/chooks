@@ -57,14 +57,6 @@ func Scan(path string, fn func(buf []byte) (done bool)) error {
 	}
 }
 
-// Clip — последние Max байт buf без обрезанной первой строки
-func Clip(buf []byte) []byte {
-	if len(buf) <= Max {
-		return buf
-	}
-	return dropPartialLine(buf[len(buf)-Max:])
-}
-
 func dropPartialLine(buf []byte) []byte {
 	if _, after, ok := bytes.Cut(buf, []byte{'\n'}); ok {
 		return after

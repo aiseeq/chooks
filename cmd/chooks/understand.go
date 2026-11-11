@@ -31,7 +31,7 @@ func newUnderstandCasesCmd() *cobra.Command {
 		Long: `Читает транскрипты сессий (~/.claude/projects/*/*.jsonl, без суб-агентов),
 изменённые за --days дней, и печатает JSONL случаев проверки понимания: письмо
 другой сессии (SendMessage), бриф суб-агенту (Agent) и правка файла инструкций
-(Edit, Write, MultiEdit, правка из Bash) в ходе после реплики пользователя — с
+(Edit, Write, правка из Bash) в ходе после реплики пользователя — с
 этой репликой, концом сообщения агента перед ней и следующей репликой
 пользователя для разметки. Тяжёлое чтение: запускать через graft exec --heavy.`,
 		Args: cobra.NoArgs,
@@ -144,8 +144,8 @@ kind, action) и спрашивает судью, расходится ли де
 			return runUnderstandBench(cmd.Context(), judge, cases, jobs, limit, cmd.OutOrStdout())
 		},
 	}
-	cmd.Flags().StringVar(&model, "model", judgeModel, "модель судьи из ~/.config/models/approved")
-	cmd.Flags().StringVar(&effort, "effort", judgeEffort, "усилие рассуждения: low, medium, high")
+	cmd.Flags().StringVar(&model, "model", understandModel, "модель судьи из ~/.config/models/approved")
+	cmd.Flags().StringVar(&effort, "effort", understandEffort, "усилие рассуждения: low, medium, high")
 	cmd.Flags().IntVar(&jobs, "jobs", 2, "сколько судей звать одновременно")
 	cmd.Flags().DurationVar(&limit, "timeout", 3*time.Minute, "предел на один вызов судьи")
 	return cmd

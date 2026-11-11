@@ -111,6 +111,14 @@ func (c SaidCase) Input() string {
 	return b.String()
 }
 
+// answerRunes — сколько сообщения агента видит судья: длинный отчёт растит
+// цену и задержку
+const answerRunes = 12000
+
+// humanReplyRunes — сколько реплики пользователя видит судья: длинная
+// реплика — обычно вставленный лог или чужой текст
+const humanReplyRunes = 3000
+
 // turnRunes — сколько хода видит судья сверки
 const turnRunes = 16000
 
@@ -162,7 +170,7 @@ const saidQuoteRunes = 600
 // агента, сказанные до before: замена said.tsv, пока его нет. Строка «в ответ
 // на» — фраза агента, судье она не нужна
 func (j Journals) FindSaid(message string, before time.Time, limit int) ([]SaidQuote, error) {
-	keys := keywords([]Question{{Line: message}})
+	keys := keywords(message)
 	if len(keys) == 0 {
 		return nil, nil
 	}
@@ -297,7 +305,7 @@ func scopeCovers(scopeDir, project string) bool {
 
 // RankSaid выбирает до limit записей по словам text (BM25 по слову и цитате)
 func RankSaid(records []SaidRecord, text string, limit int) []SaidRecord {
-	keys := keywords([]Question{{Line: text}})
+	keys := keywords(text)
 	if len(keys) == 0 {
 		return nil
 	}

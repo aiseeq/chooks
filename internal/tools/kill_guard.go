@@ -156,9 +156,10 @@ func findExecCommands(args []word) [][]word {
 func (s *killScan) parsedCalls() error {
 	calls, err := shellcmd.Calls(s.command)
 	if err != nil {
-		// синтаксис, который не разбирает и bash: оболочка его не исполнит,
-		// вложенный скрипт с ошибкой — найденные вызовы всё равно проверяются
-		s.tool.Logger().Debug("kill_guard: shell parse", "error", err)
+		// команду со словом kill проверил только свой лексер: защита слабее,
+		// это должно быть видно в логе. Вызовы до ошибки во вложенном скрипте
+		// всё равно проверяются
+		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду, проверка только лексером", "error", err)
 	}
 	for _, c := range calls {
 		if c.Name == "" {

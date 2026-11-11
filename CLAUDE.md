@@ -1,4 +1,4 @@
-<!-- lex: собран из /home/aisee/.claude/codex/manifest/git-chooks-CLAUDE.md.yaml. Правь фрагменты в /home/aisee/.claude/codex/frag и запусти `lex build --codex /home/aisee/.claude/codex`; правку прямо в этом файле перенеси во фрагменты: `lex absorb --codex /home/aisee/.claude/codex <этот файл>` -->
+<!-- lex: собран из ~/.claude/codex/manifest/git-chooks-CLAUDE.md.yaml. Правь фрагменты в ~/.claude/codex/frag и запусти `lex build --codex ~/.claude/codex`; правку прямо в этом файле перенеси во фрагменты: `lex absorb --codex ~/.claude/codex <этот файл>` -->
 Контекст
 - chooks (github.com/aiseeq/chooks, бывший claude-hooks) — Go-хуки для Claude Code: уведомления, строка статуса, проверка стиля Jira-комментариев. С 26.10 имя `chooks` у всего: Go-модуль, бинарь `~/bin/chooks`, конфиг `~/.config/chooks/config.yaml`, каталоги состояния и лог `~/.claude/logs/chooks.log` (пользователь 26.10: «"claude-hooks" можно полностью переименовать в chooks»).
 - Notification и Stop-уведомление транскрипт не читают: всё нужное (`background_tasks`, `session_crons`, `notification_type`) приходит в stdin, а транскрипт в сотни МБ не укладывается в таймаут хука.

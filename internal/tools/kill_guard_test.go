@@ -123,6 +123,8 @@ func TestKillGuardBlocks(t *testing.T) {
 		`pkill -t pts/1`,
 		`killall5`,
 		`killall5 -9`,
+		// -l у pkill не список сигналов (это флаг pgrep): справкой не считается
+		`pkill -l -u aisee`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -185,6 +187,9 @@ func TestKillGuardAllows(t *testing.T) {
 		`eval "kill 455274"`,
 		`pkill -u aisee -x sleep`,
 		`killall -l`,
+		`pkill --help`,
+		`pkill -V`,
+		`killall --version`,
 		`eval eval eval eval kill 455274`,
 		`bash --norc 'kill 1500'`,
 	} {

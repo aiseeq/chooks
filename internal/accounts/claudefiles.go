@@ -8,8 +8,9 @@ import (
 	"io"
 	"maps"
 	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/atomicfile"
 )
 
 // oauthKey — поле файла токенов со входом claude.ai. Остальные поля файла
@@ -92,7 +93,7 @@ func writeCredentials(path string, current credentialsFile, value json.RawMessag
 	if err != nil {
 		return time.Time{}, fmt.Errorf("cannot encode Claude Code credentials: %w", err)
 	}
-	if err := writeAtomic(path, data, 0o600); err != nil {
+	if err := atomicfile.WriteSync(path, data, 0o600); err != nil {
 		return time.Time{}, err
 	}
 	info, err := os.Stat(path)
@@ -100,38 +101,6 @@ func writeCredentials(path string, current credentialsFile, value json.RawMessag
 		return time.Time{}, fmt.Errorf("cannot stat Claude Code credentials: %w", err)
 	}
 	return info.ModTime(), nil
-}
-
-// writeAtomic пишет файл через временный рядом и переименование: читатель
-// видит либо прежний файл, либо новый целиком
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return fmt.Errorf("cannot create %s: %w", path, err)
-	}
-	fail := func(err error) error {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return fmt.Errorf("cannot write %s: %w", path, err)
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		return fail(err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("cannot write %s: %w", path, err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("cannot replace %s: %w", path, err)
-	}
-	return nil
 }
 
 // accountRef — учётка из oauthAccount
@@ -271,7 +240,7 @@ func replaceOAuthAccount(p Paths, value json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("cannot encode Claude Code config: %w", err)
 	}
-	return writeAtomic(p.GlobalConfig, out, info.Mode().Perm())
+	return atomicfile.WriteSync(p.GlobalConfig, out, info.Mode().Perm())
 }
 
 // indentMember выравнивает значение под поле верхнего уровня

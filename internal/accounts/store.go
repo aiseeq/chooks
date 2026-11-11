@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/atomicfile"
 )
 
 // Store — хранилище учёток. Файл с правами 600: в нём токены всех подписок
@@ -70,7 +72,7 @@ func saveStore(p Paths, s *Store) error {
 	if err != nil {
 		return fmt.Errorf("cannot encode the accounts store: %w", err)
 	}
-	return writeAtomic(p.Store(), data, 0o600)
+	return atomicfile.WriteSync(p.Store(), data, 0o600)
 }
 
 // byUUID — учётка по uuid или nil

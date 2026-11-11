@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/chooks/internal/accounts"
+	"github.com/aiseeq/chooks/internal/atomicfile"
 )
 
 // WeeklyLimit — доля недельного лимита подписки, как её отдаёт Claude Code
@@ -419,22 +420,8 @@ func saveLimits(path string, s *limitsSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("failed to encode the limits snapshot: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".limits-*.json")
-	if err != nil {
-		return fmt.Errorf("cannot create the limits snapshot: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return fmt.Errorf("cannot write the limits snapshot: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("cannot write the limits snapshot: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("cannot replace the limits snapshot: %w", err)
+	if err := atomicfile.Write(path, data, 0o644); err != nil {
+		return fmt.Errorf("cannot save the limits snapshot: %w", err)
 	}
 	return nil
 }

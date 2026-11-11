@@ -20,7 +20,7 @@ const deniedCommandRunes = 2000
 // Сна not-taken): команда Bash, у остальных инструментов tool_input целиком.
 // Секреты скрыты до среза, значений в лог не идёт
 func deniedCommand(input *core.ToolInput) (string, error) {
-	if input.ToolName == "Bash" {
+	if core.IsShellTool(input.ToolName) {
 		return questioncheck.Excerpt(input.Command, deniedCommandRunes), nil
 	}
 	text, err := maskedToolInput(input.ToolInput)

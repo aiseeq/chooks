@@ -26,7 +26,7 @@ type ModelGuardTool struct {
 
 // NewModelGuardTool создаёт проверку выбранной модели.
 func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardTool, error) {
-	return &ModelGuardTool{BaseTool: NewBaseTool("model_guard", config.Enabled, []string{"Bash", "Agent"}, logger)}, nil
+	return &ModelGuardTool{BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent"}, core.ShellTools...), logger)}, nil
 }
 
 // ValidateTool проверяет модель лишь у вызовов, которые её явно задают.
@@ -79,7 +79,7 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		}
 		return found
 	}
-	if input.ToolName != "Bash" {
+	if !core.IsShellTool(input.ToolName) {
 		return nil
 	}
 	return bashModelCandidates(input.Command)

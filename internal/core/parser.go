@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 )
 
 // ParseToolInput парсит JSON входные данные от Claude Code
@@ -24,7 +25,7 @@ func ParseToolInput(data []byte) (*ToolInput, error) {
 // Отсутствие tool_input не является ошибкой: события сессии (например Stop)
 // приходят без него; присутствующий, но нечитаемый tool_input — ошибка
 func extractToolSpecificData(input *ToolInput) error {
-	if len(input.ToolInput) == 0 || input.ToolName != "Bash" {
+	if len(input.ToolInput) == 0 || !IsShellTool(input.ToolName) {
 		return nil
 	}
 
@@ -66,6 +67,15 @@ func decodeToolInput(raw json.RawMessage) (map[string]any, error) {
 	default:
 		return nil, fmt.Errorf("tool_input is neither an object nor a string: starts with %q", trimmed[0])
 	}
+}
+
+// ShellTools инструменты, чей command исполняет оболочка: Monitor запускает
+// команду так же, как Bash, и проверяется теми же правилами
+var ShellTools = []string{"Bash", "Monitor"}
+
+// IsShellTool — command инструмента исполняет оболочка
+func IsShellTool(name string) bool {
+	return slices.Contains(ShellTools, name)
 }
 
 // stringField извлекает строковое поле из распарсенного tool_input

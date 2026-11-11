@@ -36,7 +36,7 @@ func NewWriteGuardTool(config core.ToolConfig, logger core.Logger) (*WriteGuardT
 		return nil, fmt.Errorf("rm check for write_guard: %w", err)
 	}
 	return &WriteGuardTool{
-		BaseTool: NewBaseTool("write_guard", config.Enabled, []string{"Bash"}, logger),
+		BaseTool: NewBaseTool("write_guard", config.Enabled, core.ShellTools, logger),
 		rm:       rm,
 	}, nil
 }
@@ -59,7 +59,7 @@ var (
 // ValidateTool проверяет тела here-doc в команде Bash
 func (t *WriteGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
 	cmd := input.Command
-	if !t.IsEnabled() || input.ToolName != "Bash" || !strings.Contains(cmd, "<<") || !strings.Contains(cmd, "rm") || !strings.Contains(cmd, "$") {
+	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(cmd, "<<") || !strings.Contains(cmd, "rm") || !strings.Contains(cmd, "$") {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 	script := &shScript{}

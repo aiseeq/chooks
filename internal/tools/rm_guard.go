@@ -42,7 +42,7 @@ type RmGuardTool struct {
 // NewRmGuardTool создает проверку rm по переменной
 func NewRmGuardTool(config core.ToolConfig, logger core.Logger) (*RmGuardTool, error) {
 	return &RmGuardTool{
-		BaseTool:  NewBaseTool("rm_guard", config.Enabled, []string{"Bash"}, logger),
+		BaseTool:  NewBaseTool("rm_guard", config.Enabled, core.ShellTools, logger),
 		lookupEnv: os.LookupEnv,
 	}, nil
 }
@@ -92,7 +92,7 @@ var (
 // ValidateTool проверяет цели rm и rmdir в команде Bash
 func (t *RmGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
 	cmd := input.Command
-	if !t.IsEnabled() || input.ToolName != "Bash" || !strings.Contains(cmd, "rm") {
+	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(cmd, "rm") {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 	script := &shScript{}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -92,10 +93,63 @@ func TestKillGuardBlocks(t *testing.T) {
 		"cat <<EOF | sudo sh\nkill -9 2100\nEOF",
 		"ssh host <<-EOF\n\tkill $p\n\tEOF",
 		"cat <<'EOF' > /dev/null\ntext\nEOF\nkill 1500",
+		// kill за ключевым словом оболочки (тикет kill-guard-gaps)
+		`for p in $(pgrep -f foo); do kill $p; done`,
+		`if kill $PID; then echo x; fi`,
+		`if true; then echo; else kill 1500; fi`,
+		`while true; do kill 1500; done`,
+		`{ kill $PID; }`,
+		`! kill $PID`,
+		`time kill $PID`,
+		`time -p kill 2100`,
+		`builtin kill 1500`,
+		// скрипт sh -c и eval — те же команды
+		// в тикете — $PPID; та же ветка вычисляемого PID, $PPID в литерале
+		// glint ложно считает исполняемым сигналом родителю
+		`bash -c 'kill -9 $PID'`,
+		`sh -c "pkill -f claude"`,
+		`bash -lc 'kill 1500'`,
+		`sudo sh -c 'kill 2100'`,
+		`eval "kill $PID"`,
+		`bash -c "bash -c 'kill 1500'"`,
+		`bash -o pipefail -c 'kill 1500'`,
+		`bash -e -c -- 'kill 1500'`,
+		// глубже предела вложенности разбор не идёт: отказ даже на безопасный PID
+		`eval eval eval eval eval kill 455274`,
+		// фильтр без шаблона выбирает все процессы пользователя, родителя, терминала
+		`pkill -u aisee`,
+		`killall -u aisee`,
+		`pkill -P 1`,
+		`pkill -t pts/1`,
+		`killall5`,
+		`killall5 -9`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
 		}
+	}
+}
+
+// killall5 бьёт по всей системе: причина называет это, а не «нет шаблона»
+func TestKillGuardKillall5Reason(t *testing.T) {
+	r := validateKill(t, `killall5 -15`)
+	if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), "всем процессам системы") {
+		t.Errorf("killall5: ждали отказ с причиной «всем процессам системы», получили %v %v", r.IsValid, r.Suggestions)
+	}
+}
+
+// Monitor исполняет command оболочкой, как Bash, — те же правила
+func TestKillGuardMonitor(t *testing.T) {
+	tool := newKillGuard(t)
+	if !slices.Contains(tool.SupportedTools(), "Monitor") {
+		t.Errorf("kill_guard не подписан на Monitor: %v", tool.SupportedTools())
+	}
+	result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Monitor", Command: "kill $PID"})
+	if err != nil {
+		t.Fatalf("ValidateTool: %v", err)
+	}
+	if result.IsValid {
+		t.Error("Monitor с kill $PID должен блокироваться")
 	}
 }
 
@@ -122,6 +176,17 @@ func TestKillGuardAllows(t *testing.T) {
 		"sed -n 1,2p decide.go && sub <<'EOF'\ndecide.go\n// замер 27.10 (kill -TERM, --resume) и (kill -TERM, -p --resume /compact)\nEOF",
 		"cat > note.md <<-EOF\n\tkill $p\n\tEOF\nkill 455274",
 		"graft commit -m \"fix: сброс\n(kill -TERM, --resume) и kill $p\"",
+		// сигнал 0 никого не убивает (5 ложных отказов в живом логе до 11.11)
+		`kill -0 $pid && echo alive`,
+		`kill -s 0 $PID 2>/dev/null || echo gone`,
+		`if kill -0 $PID; then kill 455274; fi`,
+		`time kill 455274`,
+		`bash -c 'kill 455274'`,
+		`eval "kill 455274"`,
+		`pkill -u aisee -x sleep`,
+		`killall -l`,
+		`eval eval eval eval kill 455274`,
+		`bash --norc 'kill 1500'`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)

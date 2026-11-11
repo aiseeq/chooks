@@ -34,7 +34,7 @@ type KillGuardTool struct {
 // NewKillGuardTool создает защиту от убийства сессии
 func NewKillGuardTool(config core.ToolConfig, logger core.Logger) (*KillGuardTool, error) {
 	return &KillGuardTool{
-		BaseTool: NewBaseTool("kill_guard", config.Enabled, []string{"Bash"}, logger),
+		BaseTool: NewBaseTool("kill_guard", config.Enabled, core.ShellTools, logger),
 		procRoot: "/proc",
 		selfPID:  os.Getpid(),
 	}, nil
@@ -44,57 +44,140 @@ const killGuardHint = "Найди PID отдельной командой (ps -o
 
 // ValidateTool проверяет команды, посылающие сигналы процессам
 func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
-	if !t.IsEnabled() || input.ToolName != "Bash" || !strings.Contains(input.Command, "kill") {
+	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(input.Command, "kill") {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
-	var reasons []string
-	var procs []procInfo
-	for _, cmd := range splitSimpleCommands(withoutHereDocBodies(input.Command, true)) {
-		name, args, viaXargs := unwrapCommand(cmd)
-		if name != "kill" && name != "pkill" && name != "killall" {
-			continue
-		}
-		if procs == nil {
-			var err error
-			if procs, err = t.listProcs(); err != nil {
-				return nil, err
-			}
-		}
-		var reason string
-		switch {
-		case viaXargs:
-			reason = name + " через xargs: цели приходят из вывода другой команды, проверить их до запуска нельзя"
-		case name == "kill":
-			reason = t.checkKill(args, procs)
-		default:
-			reason = t.checkPattern(name, args, input.Command, procs)
-		}
-		if reason != "" {
-			reasons = append(reasons, reason)
-		}
+	scan := killScan{tool: t, command: input.Command}
+	if err := scan.walk(input.Command, 0); err != nil {
+		return nil, err
 	}
-	if len(reasons) == 0 {
+	if len(scan.reasons) == 0 {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
-	violations := make([]core.Violation, 0, len(reasons))
-	for _, r := range reasons {
+	violations := make([]core.Violation, 0, len(scan.reasons))
+	for _, r := range scan.reasons {
 		violations = append(violations, core.NewViolation("kill_guard",
 			"Сигнал может убить не тот процесс или саму сессию:", r, core.LevelCritical, 0, 0))
 	}
-	return core.NewValidationResult(false, violations, append(reasons, killGuardHint)), nil
+	return core.NewValidationResult(false, violations, append(scan.reasons, killGuardHint)), nil
+}
+
+// maxScriptNesting предел вложенности sh -c и eval: глубже разбор не идёт,
+// команда отклоняется
+const maxScriptNesting = 4
+
+// killScan обход команды и вложенных в неё скриптов sh -c и eval
+type killScan struct {
+	tool *KillGuardTool
+	// command — команда целиком: её текст стоит в cmdline оболочки, и pkill -f
+	// по нему убьёт эту оболочку
+	command string
+	procs   []procInfo
+	reasons []string
+}
+
+// walk проверяет простые команды скрипта; скрипт sh -c и eval — тем же
+// разбором на уровень глубже
+func (s *killScan) walk(script string, depth int) error {
+	for _, cmd := range splitSimpleCommands(withoutHereDocBodies(script, true)) {
+		name, args, viaXargs := unwrapCommand(cmd)
+		if inner, ok := innerScript(name, args); ok {
+			if depth >= maxScriptNesting {
+				s.reasons = append(s.reasons, fmt.Sprintf("вложенность sh -c и eval глубже %d: проверить сигналы внутри нельзя", maxScriptNesting))
+				continue
+			}
+			if err := s.walk(inner, depth+1); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := s.check(name, args, viaXargs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// check проверяет одну простую команду, если она шлёт сигнал
+func (s *killScan) check(name string, args []word, viaXargs bool) error {
+	switch name {
+	case "kill", "pkill", "killall", "killall5":
+	default:
+		return nil
+	}
+	if s.procs == nil {
+		procs, err := s.tool.listProcs()
+		if err != nil {
+			return err
+		}
+		s.procs = procs
+	}
+	var reason string
+	switch {
+	case viaXargs:
+		reason = name + " через xargs: цели приходят из вывода другой команды, проверить их до запуска нельзя"
+	case name == "killall5":
+		reason = "killall5 шлёт сигнал всем процессам системы вне своей сессии: погасит все сессии Claude"
+	case name == "kill":
+		reason = s.tool.checkKill(args, s.procs)
+	default:
+		reason = s.tool.checkPattern(name, args, s.command, s.procs)
+	}
+	if reason != "" {
+		s.reasons = append(s.reasons, reason)
+	}
+	return nil
+}
+
+// innerScript скрипт, который команда исполнит как команды оболочки:
+// аргумент после -c у sh, bash и подобных (флаги -lc, -ec тоже), аргументы
+// eval через пробел
+func innerScript(name string, args []word) (string, bool) {
+	if name == "eval" {
+		texts := make([]string, 0, len(args))
+		for _, a := range args {
+			texts = append(texts, a.text)
+		}
+		return strings.Join(texts, " "), len(texts) > 0
+	}
+	if name == "ssh" || !shellNames[name] {
+		return "", false
+	}
+	withC := false
+	for i := 0; i < len(args); i++ {
+		a := args[i].text
+		switch {
+		case a == "-o" || a == "+o":
+			i++ // имя опции set -o
+		case a == "--":
+			if withC && i+1 < len(args) {
+				return args[i+1].text, true
+			}
+			return "", false
+		case strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+"):
+			// -c, -lc, -ec; длинные опции (--norc) и +x не в счёт
+			withC = withC || (a[0] == '-' && a[1] != '-' && strings.ContainsRune(a[1:], 'c'))
+		default:
+			return a, withC
+		}
+	}
+	return "", false
 }
 
 // checkKill проверяет цели kill: только литеральные PID и job spec, ни один
-// не задевает сессию
+// не задевает сессию. Сигнал 0 лишь проверяет, жив ли процесс, — цели любые
 func (t *KillGuardTool) checkKill(args []word, procs []procInfo) string {
 	targets := args
 	if len(targets) > 0 && strings.HasPrefix(targets[0].text, "-") && targets[0].literal {
 		switch targets[0].text {
-		case "-l", "-L", "--list", "--table":
+		case "-l", "-L", "--list", "--table", "-0", "--signal=0":
 			return ""
 		case "-s", "-n", "--signal":
+			if len(targets) > 1 && targets[1].literal && targets[1].text == "0" {
+				return ""
+			}
 			targets = targets[min(2, len(targets)):]
 		default:
 			targets = targets[1:]
@@ -125,7 +208,9 @@ func (t *KillGuardTool) checkKill(args []word, procs []procInfo) string {
 // patternArgs разобранные аргументы pkill или killall
 type patternArgs struct {
 	full, exact, isRegex bool
-	patterns             []string
+	// info — справка, версия или список сигналов: сигнала не будет
+	info     bool
+	patterns []string
 }
 
 // parsePatternArgs разбирает флаги и шаблоны; непустая строка — причина отказа
@@ -143,6 +228,8 @@ func parsePatternArgs(name string, args []word) (patternArgs, string) {
 			pa.exact = true
 		case a.text == "-r" || a.text == "--regexp":
 			pa.isRegex = true
+		case infoOption(name, a.text):
+			pa.info = true
 		case optionTakesValue(name, a.text):
 			i++
 		case strings.HasPrefix(a.text, "-"):
@@ -154,7 +241,21 @@ func parsePatternArgs(name string, args []word) (patternArgs, string) {
 	if name == "pkill" && len(pa.patterns) > 1 {
 		pa.patterns = pa.patterns[len(pa.patterns)-1:]
 	}
+	if len(pa.patterns) == 0 && !pa.info {
+		return pa, name + " без шаблона выбирает процессы только по фильтру (-u, -P, -t, -g, -s): pkill -u $USER гасит все сессии разом"
+	}
 	return pa, ""
+}
+
+// infoOption флаг справки, версии или списка сигналов: утилита ничего не шлёт
+func infoOption(name, opt string) bool {
+	switch opt {
+	case "--help", "-V", "--version":
+		return true
+	case "-l", "--list":
+		return name == "killall"
+	}
+	return false
 }
 
 // regexp шаблон в том виде, как его сопоставляет утилита: killall без -r
@@ -461,14 +562,16 @@ func lexShell(command string) *shellLexer {
 	return l
 }
 
-// unwrapCommand снимает обёртки sudo, timeout, nohup, env, xargs и возвращает
-// имя утилиты и её аргументы
+// unwrapCommand снимает обёртки sudo, timeout, nohup, env, xargs, time и
+// ключевые слова оболочки перед командой (if, do, !, {) и возвращает имя
+// утилиты и её аргументы
 func unwrapCommand(cmd []word) (name string, args []word, viaXargs bool) {
 	for len(cmd) > 0 {
 		head := filepath.Base(cmd[0].text)
 		cmd = cmd[1:]
 		switch head {
-		case "sudo", "nohup", "env", "exec", "command", "nice", "setsid":
+		case "if", "then", "else", "elif", "while", "until", "do", "!", "{", "builtin":
+		case "sudo", "nohup", "env", "exec", "command", "nice", "setsid", "time":
 			for len(cmd) > 0 && (strings.HasPrefix(cmd[0].text, "-") || strings.Contains(cmd[0].text, "=")) {
 				cmd = cmd[1:]
 			}

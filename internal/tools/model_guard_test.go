@@ -56,6 +56,9 @@ func TestModelGuard(t *testing.T) {
 		{"here-doc через пробел", "Bash", "", "cat << \"EOF\" 2>&1\nclaude --model sonnet\nEOF", false},
 		{"команда после here-doc", "Bash", "", "cat <<EOF\nx\nEOF\nclaude --model sonnet", true},
 		{"ls", "Bash", "", "ls", false},
+		// Monitor исполняет command оболочкой (тикет kill-guard-gaps)
+		{"Monitor sonnet", "Monitor", "", "claude --model sonnet", true},
+		{"if claude", "Bash", "", "if claude -p --model sonnet x; then echo; fi", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

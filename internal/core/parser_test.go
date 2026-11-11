@@ -22,6 +22,14 @@ func TestParseToolInput(t *testing.T) {
 			wantCommand: "pwd",
 		},
 		{
+			// Monitor исполняет command оболочкой: без него kill в Monitor не
+			// проверялся (тикет kill-guard-gaps)
+			name:        "Monitor",
+			payload:     `{"tool_name":"Monitor","tool_input":{"command":"kill $PID","description":"x"}}`,
+			wantTool:    "Monitor",
+			wantCommand: "kill $PID",
+		},
+		{
 			name:     "другие инструменты не разбираются",
 			payload:  `{"tool_name":"Write","tool_input":{"file_path":"/tmp/a.go","command":"x"}}`,
 			wantTool: "Write",

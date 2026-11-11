@@ -44,7 +44,7 @@ const killGuardHint = "Найди PID отдельной командой (ps -o
 
 // ValidateTool проверяет команды, посылающие сигналы процессам
 func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
-	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(input.Command, "kill") {
+	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(unquoted(input.Command), "kill") {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
@@ -64,6 +64,11 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 	return core.NewValidationResult(false, violations, append(scan.reasons, killGuardHint)), nil
 }
 
+// unquoted команда без кавычек и \: k\ill и 'k'ill оболочка исполнит как kill
+func unquoted(command string) string {
+	return strings.NewReplacer(`\`, "", `'`, "", `"`, "").Replace(command)
+}
+
 // maxScriptNesting предел вложенности sh -c и eval: глубже разбор не идёт,
 // команда отклоняется
 const maxScriptNesting = 4
@@ -78,30 +83,70 @@ type killScan struct {
 	reasons []string
 }
 
-// walk проверяет простые команды скрипта; скрипт sh -c и eval — тем же
-// разбором на уровень глубже
+// walk проверяет простые команды скрипта; скрипт sh -c, eval, watch, trap,
+// su -c и here-string оболочки — тем же разбором на уровень глубже
 func (s *killScan) walk(script string, depth int) error {
-	for _, cmd := range splitSimpleCommands(withoutHereDocBodies(script, true)) {
-		name, args, viaXargs := unwrapCommand(cmd)
-		if inner, ok := innerScript(name, args); ok {
-			if depth >= maxScriptNesting {
-				s.reasons = append(s.reasons, fmt.Sprintf("вложенность sh -c и eval глубже %d: проверить сигналы внутри нельзя", maxScriptNesting))
-				continue
-			}
-			if err := s.walk(inner, depth+1); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := s.check(name, args, viaXargs); err != nil {
+	lexed := lexShell(withoutHereDocBodies(script, true))
+	for i, cmd := range lexed.cmds {
+		if err := s.simple(cmd, lexed.stdin[i], depth); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// check проверяет одну простую команду, если она шлёт сигнал
-func (s *killScan) check(name string, args []word, viaXargs bool) error {
+// simple проверяет одну простую команду: сигнал, вложенный скрипт или
+// команду find -exec
+func (s *killScan) simple(cmd []word, stdin cmdStdin, depth int) error {
+	name, args, via := unwrapCommand(cmd)
+	inner, source := innerScript(name, args)
+	switch {
+	case source == scriptStdin && stdin.hasHereString:
+		inner, source = stdin.hereString, scriptArg
+	case source == scriptStdin && stdin.piped:
+		s.reasons = append(s.reasons, name+" читает скрипт из вывода другой команды (… | "+name+"): проверить его до запуска нельзя")
+		return nil
+	}
+	if source == scriptArg {
+		if depth >= maxScriptNesting {
+			s.reasons = append(s.reasons, fmt.Sprintf("вложенность sh -c и eval глубже %d: проверить сигналы внутри нельзя", maxScriptNesting))
+			return nil
+		}
+		return s.walk(inner, depth+1)
+	}
+	if name == "find" {
+		for _, exec := range findExecCommands(args) {
+			if err := s.simple(exec, cmdStdin{}, depth); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return s.check(name, args, via)
+}
+
+// findExecCommands команды -exec, -execdir, -ok и -okdir у find: слова до ; или +
+func findExecCommands(args []word) [][]word {
+	var out [][]word
+	for i := 0; i < len(args); i++ {
+		switch args[i].text {
+		case "-exec", "-execdir", "-ok", "-okdir":
+		default:
+			continue
+		}
+		end := i + 1
+		for end < len(args) && args[end].text != ";" && args[end].text != "+" {
+			end++
+		}
+		out = append(out, args[i+1:end])
+		i = end
+	}
+	return out
+}
+
+// check проверяет одну простую команду, если она шлёт сигнал; via — обёртка,
+// подающая аргументы из ввода (xargs, parallel)
+func (s *killScan) check(name string, args []word, via string) error {
 	switch name {
 	case "kill", "pkill", "killall", "killall5":
 	default:
@@ -116,8 +161,8 @@ func (s *killScan) check(name string, args []word, viaXargs bool) error {
 	}
 	var reason string
 	switch {
-	case viaXargs:
-		reason = name + " через xargs: цели приходят из вывода другой команды, проверить их до запуска нельзя"
+	case via != "":
+		reason = name + " через " + via + ": цели приходят из ввода или списка, проверить их до запуска нельзя"
 	case name == "killall5":
 		reason = "killall5 шлёт сигнал всем процессам системы вне своей сессии: погасит все сессии Claude"
 	case name == "kill":
@@ -173,8 +218,9 @@ func (t *KillGuardTool) checkKill(args []word, procs []procInfo) string {
 // patternArgs разобранные аргументы pkill или killall
 type patternArgs struct {
 	full, exact, isRegex bool
-	// info — справка, версия или список сигналов: сигнала не будет
-	info     bool
+	// noSignal — справка, версия, список сигналов или сигнал 0: никто не
+	// будет завершён
+	noSignal bool
 	patterns []string
 }
 
@@ -193,10 +239,11 @@ func parsePatternArgs(name string, args []word) (patternArgs, string) {
 			pa.exact = true
 		case a.text == "-r" || a.text == "--regexp":
 			pa.isRegex = true
-		case infoOption(name, a.text):
-			pa.info = true
+		case noSignalOption(name, a.text):
+			pa.noSignal = true
 		case optionTakesValue(name, a.text):
 			i++
+			pa.noSignal = pa.noSignal || signalZero(name, a.text, args, i)
 		case strings.HasPrefix(a.text, "-"):
 			// сигнал или флаг без значения
 		default:
@@ -206,16 +253,24 @@ func parsePatternArgs(name string, args []word) (patternArgs, string) {
 	if name == "pkill" && len(pa.patterns) > 1 {
 		pa.patterns = pa.patterns[len(pa.patterns)-1:]
 	}
-	if len(pa.patterns) == 0 && !pa.info {
+	if len(pa.patterns) == 0 && !pa.noSignal {
 		return pa, name + " без шаблона выбирает процессы только по фильтру (-u, -P, -t, -g, -s): pkill -u $USER гасит все сессии разом"
 	}
 	return pa, ""
 }
 
-// infoOption флаг справки, версии или списка сигналов: утилита ничего не шлёт
-func infoOption(name, opt string) bool {
+// signalZero — опция сигнала opt со значением args[i] задаёт сигнал 0 (у
+// pkill -s — сессия, не сигнал)
+func signalZero(name, opt string, args []word, i int) bool {
+	isSignal := opt == "--signal" || name == "killall" && opt == "-s"
+	return isSignal && i < len(args) && args[i].text == "0"
+}
+
+// noSignalOption флаг справки, версии, списка сигналов или сигнала 0:
+// утилита ничего не завершит
+func noSignalOption(name, opt string) bool {
 	switch opt {
-	case "--help", "-V", "--version":
+	case "--help", "-V", "--version", "-0", "--signal=0":
 		return true
 	case "-l", "--list":
 		return name == "killall"
@@ -240,7 +295,7 @@ func (pa patternArgs) regexp(p string) (*regexp.Regexp, error) {
 // сверяется с теми же полями процессов, что у самой утилиты
 func (t *KillGuardTool) checkPattern(name string, args []word, command string, procs []procInfo) string {
 	pa, reason := parsePatternArgs(name, args)
-	if reason != "" {
+	if reason != "" || pa.noSignal {
 		return reason
 	}
 	ancestors := t.ancestors(procs)

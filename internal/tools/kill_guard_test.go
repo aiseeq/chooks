@@ -125,6 +125,50 @@ func TestKillGuardBlocks(t *testing.T) {
 		`killall5 -9`,
 		// -l у pkill не список сигналов (это флаг pgrep): справкой не считается
 		`pkill -l -u aisee`,
+		// обходы из проверки kill-guard-gaps (тикет kill-guard-gaps-2):
+		// \ оболочка снимает
+		`\kill -9 $PID`,
+		`k\ill -9 $PID`,
+		// скрипт оболочки из stdin
+		`echo 'kill -9 $PID' | bash`,
+		`bash <<< 'kill -9 $PID'`,
+		`echo 'kill $PID' | bash -s`,
+		`echo 'kill $PID' | bash -s arg1`,
+		`echo a#b; kill 1500`,
+		`pgrep foo | parallel kill`,
+		`k'i'll $PID`,
+		`bash -x <<< "kill 1500"`,
+		// значение опции оболочки перед -c
+		`bash -O extglob -c 'kill -9 $PID'`,
+		`bash --rcfile /dev/null -c 'kill 1500'`,
+		// значения опций обёрток
+		`sudo -u aisee kill $PID`,
+		`nice -n 10 kill $PID`,
+		`timeout -s 9 5 kill $PID`,
+		`FOO=1 kill $PID`,
+		`xargs -I {} kill {} < pids`,
+		// обёртки
+		`stdbuf -oL kill $PID`,
+		`flock /tmp/x kill $PID`,
+		`flock -w 5 /tmp/x -c 'kill 1500'`,
+		`busybox kill $PID`,
+		`coproc kill $PID`,
+		`parallel kill ::: 455274`,
+		`find /proc -maxdepth 1 -exec kill {} +`,
+		`find . -name x -exec echo {} \; -exec kill 1500 \;`,
+		`systemd-run --user --scope pkill -u aisee`,
+		`ionice -c 3 kill 1500`,
+		// строка-скрипт
+		`watch -n1 'kill -9 $PID'`,
+		`watch -n 1 pkill -u aisee`,
+		`trap 'kill -9 $PID' EXIT`,
+		`trap 'kill 1500' EXIT`,
+		`su aisee -c 'kill 1500'`,
+		`runuser -u aisee --command='kill 1500'`,
+		`env -S 'pkill -u aisee'`,
+		`env -i -S'kill 1500'`,
+		`env --split-string='kill 1500'`,
+		`env -u HOME -- kill 1500`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -187,6 +231,26 @@ func TestKillGuardAllows(t *testing.T) {
 		`eval "kill 455274"`,
 		`pkill -u aisee -x sleep`,
 		`killall -l`,
+		// ложные отказы из проверки kill-guard-gaps: комментарий и сигнал 0
+		`echo hi # later; kill it`,
+		"echo hi\n# kill $p\nls",
+		`echo a#b; kill 455274`,
+		`pkill -0 -u aisee`,
+		`pkill --signal 0 -u aisee`,
+		`killall -s 0 -u aisee`,
+		`kill \
+  455274`,
+		`bash <<< 'kill 455274'`,
+		// || — не конвейер: тело here-doc проверяется само
+		"pgrep -x foo || bash <<'EOF'\nkill 455274\nEOF",
+		`pkill -0 konsole`,
+		`bash script.sh`,
+		`kill 455274 || echo gone`,
+		`trap - EXIT`,
+		`trap -p`,
+		`watch -n1 'kill -0 $PID'`,
+		`find . -name '*.go' -exec grep -l kill {} +`,
+		`timeout --kill-after=5 10 go version`,
 		`pkill --help`,
 		`pkill -V`,
 		`killall --version`,

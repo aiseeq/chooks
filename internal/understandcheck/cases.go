@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -129,7 +130,10 @@ func parsedBashRuleFile(command string) (string, bool, error) {
 		return "", false, nil
 	}
 	cwd := ""
-	for _, call := range calls {
+	for i, call := range calls {
+		if file := massEdit(calls, i, cwd); file != "" {
+			return file, true, nil
+		}
 		if call.Name == "cd" {
 			next := ""
 			for _, arg := range call.Args {
@@ -178,6 +182,65 @@ func knownReadOnlyShellCommand(calls []shellcmd.Call) bool {
 		}
 	}
 	return seen
+}
+
+// massEdit цель массовой правки, когда файлы находит сама команда: find или
+// fd с -exec редактора (find ~/.claude/rules -exec sed -i … {} \;) и
+// редактор под xargs (grep -rl x ~/.claude/rules | xargs sed -i …). Цель —
+// каталог поиска или файл инструкций в словах поиска (find . -name CLAUDE.md)
+func massEdit(calls []shellcmd.Call, index int, cwd string) string {
+	c := calls[index]
+	var search []string
+	switch {
+	case c.Name == "find" || c.Name == "fd" || c.Name == "fdfind":
+		exec := -1
+		for i, a := range c.Args {
+			switch a {
+			case "-exec", "-execdir", "-ok", "-okdir", "-x", "-X", "--exec", "--exec-batch":
+				exec = i
+			}
+			if exec >= 0 {
+				break
+			}
+		}
+		if exec < 0 || !editsInPlace(c.Args[exec+1:]) {
+			return ""
+		}
+		search = c.Args[:exec]
+	case slices.Contains(c.Via, "xargs") && editsInPlace(append([]string{c.Name}, c.Args...)):
+		for _, prev := range calls[:index] {
+			search = append(search, prev.Args...)
+		}
+	default:
+		return ""
+	}
+	for _, w := range search {
+		if strings.HasPrefix(w, "-") {
+			continue
+		}
+		if isRulePath(w, cwd) || isRulePath(filepath.Join(w, "x"), cwd) {
+			return shellAbs(w, cwd)
+		}
+	}
+	return ""
+}
+
+// editsInPlace слова команды правят файлы на месте: sed -i, perl -i, sub,
+// tee, sponge
+func editsInPlace(words []string) bool {
+	editor, inplace := false, false
+	for _, w := range words {
+		switch filepath.Base(w) {
+		case "sub", "tee", "sponge":
+			return true
+		case "sed", "perl", "ruby":
+			editor = true
+		}
+		if strings.HasPrefix(w, "-i") || strings.HasPrefix(w, "-pi") || strings.HasPrefix(w, "--in-place") {
+			inplace = true
+		}
+	}
+	return editor && inplace
 }
 
 func hasExpansion(words []string) bool {
@@ -334,8 +397,32 @@ func scriptedWrites(args []string, redirs []shellcmd.Redir) []string {
 			}
 		}
 	}
+	// путь собран в скрипте (expanduser, Path.home()/…, f-строка, shutil,
+	// os.replace): запись видна, цель нет — любой путь инструкций в тексте
+	// скрипта считается её целью; лишний вызов судьи дешевле пропуска
+	if scriptWriteMarker.MatchString(script) {
+		// путь — целая строка в кавычках или отдельный аргумент (sys.argv):
+		// «CLAUDE.md» в прозе внутри строки скрипта не цель
+		for _, m := range scriptQuotedPath.FindAllStringSubmatch(script, -1) {
+			files = append(files, m[1])
+		}
+		files = append(files, args...)
+		for _, m := range scriptJoinedPath.FindAllStringSubmatch(script, -1) {
+			files = append(files, "~/.claude/"+m[1]+"/x")
+		}
+	}
 	return files
 }
+
+// scriptWriteMarker признак записи в файл в скрипте python или node
+var scriptWriteMarker = regexp.MustCompile(`['"](?:[wax]|r\+)[bt+]*['"]|mode\s*=|\.write_(?:text|bytes)\s*\(|writeFile|appendFile|shutil\.(?:copy|move)|os\.(?:replace|rename)\s*\(`)
+
+// scriptQuotedPath строковый литерал целиком из пути инструкций
+var scriptQuotedPath = regexp.MustCompile(`['"](` + bashPath.String() + `)['"]`)
+
+// scriptJoinedPath путь инструкций по частям: Path.home()/'.claude'/'rules',
+// os.path.join(home, '.claude', 'skills')
+var scriptJoinedPath = regexp.MustCompile(`['"]\.claude['"]\s*[/,]\s*['"](skills|rules|agents|hooks)['"]`)
 
 var scriptPathAlias = regexp.MustCompile(`(?m)^\s*([A-Za-z_]\w*)\s*=\s*['"]([^'"]+)['"]`)
 var scriptVariableWrite = regexp.MustCompile(`(?:open\s*\(\s*([A-Za-z_]\w*)\s*,\s*['"][wax+])|Path\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\.write_text\s*\(`)

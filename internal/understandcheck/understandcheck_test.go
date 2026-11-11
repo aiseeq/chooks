@@ -193,6 +193,21 @@ func TestBashRuleFile_WriteSemantics(t *testing.T) {
 		{"git checkout no --", "git checkout HEAD~1 CLAUDE.md", true},
 		{"git -C restore", "git -C ~/.claude restore rules/a.md", true},
 		{"ln -sf", "ln -sf /tmp/x.md ~/.claude/rules/a.md", true},
+		// массовая правка: файлы находит сама команда
+		{"find -exec sed -i", `find ~/.claude/rules -name "*.md" -exec sed -i s/a/b/ {} \;`, true},
+		{"find -name CLAUDE.md -exec env sed", `find . -name CLAUDE.md -exec env LC_ALL=C sed -i s/a/b/ {} +`, true},
+		{"grep -rl | xargs sed -i", "grep -rl foo ~/.claude/skills | xargs sed -i s/a/b/", true},
+		{"fd -x sed -i", "fd -e md . ~/.claude/rules -x sed -i s/a/b/", true},
+		{"find -exec grep read", `find ~/.claude/rules -name "*.md" -exec grep -l x {} \;`, false},
+		{"find -exec sed -i elsewhere", `find /tmp/x -name "*.md" -exec sed -i s/a/b/ {} \;`, false},
+		{"grep | xargs sed -n", "grep -rl foo ~/.claude/skills | xargs sed -n 1p", false},
+		// python: путь собран в скрипте
+		{"python expanduser", `python3 -c "import os; open(os.path.expanduser('~/.claude/CLAUDE.md'),'w').write('x')"`, true},
+		{"python Path.home", "python3 - <<'EOF'\nfrom pathlib import Path\n(Path.home()/'.claude'/'rules'/'a.md').write_text('x')\nEOF", true},
+		{"python mode=", "python3 - <<'EOF'\nwith open('/home/aisee/.claude/decisions.md', mode='a') as f: f.write('x')\nEOF", true},
+		{"python sys.argv", "python3 - /home/aisee/.claude/projects/-home-aisee/memory/a.md <<'EOF'\nimport sys\np=sys.argv[1]\nopen(p,'w').write('x')\nEOF", true},
+		{"python prose mention", "python3 - <<'EOF'\nopen('/tmp/notes.md','a').write('внести в глобальный CLAUDE.md правило')\nEOF", false},
+		{"python shutil", `python3 -c "import shutil; shutil.copy('/tmp/x', '/home/aisee/.claude/settings.json')"`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

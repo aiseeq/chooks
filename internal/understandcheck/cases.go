@@ -3,12 +3,15 @@ package understandcheck
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/akit/transcript"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // Kind — какое действие уносит слово пользователя дальше
@@ -66,7 +69,7 @@ type Case struct {
 // instructionFile — путь к файлу инструкций агентов: CLAUDE.md, AGENTS.md,
 // скиллы, правила, память проектов, журнал решений, промпты Сна, настройки и
 // хуки Claude Code
-var instructionFile = regexp.MustCompile(`(?:^|/)(?:CLAUDE\.md|AGENTS\.md|SKILL\.md)$|/\.claude/(?:skills|rules|agents|hooks|improve/prompts)/|/\.claude/projects/[^/]+/memory/|/\.claude/(?:decisions\.md|settings(?:\.local)?\.json)$`)
+var instructionFile = regexp.MustCompile(`(?:^|/)(?:CLAUDE\.md|AGENTS\.md|SKILL\.md)$|/\.claude/(?:skills|rules|agents|hooks|improve/prompts)/|/\.claude/projects/[^/]+/memory/|/\.claude/(?:decisions\.md|settings(?:\.local)?\.json)$|/\.claude/codex/(?:frag|manifest)/|/\.claude/codex/constitution\.md$|/\.config/(?:chooks/config\.yaml|models/approved|cl(?:/|$))`)
 
 // IsInstructionFile — путь ведёт к файлу инструкций агентов
 func IsInstructionFile(path string) bool {
@@ -75,7 +78,7 @@ func IsInstructionFile(path string) bool {
 
 // bashPath — путь к файлу инструкций в команде Bash; переменная в пути
 // ($HOME, ${D}) — его часть
-var bashPath = regexp.MustCompile(`[~$\w{}./-]*(?:CLAUDE\.md|AGENTS\.md|SKILL\.md|\.claude/(?:skills|rules|agents|hooks|improve/prompts)/[\w./-]+|\.claude/projects/[^/\s]+/memory/[\w./-]+|\.claude/decisions\.md|\.claude/settings(?:\.local)?\.json)`)
+var bashPath = regexp.MustCompile(`[~$\w{}./-]*(?:CLAUDE\.md|AGENTS\.md|SKILL\.md|\.claude/(?:skills|rules|agents|hooks|improve/prompts)/[\w./-]+|\.claude/projects/[^/\s]+/memory/[\w./-]+|\.claude/decisions\.md|\.claude/settings(?:\.local)?\.json|\.claude/codex/(?:frag|manifest)/[\w./-]+|\.claude/codex/constitution\.md|\.config/chooks/config\.yaml|\.config/models/approved|\.config/cl/[\w./-]+)`)
 
 // bashEditor — команда правит файлы, названные в ней: sub из akit, sed -i,
 // perl -i, tee. Ищется в тексте, и слово в кавычках тоже срабатывает: это один
@@ -96,6 +99,81 @@ var bashRedirect = regexp.MustCompile(`>{1,2}\s*["']?(` + bashPath.String() + `)
 // bashRuleFile — файл инструкций, который меняет команда Bash; пусто — команда
 // такой файл не меняет
 func bashRuleFile(command string) string {
+	file, ok, err := parsedBashRuleFile(command)
+	if err != nil {
+		logger, logErr := core.NewLogger(core.DefaultLoggerConfig())
+		if logErr == nil {
+			logger.Warn("не удалось разобрать команду Bash для поиска правки инструкции", "error", err)
+		}
+		return textBashRuleFile(command)
+	}
+	if ok {
+		if file != "" {
+			if text := textBashRuleFile(command); text != "" {
+				return text
+			}
+		}
+		return file
+	}
+	return textBashRuleFile(command)
+}
+
+// parsedBashRuleFile ищет видимую запись в командах оболочки. false означает,
+// что разбор не дал надёжного ответа и нужен прежний консервативный поиск.
+func parsedBashRuleFile(command string) (string, bool, error) {
+	calls, err := shellcmd.Calls(command)
+	if err != nil {
+		return "", false, fmt.Errorf("разбор команды оболочки: %w", err)
+	}
+	if opaqueShellWrite(command, calls) {
+		return "", false, nil
+	}
+	cwd := ""
+	for _, call := range calls {
+		if call.Name == "cd" {
+			cwd = ""
+			for _, arg := range call.Args {
+				if !strings.HasPrefix(arg, "-") {
+					cwd = shellAbs(arg, cwd)
+					break
+				}
+			}
+			continue
+		}
+		if call.Name == "git" {
+			if file := gitRuleWrite(call, cwd); file != "" {
+				return file, true, nil
+			}
+		}
+		if file := shellWrite(call, cwd); file != "" {
+			return file, true, nil
+		}
+	}
+	if textBashRuleFile(command) != "" && !knownReadOnlyShellCommand(calls) {
+		return "", false, nil
+	}
+	return "", true, nil
+}
+
+// knownReadOnlyShellCommand подавляет старый текстовый поиск только для
+// однозначного чтения: иначе он принимает слово grep за имя редактора.
+func knownReadOnlyShellCommand(calls []shellcmd.Call) bool {
+	if len(calls) == 0 {
+		return false
+	}
+	seen := false
+	for _, call := range calls {
+		if len(call.Via) != 0 || (call.Name != "cat" && call.Name != "grep" && call.Name != "head" && call.Name != "tail" && call.Name != "tee") {
+			return false
+		}
+		if call.Name == "grep" || call.Name == "tee" {
+			seen = true
+		}
+	}
+	return seen
+}
+
+func textBashRuleFile(command string) string {
 	if m := bashRedirect.FindStringSubmatch(command); m != nil {
 		return m[1]
 	}
@@ -106,6 +184,183 @@ func bashRuleFile(command string) string {
 		}
 	}
 	return ""
+}
+
+func shellAbs(file, cwd string) string {
+	file = strings.Trim(strings.TrimSpace(file), "\"'")
+	if strings.HasPrefix(file, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Clean(filepath.Join(home, file[2:]))
+		}
+		return file
+	}
+	if filepath.IsAbs(file) {
+		return filepath.Clean(file)
+	}
+	if cwd != "" {
+		return filepath.Clean(filepath.Join(cwd, file))
+	}
+	return file
+}
+
+func isRulePath(file, cwd string) bool {
+	return IsInstructionFile(shellAbs(file, cwd))
+}
+
+func shellWrite(c shellcmd.Call, cwd string) string {
+	if file := redirectRuleWrite(c.Redirs, cwd); file != "" {
+		return file
+	}
+	args := make([]string, 0, len(c.Args))
+	for _, arg := range c.Args {
+		if !strings.HasPrefix(arg, "-") {
+			args = append(args, arg)
+		}
+	}
+	candidates := shellWriteCandidates(c, args)
+	for _, file := range candidates {
+		if isRulePath(file, cwd) {
+			return shellAbs(file, cwd)
+		}
+	}
+	return ""
+}
+
+func redirectRuleWrite(redirs []shellcmd.Redir, cwd string) string {
+	for _, redir := range redirs {
+		switch redir.Op {
+		case ">", ">>", ">|", "&>", "&>>":
+			if isRulePath(redir.Target, cwd) {
+				return shellAbs(redir.Target, cwd)
+			}
+		}
+	}
+	return ""
+}
+
+func shellWriteCandidates(c shellcmd.Call, args []string) []string {
+	var candidates []string
+	switch c.Name {
+	case "cp", "mv", "install":
+		if len(args) > 1 {
+			candidates = args[len(args)-1:]
+		}
+	case "tee", "sponge":
+		candidates = args
+	case "sub":
+		if len(args) > 2 {
+			candidates = args[2:]
+		}
+	case "sed", "perl":
+		if inplaceArg(c.Args, c.Name) && len(args) > 0 {
+			candidates = args[1:]
+		}
+	case "python", "python2", "python3", "pypy", "node", "nodejs":
+		candidates = scriptedWrites(c.Args, c.Redirs)
+	}
+	return candidates
+}
+
+func inplaceArg(args []string, name string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-i") || strings.HasPrefix(arg, "--in-place") || (name == "perl" && strings.HasPrefix(arg, "-pi")) {
+			return true
+		}
+	}
+	return false
+}
+
+var scriptWrite = regexp.MustCompile(`(?:open\s*\(\s*[r]?['"]([^'"]+)['"]\s*,\s*['"][wax+])|Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_text\s*\(|writeFile(?:Sync)?\s*\(\s*['"]([^'"]+)['"]`)
+
+func scriptedWrites(args []string, redirs []shellcmd.Redir) []string {
+	var joined strings.Builder
+	joined.WriteString(strings.Join(args, " "))
+	for _, redir := range redirs {
+		if redir.Op == "<<" || redir.Op == "<<-" {
+			joined.WriteString("\n" + redir.Body)
+		}
+	}
+	script := joined.String()
+	aliases := make(map[string]string)
+	for _, m := range scriptPathAlias.FindAllStringSubmatch(script, -1) {
+		aliases[m[1]] = m[2]
+	}
+	var files []string
+	for _, m := range scriptWrite.FindAllStringSubmatch(script, -1) {
+		for _, g := range m[1:] {
+			if g != "" {
+				files = append(files, g)
+				break
+			}
+		}
+	}
+	for _, m := range scriptVariableWrite.FindAllStringSubmatch(script, -1) {
+		for _, name := range m[1:] {
+			if file := aliases[name]; file != "" {
+				files = append(files, file)
+			}
+		}
+	}
+	return files
+}
+
+var scriptPathAlias = regexp.MustCompile(`(?m)^\s*([A-Za-z_]\w*)\s*=\s*['"]([^'"]+)['"]`)
+var scriptVariableWrite = regexp.MustCompile(`(?:open\s*\(\s*([A-Za-z_]\w*)\s*,\s*['"][wax+])|Path\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\.write_text\s*\(`)
+
+func gitRuleWrite(c shellcmd.Call, cwd string) string {
+	args := c.Args
+	gitDir := cwd
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-C" {
+			gitDir = shellAbs(args[i+1], cwd)
+			i++
+		}
+	}
+	sep := -1
+	verb := ""
+	for i, arg := range args {
+		if arg == "--" {
+			sep = i
+			break
+		}
+		if arg == "checkout" || arg == "restore" {
+			verb = arg
+		}
+	}
+	if sep >= 0 && verb != "" {
+		return rulePathInArgs(args[sep+1:], gitDir)
+	}
+	if sep < 0 {
+		for i, arg := range args {
+			if arg == "restore" {
+				return rulePathInArgs(args[i+1:], cwd)
+			}
+		}
+	}
+	return ""
+}
+
+func rulePathInArgs(args []string, cwd string) string {
+	for _, path := range args {
+		if isRulePath(path, cwd) {
+			return shellAbs(path, cwd)
+		}
+	}
+	return ""
+}
+
+var opaqueWrite = regexp.MustCompile(`(?:^|[;&|]\s*)(?:eval|exec)\b|\|\s*(?:ba|z|k)?sh\b|\$\{?\w+\}?/[^\s;&|]*`)
+
+func opaqueShellWrite(command string, calls []shellcmd.Call) bool {
+	if opaqueWrite.MatchString(command) {
+		return true
+	}
+	for _, c := range calls {
+		if c.Name == "" || c.Offset < 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Collector собирает случаи из событий одного транскрипта по порядку

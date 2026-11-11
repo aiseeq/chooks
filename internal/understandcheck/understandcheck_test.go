@@ -111,12 +111,21 @@ func TestIsInstructionFile(t *testing.T) {
 		"/home/u/.claude/decisions.md",
 		"/home/u/.claude/settings.json",
 		"/home/u/.claude/improve/prompts/judge.md",
+		"/home/u/.claude/codex/frag/.claude-CLAUDE.md/fragment-12.md",
+		"/home/u/.claude/codex/frag/.claude-skills-instructions-SKILL.md/20-10-22-10-1.md",
+		"/home/u/.claude/codex/manifest/.claude-CLAUDE.md.yaml",
+		"/home/u/.claude/codex/constitution.md",
+		"/home/u/.config/chooks/config.yaml",
+		"/home/u/.config/models/approved",
+		"/home/u/.config/cl/config.json",
+		"/home/u/.config/cl/settings/x.json",
 	}
 	no := []string{
 		"/home/u/git/chooks/README.md",
 		"/home/u/.claude/improve/state/backlog.md",
 		"/home/u/git/chooks/docs/tasks/x.md",
 		"/home/u/.claude/projects/-home-u/abc.jsonl",
+		"/home/u/.config/other/config.yaml",
 	}
 	for _, p := range yes {
 		if !IsInstructionFile(p) {
@@ -127,6 +136,50 @@ func TestIsInstructionFile(t *testing.T) {
 		if IsInstructionFile(p) {
 			t.Errorf("%s: not an instruction file", p)
 		}
+	}
+}
+
+func TestBashRuleFile_WriteSemantics(t *testing.T) {
+	cases := []struct {
+		name, command string
+		want          bool
+	}{
+		{"cp target", "cp /tmp/new.md ~/.claude/CLAUDE.md", true},
+		{"cp settings target", "cp /tmp/settings.json ~/.claude/settings.json", true},
+		{"cp config target", "cp /tmp/config.yaml ~/.config/chooks/config.yaml", true},
+		{"cp instruction sources to scratch", "cp ~/.claude/skills/a/SKILL.md ~/.claude/skills/b/SKILL.md /tmp/copy/", false},
+		{"mv approved target", "mv /tmp/approved ~/.config/models/approved", true},
+		{"cd config redirect", "cd ~/.config/cl && cat > config.json", true},
+		{"git codex fragment", "git -C ~/.claude/codex/frag checkout HEAD~1 -- fragment-12.md", true},
+		{"mv target", "mv /tmp/s.json /home/aisee/.claude/settings.json", true},
+		{"install target", "install -m644 /tmp/x.md ~/.claude/rules/go.md", true},
+		{"python open write", `python3 -c "open('/home/aisee/.claude/CLAUDE.md','w').write('x')"`, true},
+		{"python heredoc", "python3 - <<'EOF'\np='/home/aisee/.claude/skills/x/SKILL.md'\ns=open(p).read()\nopen(p,'w').write(s)\nEOF", true},
+		{"pathlib", `python3 -c "import pathlib; pathlib.Path('/home/aisee/.claude/rules/go.md').write_text('x')"`, true},
+		{"sponge", "jq '.x=1' ~/.claude/settings.json | sponge ~/.claude/settings.json", true},
+		{"cd redirect", "cd ~/.claude && cat > settings.json <<'EOF'\n{}\nEOF", true},
+		{"relative redirect", "cd /home/aisee/git/chooks; printf x > CLAUDE.md", true},
+		{"git checkout", "cd ~/.claude && git checkout HEAD~1 -- CLAUDE.md", true},
+		{"git -C checkout", "git -C ~/.claude checkout HEAD~1 -- CLAUDE.md", true},
+		{"git restore", "git restore --source HEAD~1 /home/aisee/git/chooks/CLAUDE.md", true},
+		{"tee target", "tee ~/.claude/CLAUDE.md < /tmp/x", true},
+		{"read grep", "grep -n sub ~/.claude/CLAUDE.md", false},
+		{"tee copy", "cat ~/.claude/CLAUDE.md | tee /tmp/copy.md", false},
+		{"cp source", "cp ~/.claude/CLAUDE.md /tmp/backup.md", false},
+		{"git diff", "git -C ~/.claude diff -- CLAUDE.md", false},
+		{"python read", `python3 -c "print(open('/home/aisee/.claude/CLAUDE.md').read())"`, false},
+		{"sed read", "sed -n 1,20p ~/.claude/CLAUDE.md", false},
+		{"cd other redirect", "cd ~/.claude && cat > /tmp/settings.json <<EOF\n{}\nEOF", false},
+		{"eval fallback", `eval "sed -i s/a/b/ CLAUDE.md"`, true},
+		{"bash pipe fallback", `echo 'sed -i s/a/b/ CLAUDE.md' | bash`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bashRuleFile(tc.command) != ""
+			if got != tc.want {
+				t.Errorf("bashRuleFile(%q) present=%v, want %v", tc.command, got, tc.want)
+			}
+		})
 	}
 }
 

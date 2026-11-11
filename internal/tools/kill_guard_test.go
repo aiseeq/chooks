@@ -156,6 +156,9 @@ func TestKillGuardBlocks(t *testing.T) {
 		`parallel kill ::: 455274`,
 		`find /proc -maxdepth 1 -exec kill {} +`,
 		`find . -name x -exec echo {} \; -exec kill 1500 \;`,
+		`find . -execdir kill -9 {} \;`,
+		`find . -ok kill 1500 \;`,
+		`find . -okdir kill 1500 \;`,
 		`systemd-run --user --scope pkill -u aisee`,
 		`ionice -c 3 kill 1500`,
 		// строка-скрипт
@@ -245,6 +248,8 @@ func TestKillGuardAllows(t *testing.T) {
 		"pgrep -x foo || bash <<'EOF'\nkill 455274\nEOF",
 		`pkill -0 konsole`,
 		`bash script.sh`,
+		`cat kill-stale.sh | bash -n`,
+		`echo ok | bash -n; grep kill log`,
 		`kill 455274 || echo gone`,
 		`trap - EXIT`,
 		`trap -p`,

@@ -438,6 +438,9 @@ func shellArgScript(args []word) (string, scriptSource) {
 			short := a[0] == '-' && a[1] != '-'
 			withC = withC || short && strings.ContainsRune(a[1:], 'c')
 			withS = withS || short && strings.ContainsRune(a[1:], 's')
+			if short && strings.ContainsRune(a[1:], 'n') {
+				return "", noScript // -n: только проверка синтаксиса, ничего не исполняется
+			}
 		case withC:
 			return a, scriptArg
 		default:

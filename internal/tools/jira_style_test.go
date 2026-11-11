@@ -22,9 +22,16 @@ func newJiraStyleTool(t *testing.T) *JiraStyleTool {
 
 func validateJiraCommand(t *testing.T, command string) *core.ValidationResult {
 	t.Helper()
+	return validateJiraCommandIn(t, "", command)
+}
+
+// validateJiraCommandIn проверяет команду, запущенную в каталоге cwd
+func validateJiraCommandIn(t *testing.T, cwd, command string) *core.ValidationResult {
+	t.Helper()
 	result, err := newJiraStyleTool(t).ValidateTool(context.Background(), &core.ToolInput{
 		ToolName: "Bash",
 		Command:  command,
+		CWD:      cwd,
 	})
 	if err != nil {
 		t.Fatalf("ValidateTool: %v", err)
@@ -266,6 +273,101 @@ EOF
 				t.Fatal("нарушение в тексте комментария должно блокироваться")
 			}
 		})
+	}
+}
+
+// Формы отправки комментария: тело в файле видно при любой записи пути
+// (-d@f, --json @f, относительный путь от cwd или после cd, $(cat f), вход
+// curl из файла или cat), нераскрытый файл - отказ, файл из heredoc этой же
+// команды не читается. Команды без вызова curl с адресом комментария и
+// признаком записи не проверяются
+func TestJiraStyleSendForms(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("bad.json", `{"body":"Готово — выкачено. **Важно**: проверь."}`)
+	write("clean.json", `{"body":"Выкатил на stage, проверь вход."}`)
+	// Прежнее тело файла, который команда перезаписывает: читать его
+	// нельзя, на отправку уйдёт новый текст
+	write("stale.json", `{"body":"Готово — выкачено."}`)
+	const (
+		auth = `curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -H 'Content-Type: application/json' `
+		url  = ` "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"`
+	)
+	bad, clean := filepath.Join(dir, "bad.json"), filepath.Join(dir, "clean.json")
+	heredoc := func(path, body string) string {
+		return "cat > " + path + " <<'JSON'\n" + body + "\nJSON\n"
+	}
+	cases := []struct {
+		name string
+		cwd  string
+		cmd  string
+		want string // "" - пропуск, иначе тип первого нарушения
+	}{
+		{"-d @абсолютный", "/", auth + "-X POST -d @" + bad + url, "jira_comment_style"},
+		{"-d@ слитно", "/", auth + "-d@" + bad + url, "jira_comment_style"},
+		{"--json @", "/", auth + "--json @" + bad + url, "jira_comment_style"},
+		{"связка -sSd", "/", `curl -sSd @` + bad + url, "jira_comment_style"},
+		{"относительный от cwd", dir, auth + "--data-binary @bad.json" + url, "jira_comment_style"},
+		{"cd перед curl", "/", "cd " + dir + " && " + auth + "-d @bad.json" + url, "jira_comment_style"},
+		{"$(cat файл)", "/", auth + `-X POST -d "$(cat ` + bad + `)"` + url, "jira_comment_style"},
+		{"вход из файла", "/", auth + "-X POST -d @-" + url + " < " + bad, "jira_comment_style"},
+		{"cat в конвейере", "/", "cat " + bad + " | " + auth + "-X POST -d @-" + url, "jira_comment_style"},
+		{"правка /comment/ID", "/", auth + "--request PUT -d @" + bad + ` "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment/10001"`, "jira_comment_style"},
+		{"переменная из команды", "/", "S=" + dir + "; " + auth + "-d @$S/bad.json" + url, "jira_comment_style"},
+		{"переменная после отправки", "/", auth + "-d @$S/bad.json" + url + "; S=" + dir, "jira_comment_payload"},
+		{"файл переписан после отправки", "/", auth + "-d @" + bad + url + "; " + heredoc(bad, `{"body":"ok"}`), "jira_comment_style"},
+		{"адрес в переменной", "/", `U="$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"; ` + auth + "-d @" + bad + ` "$U"`, "jira_comment_style"},
+		{"perl -i поверх старого", "/", "perl -pi -e 's/ — / - /' " + dir + "/stale.json && " + auth + "-d @" + dir + "/stale.json" + url, ""},
+		{"perl -M без правки на месте", "/", "perl -Mwarnings -ne 'print' " + bad + " && " + auth + "-d @" + bad + url, "jira_comment_style"},
+		{"heredoc с нарушением", "/", heredoc(dir+"/new-bad.json", `{"body":"Готово — выкачено"}`) + auth + "-d @" + dir + "/new-bad.json" + url, "jira_comment_style"},
+		{"нераскрытая переменная", "/", auth + "-X POST -d @$S/c.json" + url, "jira_comment_payload"},
+		{"файла нет", "/", auth + "-X POST -d @" + dir + "/missing.json" + url, "jira_comment_payload"},
+		{"относительный без cwd", "", auth + "-d @clean.json" + url, "jira_comment_payload"},
+		{"каталог после cd $X", "/", "cd $X && " + auth + "-d @clean.json" + url, "jira_comment_payload"},
+		{"правка задачи, не комментария", "/", auth + "-X PUT -d @" + bad + ` "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1"`, ""},
+		{"правка задачи и чтение комментариев", "/", auth + "-X PUT -d @" + bad + ` "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1"; curl -s` + url, ""},
+		{"чтение комментариев", "/", auth + "-X GET" + url + ` | grep -c "Готово — выкачено"`, ""},
+		{"grep по адресу", "/", `grep -rn "rest/api/3/issue/PROJ-1/comment" docs/ -X POST # заметка — не отправка`, ""},
+		{"echo адреса в файл", "/", `echo 'curl -d @x.json $JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment — пример' > ` + dir + "/note.txt", ""},
+		{"чистый файл", "/", auth + "-X POST -d @" + clean + url, ""},
+		{"чистый относительный", dir, auth + "-X POST -d @clean.json" + url, ""},
+		{"чистый heredoc поверх старого", "/", heredoc(dir+"/stale.json", `{"body":"Выкатил на stage, проверь вход."}`) + auth + "-d @" + dir + "/stale.json" + url, ""},
+		{"sed -i поверх старого", "/", "sed -i 's/ — / - /' " + dir + "/stale.json; " + auth + "-d @" + dir + "/stale.json" + url, ""},
+		{"генератор в конвейере", "/", `printf '{"body":"Выкатил на stage"}' | ` + auth + "-d @-" + url, ""},
+		{"--data-urlencode не тело", "/", auth + "--data-urlencode q@" + dir + "/missing.json" + url, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := validateJiraCommandIn(t, tc.cwd, tc.cmd)
+			got := ""
+			if !result.IsValid && len(result.Violations) > 0 {
+				got = result.Violations[0].Type
+			}
+			if got != tc.want || result.IsValid != (tc.want == "") {
+				t.Fatalf("нарушение %q (пропуск %v), ожидалось %q: %v", got, result.IsValid, tc.want, result.Suggestions)
+			}
+		})
+	}
+}
+
+// Нераскрытый файл называется первым сообщением, маркеры видимой части
+// тела идут подсказками следом
+func TestJiraStyleNamesUnreadablePayloadFirst(t *testing.T) {
+	result := validateJiraCommandIn(t, "/",
+		`curl -X POST -d @$S/c.json -d '{"body":"Готово — выкачено"}' "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"`)
+	if result.IsValid || len(result.Violations) < 2 {
+		t.Fatalf("ожидался отказ и по файлу, и по маркеру: %+v", result.Violations)
+	}
+	if result.Violations[0].Type != "jira_comment_payload" || !strings.Contains(result.Violations[0].Suggestion, "$S/c.json") {
+		t.Fatalf("первым должен быть нераскрытый файл: %+v", result.Violations[0])
+	}
+	if !strings.Contains(strings.Join(result.Suggestions, "\n"), "длинное тире") {
+		t.Fatalf("маркер видимой части должен остаться в подсказках: %v", result.Suggestions)
 	}
 }
 

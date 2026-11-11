@@ -291,6 +291,7 @@ func TestJiraStyleSendForms(t *testing.T) {
 	}
 	write("bad.json", `{"body":"Готово — выкачено. **Важно**: проверь."}`)
 	write("clean.json", `{"body":"Выкатил на stage, проверь вход."}`)
+	write("bad.txt", "Готово — выкачено.")
 	// Прежнее тело файла, который команда перезаписывает: читать его
 	// нельзя, на отправку уйдёт новый текст
 	write("stale.json", `{"body":"Готово — выкачено."}`)
@@ -338,6 +339,17 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"чистый относительный", dir, auth + "-X POST -d @clean.json" + url, ""},
 		{"чистый heredoc поверх старого", "/", heredoc(dir+"/stale.json", `{"body":"Выкатил на stage, проверь вход."}`) + auth + "-d @" + dir + "/stale.json" + url, ""},
 		{"sed -i поверх старого", "/", "sed -i 's/ — / - /' " + dir + "/stale.json; " + auth + "-d @" + dir + "/stale.json" + url, ""},
+		{"jq --rawfile в конвейере", "/", "jq -n --rawfile b " + dir + "/bad.txt '{body:$b}' | " + auth + "-X POST -d @-" + url, "jira_comment_style"},
+		{"jq по файлу в конвейере", dir, "jq -c . bad.json | " + auth + "-d @-" + url, "jira_comment_style"},
+		{"cat | jq | curl", "/", "cat " + bad + " | jq . | " + auth + "-d @-" + url, "jira_comment_style"},
+		{"python с файлом в конвейере", "/", `python3 -c 'import json,sys; print(json.dumps({"body": open(sys.argv[1]).read()}))' ` + dir + "/bad.txt | " + auth + "-d @-" + url, "jira_comment_style"},
+		{"jq < файл в конвейере", "/", "jq -c . < " + bad + " | " + auth + "-d @-" + url, "jira_comment_style"},
+		{"cat нет файла в конвейере", "/", "cat " + dir + "/missing.json | " + auth + "-d @-" + url, "jira_comment_payload"},
+		{"jq без файла-аргумента", "/", "jq -n \"{body:1}\" | " + auth + "-d @-" + url, ""},
+		{"< обрывает конвейер", "/", "cat " + bad + " | jq -c . < " + clean + " | " + auth + "-d @-" + url, ""},
+		{"чистый jq в конвейере", "/", "jq -c . " + clean + " | " + auth + "-d @-" + url, ""},
+		{"--upload-file", "/", auth + "-X POST --upload-file " + bad + url, "jira_comment_style"},
+		{"-T на /comment/ID", "/", auth + "-T " + bad + ` "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment/10001"`, "jira_comment_style"},
 		{"генератор в конвейере", "/", `printf '{"body":"Выкатил на stage"}' | ` + auth + "-d @-" + url, ""},
 		{"--data-urlencode не тело", "/", auth + "--data-urlencode q@" + dir + "/missing.json" + url, ""},
 	}

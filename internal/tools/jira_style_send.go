@@ -59,7 +59,11 @@ func parseCurl(args []string, expand func(string) string) curlRequest {
 			req.write = true
 		case arg == "--request":
 			req.write = req.write || curlWriteMethods[strings.ToUpper(next())]
-		case arg == "--form" || arg == "--upload-file":
+		case arg == "--upload-file":
+			// файл уходит телом как есть, как -d @f; - значит вход
+			req.data = append(req.data, curlData{option: arg, value: "@" + next()})
+			req.write = true
+		case arg == "--form":
 			next()
 			req.write = true
 		case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 1:
@@ -88,7 +92,10 @@ func (req *curlRequest) shortCluster(arg string, next func() string) {
 			req.write = true
 		case 'X':
 			req.write = req.write || curlWriteMethods[strings.ToUpper(value)]
-		case 'F', 'T':
+		case 'T':
+			req.data = append(req.data, curlData{option: "-T", value: "@" + value})
+			req.write = true
+		case 'F':
 			req.write = true
 		}
 		return
@@ -259,6 +266,9 @@ type payloadSource struct {
 	raw string // путь как в команде
 	cwd string // каталог, от которого он считается
 	at  int    // место вызова, читающего файл
+	// optional - аргумент генератора в конвейере (jq . f, python3 x.py f):
+	// он бывает и не файлом (фильтр jq), поэтому нет такого файла - пропуск
+	optional bool
 }
 
 // payloadFiles файлы тела отправки: -d @f, --json @f, -d "$(cat f)",
@@ -299,41 +309,63 @@ func (p *commandPlan) substitutedFiles(send *commentSend, value string) []payloa
 	return files
 }
 
-// stdinFiles файлы, которые придут на вход curl -d @-: перенаправление
-// < f у curl или cat f перед ним в конвейере
+// stdinFiles файлы, из которых собран вход curl -d @-: перенаправление < f
+// у curl и у вызовов конвейера перед ним, операнды cat и аргументы-файлы
+// генераторов (jq --rawfile b f, jq . f, python3 -c '…' f). Heredoc и
+// литерал генератора стоят в самой команде
 func (p *commandPlan) stdinFiles(send *commentSend) []payloadSource {
-	for _, r := range send.call.Redirs {
-		switch r.Op {
-		case "<":
-			return []payloadSource{{raw: p.path(r.Target, send.index), cwd: send.cwd, at: send.index}}
-		case "<<", "<<-", "<<<":
-			return nil
+	var files []payloadSource
+	for stage := send.index; stage >= 0; stage = p.pipedFrom(stage) {
+		if stage != send.index {
+			files = append(files, p.argFiles(stage)...)
+		}
+		if r := stdinRedir(p.calls[stage].Redirs); r != nil {
+			if r.Op == "<" {
+				files = append(files, payloadSource{raw: p.path(r.Target, stage), cwd: p.cwds[stage], at: stage})
+			}
+			// вход из файла или heredoc: конвейер выше на этот вызов не идёт
+			break
 		}
 	}
-	producer := p.pipedFrom(send)
-	if producer < 0 || p.calls[producer].Name != "cat" {
-		return nil
+	return files
+}
+
+// stdinRedir перенаправление входа вызова: < f или heredoc; nil - его нет
+func stdinRedir(redirs []shellcmd.Redir) *shellcmd.Redir {
+	for i := range redirs {
+		switch redirs[i].Op {
+		case "<", "<<", "<<-", "<<<":
+			return &redirs[i]
+		}
 	}
+	return nil
+}
+
+// argFiles файлы, которые вызов конвейера читает аргументами: у cat - все
+// операнды (нет файла - отказ), у генератора - те, что есть на диске
+func (p *commandPlan) argFiles(index int) []payloadSource {
+	c := p.calls[index]
 	var files []payloadSource
-	for _, a := range operands(p.calls[producer].Args) {
-		files = append(files, payloadSource{raw: p.path(a, producer), cwd: p.cwds[producer], at: producer})
+	for _, a := range operands(c.Args) {
+		files = append(files, payloadSource{raw: p.path(a, index), cwd: p.cwds[index], at: index, optional: c.Name != "cat"})
 	}
 	return files
 }
 
 // pipedFrom вызов, чей вывод идёт на вход отправки через |: между его
 // текстом и именем curl только перенаправления и |; -1 - такого нет
-func (p *commandPlan) pipedFrom(send *commentSend) int {
-	if send.call.Offset < 0 {
+func (p *commandPlan) pipedFrom(index int) int {
+	to := p.calls[index]
+	if to.Offset < 0 {
 		return -1
 	}
-	for i := send.index - 1; i >= 0; i-- {
+	for i := index - 1; i >= 0; i-- {
 		c := p.calls[i]
 		end := c.Offset + len(c.Raw)
-		if c.Offset < 0 || end > send.call.Offset || !strings.HasPrefix(p.command[c.Offset:], c.Raw) {
+		if c.Offset < 0 || end > to.Offset || !strings.HasPrefix(p.command[c.Offset:], c.Raw) {
 			continue
 		}
-		gap := strings.TrimSpace(p.command[end:send.call.Offset])
+		gap := strings.TrimSpace(p.command[end:to.Offset])
 		if !strings.HasSuffix(gap, "|") || strings.HasSuffix(gap, "||") ||
 			strings.ContainsAny(gap, ";\n'\"()`") || strings.Contains(gap, "&&") {
 			return -1

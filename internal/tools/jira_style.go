@@ -104,7 +104,7 @@ func (t *JiraStyleTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 		for _, src := range plan.payloadFiles(send) {
 			body, written, err := plan.readSource(src)
 			switch {
-			case written:
+			case written, err != nil && src.optional:
 				continue
 			case err != nil:
 				unreadable = append(unreadable, fmt.Sprintf("%s (%s): %v", src.raw, describeSend(send), err))

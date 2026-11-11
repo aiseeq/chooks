@@ -172,6 +172,20 @@ func TestKillGuardBlocks(t *testing.T) {
 		`env -i -S'kill 1500'`,
 		`env --split-string='kill 1500'`,
 		`env -u HOME -- kill 1500`,
+		// полный разбор оболочки (тикет kill-guard-shellcmd): имя из
+		// переменной, ANSI-C кавычки, функции, coproc, склеенные опции
+		`K=kill; $K -9 $PID`,
+		`$'kill' -9 $PID`,
+		`$'pkill' -u aisee`,
+		`function f { kill -9 $PID; }; f`,
+		`f() { kill 1500; }; f`,
+		`coproc K { kill -9 $PID; }`,
+		`sudo -iu aisee kill -9 $PID`,
+		`sudo -Eu aisee kill 1500`,
+		`$(echo kill) -9 1500`,
+		"`echo pkill` -u aisee",
+		`K=xargs; pgrep foo | $K kill`,
+		`K=pkill; $K -f "$NAME"`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -184,6 +198,14 @@ func TestKillGuardKillall5Reason(t *testing.T) {
 	r := validateKill(t, `killall5 -15`)
 	if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), "всем процессам системы") {
 		t.Errorf("killall5: ждали отказ с причиной «всем процессам системы», получили %v %v", r.IsValid, r.Suggestions)
+	}
+}
+
+// лексер и полный разбор находят один и тот же kill: причина — одна
+func TestKillGuardReasonOnce(t *testing.T) {
+	r := validateKill(t, `kill 1500`)
+	if len(r.Violations) != 1 {
+		t.Errorf("ждали одну причину, получили %d: %v", len(r.Violations), r.Suggestions)
 	}
 }
 
@@ -256,6 +278,10 @@ func TestKillGuardAllows(t *testing.T) {
 		`watch -n1 'kill -0 $PID'`,
 		`find . -name '*.go' -exec grep -l kill {} +`,
 		`timeout --kill-after=5 10 go version`,
+		`$(git rev-parse --show-toplevel)/scripts/x.sh; echo kill`,
+		`f() { kill 455274; }; f`,
+		`K=kill; $K 455274`,
+		`sudo -iu aisee kill -0 455274`,
 		`pkill --help`,
 		`pkill -V`,
 		`killall --version`,

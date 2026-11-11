@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
 )
 
@@ -50,6 +52,9 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 
 	scan := killScan{tool: t, command: input.Command}
 	if err := scan.walk(input.Command, 0); err != nil {
+		return nil, err
+	}
+	if err := scan.parsedCalls(); err != nil {
 		return nil, err
 	}
 	if len(scan.reasons) == 0 {
@@ -144,6 +149,47 @@ func findExecCommands(args []word) [][]word {
 	return out
 }
 
+// parsedCalls проверяет вызовы, найденные полным разбором оболочки
+// (akit/shellcmd): имя из переменной (K=kill; $K), $'kill', тела функций и
+// coproc, склеенные опции обёрток (sudo -iu). Вызов с именем из $(…) — отказ,
+// если в его тексте есть kill
+func (s *killScan) parsedCalls() error {
+	calls, err := shellcmd.Calls(s.command)
+	if err != nil {
+		// синтаксис, который не разбирает и bash: оболочка его не исполнит,
+		// вложенный скрипт с ошибкой — найденные вызовы всё равно проверяются
+		s.tool.Logger().Debug("kill_guard: shell parse", "error", err)
+	}
+	for _, c := range calls {
+		if c.Name == "" {
+			if strings.Contains(unquoted(c.Raw), "kill") {
+				s.addReason("имя команды вычисляется при запуске ($(…) или `…`) рядом с kill: проверить, что исполнится, нельзя")
+			}
+			continue
+		}
+		via := ""
+		if slices.Contains(c.Via, "xargs") {
+			via = "xargs"
+		}
+		args := make([]word, 0, len(c.Args))
+		for _, a := range c.Args {
+			args = append(args, word{text: a, literal: !strings.ContainsAny(a, "$`")})
+		}
+		if err := s.check(c.Name, args, via); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addReason добавляет причину отказа без повторов: лексер и полный разбор
+// находят один и тот же вызов
+func (s *killScan) addReason(reason string) {
+	if !slices.Contains(s.reasons, reason) {
+		s.reasons = append(s.reasons, reason)
+	}
+}
+
 // check проверяет одну простую команду, если она шлёт сигнал; via — обёртка,
 // подающая аргументы из ввода (xargs, parallel)
 func (s *killScan) check(name string, args []word, via string) error {
@@ -171,7 +217,7 @@ func (s *killScan) check(name string, args []word, via string) error {
 		reason = s.tool.checkPattern(name, args, s.command, s.procs)
 	}
 	if reason != "" {
-		s.reasons = append(s.reasons, reason)
+		s.addReason(reason)
 	}
 	return nil
 }

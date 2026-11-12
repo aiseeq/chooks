@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,19 +12,23 @@ import (
 )
 
 // gitGuardTree — общее дерево мастера (.git — каталог) с файлом main.go и
-// linked worktree суб-агента (.git — файл)
+// подмодулем sub, linked worktree суб-агента (.git — файл) на ветке f
 func gitGuardTree(t *testing.T) (shared, own string) {
 	t.Helper()
 	root := t.TempDir()
 	shared, own = filepath.Join(root, "repo"), filepath.Join(root, "wt")
-	for _, dir := range []string{filepath.Join(shared, ".git"), filepath.Join(shared, "pkg"), own} {
+	wtGit := filepath.Join(shared, ".git", "worktrees", "wt")
+	for _, dir := range []string{wtGit, filepath.Join(shared, ".git", "modules", "sub"), filepath.Join(shared, "pkg"), filepath.Join(shared, "sub"), own} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for path, text := range map[string]string{
-		filepath.Join(shared, "main.go"): "package main\n",
-		filepath.Join(own, ".git"):       "gitdir: " + filepath.Join(shared, ".git", "worktrees", "wt") + "\n",
+		filepath.Join(shared, "main.go"):                        "package main\n",
+		filepath.Join(shared, "sub", ".git"):                    "gitdir: ../.git/modules/sub\n",
+		filepath.Join(own, ".git"):                              "gitdir: " + wtGit + "\n",
+		filepath.Join(wtGit, "HEAD"):                            "ref: refs/heads/f\n",
+		filepath.Join(shared, ".git", "modules", "sub", "HEAD"): "ref: refs/heads/main\n",
 	} {
 		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 			t.Fatal(err)
@@ -42,6 +47,12 @@ func TestGitGuard(t *testing.T) {
 	// Дерево теста само лежит во временном каталоге: временные — свои
 	scratch := filepath.Join(t.TempDir(), "claude-tmp")
 	t.Setenv("SCRATCH", scratch)
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(shared, filepath.Join(scratch, "link")); err != nil {
+		t.Fatal(err)
+	}
 	tool.tempRoots = []string{scratch, "/var/tmp/gg-test"}
 	cases := []struct {
 		name, command string
@@ -73,6 +84,42 @@ func TestGitGuard(t *testing.T) {
 		{"за обёрткой", "timeout 10 git clean -fdx", true},
 		{"--git-dir: дерево неизвестно", "git --git-dir=" + own + "/.git reset --hard", true},
 		{"--work-tree словом: дерево неизвестно", "cd " + own + " && git --work-tree " + shared + " reset --hard", true},
+		{"checkout по шаблону", "git checkout '*.go'", true},
+		{"checkout pathspec :/", "git checkout :/", true},
+		{"checkout --pathspec-from-file", "git checkout --pathspec-from-file=list", true},
+		{"reset --har", "git reset --har", true},
+		{"checkout --forc", "git checkout --forc main", true},
+		{"switch --discard", "git switch --discard main", true},
+		{"switch -qf", "git switch -qf main", true},
+		{"switch -C", "git switch -C main", true},
+		{"checkout -qB", "git checkout -qB main", true},
+		{"checkout -p", "git checkout -p", true},
+		{"push --del", "git push --del origin x", true},
+		{"push --mirr", "git push --mirr origin", true},
+		{"push --force-w", "git push --force-w origin main", true},
+		{"push --pru", "git push --pru origin", true},
+		{"push --force-if-includes", "git push --force-if-includes origin main", true},
+		{"push -- +ref", "git push -- origin +main", true},
+		{"push -- :ref", "git push -- origin :main", true},
+		{"clean -e слитно", "git clean -fdx -enode_modules", true},
+		{"clean --dry-run", "git clean --dry-run -d", false},
+		{"GIT_DIR из своего worktree", "cd " + own + " && GIT_DIR=" + shared + "/.git git reset --hard", true},
+		{"export GIT_WORK_TREE", "cd " + own + " && export GIT_WORK_TREE=" + shared + " && git reset --hard", true},
+		{"pushd в дерево мастера", "cd " + own + " && pushd " + shared + " && git reset --hard", true},
+		{"после popd каталог неизвестен", "pushd " + own + " && popd && git reset --hard", true},
+		{"симлинк из временного", "git -C " + filepath.Join(scratch, "link") + " reset --hard", true},
+		{"алиас через -c", "git -c alias.w='reset --hard' w", true},
+		{"-c без алиаса", "git -c core.pager=cat reset --hard", true},
+		{"-c без алиаса: status", "git -c core.pager=cat status", false},
+		{"неизвестный каталог: checkout пути", "git --git-dir=x checkout pkg/a", true},
+		{"неизвестный каталог: checkout ветки", "git --git-dir=x checkout main", false},
+
+		{"rm -f", "git rm -f main.go", true},
+		{"checkout-index -f", "git checkout-index -f -a", true},
+		{"read-tree --reset -u", "git read-tree -u --reset HEAD", true},
+
+		{"reflog expire", "git reflog expire --expire=now --all", true},
+		{"подмодуль — дерево мастера", "git -C " + filepath.Join(shared, "sub") + " reset --hard", true},
 		// Безобидные формы (решение 12.11 в тикете)
 		{"stash list", "git stash list", false},
 		{"stash show", "git stash show -p stash@{0}", false},
@@ -80,6 +127,12 @@ func TestGitGuard(t *testing.T) {
 		{"restore -S", "git restore -S main.go", false},
 		{"checkout ветки", "git checkout main", false},
 		{"checkout -b", "git checkout -b feature", false},
+		{"checkout -b слитно", "git checkout -bfix", false},
+		{"branch -D (уборка своих веток)", "git branch -D x", false},
+		{"worktree remove --force (уборка своих worktree)", "git worktree remove --force ../wt2", false},
+		{"rm", "git rm main.go", false},
+		{"read-tree", "git read-tree HEAD", false},
+		{"reflog", "git reflog show", false},
 		{"switch", "git switch main", false},
 		{"clean -n", "git clean -nd", false},
 		{"reset без --hard", "git reset main.go", false},
@@ -91,9 +144,15 @@ func TestGitGuard(t *testing.T) {
 		{"свой worktree", "cd " + own + " && git reset --hard && git stash", false},
 		{"свой worktree через -C", "git -C " + own + " clean -fdx", false},
 		{"свой worktree: push --force-with-lease", "cd " + own + " && git push --force-with-lease=f:abc --force-if-includes origin HEAD:refs/heads/f", false},
+		{"свой worktree: lease без refspec", "cd " + own + " && git push --force-with-lease", false},
+		{"свой worktree: lease ветки", "cd " + own + " && git push --force-with-lease origin f HEAD", false},
+		{"свой worktree: lease в чужую ветку", "cd " + own + " && git push --force-with-lease origin HEAD:main", true},
+		{"свой worktree: lease --all", "cd " + own + " && git push --force-with-lease --all origin", true},
 		{"свой worktree: push --force", "cd " + own + " && git push --force origin HEAD:main", true},
 		{"свой worktree: lease и +ref", "cd " + own + " && git push --force-with-lease origin +HEAD:main", true},
 		{"свой worktree: push --delete", "git -C " + own + " push origin --delete main", true},
+		{"свой worktree: reflog expire", "cd " + own + " && git reflog expire --all", true},
+		{"свой worktree: stash", "cd " + own + " && git stash && git rm -f a", false},
 		{"клон в scratchpad: push --force", "cd " + filepath.Join(scratch, "s", "repo") + " && git push --force origin main", false},
 		{"клон в scratchpad через переменную окружения", "cd $SCRATCH/s/repo && git reset --hard", true},
 		{"клон в scratchpad", "cd " + filepath.Join(scratch, "s", "repo") + " && git reset --hard && git clean -fdx", false},
@@ -119,6 +178,38 @@ func TestGitGuard(t *testing.T) {
 				t.Errorf("основной сессии отказ: %v %v", err, main)
 			}
 		})
+	}
+}
+
+// Основная сессия работает в linked worktree: её суб-агентам это дерево не
+// своё
+func TestGitGuardMasterInWorktree(t *testing.T) {
+	_, own := gitGuardTree(t)
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewGitGuardTool(core.ToolConfig{Enabled: true}, logger)
+	tool.tempRoots = nil
+	for _, start := range []string{own, filepath.Join(own, "cmd")} {
+		input := &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: own, AgentID: "a1",
+			TranscriptPath: filepath.Join("/p", encodeProject(start), "s.jsonl")}
+		if got, err := tool.ValidateTool(context.Background(), input); err != nil || got.IsValid {
+			t.Errorf("мастер в %s: git stash суб-агенту: %v %+v", start, err, got)
+		}
+	}
+	// Мастер в другом каталоге: worktree — суб-агента
+	input := &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: own, AgentID: "a1", TranscriptPath: "/p/-home-x/s.jsonl"}
+	if got, err := tool.ValidateTool(context.Background(), input); err != nil || !got.IsValid {
+		t.Errorf("свой worktree: %v %+v", err, got)
+	}
+}
+
+// Временные каталоги — системный и scratchpad Claude Code
+func TestGitGuardTempRoots(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_TMPDIR", "/var/scratch-x")
+	if roots := tempRoots(); !slices.Contains(roots, "/var/scratch-x") || !slices.Contains(roots, "/tmp") {
+		t.Errorf("tempRoots: %v", roots)
 	}
 }
 

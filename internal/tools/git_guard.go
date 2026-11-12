@@ -18,14 +18,14 @@ const gitGuardHint = "суб-агенту такие git-команды запр
 
 // GitGuardTool отказывает суб-агентам Claude (не основной сессии) в
 // git-командах, которые стирают незакоммиченную работу или меняют
-// запушенное: reset --hard, restore, checkout -- путь, clean, stash,
-// force-push, удаление ветки на remote. Основная сессия делает их по «да»
-// пользователя; у бойцов worker они запрещены своим механизмом
-// (пользователь 12.11: «пускай то, что требует моего разрешения делает только
-// мастер», выбор 4а — запрет кодом всем суб-агентам). В своём linked
-// worktree суб-агенту можно всё, кроме push, меняющего запушенное: его
-// можно только --force-with-lease своей ветки (git.md: после graft worktree
-// sync); во временном каталоге — всё
+// запушенное: reset --hard, restore, checkout пути, clean, stash,
+// force-push, удаление ветки. Основная сессия делает их по «да»
+// пользователя (пользователь 12.11: «пускай то, что требует моего разрешения
+// делает только мастер», выбор 4а — запрет кодом всем суб-агентам).
+// В своём linked worktree суб-агенту можно всё, что меняет только это
+// дерево; общее для всех worktree репо (ветки, ссылки, remote) — нельзя,
+// кроме push --force-with-lease своей ветки (git.md: после graft worktree
+// sync). Во временном каталоге — всё: там клоны и пробы
 type GitGuardTool struct {
 	*BaseTool
 	// tempRoots — временные каталоги: репо в них — клон или проба
@@ -56,6 +56,9 @@ func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*
 	if err != nil {
 		t.Logger().Warn("git_guard: домашний каталог неизвестен", "error", err)
 	}
+	// GIT_DIR и GIT_WORK_TREE переносят git в другое репо: каталог неизвестен
+	envRepo := strings.Contains(input.Command, "GIT_DIR") || strings.Contains(input.Command, "GIT_WORK_TREE")
+	master := sessionProject(input.TranscriptPath)
 	plan := planCommand(input.Command, input.CWD, home, calls)
 	var reasons []string
 	for i, c := range calls {
@@ -63,8 +66,11 @@ func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*
 			continue
 		}
 		g := parseGit(c.Args, plan.cwds[i], home, func(p string) string { return plan.path(p, i) })
-		why := g.destructive()
-		if why == "" || inTemp(g.dir, t.tempRoots) || linkedWorktree(g.dir) && (g.sub != "push" || leasePush(g.args)) {
+		if envRepo {
+			g.dir = ""
+		}
+		why, shared := g.destructive()
+		if why == "" || t.ownTree(g, shared, master) {
 			continue
 		}
 		reasons = append(reasons, fmt.Sprintf("git %s — %s", g.sub, why))
@@ -77,11 +83,43 @@ func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*
 	return core.NewValidationResult(false, []core.Violation{v}, []string{message}), nil
 }
 
+// ownTree — опасная подкоманда g работает в дереве суб-агента: каталог во
+// временном или в linked worktree, где не работает основная сессия.
+// shared — подкоманда меняет общее для всех worktree (ветки, ссылки,
+// remote): в worktree можно только push --force-with-lease его ветки.
+// Каталог неизвестен — не своё
+func (t *GitGuardTool) ownTree(g gitCall, shared bool, master string) bool {
+	if g.dir == "" {
+		return false
+	}
+	dir := g.dir
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	if inTemp(dir, t.tempRoots) {
+		return true
+	}
+	wt, err := linkedWorktree(dir)
+	if err != nil {
+		// Worktree не прочитать — не опознать своё: отказ (безопасная сторона)
+		t.Logger().Warn("git_guard: worktree не прочитан", "dir", dir, "error", err)
+		return false
+	}
+	switch {
+	case wt.root == "" || masterIn(wt.root, master):
+		return false
+	case !shared:
+		return true
+	}
+	return g.sub == "push" && leasePush(g.args, wt.branch)
+}
+
 // gitCall — вызов git: каталог репо, подкоманда и её аргументы
 type gitCall struct {
-	dir  string // каталог, где работает git; "" — не раскрыть до запуска
-	sub  string
-	args []string
+	dir   string // каталог, где работает git; "" — не раскрыть до запуска
+	sub   string
+	args  []string
+	alias bool // -c alias.*: подкоманда может быть алиасом
 }
 
 // gitValueOpts — глобальные опции git со значением отдельным словом
@@ -105,6 +143,9 @@ func parseGit(args []string, cwd, home string, expand func(string) string) gitCa
 			g.dir = ""
 		case slices.Contains(gitValueOpts, a):
 			i++
+			if a == "-c" && i < len(args) && strings.HasPrefix(strings.ToLower(args[i]), "alias.") {
+				g.alias = true
+			}
 		case strings.HasPrefix(a, "-"):
 		default:
 			g.sub, g.args = a, args[i+1:]
@@ -114,60 +155,89 @@ func parseGit(args []string, cwd, home string, expand func(string) string) gitCa
 	return g
 }
 
-// destructive — чем подкоманда опасна для чужой работы; "" — безопасна.
-// Пропускается (решение 12.11): git stash list/show, restore --staged без
-// --worktree (только снимает из индекса), checkout -b/--orphan (новая ветка),
-// checkout и switch на ветку (переключение не стирает правки: git
-// отказывает при конфликте), clean -n, reset без --hard/--merge/--keep
-// (дерево не трогает), обычный push
-func (g gitCall) destructive() string {
-	switch g.sub {
-	case "reset":
-		if hasAny(g.args, "--hard", "--merge", "--keep") {
-			return "стирает правки дерева"
+// destructive — чем подкоманда опасна для чужой работы ("" — безопасна) и
+// меняет ли она общее для всех worktree репо (ветки, ссылки, remote)
+func (g gitCall) destructive() (why string, shared bool) {
+	if g.alias {
+		return "подкоманду из алиаса -c alias.* не проверить", true
+	}
+	if check, ok := gitDangers[g.sub]; ok {
+		return check(g)
+	}
+	return "", false
+}
+
+// gitDangers — проверки опасных подкоманд. Пропускается (решение 12.11):
+// git stash list/show, restore --staged без --worktree (только снимает из
+// индекса), checkout -b/--orphan (новая ветка), checkout и switch на ветку
+// (переключение не стирает правки: git отказывает при конфликте), clean -n,
+// reset без --hard/--merge/--keep (дерево не трогает), обычный push.
+// worktree remove --force и branch -D не проверяются: сухой прогон 12.11 —
+// 107 таких команд суб-агентов, все уборка их же временных worktree и
+// веток проверки
+var gitDangers = map[string]func(gitCall) (string, bool){
+	"reset": func(g gitCall) (string, bool) {
+		return when(hasLong(g.args, "--hard", "--merge", "--keep"), "стирает правки дерева"), false
+	},
+	"restore": func(g gitCall) (string, bool) {
+		staged := hasLong(g.args, "--staged") || hasShort(g.args, 'S', "s")
+		worktree := hasLong(g.args, "--worktree") || hasShort(g.args, 'W', "s")
+		return when(!staged || worktree, "стирает правки файлов"), false
+	},
+	"checkout": func(g gitCall) (string, bool) { return g.checkout(), false },
+	"switch": func(g gitCall) (string, bool) {
+		if hasLong(g.args, "--force", "--discard-changes") || hasShort(g.args, 'f', "cC") {
+			return "стирает правки дерева", false
 		}
-	case "restore":
-		staged := hasAny(g.args, "--staged", "-S") || hasShort(g.args, 'S')
-		worktree := hasAny(g.args, "--worktree", "-W") || hasShort(g.args, 'W')
-		if !staged || worktree {
-			return "стирает правки файлов"
-		}
-	case "checkout":
-		return g.checkout()
-	case "switch":
-		switch {
-		case hasAny(g.args, "-f", "--force", "--discard-changes"):
-			return "стирает правки дерева"
-		case hasAny(g.args, "-C", "--force-create"):
-			return "переставляет существующую ветку"
-		}
-	case "clean":
-		if !hasAny(g.args, "--dry-run") && !hasShort(g.args, 'n') {
-			return "удаляет неотслеживаемые файлы"
-		}
-	case "stash":
-		if ops := gitOperands(g.args); len(ops) == 0 || (ops[0] != "list" && ops[0] != "show") {
-			return "убирает правки из дерева или стирает отложенные"
-		}
-	case "push":
-		return pushDanger(g.args)
+		return when(hasLong(g.args, "--force-create") || hasShort(g.args, 'C', "c"), "переставляет существующую ветку"), true
+	},
+	"clean": func(g gitCall) (string, bool) {
+		return when(!hasLong(g.args, "--dry-run") && !hasShort(g.args, 'n', "e"), "удаляет неотслеживаемые файлы"), false
+	},
+	"stash": func(g gitCall) (string, bool) {
+		ops := gitOperands(g.args)
+		return when(len(ops) == 0 || (ops[0] != "list" && ops[0] != "show"), "убирает правки из дерева или стирает отложенные"), false
+	},
+	"rm":             forced("стирает правки файлов"),
+	"checkout-index": forced("стирает правки файлов"),
+	"read-tree": func(g gitCall) (string, bool) {
+		return when(hasLong(g.args, "--reset") && hasShort(g.args, 'u', ""), "стирает правки дерева"), false
+	},
+	"reflog": func(g gitCall) (string, bool) {
+		ops := gitOperands(g.args)
+		return when(len(ops) > 0 && (ops[0] == "expire" || ops[0] == "delete"), "стирает историю ссылок"), true
+	},
+	"push": func(g gitCall) (string, bool) { return pushDanger(g.args), true },
+}
+
+// when — why, если условие верно, иначе ""
+func when(cond bool, why string) string {
+	if cond {
+		return why
 	}
 	return ""
 }
 
+// forced — подкоманда опасна только с --force/-f
+func forced(why string) func(gitCall) (string, bool) {
+	return func(g gitCall) (string, bool) {
+		return when(hasLong(g.args, "--force") || hasShort(g.args, 'f', ""), why), false
+	}
+}
+
 // checkout — опасная форма git checkout: путь (после -- или существующий
-// файл), принудительный, по частям, -B
+// файл, шаблон, pathspec), принудительный, по частям, -B
 func (g gitCall) checkout() string {
 	switch {
-	case hasAny(g.args, "-f", "--force") || hasShort(g.args, 'f'):
+	case hasLong(g.args, "--force") || hasShort(g.args, 'f', "bB"):
 		return "стирает правки дерева"
-	case hasAny(g.args, "-p", "--patch"):
+	case hasLong(g.args, "--patch") || hasShort(g.args, 'p', "bB"):
 		return "стирает правки файла по частям"
-	case hasAny(g.args, "-B"):
+	case hasShort(g.args, 'B', "b"):
 		return "переставляет существующую ветку"
-	case slices.Contains(g.args, "--"):
+	case slices.Contains(g.args, "--") || hasLong(g.args, "--pathspec-from-file"):
 		return "checkout -- путь стирает правки файла"
-	case hasAny(g.args, "-b", "--orphan"):
+	case hasLong(g.args, "--orphan") || hasShort(g.args, 'b', "B"):
 		return ""
 	}
 	ops := gitOperands(g.args)
@@ -180,11 +250,15 @@ func (g gitCall) checkout() string {
 	return ""
 }
 
-// isPath — слово называет файл или каталог дерева. Каталог неизвестен —
-// похожее на путь слово (с «/» или «*») считается путём
+// isPath — слово называет файл или каталог дерева. Шаблон и pathspec
+// («*», «?», «[», «:») именем ветки быть не могут (git check-ref-format).
+// Каталог неизвестен — похожее на путь слово (с «/») считается путём
 func (g gitCall) isPath(op string) bool {
+	if strings.ContainsAny(op, "*?[:") {
+		return true
+	}
 	if g.dir == "" {
-		return strings.ContainsAny(op, "/*")
+		return strings.Contains(op, "/")
 	}
 	_, err := os.Lstat(filepath.Join(g.dir, op))
 	return err == nil
@@ -194,13 +268,12 @@ func (g gitCall) isPath(op string) bool {
 // удаление ветки на remote
 func pushDanger(args []string) string {
 	switch {
-	case hasAny(args, "--force", "--mirror", "--force-if-includes") || hasShort(args, 'f') ||
-		slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--force-with-lease") }):
+	case hasLong(args, "--force", "--mirror", "--force-if-includes", "--force-with-lease") || hasShort(args, 'f', "o"):
 		return "принудительный push меняет запушенное"
-	case hasAny(args, "--delete", "--prune") || hasShort(args, 'd'):
+	case hasLong(args, "--delete", "--prune") || hasShort(args, 'd', "o"):
 		return "удаляет ветку на remote"
 	}
-	for _, op := range gitOperands(args) {
+	for _, op := range pushOperands(args) {
 		switch {
 		case strings.HasPrefix(op, "+"):
 			return "принудительный push меняет запушенное"
@@ -211,19 +284,76 @@ func pushDanger(args []string) string {
 	return ""
 }
 
-// hasAny — среди слов есть одно из названных
-func hasAny(args []string, names ...string) bool {
-	return slices.ContainsFunc(args, func(a string) bool { return slices.Contains(names, a) })
+// leasePush — push --force-with-lease только ветки branch своего worktree
+// (refspec без приёмника или с приёмником branch), без других опасных форм
+func leasePush(args []string, branch string) bool {
+	rest := slices.DeleteFunc(slices.Clone(args), func(a string) bool {
+		name, _, _ := strings.Cut(a, "=")
+		// «--force-» и короче — сокращение и для --force: не lease
+		return len(name) > len("--force-") && (strings.HasPrefix("--force-with-lease", name) || strings.HasPrefix("--force-if-includes", name))
+	})
+	if branch == "" || pushDanger(rest) != "" || hasLong(rest, "--all", "--branches", "--tags") {
+		return false
+	}
+	ops := pushOperands(rest)
+	if len(ops) == 0 {
+		return true
+	}
+	for _, refspec := range ops[1:] {
+		src, dst, mapped := strings.Cut(refspec, ":")
+		if !mapped {
+			dst = src
+		}
+		dst = strings.TrimPrefix(dst, "refs/heads/")
+		if dst != branch && !(dst == "HEAD" && !mapped) {
+			return false
+		}
+	}
+	return true
 }
 
-// hasShort — короткий ключ в связке (-fd, -nx); только до «--»
-func hasShort(args []string, flag rune) bool {
+// pushOperands — remote и refspec push: слова не опции, и после «--» тоже
+// (refspec с «-» не начинается)
+func pushOperands(args []string) []string {
+	return slices.DeleteFunc(slices.Clone(args), func(a string) bool { return strings.HasPrefix(a, "-") })
+}
+
+// hasLong — длинная опция из названных до «--», в том числе сокращённая:
+// git принимает однозначное начало имени (--har, --forc). Неоднозначное git
+// отвергает сам, так что начало любого из названных — уже опасно
+func hasLong(args []string, names ...string) bool {
 	for _, a := range args {
 		if a == "--" {
 			return false
 		}
-		if len(a) > 1 && a[0] == '-' && a[1] != '-' && strings.ContainsRune(a[1:], flag) {
+		name, _, _ := strings.Cut(a, "=")
+		if len(name) < 3 || !strings.HasPrefix(name, "--") {
+			continue
+		}
+		if slices.ContainsFunc(names, func(n string) bool { return strings.HasPrefix(n, name) }) {
 			return true
+		}
+	}
+	return false
+}
+
+// hasShort — короткий ключ в связке (-fd, -nx) до «--»; values — ключи со
+// значением: после такого ключа остаток слова — значение (-bfix, -enode)
+func hasShort(args []string, flag rune, values string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if len(a) < 2 || a[0] != '-' || a[1] == '-' {
+			continue
+		}
+		for _, c := range a[1:] {
+			if c == flag {
+				return true
+			}
+			if strings.ContainsRune(values, c) {
+				break
+			}
 		}
 	}
 	return false
@@ -255,21 +385,8 @@ func tempRoots() []string {
 	return roots
 }
 
-// leasePush — push без опасных форм, кроме --force-with-lease (и
-// --force-if-includes при нём): обновление своей ветки после sync
-func leasePush(args []string) bool {
-	rest := slices.DeleteFunc(slices.Clone(args), func(a string) bool {
-		return strings.HasPrefix(a, "--force-with-lease") || a == "--force-if-includes"
-	})
-	return pushDanger(rest) == ""
-}
-
-// inTemp — каталог во временном: репо там — клон или проба суб-агента.
-// Каталог неизвестен — не временный
+// inTemp — каталог во временном: репо там — клон или проба суб-агента
 func inTemp(dir string, temp []string) bool {
-	if dir == "" {
-		return false
-	}
 	for _, root := range temp {
 		if rel, err := filepath.Rel(filepath.Clean(root), dir); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
 			return true
@@ -278,18 +395,81 @@ func inTemp(dir string, temp []string) bool {
 	return false
 }
 
-// linkedWorktree — каталог внутри linked worktree (.git — файл): дерево
-// суб-агента, не общее дерево мастера. Каталог неизвестен — не свой
-func linkedWorktree(dir string) bool {
-	if dir == "" {
-		return false
-	}
+// worktree — linked worktree: корень и ветка в нём ("" — HEAD отделён)
+type worktree struct {
+	root, branch string
+}
+
+// linkedWorktree — linked worktree, в котором лежит каталог: .git — файл
+// со ссылкой в .git/worktrees основного репо (у подмодуля — .git/modules,
+// он часть дерева мастера). Не linked worktree — пустой
+func linkedWorktree(dir string) (worktree, error) {
 	for d := dir; ; d = filepath.Dir(d) {
-		if info, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
-			return info.Mode().IsRegular()
+		dotGit := filepath.Join(d, ".git")
+		if info, err := os.Lstat(dotGit); err == nil {
+			if !info.Mode().IsRegular() {
+				return worktree{}, nil
+			}
+			return readWorktree(d, dotGit)
 		}
 		if filepath.Dir(d) == d {
-			return false
+			return worktree{}, nil
 		}
 	}
+}
+
+// readWorktree читает ссылку .git-файла и ветку из HEAD worktree (HEAD
+// отделён — ветки нет: push с lease не пройдёт)
+func readWorktree(root, dotGit string) (worktree, error) {
+	data, err := os.ReadFile(dotGit)
+	if err != nil {
+		return worktree{}, fmt.Errorf("чтение worktree %s: %w", root, err)
+	}
+	gitdir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
+	if !ok || !strings.Contains(filepath.ToSlash(gitdir), "/worktrees/") {
+		return worktree{}, nil
+	}
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(root, gitdir)
+	}
+	head, err := os.ReadFile(filepath.Join(gitdir, "HEAD"))
+	if err != nil {
+		return worktree{}, fmt.Errorf("чтение worktree %s: %w", root, err)
+	}
+	wt := worktree{root: root}
+	if branch, ok := strings.CutPrefix(strings.TrimSpace(string(head)), "ref: refs/heads/"); ok {
+		wt.branch = branch
+	}
+	return wt, nil
+}
+
+// sessionProject — каталог проекта основной сессии в ~/.claude/projects:
+// её стартовый каталог, где не буквы и не цифры заменены на «-». Для
+// суб-агента transcript_path — транскрипт основной сессии
+func sessionProject(transcript string) string {
+	if transcript == "" {
+		return ""
+	}
+	return filepath.Base(filepath.Dir(transcript))
+}
+
+// encodeProject — имя каталога проекта Claude Code для пути
+func encodeProject(path string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, path)
+}
+
+// masterIn — основная сессия начата в дереве root (или в нём самом): это
+// дерево мастера. Кодирование с потерями: совпадение с соседом (x и x-y) —
+// в сторону отказа
+func masterIn(root, master string) bool {
+	if master == "" {
+		return false
+	}
+	enc := encodeProject(root)
+	return master == enc || strings.HasPrefix(master, enc+"-")
 }

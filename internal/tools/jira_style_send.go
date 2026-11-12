@@ -145,6 +145,15 @@ func planCommand(command, cwd, home string, calls []shellcmd.Call) commandPlan {
 		switch c.Name {
 		case "cd":
 			cwd = plan.changeDir(i, cwd)
+		case "pushd":
+			// pushd +N и без каталога меняют местами стек: каталог неизвестен
+			if dirs := operands(c.Args); len(dirs) == 0 || strings.HasPrefix(dirs[0], "+") {
+				cwd = ""
+			} else {
+				cwd = plan.changeDir(i, cwd)
+			}
+		case "popd":
+			cwd = ""
 		case "curl":
 			expand := func(arg string) string { return plan.path(arg, i) }
 			if req := parseCurl(c.Args, expand); req.url && req.write {

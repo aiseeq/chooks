@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
@@ -73,6 +74,28 @@ func TestModelGuard(t *testing.T) {
 		{"settings json env", "Bash", "", `claude -p hi --settings '{"env":{"ANTHROPIC_MODEL":"sonnet"}}'`, true},
 		{"settings json одобренной", "Bash", "", `claude -p hi --settings '{"model":"opus"}'`, false},
 		{"fallback-model", "Bash", "", "claude -p hi --model opus --fallback-model sonnet", true},
+		// Ревью 12.11: упоминание переменной — не присваивание
+		{"переменная в промпте", "Bash", "", `claude -p "объясни, почему ANTHROPIC_MODEL=sonnet не работает" --model opus`, false},
+		{"переменная в here-doc промпта", "Bash", "", "cat <<'EOF' | claude --model opus -p\nревью: ANTHROPIC_MODEL=sonnet claude -p hi обходил guard\nEOF", false},
+		{"переменная в $(here-doc)", "Bash", "", "claude --model opus -p \"$(cat <<'EOF'\nANTHROPIC_MODEL=sonnet\nEOF\n)\"", false},
+		{"переменная в файле скрипта", "Bash", "", "cat > /tmp/x.sh <<'X'\nANTHROPIC_MODEL=sonnet claude -p hi\nX\nclaude --model opus -p review", false},
+		{"переменная у другой команды", "Bash", "", "ANTHROPIC_MODEL=sonnet python3 bench.py; claude --model opus -p hi", false},
+		{"переменная в echo", "Bash", "", "echo 'ANTHROPIC_MODEL=sonnet' >> /tmp/notes.md && claude --model opus -p hi", false},
+		{"одобренная в кавычках", "Bash", "", "ANTHROPIC_MODEL='opus' claude -p hi", false},
+		{"одобренная с переносом строки", "Bash", "", "ANTHROPIC_MODEL=opus \\\n  claude -p hi", false},
+		{"переменная в bash -c", "Bash", "", `bash -c 'ANTHROPIC_MODEL=sonnet claude -p hi'`, true},
+		{"env переменной", "Bash", "", "env ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"declare -x", "Bash", "", "declare -x ANTHROPIC_MODEL=sonnet; claude -p hi", true},
+		{"запасной лексер", "Bash", "", `claude --model sonnet -p "hi`, true},
+		{"запасной лексер, переменная", "Bash", "", `ANTHROPIC_MODEL=sonnet claude -p "hi`, true},
+		{"agents inherit", "Bash", "", `claude -p hi --agents '{"r":{"description":"d","prompt":"p","model":"inherit"}}'`, false},
+		{"agents не JSON", "Bash", "", `claude -p hi --agents agents.json`, false},
+		{"settings=", "Bash", "", `claude -p hi --settings='{"model":"sonnet"}'`, true},
+		{"fallback-model=", "Bash", "", "claude -p hi --fallback-model=sonnet", true},
+		{"agents=", "Bash", "", `claude -p hi --agents='{"r":{"description":"d","prompt":"p","model":"haiku"}}'`, true},
+		{"settings поле не того типа", "Bash", "", `claude -p hi --settings '{"model":"sonnet","env":{"X":1}}'`, true},
+		{"settings файл из той же команды", "Bash", "", `echo '{"model":"sonnet"}' > /tmp/mg-absent-s.json && claude -p hi --settings /tmp/mg-absent-s.json`, true},
+		{"settings файл из той же команды, одобренная", "Bash", "", `echo '{"model":"opus"}' > /tmp/mg-absent-s.json && claude -p hi --settings /tmp/mg-absent-s.json`, false},
 		// 12.11 сухой прогон: путь настроек из переменной — не модель
 		{"settings путь из переменной", "Bash", "", `S=/tmp/p; claude -p hi --settings $S/a.json`, false},
 		{"settings json с подстановкой", "Bash", "", `claude -p hi --settings "{\"model\":\"$M\"}"`, true},
@@ -221,9 +244,15 @@ func TestModelGuardSettingsFile(t *testing.T) {
 	if err := os.WriteFile(settings, []byte(`{"model":"sonnet"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for command, reject := range map[string]bool{
 		"claude -p hi --settings " + settings:              true,
 		"claude -p hi --settings " + dir + "/missing.json": false,
+		// FIFO не читается: чтение повесило бы хук (ревью 12.11)
+		"claude -p hi --settings " + fifo: false,
 	} {
 		got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: command})
 		if err != nil {

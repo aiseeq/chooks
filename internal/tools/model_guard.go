@@ -95,11 +95,12 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		if abs == "" {
 			return nil
 		}
-		data, err := os.ReadFile(abs)
+		data, err := readSettingsFile(abs)
 		switch {
 		case errors.Is(err, os.ErrNotExist):
-			// Файл настроек пишет та же команда: до её запуска его нет
-			return nil
+			// Файл настроек пишет та же команда: до её запуска его нет, и
+			// модель ищется в тексте самой команды
+			return []byte(input.Command)
 		case err != nil:
 			logger.Warn("model_guard: файл --settings не читается, модель из него не проверена", "path", abs, "error", err)
 			return nil
@@ -109,6 +110,22 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 	return bashModelCandidates(input.Command, readSettings, logger)
 }
 
+// maxSettingsSize — предел файла --settings: настройки — килобайты
+const maxSettingsSize = 1 << 20
+
+// readSettingsFile читает файл настроек, только обычный и не больше
+// maxSettingsSize: чтение FIFO или /dev/zero повесило бы хук (ревью 12.11)
+func readSettingsFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxSettingsSize {
+		return nil, fmt.Errorf("не обычный файл или больше %d байт: %s", maxSettingsSize, info.Mode())
+	}
+	return os.ReadFile(path)
+}
+
 // modelClients — программы, которым модель задают в командной строке
 var modelClients = []string{"claude", "codex", "opencode"}
 
@@ -116,7 +133,8 @@ var modelClients = []string{"claude", "codex", "opencode"}
 // ищет akit shellcmd: он видит и вложенные скрипты (bash -c, ssh, here-doc на
 // вход оболочке). Команду, которую shellcmd не разобрал, проверяет прежний
 // лексер: без вложенных скриптов, но и без пропуска простых вызовов
-// readSettings читает файл --settings по пути из команды, nil — не прочесть
+// readSettings читает файл --settings по пути из команды, nil — не прочесть;
+// файла нет — текст команды, которая может его написать
 func bashModelCandidates(command string, readSettings func(string) []byte, logger core.Logger) []modelCandidate {
 	calls, err := shellcmd.Find(command, modelClients...)
 	if calls == nil && err != nil {
@@ -136,7 +154,7 @@ func bashModelCandidates(command string, readSettings func(string) []byte, logge
 		}
 	}
 	if claude {
-		found = append(found, envModelCandidates(command)...)
+		found = append(found, envModelCandidates(command, 0)...)
 	}
 	return found
 }
@@ -156,30 +174,63 @@ func lexedModelCandidates(command string, readSettings func(string) []byte) []mo
 		}
 	}
 	if claude {
-		found = append(found, envModelCandidates(command)...)
+		found = append(found, envModelCandidates(command, 0)...)
 	}
 	return found
 }
 
-// modelEnv — присваивание переменной, задающей модель Claude Code: префиксом
-// вызова, export или в вложенном скрипте. Ищется по всему тексту команды с
-// вызовом claude: присваивание действует на вызов и из другой простой команды
-// (export X=…; claude), а shellcmd присваиваний не отдаёт (тикет akit
-// shellcmd-assignments). Переменные быстрой модели (haiku) Claude Code
-// задаёт сам, они не проверяются
-var modelEnv = regexp.MustCompile(`\b(?:ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)=("[^"]*"|'[^']*'|[^\s;&|)'"]*)`)
+// modelEnvNames — переменные, задающие модель Claude Code. Переменные быстрой
+// модели (haiku) Claude Code задаёт сам, они не проверяются
+var modelEnvNames = map[string]bool{
+	"ANTHROPIC_MODEL": true, "ANTHROPIC_DEFAULT_OPUS_MODEL": true,
+	"ANTHROPIC_DEFAULT_SONNET_MODEL": true, "CLAUDE_CODE_SUBAGENT_MODEL": true,
+}
 
-func envModelCandidates(command string) []modelCandidate {
+// exportNames — встроенные, чьи присваивания уходят в окружение следующих команд
+var exportNames = map[string]bool{"export": true, "declare": true, "typeset": true, "local": true, "readonly": true}
+
+// maxEnvDepth — предел вложенности скриптов (bash -c 'bash -c …') при поиске
+// присваиваний
+const maxEnvDepth = 4
+
+// envModelCandidates — модели из присваиваний переменных modelEnvNames, что
+// действуют на claude: префиксом вызова (и env), export/declare, префиксом
+// оболочки и внутри её скрипта (bash -c, ssh). Слово с именем переменной в
+// промпте, в теле here-doc для файла или у другой команды — не присваивание
+// для claude (ревью 12.11). shellcmd присваиваний не отдаёт (тикет akit
+// shellcmd-assignments), поэтому — прежний лексер
+func envModelCandidates(script string, depth int) []modelCandidate {
+	if depth > maxEnvDepth {
+		return nil
+	}
 	var found []modelCandidate
-	for _, m := range modelEnv.FindAllStringSubmatch(command, -1) {
-		value, single := m[1], strings.HasPrefix(m[1], "'")
-		if single || strings.HasPrefix(value, `"`) {
-			value = value[1 : len(value)-1]
+	for _, cmd := range splitSimpleCommands(withoutHereDocBodies(script, true)) {
+		name, args, _ := unwrapCommand(cmd)
+		prefix := cmd[:len(cmd)-len(args)]
+		switch {
+		case name == "claude":
+			found = append(found, assignedModels(prefix)...)
+		case exportNames[name]:
+			found = append(found, assignedModels(args)...)
+		case shellNames[name]:
+			found = append(found, assignedModels(prefix)...)
+			for _, a := range args {
+				found = append(found, envModelCandidates(a.text, depth+1)...)
+			}
 		}
-		if value == "" {
+	}
+	return found
+}
+
+// assignedModels — значения присваиваний modelEnvNames среди слов
+func assignedModels(words []word) []modelCandidate {
+	var found []modelCandidate
+	for _, w := range words {
+		name, value, ok := strings.Cut(w.text, "=")
+		if !ok || !modelEnvNames[name] || value == "" {
 			continue
 		}
-		found = append(found, modelCandidate{value: value, dynamic: !single && strings.ContainsAny(value, "$`")})
+		found = append(found, modelCandidate{value: value, dynamic: !w.literal})
 	}
 	return found
 }
@@ -227,8 +278,27 @@ func feedsShell(cmds [][]word) bool {
 	return false
 }
 
+// valueFlags — флаги claude со значением, которые пишутся и через «=»
+var valueFlags = []string{"--settings", "--agents", "--fallback-model"}
+
+// splitValueFlags разбивает --flag=value флагов valueFlags на два слова
+func splitValueFlags(args []word) []word {
+	out := make([]word, 0, len(args))
+	for _, a := range args {
+		if flag, value, ok := strings.Cut(a.text, "="); ok && slices.Contains(valueFlags, flag) {
+			out = append(out, word{text: flag, literal: true}, word{text: value, literal: a.literal})
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 func candidatesFromArgs(name string, args []word, readSettings func(string) []byte) []modelCandidate {
 	var found []modelCandidate
+	if name == "claude" {
+		args = splitValueFlags(args)
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -261,13 +331,18 @@ func candidatesFromArgs(name string, args []word, readSettings func(string) []by
 	return found
 }
 
-// jsonModelCandidates — модели в JSON флага claude: --settings (строка JSON
-// или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
-// Файла нет или он не JSON — моделей нет: такой запуск claude сам не начнётся
 // jsonModelKey — ключ модели в исходном тексте JSON, в том числе с
 // экранированными кавычками внутри "…": "model": и \"ANTHROPIC_MODEL\":
 var jsonModelKey = regexp.MustCompile(`\b(?:model|[A-Z_]+_MODEL)\\*"\s*:`)
 
+// writtenModel — модель в тексте команды, которая пишет файл настроек:
+// "model":"x" и "ANTHROPIC_MODEL":"x"
+var writtenModel = regexp.MustCompile(`"(?:model|ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)"\s*:\s*"([^"]*)"`)
+
+// jsonModelCandidates — модели в JSON флага claude: --settings (строка JSON
+// или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
+// Файла --settings ещё нет — модели в тексте команды, которая его пишет.
+// Не JSON — моделей нет: такой запуск claude сам не начнётся
 func jsonModelCandidates(flag string, arg word, readSettings func(string) []byte) []modelCandidate {
 	if !arg.literal {
 		// Путь файла из переменной не прочесть, а JSON с подстановкой — модель
@@ -288,7 +363,8 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string) []byte
 	}
 	var found []modelCandidate
 	add := func(model string) {
-		if strings.TrimSpace(model) != "" {
+		// inherit — модель агента из основного вызова, она проверена отдельно
+		if strings.TrimSpace(model) != "" && model != "inherit" {
 			found = append(found, modelCandidate{value: model})
 		}
 	}
@@ -298,25 +374,33 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string) []byte
 		}
 		if json.Unmarshal(raw, &agents) == nil {
 			for _, a := range agents {
-				// inherit — модель основного вызова, она проверена отдельно
-				if a.Model != "inherit" {
-					add(a.Model)
-				}
+				add(a.Model)
 			}
 		}
 		return found
 	}
-	var settings struct {
-		Model string            `json:"model"`
-		Env   map[string]string `json:"env"`
-	}
+	// Поля разбираются по одному: поле не того типа рядом не прячет модель
+	var settings map[string]json.RawMessage
 	if json.Unmarshal(raw, &settings) != nil {
-		return nil
+		if !json.Valid(raw) {
+			// Текст команды вместо файла, которого ещё нет
+			for _, m := range writtenModel.FindAllSubmatch(raw, -1) {
+				add(string(m[1]))
+			}
+		}
+		return found
 	}
-	add(settings.Model)
-	for name, value := range settings.Env {
-		if modelEnv.MatchString(name + "=x") {
-			add(value)
+	var model string
+	if json.Unmarshal(settings["model"], &model) == nil {
+		add(model)
+	}
+	var env map[string]json.RawMessage
+	if json.Unmarshal(settings["env"], &env) == nil {
+		for name, raw := range env {
+			var value string
+			if modelEnvNames[name] && json.Unmarshal(raw, &value) == nil {
+				add(value)
+			}
 		}
 	}
 	return found

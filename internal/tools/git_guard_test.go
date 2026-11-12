@@ -192,8 +192,8 @@ func TestGitGuard(t *testing.T) {
 			if got.IsValid == tc.reject {
 				t.Fatalf("valid=%v violations=%v", got.IsValid, got.Violations)
 			}
-			if tc.reject && !strings.Contains(got.Violations[0].Message, "напиши об этом в итоге мастеру") {
-				t.Errorf("нет подсказки: %s", got.Violations[0].Message)
+			if tc.reject && (len(got.Suggestions) != 1 || !strings.Contains(got.Suggestions[0], "напиши об этом в итоге мастеру") || strings.Contains(got.Violations[0].Message, "напиши")) {
+				t.Errorf("подсказка не отдельной строкой: %q %q", got.Violations[0].Message, got.Suggestions)
 			}
 			// Основная сессия делает их по «да» пользователя — без отказа
 			input.AgentID, input.AgentType = "", ""

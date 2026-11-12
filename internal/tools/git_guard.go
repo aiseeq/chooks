@@ -78,9 +78,8 @@ func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*
 	if len(reasons) == 0 {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
-	message := strings.Join(reasons, "; ") + ". " + gitGuardHint
-	v := core.NewViolation("git_guard", message, "", core.LevelCritical, 0, 0)
-	return core.NewValidationResult(false, []core.Violation{v}, []string{message}), nil
+	v := core.NewViolation("git_guard", strings.Join(reasons, "; "), "", core.LevelCritical, 0, 0)
+	return core.NewValidationResult(false, []core.Violation{v}, []string{gitGuardHint}), nil
 }
 
 // gitConfigEnv — присваивание переменной, добавляющей git настройки

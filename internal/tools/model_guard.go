@@ -488,7 +488,6 @@ func (t *ModelGuardTool) reject(reason string, models ...[]approvedModel) *core.
 	if len(list) > 0 {
 		message += "; одобрены: " + strings.Join(list, ", ")
 	}
-	message += "; " + modelGuardHint
 	v := core.NewViolation("model_guard", message, "", core.LevelCritical, 0, 0)
-	return core.NewValidationResult(false, []core.Violation{v}, []string{message})
+	return core.NewValidationResult(false, []core.Violation{v}, []string{modelGuardHint})
 }

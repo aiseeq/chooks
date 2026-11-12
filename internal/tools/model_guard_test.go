@@ -111,6 +111,10 @@ func TestModelGuard(t *testing.T) {
 			if got.IsValid == tc.reject {
 				t.Fatalf("valid=%v violations=%v", got.IsValid, got.Violations)
 			}
+			// Подсказка — отдельной строкой, не повтором причины
+			if tc.reject && (!slices.Equal(got.Suggestions, []string{modelGuardHint}) || strings.Contains(got.Violations[0].Message, modelGuardHint)) {
+				t.Errorf("подсказка: %q %q", got.Violations[0].Message, got.Suggestions)
+			}
 		})
 	}
 }

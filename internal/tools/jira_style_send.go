@@ -134,30 +134,26 @@ type commandPlan struct {
 }
 
 // planCommand проходит вызовы по порядку: cd меняет каталог для
-// относительных путей, записи файлов и отправки комментария запоминаются
+// относительных путей (только в своей области: подоболочка, звено
+// конвейера, вложенный скрипт — shellScopes), записи файлов и отправки
+// комментария запоминаются
 func planCommand(command, cwd, home string, calls []shellcmd.Call) commandPlan {
 	plan := commandPlan{command: command, home: home, calls: calls, cwds: make([]string, len(calls))}
 	plan.vars, plan.varsErr = commandVars(command, home)
+	scopes, scopesErr := commandScopes(command)
+	var changes []dirChange
 	for i := range calls {
 		c := &calls[i]
-		plan.cwds[i] = cwd
-		plan.addWrites(i, cwd)
+		here := dirAt(cwd, c.Offset, changes, scopesErr != nil)
+		plan.cwds[i] = here
+		plan.addWrites(i, here)
 		switch c.Name {
-		case "cd":
-			cwd = plan.changeDir(i, cwd)
-		case "pushd":
-			// pushd +N и без каталога меняют местами стек: каталог неизвестен
-			if dirs := operands(c.Args); len(dirs) == 0 || strings.HasPrefix(dirs[0], "+") {
-				cwd = ""
-			} else {
-				cwd = plan.changeDir(i, cwd)
-			}
-		case "popd":
-			cwd = ""
+		case "cd", "pushd", "popd":
+			changes = append(changes, dirChange{offset: c.Offset, dir: plan.newDir(i, here), within: scopes.around(c)})
 		case "curl":
 			expand := func(arg string) string { return plan.path(arg, i) }
 			if req := parseCurl(c.Args, expand); req.url && req.write {
-				plan.sends = append(plan.sends, commentSend{index: i, call: c, req: req, cwd: cwd})
+				plan.sends = append(plan.sends, commentSend{index: i, call: c, req: req, cwd: here})
 			}
 		}
 	}
@@ -228,11 +224,33 @@ func operands(args []string) []string {
 
 // changeDir каталог после cd в вызове index; "" - не раскрыть до запуска
 func (p *commandPlan) changeDir(index int, cwd string) string {
-	dirs := operands(p.calls[index].Args)
-	if len(dirs) == 0 {
+	args := p.calls[index].Args
+	dirs := operands(args)
+	switch {
+	case slices.Contains(args, "-"):
+		// cd - — прежний каталог
+		return ""
+	case len(dirs) == 0:
 		return p.home
 	}
 	return absPath(p.path(dirs[0], index), cwd, p.home)
+}
+
+// newDir — каталог после cd, pushd или popd вызова index. pushd -n и
+// popd -n каталог не меняют; pushd +N, pushd без каталога и popd берут его
+// из стека: неизвестен
+func (p *commandPlan) newDir(index int, cwd string) string {
+	c := &p.calls[index]
+	dirs := operands(c.Args)
+	switch {
+	case c.Name == "cd":
+		return p.changeDir(index, cwd)
+	case slices.Contains(c.Args, "-n"):
+		return cwd
+	case c.Name == "popd" || len(dirs) == 0 || strings.HasPrefix(dirs[0], "+"):
+		return ""
+	}
+	return p.changeDir(index, cwd)
 }
 
 // shellBraceVar ${NAME} - та же переменная, что $NAME

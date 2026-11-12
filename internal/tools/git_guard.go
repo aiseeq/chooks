@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -56,21 +57,15 @@ func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*
 	if err != nil {
 		t.Logger().Warn("git_guard: домашний каталог неизвестен", "error", err)
 	}
-	// GIT_DIR и GIT_WORK_TREE переносят git в другое репо: каталог неизвестен
-	envRepo := strings.Contains(input.Command, "GIT_DIR") || strings.Contains(input.Command, "GIT_WORK_TREE")
-	master := sessionProject(input.TranscriptPath)
-	plan := planCommand(input.Command, input.CWD, home, calls)
+	gits, ctx := gitCalls(input, calls, home)
 	var reasons []string
 	for i, c := range calls {
 		if c.Name != "git" {
 			continue
 		}
-		g := parseGit(c.Args, plan.cwds[i], home, func(p string) string { return plan.path(p, i) })
-		if envRepo {
-			g.dir = ""
-		}
+		g := gits[i]
 		why, shared := g.destructive()
-		if why == "" || t.ownTree(g, shared, master) {
+		if why == "" || t.ownTree(g, shared, ctx) {
 			continue
 		}
 		reasons = append(reasons, fmt.Sprintf("git %s — %s", g.sub, why))
@@ -83,18 +78,60 @@ func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*
 	return core.NewValidationResult(false, []core.Violation{v}, []string{message}), nil
 }
 
+// gitConfigEnv — присваивание переменной, добавляющей git настройки
+// (GIT_CONFIG_NOSYSTEM и GIT_CONFIG_GLOBAL только изолируют от файлов)
+var gitConfigEnv = regexp.MustCompile(`GIT_CONFIG_(COUNT|KEY_\d+|PARAMETERS)=`)
+
+// gitCalls разбирает git-вызовы команды (gits[i] — вызов calls[i]) и
+// собирает её контекст
+func gitCalls(input *core.ToolInput, calls []shellcmd.Call, home string) ([]gitCall, commandContext) {
+	// GIT_DIR и GIT_WORK_TREE переносят git в другое репо: каталог неизвестен
+	envRepo := strings.Contains(input.Command, "GIT_DIR") || strings.Contains(input.Command, "GIT_WORK_TREE")
+	envConfig := gitConfigEnv.MatchString(input.Command)
+	ctx := commandContext{master: sessionProject(input.TranscriptPath)}
+	gits := make([]gitCall, len(calls))
+	plan := planCommand(input.Command, input.CWD, home, calls)
+	for i, c := range calls {
+		switch c.Name {
+		case "ln":
+			ctx.links = true
+		case "git":
+			g := parseGit(c.Args, plan.cwds[i], home, func(p string) string { return plan.path(p, i) })
+			g.config = g.config || envConfig
+			if envRepo {
+				g.dir = ""
+			}
+			ctx.branchMoved = ctx.branchMoved || g.sub == "switch" || g.sub == "checkout"
+			gits[i] = g
+		}
+	}
+	return gits, ctx
+}
+
+// commandContext — что в команде влияет на опознание своего дерева
+type commandContext struct {
+	master      string // каталог проекта основной сессии (sessionProject)
+	links       bool   // команда создаёт ссылки (ln): несуществующий пока каталог может оказаться ссылкой
+	branchMoved bool   // команда переключает ветку: HEAD worktree на момент push не тот, что сейчас
+}
+
 // ownTree — опасная подкоманда g работает в дереве суб-агента: каталог во
 // временном или в linked worktree, где не работает основная сессия.
 // shared — подкоманда меняет общее для всех worktree (ветки, ссылки,
 // remote): в worktree можно только push --force-with-lease его ветки.
 // Каталог неизвестен — не своё
-func (t *GitGuardTool) ownTree(g gitCall, shared bool, master string) bool {
+func (t *GitGuardTool) ownTree(g gitCall, shared bool, ctx commandContext) bool {
 	if g.dir == "" {
 		return false
 	}
 	dir := g.dir
-	if real, err := filepath.EvalSymlinks(dir); err == nil {
+	real, err := filepath.EvalSymlinks(dir)
+	switch {
+	case err == nil:
 		dir = real
+	case ctx.links:
+		// Каталога ещё нет, а команда делает ссылки: куда он ведёт — не узнать
+		return false
 	}
 	if inTemp(dir, t.tempRoots) {
 		return true
@@ -106,24 +143,34 @@ func (t *GitGuardTool) ownTree(g gitCall, shared bool, master string) bool {
 		return false
 	}
 	switch {
-	case wt.root == "" || masterIn(wt.root, master):
+	case wt.root == "" || masterIn(wt.root, ctx.master):
 		return false
 	case !shared:
 		return true
 	}
-	return g.sub == "push" && leasePush(g.args, wt.branch)
+	return g.sub == "push" && !ctx.branchMoved && leasePush(g.args, wt.branch)
 }
 
 // gitCall — вызов git: каталог репо, подкоманда и её аргументы
 type gitCall struct {
-	dir   string // каталог, где работает git; "" — не раскрыть до запуска
-	sub   string
-	args  []string
-	alias bool // -c alias.*: подкоманда может быть алиасом
+	dir  string // каталог, где работает git; "" — не раскрыть до запуска
+	sub  string
+	args []string
+	// config — настройка из команды (-c, --config-env, GIT_CONFIG_*) может
+	// сделать подкоманду алиасом или push принудительным
+	config bool
 }
 
 // gitValueOpts — глобальные опции git со значением отдельным словом
 var gitValueOpts = []string{"-c", "--namespace", "--exec-path", "--config-env"}
+
+// riskyConfig — настройка git, меняющая смысл подкоманды: алиас, refspec
+// или зеркало remote
+func riskyConfig(setting string) bool {
+	key, _, _ := strings.Cut(strings.ToLower(setting), "=")
+	return strings.HasPrefix(key, "alias.") ||
+		strings.HasPrefix(key, "remote.") && (strings.HasSuffix(key, ".push") || strings.HasSuffix(key, ".mirror"))
+}
 
 // parseGit снимает глобальные опции git: -C меняет каталог, --git-dir и
 // --work-tree делают его неизвестным (своё дерево не опознать). expand
@@ -143,9 +190,11 @@ func parseGit(args []string, cwd, home string, expand func(string) string) gitCa
 			g.dir = ""
 		case slices.Contains(gitValueOpts, a):
 			i++
-			if a == "-c" && i < len(args) && strings.HasPrefix(strings.ToLower(args[i]), "alias.") {
-				g.alias = true
+			if (a == "-c" || a == "--config-env") && i < len(args) && riskyConfig(args[i]) {
+				g.config = true
 			}
+		case strings.HasPrefix(a, "--config-env="):
+			g.config = g.config || riskyConfig(strings.TrimPrefix(a, "--config-env="))
 		case strings.HasPrefix(a, "-"):
 		default:
 			g.sub, g.args = a, args[i+1:]
@@ -158,8 +207,8 @@ func parseGit(args []string, cwd, home string, expand func(string) string) gitCa
 // destructive — чем подкоманда опасна для чужой работы ("" — безопасна) и
 // меняет ли она общее для всех worktree репо (ветки, ссылки, remote)
 func (g gitCall) destructive() (why string, shared bool) {
-	if g.alias {
-		return "подкоманду из алиаса -c alias.* не проверить", true
+	if g.config {
+		return "настройку из команды (алиас, push remote, GIT_CONFIG_*) не проверить", true
 	}
 	if check, ok := gitDangers[g.sub]; ok {
 		return check(g)
@@ -184,7 +233,7 @@ var gitDangers = map[string]func(gitCall) (string, bool){
 		worktree := hasLong(g.args, "--worktree") || hasShort(g.args, 'W', "s")
 		return when(!staged || worktree, "стирает правки файлов"), false
 	},
-	"checkout": func(g gitCall) (string, bool) { return g.checkout(), false },
+	"checkout": func(g gitCall) (string, bool) { return g.checkout(), hasShort(g.args, 'B', "b") },
 	"switch": func(g gitCall) (string, bool) {
 		if hasLong(g.args, "--force", "--discard-changes") || hasShort(g.args, 'f', "cC") {
 			return "стирает правки дерева", false
@@ -192,13 +241,18 @@ var gitDangers = map[string]func(gitCall) (string, bool){
 		return when(hasLong(g.args, "--force-create") || hasShort(g.args, 'C', "c"), "переставляет существующую ветку"), true
 	},
 	"clean": func(g gitCall) (string, bool) {
-		return when(!hasLong(g.args, "--dry-run") && !hasShort(g.args, 'n', "e"), "удаляет неотслеживаемые файлы"), false
+		args := dropValues(g.args, "-e", "--exclude")
+		return when(!hasLong(args, "--dry-run") && !hasShort(args, 'n', "e"), "удаляет неотслеживаемые файлы"), false
 	},
 	"stash": func(g gitCall) (string, bool) {
 		ops := gitOperands(g.args)
 		return when(len(ops) == 0 || (ops[0] != "list" && ops[0] != "show"), "убирает правки из дерева или стирает отложенные"), false
 	},
-	"rm":             forced("стирает правки файлов"),
+	"rm": func(g gitCall) (string, bool) {
+		// --cached трогает только индекс
+		why, _ := forced("стирает правки файлов")(g)
+		return when(!hasLong(g.args, "--cached"), why), false
+	},
 	"checkout-index": forced("стирает правки файлов"),
 	"read-tree": func(g gitCall) (string, bool) {
 		return when(hasLong(g.args, "--reset") && hasShort(g.args, 'u', ""), "стирает правки дерева"), false
@@ -216,6 +270,23 @@ func when(cond bool, why string) string {
 		return why
 	}
 	return ""
+}
+
+// dropValues — слова без значений опций, данных отдельным словом
+// (-e -n: «-n» — шаблон исключения, не ключ)
+func dropValues(args []string, opts ...string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		out = append(out, args[i])
+		if args[i] == "--" {
+			out = append(out, args[i+1:]...)
+			break
+		}
+		if slices.Contains(opts, args[i]) {
+			i++
+		}
+	}
+	return out
 }
 
 // forced — подкоманда опасна только с --force/-f

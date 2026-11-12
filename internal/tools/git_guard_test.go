@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
 )
 
@@ -109,8 +110,24 @@ func TestGitGuard(t *testing.T) {
 		{"после popd каталог неизвестен", "pushd " + own + " && popd && git reset --hard", true},
 		{"симлинк из временного", "git -C " + filepath.Join(scratch, "link") + " reset --hard", true},
 		{"алиас через -c", "git -c alias.w='reset --hard' w", true},
+		{"алиас через --config-env", "W='reset --hard' git --config-env=alias.w=W w", true},
+		{"алиас через GIT_CONFIG_*", "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.w GIT_CONFIG_VALUE_0='reset --hard' git w", true},
+		{"-c remote.*.push", "git -c remote.origin.push=+HEAD:main push origin", true},
+		{"--config-env remote.*.mirror", "git --config-env remote.origin.mirror=M push origin", true},
+		{"clean -e -n", "git clean -fdx -e -n", true},
+		{"clean --exclude --dry-run", "git clean -f --exclude --dry-run", true},
+		{"clean -n -e x", "git clean -n -e x", false},
+		{"rm --cached -f", "git rm --cached -f main.go", false},
+		{"(cd свой) и git в дереве мастера", "(cd " + own + "); git reset --hard", true},
+		{"cd свой в конвейере", "cd " + own + " | true; git reset --hard", true},
+		{"cd свой в bash -c", "bash -c 'cd " + own + "'; git reset --hard", true},
+		{"(cd свой && git) — свой", "(cd " + own + " && git reset --hard)", false},
+		{"pushd -n", "pushd -n " + own + " && git reset --hard", true},
+		{"ссылка в той же команде", "cd " + scratch + " && ln -s " + shared + " l2 && git -C l2 reset --hard", true},
+		{"клон в той же команде", "git clone x " + scratch + "/c2 && cd " + scratch + "/c2 && git reset --hard", false},
 		{"-c без алиаса", "git -c core.pager=cat reset --hard", true},
 		{"-c без алиаса: status", "git -c core.pager=cat status", false},
+		{"изоляция настроек", "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git status; env -u GIT_CONFIG_PARAMETERS git log", false},
 		{"неизвестный каталог: checkout пути", "git --git-dir=x checkout pkg/a", true},
 		{"неизвестный каталог: checkout ветки", "git --git-dir=x checkout main", false},
 
@@ -152,6 +169,9 @@ func TestGitGuard(t *testing.T) {
 		{"свой worktree: lease и +ref", "cd " + own + " && git push --force-with-lease origin +HEAD:main", true},
 		{"свой worktree: push --delete", "git -C " + own + " push origin --delete main", true},
 		{"свой worktree: reflog expire", "cd " + own + " && git reflog expire --all", true},
+		{"свой worktree: switch и lease HEAD", "cd " + own + " && git switch develop && git push --force-with-lease origin HEAD", true},
+		{"свой worktree: checkout -B", "cd " + own + " && git checkout -B develop origin/main", true},
+		{"свой worktree: checkout -b", "cd " + own + " && git checkout -b feat2", false},
 		{"свой worktree: stash", "cd " + own + " && git stash && git rm -f a", false},
 		{"клон в scratchpad: push --force", "cd " + filepath.Join(scratch, "s", "repo") + " && git push --force origin main", false},
 		{"клон в scratchpad через переменную окружения", "cd $SCRATCH/s/repo && git reset --hard", true},
@@ -225,5 +245,47 @@ func TestGitGuardFork(t *testing.T) {
 	got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: shared, AgentID: "f1", AgentType: "fork"})
 	if err != nil || got.IsValid {
 		t.Errorf("форку git stash: %v %+v", err, got)
+	}
+}
+
+// Каталог вызова: cd действует только в своей области
+func TestPlanCommandScopes(t *testing.T) {
+	cases := []struct{ command, want string }{
+		{"cd /a && git x", "/a"},
+		{"(cd /a); git x", "/w"},
+		{"(cd /a && git x)", "/a"},
+		{"cd /a | true; git x", "/w"},
+		{"bash -c 'cd /a'; git x", "/w"},
+		{"bash -c 'cd /a && git x'", "/a"},
+		{"bash <<'E'\ncd /a\nE\ngit x", "/w"},
+		{"bash <<'E'\ncd /a\ngit x\nE", "/a"},
+		{"bash <<'E'\ncd /a\nE\nbash <<'F'\ngit x\nF", "/w"},
+		{"G=git; (cd /a); $G x", ""}, // смещение вызова неизвестно: в области ли — не узнать
+		{"G=git; cd /a; $G x", "/a"},
+		{"cd /a & git x", "/w"},
+		{"echo $(cd /a); git x", "/w"},
+		{"timeout 5 cd /a; git x", "/w"},
+		{"builtin cd /a; git x", "/a"},
+		{"{ cd /a; }; git x", "/a"},
+		{"cd /a; (cd /b); git x", "/a"},
+		{"cd /a && pushd -n /b && git x", "/a"},
+		{"pushd /a && popd && git x", ""},
+		{"cd /a && cd - && git x", ""},
+	}
+	for _, tc := range cases {
+		calls, err := shellcmd.Calls(tc.command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := planCommand(tc.command, "/w", "/h", calls)
+		got := "нет git"
+		for i, c := range calls {
+			if c.Name == "git" {
+				got = plan.cwds[i]
+			}
+		}
+		if got != tc.want {
+			t.Errorf("%q: каталог git %q, нужен %q", tc.command, got, tc.want)
+		}
 	}
 }

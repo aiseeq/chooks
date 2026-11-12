@@ -84,7 +84,7 @@ type Forecast struct {
 
 // Forecast прогоняет темп rate вперёд по правилу ротации от расхода usage
 func (s *Store) Forecast(usage map[string]Usage, rate float64, now time.Time) Forecast {
-	f := Forecast{Rate: rate, MixedTiers: s.mixedTiers()}
+	f := Forecast{Rate: rate, MixedTiers: s.MixedTiers()}
 	run := s.simulate(usage, rate, now)
 	f.DryAt, f.RefillAt, f.RefillEmail, f.Plan, f.Tracks = run.dryAt, run.refillAt, run.refillEmail, run.plan, run.tracks
 	switch {
@@ -213,8 +213,8 @@ func extend(plan []Spell, email string, t time.Time) []Spell {
 	return append(plan, Spell{Email: email, From: t, To: t.Add(poolStep)})
 }
 
-// mixedTiers — у живых учёток разные тарифы
-func (s *Store) mixedTiers() bool {
+// MixedTiers — у живых учёток разные тарифы
+func (s *Store) MixedTiers() bool {
 	tier := ""
 	for i := range s.Accounts {
 		o, err := s.Accounts[i].oauth()

@@ -189,6 +189,7 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	if store != nil && len(store.Accounts) > 0 {
 		bar.pool = poolPace(store, snapshot, now, logger)
 	}
+	bar.unit = accountUnit(store != nil && store.MixedTiers(), now)
 
 	visible := func() (bool, error) { return desktop.TabVisible(ctx) }
 	line, title := build(input, contextFill(input, paths.ClaudeDir, logger), bar, now, visible, logger)
@@ -440,32 +441,41 @@ func shortModel(model string) string {
 // contextBar рисует полосу заполнения контекста до порога автосжатия
 func contextBar(used float64) string {
 	shade := min(max(int(used)*len(contextShades)/100, 0), len(contextShades)-1)
-	return meter("ctx", used, contextShades[shade], "")
+	used = min(used, 100)
+	return meter("ctx", used, used, contextShades[shade], "")
 }
 
-// weekBar — подпись полосы недели и прогноз пула учёток; pool nil —
-// прогноза пула нет, цвет — по прогнозу одной недели
+// weekBar — подпись полосы недели, прогноз пула учёток и единица процента;
+// pool nil — прогноза пула нет, цвет — по прогнозу одной недели
 type weekBar struct {
 	label string
 	pool  *pace
+	unit  planUnit
 }
 
-// weeklyBar рисует долю недельного лимита активной учётки. Цвет — прогноз:
-// пула учёток, если он есть, иначе недели на сброс. Значка нет —
-// пользователю цвета достаточно (22.10: «мне цвета достаточно в целом»)
+// weeklyBar рисует долю недельного лимита активной учётки. Полоса — от
+// ёмкости учётки (полная — учётка кончилась), число — в % недели подписки за
+// $100, без цены плана — % своей недели с пометкой. Цвет — прогноз: пула
+// учёток, если он есть, иначе недели на сброс. Значка нет — пользователю
+// цвета достаточно (22.10: «мне цвета достаточно в целом»)
 func weeklyBar(bar weekBar, week weeklyUsage, now time.Time) string {
 	p := weeklyPace(week, now)
 	if bar.pool != nil {
 		p = *bar.pool
 	}
+	used := min(week.used, 100)
+	mark := ""
+	if !bar.unit.ok() {
+		mark = otherUnitMark
+	}
+	color := green
 	switch p {
 	case paceOver:
-		return meter(bar.label, week.used, red, "")
+		color = red
 	case paceNear:
-		return meter(bar.label, week.used, yellow, "")
-	default:
-		return meter(bar.label, week.used, green, "")
+		color = yellow
 	}
+	return meter(bar.label, used, bar.unit.pct(used), color, mark)
 }
 
 // poolPace — прогноз пула учёток для цвета полосы. Сбой (нет снимка,
@@ -495,9 +505,10 @@ func poolPace(store *accounts.Store, snapshot *limitsSnapshot, now time.Time, lo
 	return &p
 }
 
-// meter рисует долю полосой: подпись, клетки, проценты и пометка. Одна форма
-// для контекста и недели, цвет выбирает вызывающий
-func meter(label string, used float64, color, mark string) string {
+// meter рисует долю полосой: подпись, клетки, число и пометка. Клетки — от
+// доли used своей ёмкости, число — shown (у недели — в другой единице). Одна
+// форма для контекста и недели, цвет выбирает вызывающий
+func meter(label string, used, shown float64, color, mark string) string {
 	if used > 100 {
 		used = 100
 	}
@@ -505,7 +516,7 @@ func meter(label string, used float64, color, mark string) string {
 	// Клетки — от того же округления, что и проценты: 99,6% — «100%» и полная полоса
 	filled := int(math.Round(used)) * barSegments / 100
 	bar := strings.Repeat("▓", filled) + strings.Repeat("░", barSegments-filled)
-	return fmt.Sprintf("%s%s %s%s %.0f%%%s%s", dim, label, color, bar, used, mark, reset)
+	return fmt.Sprintf("%s%s %s%s %.0f%%%s%s", dim, label, color, bar, shown, mark, reset)
 }
 
 // pace — прогноз недельного лимита

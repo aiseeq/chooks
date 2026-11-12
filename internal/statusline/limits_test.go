@@ -151,6 +151,7 @@ func TestMergeWeeklyLimitTwoAccounts(t *testing.T) {
 func TestWriteLimitsTwoAccounts(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
+	writeRates(t, "100")
 	path, err := LimitsFile()
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +169,7 @@ func TestWriteLimitsTwoAccounts(t *testing.T) {
 	if !strings.Contains(text, "61%") || !strings.Contains(text, "4%  с") {
 		t.Errorf("в сводке нет обеих учёток:\n%s", text)
 	}
-	if lines := strings.Split(text, "\n"); !strings.Contains(lines[2], "4%") || !strings.Contains(lines[2], "тратит сейчас") {
+	if lines := strings.Split(text, "\n"); !strings.Contains(lines[3], "4%") || !strings.Contains(lines[3], "тратит сейчас") {
 		t.Errorf("тратящая сейчас — личная:\n%s", text)
 	}
 

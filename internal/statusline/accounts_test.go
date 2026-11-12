@@ -29,6 +29,7 @@ func isolateRender(t *testing.T) *[]rotationCall {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("KONSOLE_DBUS_SERVICE", "")
 	t.Setenv("KONSOLE_DBUS_SESSION", "")
+	writeRates(t, "100")
 	var calls []rotationCall
 	saved := startRotation
 	startRotation = func(_ accounts.Paths, s *accounts.Store, usage map[string]accounts.Usage, _ time.Time, _ string, args ...string) (string, error) {
@@ -425,7 +426,7 @@ func TestRenderColorsByPool(t *testing.T) {
 	if err := WriteLimits(&out, false); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "Пул учёток: темп 96% недели учётки в сутки") || !strings.Contains(out.String(), "пул кончится") {
+	if !strings.Contains(out.String(), "Пул учёток: темп 96% в сутки") || !strings.Contains(out.String(), "пул кончится") {
 		t.Errorf("сводка без прогноза пула:\n%s", out.String())
 	}
 }

@@ -118,7 +118,7 @@ const maxSettingsSize = 1 << 20
 func readSettingsFile(path string) ([]byte, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("файл настроек %s: %w", path, err)
 	}
 	if !info.Mode().IsRegular() || info.Size() > maxSettingsSize {
 		return nil, fmt.Errorf("не обычный файл или больше %d байт: %s", maxSettingsSize, info.Mode())
@@ -186,9 +186,6 @@ var modelEnvNames = map[string]bool{
 	"ANTHROPIC_DEFAULT_SONNET_MODEL": true, "CLAUDE_CODE_SUBAGENT_MODEL": true,
 }
 
-// exportNames — встроенные, чьи присваивания уходят в окружение следующих команд
-var exportNames = map[string]bool{"export": true, "declare": true, "typeset": true, "local": true, "readonly": true}
-
 // maxEnvDepth — предел вложенности скриптов (bash -c 'bash -c …') при поиске
 // присваиваний
 const maxEnvDepth = 4
@@ -210,7 +207,8 @@ func envModelCandidates(script string, depth int) []modelCandidate {
 		switch {
 		case name == "claude":
 			found = append(found, assignedModels(prefix)...)
-		case exportNames[name]:
+		case declarers[name]:
+			// export, declare и родня: присваивания уходят в окружение следующих команд
 			found = append(found, assignedModels(args)...)
 		case shellNames[name]:
 			found = append(found, assignedModels(prefix)...)

@@ -503,7 +503,7 @@ func pending(p Paths, s *Store, usage map[string]Usage, now time.Time) (string, 
 		return "", nil
 	}
 	if len(needsUsage(s, usage, now)) > 0 {
-		return "неизвестна неделя неактивной учётки", nil
+		return "неделя неактивной учётки неизвестна или пуста", nil
 	}
 	activeAlive := false
 	if active := s.byUUID(s.Active); active != nil {

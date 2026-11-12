@@ -140,8 +140,8 @@ func forecastPool(store *accounts.Store, snapshot *limitsSnapshot, historyPath s
 }
 
 // poolText — прогноз пула строкой сводки
-func poolText(store *accounts.Store, f PoolForecast, unit planUnit, now time.Time) string {
-	head := fmt.Sprintf("Пул учёток: темп %.0f%% в сутки (за %.0f ч); ", unit.pct(f.Rate*24), f.RateSpanHours)
+func poolText(store *accounts.Store, f PoolForecast, unit accounts.Unit, now time.Time) string {
+	head := fmt.Sprintf("Пул учёток: темп %s в сутки (за %.0f ч); ", unit.Percent(f.Rate*24), f.RateSpanHours)
 	var text string
 	switch f.Forecast.Pace {
 	case accounts.PaceOver:

@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -580,11 +578,11 @@ func WriteLimits(w io.Writer, steps bool) error {
 	}
 	latest := latestWeek(weeks)
 	shown := map[int]bool{}
-	unit := accountUnit(store.MixedTiers(), now)
-	if unit.ok() {
-		fmt.Fprintf(w, "Доли — в %% %s (полная неделя учётки — %s%%)\n", unit.name(), pctText(unit.pct(100)))
+	unit := store.PlanUnit(now)
+	if unit.OK() {
+		fmt.Fprintf(w, "Доли — в %% %s (полная неделя учётки — %s)\n", unit.Name(), unit.Percent(100))
 	} else {
-		fmt.Fprintf(w, "Доли — в %% %s, не недели подписки за $%d: %s\n", unit.name(), unitPlanUSD, unit.why)
+		fmt.Fprintf(w, "Доли — в %% %s («%s»), не недели подписки за $%d: %s\n", unit.Name(), accounts.OtherUnitMark, accounts.UnitPlanUSD, unit.Why)
 	}
 	if len(infos) > 0 {
 		fmt.Fprintf(w, "Подписки Claude (%s, %s):\n", paths.Store(), path)
@@ -595,8 +593,8 @@ func WriteLimits(w io.Writer, steps bool) error {
 		if store.AutoOff {
 			auto = "выключено (chooks account auto on)"
 		}
-		fmt.Fprintf(w, "Автопереключение: %s; учётка пуста с %s%%, из непустых — ближайший сброс недели\n",
-			auto, pctText(unit.pct(accounts.WeekEmptyPercent)))
+		fmt.Fprintf(w, "Автопереключение: %s; учётка пуста с %s, из непустых — ближайший сброс недели\n",
+			auto, unit.Percent(accounts.WeekEmptyPercent))
 		f, err := forecastPool(store, snapshot, limitsHistory(path), now)
 		if err != nil {
 			fmt.Fprintf(w, "Пул учёток: прогноза нет — %v\n", err)
@@ -621,20 +619,15 @@ func WriteLimits(w io.Writer, steps bool) error {
 		if i == latest {
 			mark = "  ← тратит сейчас"
 		}
-		fmt.Fprintf(w, "сброс %s  %s%%  с %s, видно %s%s\n",
-			accounts.ShortTime(rec.ResetsAt), pctText(unit.pct(rec.SevenDay)), accounts.ShortTime(rec.At), accounts.ShortTime(rec.SeenAt), mark)
+		fmt.Fprintf(w, "сброс %s  %s  с %s, видно %s%s\n",
+			accounts.ShortTime(rec.ResetsAt), unit.Percent(rec.SevenDay), accounts.ShortTime(rec.At), accounts.ShortTime(rec.SeenAt), mark)
 	}
 	fmt.Fprintf(w, "Шагов в журнале: %d (chooks limits --steps)\n", len(journal))
 	return nil
 }
 
-// pctText — процент для текста: до десятых, без хвоста нулей
-func pctText(p float64) string {
-	return strconv.FormatFloat(math.Round(p*10)/10, 'f', -1, 64)
-}
-
 // writeAccount печатает учётку: почта, неделя в единице unit, срок входа
-func writeAccount(w io.Writer, info accounts.Info, snapshot *limitsSnapshot, shown map[int]bool, unit planUnit, now time.Time) {
+func writeAccount(w io.Writer, info accounts.Info, snapshot *limitsSnapshot, shown map[int]bool, unit accounts.Unit, now time.Time) {
 	mark := ""
 	if info.Active {
 		mark = "  ← сейчас у Claude Code"
@@ -649,8 +642,8 @@ func writeAccount(w io.Writer, info accounts.Info, snapshot *limitsSnapshot, sho
 	if week >= 0 {
 		rec := snapshot.Weeks[week]
 		shown[week] = true
-		fmt.Fprintf(w, "  неделя %s%%, сброс %s (доля с %s, видно %s)\n",
-			pctText(unit.pct(rec.SevenDay)), accounts.ShortTime(rec.ResetsAt), accounts.ShortTime(rec.At), accounts.ShortTime(rec.SeenAt))
+		fmt.Fprintf(w, "  неделя %s, сброс %s (доля с %s, видно %s)\n",
+			unit.Percent(rec.SevenDay), accounts.ShortTime(rec.ResetsAt), accounts.ShortTime(rec.At), accounts.ShortTime(rec.SeenAt))
 	} else {
 		fmt.Fprintln(w, "  неделя неизвестна или не начата")
 	}

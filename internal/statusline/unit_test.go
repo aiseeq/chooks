@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/accounts"
 )
 
 // writeRates кладёт файл курсов во временный HOME: действующая строка
@@ -35,39 +37,19 @@ func writeRates(t *testing.T, price string) {
 	}
 }
 
-// Цена плана — строка anthropic с наибольшим valid_from не позже now, при
-// равных — нижняя; будущая и чужого поставщика не действуют
-func TestPlanPrice(t *testing.T) {
-	writeRates(t, "200")
-	path, err := RatesFile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	price, err := planPrice(path, ratesProvider, time.Now())
-	if err != nil || price != 200 {
-		t.Fatalf("цена %v, ошибка %v; ожидалось 200", price, err)
-	}
-	if _, err := planPrice(path, "deepseek", time.Now()); err == nil {
-		t.Error("нет строки поставщика — ожидалась ошибка")
-	}
-	if _, err := planPrice(filepath.Join(t.TempDir(), "none.tsv"), ratesProvider, time.Now()); err == nil {
-		t.Error("нет файла — ожидалась ошибка")
-	}
-}
-
 // Полоса недели — от ёмкости учётки, число — в % недели подписки за $100;
 // цены плана нет — % своей недели с пометкой (пользователь 12.11)
 func TestWeeklyBarPlanUnit(t *testing.T) {
 	resets := time.Now().Add(6 * 24 * time.Hour)
 	tests := []struct {
 		name string
-		unit planUnit
+		unit accounts.Unit
 		used float64
 		want string
 	}{
-		{"план $200", planUnit{scale: 2}, 73, "нед ▓▓▓▓▓▓▓░░░ 146%"},
-		{"план $100", planUnit{scale: 1}, 40, "нед ▓▓▓▓░░░░░░ 40%"},
-		{"цены плана нет", planUnit{why: "нет файла"}, 73, "нед ▓▓▓▓▓▓▓░░░ 73%" + otherUnitMark},
+		{"план $200", accounts.Unit{Scale: 2}, 73, "нед ▓▓▓▓▓▓▓░░░ 146%"},
+		{"план $100", accounts.Unit{Scale: 1}, 40, "нед ▓▓▓▓░░░░░░ 40%"},
+		{"цены плана нет", accounts.Unit{Why: "нет файла"}, 73, "нед ▓▓▓▓▓▓▓░░░ 73%" + accounts.OtherUnitMark},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -86,7 +68,7 @@ func TestPlanUnitRenderAndLimits(t *testing.T) {
 	}{
 		{"200", "▓▓▓▓▓▓▓░░░ 146%", "неделя 146%"},
 		{"100", "▓▓▓▓▓▓▓░░░ 73%", "неделя 73%"},
-		{"", "▓▓▓▓▓▓▓░░░ 73%" + otherUnitMark, "неделя 73%"},
+		{"", "▓▓▓▓▓▓▓░░░ 73%" + accounts.OtherUnitMark, "неделя 73%" + accounts.OtherUnitMark},
 	} {
 		t.Run("цена "+tt.price, func(t *testing.T) {
 			isolateRender(t)

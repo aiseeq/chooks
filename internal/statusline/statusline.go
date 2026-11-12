@@ -189,7 +189,7 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	if store != nil && len(store.Accounts) > 0 {
 		bar.pool = poolPace(store, snapshot, now, logger)
 	}
-	bar.unit = accountUnit(store != nil && store.MixedTiers(), now)
+	bar.unit = store.PlanUnit(now)
 
 	visible := func() (bool, error) { return desktop.TabVisible(ctx) }
 	line, title := build(input, contextFill(input, paths.ClaudeDir, logger), bar, now, visible, logger)
@@ -450,7 +450,7 @@ func contextBar(used float64) string {
 type weekBar struct {
 	label string
 	pool  *pace
-	unit  planUnit
+	unit  accounts.Unit
 }
 
 // weeklyBar рисует долю недельного лимита активной учётки. Полоса — от
@@ -465,8 +465,8 @@ func weeklyBar(bar weekBar, week weeklyUsage, now time.Time) string {
 	}
 	used := min(week.used, 100)
 	mark := ""
-	if !bar.unit.ok() {
-		mark = otherUnitMark
+	if !bar.unit.OK() {
+		mark = accounts.OtherUnitMark
 	}
 	color := green
 	switch p {
@@ -475,7 +475,7 @@ func weeklyBar(bar weekBar, week weeklyUsage, now time.Time) string {
 	case paceNear:
 		color = yellow
 	}
-	return meter(bar.label, used, bar.unit.pct(used), color, mark)
+	return meter(bar.label, used, bar.unit.Pct(used), color, mark)
 }
 
 // poolPace — прогноз пула учёток для цвета полосы. Сбой (нет снимка,

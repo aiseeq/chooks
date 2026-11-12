@@ -1,7 +1,6 @@
 package accounts
 
 import (
-	"encoding/json"
 	"slices"
 	"testing"
 	"time"
@@ -53,25 +52,11 @@ func TestForecastPoolNear(t *testing.T) {
 // Разные тарифы помечаются: доли недели Max 5x и 20x несопоставимы
 func TestForecastMixedTiers(t *testing.T) {
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
-	tiered := func(uuid, tier string) Account {
-		a := account(uuid, 20*day, now)
-		var m map[string]any
-		if err := json.Unmarshal(a.OAuth, &m); err != nil {
-			t.Fatal(err)
-		}
-		m["rateLimitTier"] = tier
-		raw, err := json.Marshal(m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		a.OAuth = raw
-		return a
-	}
-	s := &Store{Active: "a", Accounts: []Account{tiered("a", "default_claude_max_20x"), tiered("b", "default_claude_max_20x")}}
+	s := &Store{Active: "a", Accounts: []Account{tiered(t, "a", "default_claude_max_20x", now), tiered(t, "b", "default_claude_max_20x", now)}}
 	if s.Forecast(nil, 1, now).MixedTiers {
 		t.Error("одинаковые тарифы помечены разными")
 	}
-	s.Accounts = append(s.Accounts, tiered("c", "default_claude_max_5x"))
+	s.Accounts = append(s.Accounts, tiered(t, "c", "default_claude_max_5x", now))
 	if !s.Forecast(nil, 1, now).MixedTiers {
 		t.Error("разные тарифы не помечены")
 	}

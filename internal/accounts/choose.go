@@ -36,7 +36,7 @@ type state struct {
 	// resets — сброс для сравнения: неизвестная неделя считается
 	// неначатой и кончится через полное окно
 	resets time.Time
-	empty  string
+	empty  bool
 }
 
 // eligible — вход учётки жив и не истекает в ближайший час
@@ -97,7 +97,7 @@ func statesWith(s *Store, usage map[string]Usage, now time.Time, usable func(*Ac
 			st.week, st.weekKnown, st.resets = u.Week, true, u.Week.ResetsAt
 		}
 		if st.weekKnown && st.week.Used >= WeekEmptyPercent {
-			st.empty = fmt.Sprintf("неделя %.0f%%", st.week.Used)
+			st.empty = true
 		}
 		out = append(out, st)
 	}
@@ -119,14 +119,17 @@ func choose(s *Store, usage map[string]Usage, now time.Time) (*Account, string) 
 	if best.account.UUID == s.Active {
 		return best.account, "активная — ближайший сброс"
 	}
+	// Доли в причине — в % недели подписки за $100, как в строке статуса и
+	// chooks limits (лид 12.11 17:39 по слову пользователя «вот прям везде»)
+	unit := s.PlanUnit(now)
 	reason := "неделя не начата"
 	if best.weekKnown {
-		reason = fmt.Sprintf("сброс %s, неделя %.0f%%", ShortTime(best.resets), best.week.Used)
+		reason = fmt.Sprintf("сброс %s, неделя %s", ShortTime(best.resets), unit.Percent(best.week.Used))
 	}
 	if active := s.byUUID(s.Active); active != nil {
 		for _, st := range all {
-			if st.account == active && st.empty != "" {
-				return best.account, fmt.Sprintf("%s пуста (%s); %s", active.Email, st.empty, reason)
+			if st.account == active && st.empty {
+				return best.account, fmt.Sprintf("%s пуста (неделя %s); %s", active.Email, unit.Percent(st.week.Used), reason)
 			}
 		}
 		if !eligible(active, now) {
@@ -148,7 +151,7 @@ func pickFrom(s *Store, all []state) (*state, []state) {
 	var best *state
 	for i := range all {
 		st := &all[i]
-		if st.empty != "" {
+		if st.empty {
 			continue
 		}
 		if best == nil || st.resets.Before(best.resets) ||
@@ -170,7 +173,7 @@ func needsUsage(s *Store, usage map[string]Usage, now time.Time) []*Account {
 	var out []*Account
 	for _, st := range states(s, usage, now) {
 		a := st.account
-		if a.UUID == s.Active || (st.weekKnown && st.empty == "") || now.Sub(a.UsageCheckedAt) < usageStale {
+		if a.UUID == s.Active || (st.weekKnown && !st.empty) || now.Sub(a.UsageCheckedAt) < usageStale {
 			continue
 		}
 		out = append(out, a)

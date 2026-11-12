@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/chooks/internal/accounts"
 	"github.com/aiseeq/chooks/internal/core"
 )
 
@@ -389,7 +390,7 @@ func TestWeeklyBar(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := weeklyBar(weekBar{label: "нед", unit: planUnit{scale: 1}}, weeklyUsage{used: tt.used, resetsAt: weekResets}, tt.now)
+			got := weeklyBar(weekBar{label: "нед", unit: accounts.Unit{Scale: 1}}, weeklyUsage{used: tt.used, resetsAt: weekResets}, tt.now)
 			if plain(got) != tt.expected {
 				t.Errorf("получено %q, ожидалось %q", plain(got), tt.expected)
 			}
@@ -428,7 +429,7 @@ func TestDetailsWeekly(t *testing.T) {
 
 	input := Input{}
 	input.RateLimits.SevenDay = &WeeklyLimit{UsedPercentage: &used, ResetsAt: &resets}
-	parts := details(input, 47, weekBar{label: "нед", unit: planUnit{scale: 1}}, now)
+	parts := details(input, 47, weekBar{label: "нед", unit: accounts.Unit{Scale: 1}}, now)
 	expected := []string{"ctx ▓▓▓▓░░░░░░ 47%", "нед ▓▓▓▓▓░░░░░ 51%"}
 	if len(parts) != len(expected) {
 		t.Fatalf("ожидалось %q, получено %q", expected, parts)
@@ -446,7 +447,7 @@ func TestDetailsWeekly(t *testing.T) {
 		"нет процента":  {ResetsAt: &resets},
 	} {
 		input.RateLimits.SevenDay = limit
-		for _, part := range details(input, 47, weekBar{label: "нед", unit: planUnit{scale: 1}}, now) {
+		for _, part := range details(input, 47, weekBar{label: "нед", unit: accounts.Unit{Scale: 1}}, now) {
 			if strings.Contains(plain(part), "нед") {
 				t.Errorf("%s: блок недели не должен выводиться, получено %q", name, plain(part))
 			}

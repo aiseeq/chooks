@@ -53,9 +53,14 @@ func (w weeklyUsage) limit() *WeeklyLimit {
 // Учётки на входе строки статуса нет, а сессии рисуются вперемешку. Поэтому
 // неделя хранится по своему сбросу: у двух подписок разные недели (рабочая
 // сбрасывается в понедельник, личная в субботу), и каждая неделя — отдельная
-// запись в Weeks. Внутри недели доля только растёт, поэтому запись держит
-// наибольшую: сессия, давно не ходившая в API, рисует старую долю (21.10 в
-// 03:32 одна сессия записала 57% между 61% других), и это не откат.
+// запись в Weeks. Доля во входе — из последнего ответа API сессии: сессия,
+// давно не ходившая в API, рисует старую долю (21.10 в 03:32 одна сессия
+// записала 57% между 61% других), и это не откат. Но доля и падает при той же
+// неделе: частичный сброс (12.11 после 100%). Поэтому запись помнит последнюю
+// долю каждой сессии: доля сессии, изменившаяся против её же прошлой, — свежий
+// ответ API и ставится в запись в обе стороны; повтор сессией своей прежней
+// доли запись не меняет (иначе отставшая сессия вернула бы 100% после
+// сброса), а первая доля сессии только поднимает её.
 //
 // Верхние поля — неделя, доля которой выросла последней: учётка, что тратит
 // сейчас. Их форма прежняя, чтобы читатели снимка не менялись
@@ -71,18 +76,21 @@ type limitsSnapshot struct {
 // отрисовка, подтвердившая долю. Session — сессия, первой увидевшая долю.
 // Account — почта учётки (хранилище accounts): неделя, которой снимок ещё не
 // видел, отходит учётке, чьи токены в этот момент у Claude Code. Пусто —
-// учётка не опознана (снимок до хранилища учёток).
+// учётка не опознана (снимок до хранилища учёток). Sessions — последняя
+// доля каждой сессии, рисовавшей неделю: по ней свежий ответ API сессии
+// отличается от старого.
 // Времена — с точностью до секунды (RFC 3339, как в прежнем снимке)
 type weekRecord struct {
-	ResetsAt time.Time `json:"sevenDayResetsAt"`
-	SevenDay float64   `json:"sevenDayUsedPercentage"`
-	At       time.Time `json:"at"`
-	SeenAt   time.Time `json:"seenAt"`
-	Session  string    `json:"session,omitempty"`
-	Account  string    `json:"account,omitempty"`
+	ResetsAt time.Time          `json:"sevenDayResetsAt"`
+	SevenDay float64            `json:"sevenDayUsedPercentage"`
+	At       time.Time          `json:"at"`
+	SeenAt   time.Time          `json:"seenAt"`
+	Session  string             `json:"session,omitempty"`
+	Account  string             `json:"account,omitempty"`
+	Sessions map[string]float64 `json:"sessions,omitempty"`
 }
 
-// limitStep — строка журнала: доля недели выросла или началась новая неделя
+// limitStep — строка журнала: доля недели изменилась или началась новая неделя
 type limitStep struct {
 	At       time.Time `json:"at"`
 	ResetsAt time.Time `json:"sevenDayResetsAt"`
@@ -117,11 +125,13 @@ type mergeResult struct {
 type weekVerdict int
 
 const (
-	// weekRaised — доля выросла или неделя новая: шаг идёт в журнал
-	weekRaised weekVerdict = iota
+	// weekChanged — доля изменилась (рост, частичный сброс) или неделя
+	// новая: шаг идёт в журнал
+	weekChanged weekVerdict = iota
 	// weekConfirmed — доля та же
 	weekConfirmed
-	// weekStale — доля меньше записанной: сессия видит старый ответ API
+	// weekStale — доля расходится с записанной, а свежим ответом API она не
+	// опознана: сессия видит старый ответ
 	weekStale
 )
 
@@ -139,8 +149,9 @@ func LimitsFile() (string, error) {
 	return filepath.Join(base, "chooks", "limits.json"), nil
 }
 
-// limitsHistory — журнал шагов рядом со снимком. Строка — шаг в 1% одной
-// учётки, около сотни строк в неделю на учётку, поэтому журнал не обрезается
+// limitsHistory — журнал шагов рядом со снимком. Строка — изменение доли
+// недели одной учётки (обычно рост на 1%), около сотни строк в неделю на
+// учётку, поэтому журнал не обрезается
 func limitsHistory(snapshot string) string {
 	return filepath.Join(filepath.Dir(snapshot), "limits-history.jsonl")
 }
@@ -149,7 +160,7 @@ func limitsHistory(snapshot string) string {
 func recordLimits(smp sample, now time.Time) (mergeResult, error) {
 	path, err := LimitsFile()
 	if err != nil {
-		return mergeResult{verdict: weekRaised}, err
+		return mergeResult{verdict: weekChanged}, err
 	}
 	return mergeLimits(path, smp, now)
 }
@@ -157,7 +168,7 @@ func recordLimits(smp sample, now time.Time) (mergeResult, error) {
 // mergeLimits сводит замер со снимком под блокировкой: сессии рисуются
 // одновременно, и без неё одна затирала бы выросшую долю другой
 func mergeLimits(path string, smp sample, now time.Time) (mergeResult, error) {
-	res := mergeResult{verdict: weekRaised, merged: smp.week}
+	res := mergeResult{verdict: weekChanged, merged: smp.week}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return res, fmt.Errorf("cannot create the limits directory: %w", err)
@@ -174,7 +185,7 @@ func mergeLimits(path string, smp sample, now time.Time) (mergeResult, error) {
 	}
 	res = snapshot.merge(smp, now)
 	res.snapshot = snapshot
-	if res.verdict == weekRaised {
+	if res.verdict == weekChanged {
 		step := limitStep{At: now.Truncate(time.Second), ResetsAt: res.merged.resetsAt, SevenDay: res.merged.used, Session: smp.session, Account: res.owner}
 		if err := appendStep(limitsHistory(path), step); err != nil {
 			return res, err
@@ -240,22 +251,61 @@ func (s *limitsSnapshot) mergeWeek(week weeklyUsage, smp sample, stamp time.Time
 			Session:  smp.session,
 			Account:  owner,
 		})
-		return week, weekRaised, owner
+		s.Weeks[len(s.Weeks)-1].remember(smp)
+		return week, weekChanged, owner
 	}
 	rec := &s.Weeks[idx]
+	news := rec.remember(smp)
 	merged := week
-	verdict := weekRaised
+	verdict := weekChanged
 	switch {
-	case week.used > rec.SevenDay:
-		rec.SevenDay, rec.At, rec.SeenAt, rec.Session = week.used, stamp, stamp, smp.session
 	case week.used == rec.SevenDay:
 		rec.SeenAt = stamp
 		verdict = weekConfirmed
+	case news == shareFresh || (news == shareFirst && week.used > rec.SevenDay):
+		rec.SevenDay, rec.At, rec.SeenAt, rec.Session = week.used, stamp, stamp, smp.session
 	default:
 		merged.used = rec.SevenDay
 		verdict = weekStale
 	}
 	return merged, verdict, rec.Account
+}
+
+// shareNews — что доля замера говорит о свежести
+type shareNews int
+
+const (
+	// shareFirst — первая доля сессии (или замер без сессии): возможно,
+	// старый ответ API, поэтому только поднимает запись
+	shareFirst shareNews = iota
+	// shareFresh — новый ответ API: замер API токеном или доля сессии,
+	// изменившаяся против её же прошлой (ответы одной сессии идут по порядку)
+	shareFresh
+	// shareRepeat — сессия повторяет свою прежнюю долю: запись не меняет
+	shareRepeat
+)
+
+// remember запоминает долю сессии и говорит, свежая ли она
+func (rec *weekRecord) remember(smp sample) shareNews {
+	if smp.exact {
+		return shareFresh
+	}
+	if smp.session == "" {
+		return shareFirst
+	}
+	prev, seen := rec.Sessions[smp.session]
+	if rec.Sessions == nil {
+		rec.Sessions = map[string]float64{}
+	}
+	rec.Sessions[smp.session] = smp.week.used
+	switch {
+	case !seen:
+		return shareFirst
+	case prev != smp.week.used:
+		return shareFresh
+	default:
+		return shareRepeat
+	}
 }
 
 // renderedWeek — запись недели замера строки статуса, -1 — новая неделя.

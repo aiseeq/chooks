@@ -34,7 +34,8 @@ const (
 var errShortHistory = errors.New("limits history is too short for the pool pace")
 
 // poolRate — темп расхода всех учёток, % недели учётки в час. Неделя
-// узнаётся по сбросу. Шаг считается от прошлого шага своей недели; первый
+// узнаётся по сбросу. Шаг считается от прошлого шага своей недели, шаг вниз
+// (частичный сброс) — расход ноль, рост после него — от сброшенной доли; первый
 // шаг недели — от нуля, если неделя началась после начала окна и журнала
 // (раньше журнала доля недели не наблюдалась), иначе он только база. Окно
 // начинается не раньше первого шага журнала
@@ -58,7 +59,7 @@ func poolRate(steps []limitStep, now time.Time) (float64, time.Duration, error) 
 	for _, st := range sorted {
 		key := st.ResetsAt.Unix()
 		prev, seen := last[key]
-		last[key] = max(prev, st.SevenDay)
+		last[key] = st.SevenDay
 		if st.At.Before(from) || st.At.After(now) {
 			continue
 		}

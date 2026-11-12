@@ -44,7 +44,7 @@ func TestMergeWeeklyLimitFirstSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "chooks", "limits.json")
 	now := time.Date(2026, 10, 20, 12, 0, 0, 123456789, time.UTC)
 	merged, verdict := merge(t, path, 38, workResets, "s1", now)
-	if verdict != weekRaised || merged.used != 38 {
+	if verdict != weekChanged || merged.used != 38 {
 		t.Errorf("первый замер: %v, %+v", verdict, merged)
 	}
 	// верхние поля читает sleepstats как RFC 3339 с секундами: форма прежняя
@@ -119,7 +119,7 @@ func TestMergeWeeklyLimitTwoAccounts(t *testing.T) {
 	base := time.Date(2026, 10, 21, 1, 0, 0, 0, time.UTC)
 	merge(t, path, 60, workResets, "work-1", base)
 	merge(t, path, 4, personalResets, "personal-1", base.Add(time.Minute))
-	if merged, verdict := merge(t, path, 61, workResets, "work-2", base.Add(2*time.Minute)); verdict != weekRaised || merged.used != 61 {
+	if merged, verdict := merge(t, path, 61, workResets, "work-2", base.Add(2*time.Minute)); verdict != weekChanged || merged.used != 61 {
 		t.Errorf("рост рабочей: %v, %v", verdict, merged.used)
 	}
 	if merged, verdict := merge(t, path, 4, personalResets, "personal-1", base.Add(3*time.Minute)); verdict != weekConfirmed || merged.used != 4 {
@@ -187,7 +187,7 @@ func TestMergeWeeklyLimitDropsPastWeek(t *testing.T) {
 	merge(t, path, 99, workResets, "s", workResets.Add(-time.Hour))
 	next := workResets.Add(weekWindow)
 	merged, verdict := merge(t, path, 1, next, "s", workResets.Add(time.Hour))
-	if verdict != weekRaised || merged.used != 1 {
+	if verdict != weekChanged || merged.used != 1 {
 		t.Errorf("новая неделя: %v, %v", verdict, merged.used)
 	}
 	got := readSnapshot(t, path)
@@ -219,7 +219,7 @@ func TestMergeWeeklyLimitConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(used float64) {
 			defer wg.Done()
-			if _, err := mergeLimits(path, sample{week: weeklyUsage{used: used, resetsAt: workResets}, session: "s"}, now); err != nil {
+			if _, err := mergeLimits(path, sample{week: weeklyUsage{used: used, resetsAt: workResets}, session: fmt.Sprint("s", used)}, now); err != nil {
 				errs <- err
 			}
 		}(float64(i))
@@ -300,5 +300,86 @@ func TestRenderStaleSessionShowsRecordedWeek(t *testing.T) {
 	}
 	if line := render("stale", 57); !strings.Contains(line, "61%") || strings.Contains(line, "57%") {
 		t.Errorf("старая сессия должна показать 61%%: %q", line)
+	}
+}
+
+// 12.11: частичный сброс недели — сброс тот же, доля ниже. Сессия, чья доля
+// упала против её же прошлой, получила свежий ответ API: запись и полоса
+// снижаются. Сессия со старым ответом и новая сессия с меньшей долей запись
+// не трогают
+func TestMergeWeeklyLimitPartialReset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "limits.json")
+	base := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	merge(t, path, 100, workResets, "a", base)
+	merge(t, path, 100, workResets, "b", base.Add(time.Minute))
+	if merged, verdict := merge(t, path, 60, workResets, "a", base.Add(time.Hour)); verdict != weekChanged || merged.used != 60 {
+		t.Errorf("доля сессии упала: %v, полоса %v, ожидалось 60", verdict, merged.used)
+	}
+	if merged, verdict := merge(t, path, 100, workResets, "b", base.Add(time.Hour+time.Minute)); verdict != weekStale || merged.used != 60 {
+		t.Errorf("старый ответ сессии b: %v, полоса %v, ожидалось 60", verdict, merged.used)
+	}
+	if merged, verdict := merge(t, path, 55, workResets, "new", base.Add(time.Hour+2*time.Minute)); verdict != weekStale || merged.used != 60 {
+		t.Errorf("новая сессия с меньшей долей: %v, полоса %v, ожидалось 60", verdict, merged.used)
+	}
+	if merged, verdict := merge(t, path, 61, workResets, "b", base.Add(2*time.Hour)); verdict != weekChanged || merged.used != 61 {
+		t.Errorf("рост после сброса: %v, полоса %v", verdict, merged.used)
+	}
+	got := readSnapshot(t, path)
+	if got.SevenDay != 61 || len(got.Weeks) != 1 || got.Weeks[0].SevenDay != 61 {
+		t.Fatalf("снимок: %+v", got)
+	}
+	_, _, steps, err := readLimitsAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shares []float64
+	for _, st := range steps {
+		shares = append(shares, st.SevenDay)
+	}
+	if fmt.Sprint(shares) != "[100 60 61]" {
+		t.Errorf("журнал: %v, ожидалось [100 60 61]", shares)
+	}
+}
+
+// Замер API токеном учётки точен: меньшая доля той же недели — сброс
+func TestMergeWeeklyLimitExactLowers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "limits.json")
+	base := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	if _, err := mergeLimits(path, sample{week: weeklyUsage{used: 100, resetsAt: workResets}, session: "a", account: "w@example.com"}, base); err != nil {
+		t.Fatal(err)
+	}
+	res, err := mergeLimits(path, sample{week: weeklyUsage{used: 40, resetsAt: workResets}, session: "api", account: "w@example.com", exact: true}, base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.verdict != weekChanged || res.merged.used != 40 {
+		t.Errorf("замер API: %v, %v, ожидалось 40", res.verdict, res.merged.used)
+	}
+	if got := readSnapshot(t, path); got.Weeks[0].SevenDay != 40 {
+		t.Errorf("запись недели %v, ожидалось 40", got.Weeks[0].SevenDay)
+	}
+}
+
+// Полоса после частичного сброса — свежая доля, и у сессии со старым ответом
+func TestRenderPartialReset(t *testing.T) {
+	isolateRender(t)
+	resets := time.Now().Add(5 * 24 * time.Hour).Truncate(time.Hour).Unix()
+	render := func(session string, used int) string {
+		t.Helper()
+		input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"rate_limits":{"seven_day":{"used_percentage":%d,"resets_at":%d}}}`,
+			session, t.TempDir(), used, resets)
+		line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plain(line)
+	}
+	render("a", 100)
+	render("b", 100)
+	if line := render("a", 60); !strings.Contains(line, "60%") {
+		t.Errorf("после сброса: %q", line)
+	}
+	if line := render("b", 100); !strings.Contains(line, "60%") || strings.Contains(line, "100%") {
+		t.Errorf("старая сессия должна показать 60%%: %q", line)
 	}
 }

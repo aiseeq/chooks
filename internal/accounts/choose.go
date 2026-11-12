@@ -159,17 +159,18 @@ func pickFrom(s *Store, all []state) (*state, []state) {
 	return best, all
 }
 
-// usageStale — расход неактивной учётки с неизвестной неделей не спрашивался
-// дольше этого: неделя могла начаться или сброситься
+// usageStale — расход неактивной учётки с неизвестной или пустой неделей не
+// спрашивался дольше этого: неделя могла начаться или сброситься
 const usageStale = 30 * time.Minute
 
-// needsUsage — неактивные живые учётки, чья неделя неизвестна: без их доли
-// и сброса правило выбора слепо
+// needsUsage — неактивные живые учётки, чья неделя неизвестна или пуста: без
+// их доли и сброса правило выбора слепо, а частичный сброс недели (12.11) у
+// неактивной учётки виден только замером API
 func needsUsage(s *Store, usage map[string]Usage, now time.Time) []*Account {
 	var out []*Account
 	for _, st := range states(s, usage, now) {
 		a := st.account
-		if a.UUID == s.Active || st.weekKnown || now.Sub(a.UsageCheckedAt) < usageStale {
+		if a.UUID == s.Active || (st.weekKnown && st.empty == "") || now.Sub(a.UsageCheckedAt) < usageStale {
 			continue
 		}
 		out = append(out, a)

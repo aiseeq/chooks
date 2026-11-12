@@ -157,3 +157,20 @@ func TestShortName(t *testing.T) {
 		t.Errorf("общий домен: %q", got)
 	}
 }
+
+// Пустая неактивная учётка перепроверяется раз в usageStale: частичный сброс
+// недели виден только замером API
+func TestNeedsUsageEmptyWeek(t *testing.T) {
+	now := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
+	s := &Store{Active: "a", Accounts: []Account{account("a", 20*day, now), account("b", 20*day, now), account("c", 20*day, now), account("d", 20*day, now)}}
+	s.Accounts[2].UsageCheckedAt = now.Add(-time.Minute)
+	week := Window{Used: 100, ResetsAt: now.Add(day)}
+	usage := map[string]Usage{
+		"a@example.com": {Week: week}, "b@example.com": {Week: week}, "c@example.com": {Week: week},
+		"d@example.com": {Week: Window{Used: 40, ResetsAt: now.Add(day)}},
+	}
+	got := needsUsage(s, usage, now)
+	if len(got) != 1 || got[0].UUID != "b" {
+		t.Errorf("перепроверить пустую: %v", fmt.Sprint(got))
+	}
+}

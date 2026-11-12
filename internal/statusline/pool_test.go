@@ -48,3 +48,22 @@ func TestReadRecentStepsTail(t *testing.T) {
 		t.Errorf("шагов в хвосте: %d", n)
 	}
 }
+
+// Частичный сброс недели — шаг вниз: расход считается от него, а не от
+// прежнего максимума
+func TestPoolRateAfterPartialReset(t *testing.T) {
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	resets := now.Add(4 * 24 * time.Hour)
+	steps := []limitStep{
+		{At: now.Add(-10 * time.Hour), ResetsAt: resets, SevenDay: 100},
+		{At: now.Add(-5 * time.Hour), ResetsAt: resets, SevenDay: 50},
+		{At: now.Add(-time.Hour), ResetsAt: resets, SevenDay: 60},
+	}
+	rate, span, err := poolRate(steps, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if span != 10*time.Hour || rate != 1 {
+		t.Errorf("темп %v%%/ч за %v, ожидалось 1%%/ч за 10 ч", rate, span)
+	}
+}

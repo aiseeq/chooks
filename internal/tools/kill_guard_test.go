@@ -93,6 +93,11 @@ func TestKillGuardBlocks(t *testing.T) {
 		"cat <<EOF | sudo sh\nkill -9 2100\nEOF",
 		"ssh host <<-EOF\n\tkill $p\n\tEOF",
 		"cat <<'EOF' > /dev/null\ntext\nEOF\nkill 1500",
+		// sudo -i/-s без команды читает скрипт из stdin, и за обёрткой тоже (akit v1.55.5)
+		"nice sudo -i <<E\nkill 1500\nE",
+		"sudo -u a sudo -s <<E\nkill $p\nE",
+		`nice -n 5 sudo -s <<< 'kill 1500'`,
+		"timeout 5 sudo -i <<'E'\nkill -9 2100\nE",
 		// kill за ключевым словом оболочки (тикет kill-guard-gaps)
 		`for p in $(pgrep -f foo); do kill $p; done`,
 		`if kill $PID; then echo x; fi`,

@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/approved"
 	"github.com/aiseeq/chooks/internal/core"
 )
@@ -82,17 +85,85 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 	if !core.IsShellTool(input.ToolName) {
 		return nil
 	}
-	return bashModelCandidates(input.Command)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// ~ в пути --settings не раскроется: файл не читается, остальное проверяется
+		logger.Warn("model_guard: домашний каталог неизвестен", "error", err)
+	}
+	return bashModelCandidates(input.Command, func(path string) string { return absPath(path, input.CWD, home) }, logger)
 }
 
-func bashModelCandidates(command string) []modelCandidate {
+// modelClients — программы, которым модель задают в командной строке
+var modelClients = []string{"claude", "codex", "opencode"}
+
+// bashModelCandidates — модели вызовов агентов в команде оболочки. Вызовы
+// ищет akit shellcmd: он видит и вложенные скрипты (bash -c, ssh, here-doc на
+// вход оболочке). Команду, которую shellcmd не разобрал, проверяет прежний
+// лексер: без вложенных скриптов, но и без пропуска простых вызовов
+// resolve даёт абсолютный путь файла из команды, "" — не раскрыть
+func bashModelCandidates(command string, resolve func(string) string, logger core.Logger) []modelCandidate {
+	calls, err := shellcmd.Find(command, modelClients...)
+	if calls == nil && err != nil {
+		logger.Warn("model_guard: shellcmd не разобрал команду, проверка простых вызовов", "error", err)
+		return lexedModelCandidates(command, resolve)
+	}
 	var found []modelCandidate
+	claude := false
+	for _, call := range calls {
+		args := make([]word, len(call.Args))
+		for i, a := range call.Args {
+			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`")}
+		}
+		found = append(found, candidatesFromArgs(call.Name, args, resolve)...)
+		if call.Name == "claude" {
+			claude = true
+		}
+	}
+	if claude {
+		found = append(found, envModelCandidates(command)...)
+	}
+	return found
+}
+
+// lexedModelCandidates — модели вызовов агентов по прежнему лексеру
+func lexedModelCandidates(command string, resolve func(string) string) []modelCandidate {
+	var found []modelCandidate
+	claude := false
 	for _, words := range splitSimpleCommands(withoutHereDocBodies(command, false)) {
 		name, args, _ := unwrapCommand(words)
-		if name != "claude" && name != "codex" && name != "opencode" {
+		if !slices.Contains(modelClients, name) {
 			continue
 		}
-		found = append(found, candidatesFromArgs(name, args)...)
+		found = append(found, candidatesFromArgs(name, args, resolve)...)
+		if name == "claude" {
+			claude = true
+		}
+	}
+	if claude {
+		found = append(found, envModelCandidates(command)...)
+	}
+	return found
+}
+
+// modelEnv — присваивание переменной, задающей модель Claude Code: префиксом
+// вызова, export или в вложенном скрипте. Ищется по всему тексту команды с
+// вызовом claude: присваивание действует на вызов и из другой простой команды
+// (export X=…; claude), а shellcmd присваиваний не отдаёт (тикет akit
+// shellcmd-assignments). Переменные быстрой модели (haiku) Claude Code
+// задаёт сам, они не проверяются
+var modelEnv = regexp.MustCompile(`\b(?:ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)=("[^"]*"|'[^']*'|[^\s;&|)'"]*)`)
+
+func envModelCandidates(command string) []modelCandidate {
+	var found []modelCandidate
+	for _, m := range modelEnv.FindAllStringSubmatch(command, -1) {
+		value, single := m[1], strings.HasPrefix(m[1], "'")
+		if single || strings.HasPrefix(value, `"`) {
+			value = value[1 : len(value)-1]
+		}
+		if value == "" {
+			continue
+		}
+		found = append(found, modelCandidate{value: value, dynamic: !single && strings.ContainsAny(value, "$`")})
 	}
 	return found
 }
@@ -140,7 +211,7 @@ func feedsShell(cmds [][]word) bool {
 	return false
 }
 
-func candidatesFromArgs(name string, args []word) []modelCandidate {
+func candidatesFromArgs(name string, args []word, resolve func(string) string) []modelCandidate {
 	var found []modelCandidate
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -152,6 +223,16 @@ func candidatesFromArgs(name string, args []word) []modelCandidate {
 			}
 		case strings.HasPrefix(a.text, "--model="):
 			found = append(found, modelCandidate{value: strings.TrimPrefix(a.text, "--model="), dynamic: !a.literal})
+		case name == "claude" && a.text == "--fallback-model":
+			if i+1 < len(args) {
+				i++
+				found = append(found, modelCandidate{value: args[i].text, dynamic: !args[i].literal})
+			}
+		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
+			if i+1 < len(args) {
+				i++
+				found = append(found, jsonModelCandidates(a.text, args[i], resolve)...)
+			}
 		case name == "codex" && (a.text == "-c" || a.text == "--config"):
 			if i+1 < len(args) {
 				i++
@@ -159,6 +240,73 @@ func candidatesFromArgs(name string, args []word) []modelCandidate {
 					found = append(found, candidate)
 				}
 			}
+		}
+	}
+	return found
+}
+
+// jsonModelCandidates — модели в JSON флага claude: --settings (строка JSON
+// или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
+// Файла нет или он не JSON — моделей нет: такой запуск claude сам не начнётся
+// jsonModelKey — ключ модели в исходном тексте JSON, в том числе с
+// экранированными кавычками внутри "…": "model": и \"ANTHROPIC_MODEL\":
+var jsonModelKey = regexp.MustCompile(`\b(?:model|[A-Z_]+_MODEL)\\*"\s*:`)
+
+func jsonModelCandidates(flag string, arg word, resolve func(string) string) []modelCandidate {
+	if !arg.literal {
+		// Путь файла из переменной не прочесть, а JSON с подстановкой — модель
+		// переменной, если в нём есть поле модели
+		if jsonModelKey.MatchString(arg.text) {
+			return []modelCandidate{{value: arg.text, dynamic: true}}
+		}
+		return nil
+	}
+	raw := []byte(arg.text)
+	if !strings.HasPrefix(strings.TrimSpace(arg.text), "{") {
+		if flag != "--settings" {
+			return nil
+		}
+		path := resolve(arg.text)
+		if path == "" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		raw = data
+	}
+	var found []modelCandidate
+	add := func(model string) {
+		if strings.TrimSpace(model) != "" {
+			found = append(found, modelCandidate{value: model})
+		}
+	}
+	if flag == "--agents" {
+		var agents map[string]struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(raw, &agents) == nil {
+			for _, a := range agents {
+				// inherit — модель основного вызова, она проверена отдельно
+				if a.Model != "inherit" {
+					add(a.Model)
+				}
+			}
+		}
+		return found
+	}
+	var settings struct {
+		Model string            `json:"model"`
+		Env   map[string]string `json:"env"`
+	}
+	if json.Unmarshal(raw, &settings) != nil {
+		return nil
+	}
+	add(settings.Model)
+	for name, value := range settings.Env {
+		if modelEnv.MatchString(name + "=x") {
+			add(value)
 		}
 	}
 	return found

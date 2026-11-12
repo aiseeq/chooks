@@ -59,6 +59,24 @@ func TestModelGuard(t *testing.T) {
 		// Monitor исполняет command оболочкой (тикет kill-guard-gaps)
 		{"Monitor sonnet", "Monitor", "", "claude --model sonnet", true},
 		{"if claude", "Bash", "", "if claude -p --model sonnet x; then echo; fi", true},
+		// Ревизия хуков 11.11 п.3: модель без --model
+		{"переменная окружения", "Bash", "", "ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"export переменной", "Bash", "", "export ANTHROPIC_MODEL='claude-sonnet-5-5'; claude -p hi", true},
+		{"переменная одобренной", "Bash", "", "ANTHROPIC_MODEL=opus claude -p hi", false},
+		{"переменная субагентов", "Bash", "", "CLAUDE_CODE_SUBAGENT_MODEL=haiku claude -p hi", true},
+		{"переменная из переменной", "Bash", "", `ANTHROPIC_MODEL="$M" claude -p hi`, true},
+		{"переменная без claude", "Bash", "", "ANTHROPIC_MODEL=sonnet env | grep MODEL", false},
+		{"bash -c", "Bash", "", `bash -c "claude --model sonnet -p hi"`, true},
+		{"ssh", "Bash", "", `ssh pc 'claude --model sonnet -p hi'`, true},
+		{"here-doc в оболочку", "Bash", "", "bash <<'EOF'\nclaude --model sonnet -p hi\nEOF", true},
+		{"settings json", "Bash", "", `claude -p hi --settings '{"model":"sonnet"}'`, true},
+		{"settings json env", "Bash", "", `claude -p hi --settings '{"env":{"ANTHROPIC_MODEL":"sonnet"}}'`, true},
+		{"settings json одобренной", "Bash", "", `claude -p hi --settings '{"model":"opus"}'`, false},
+		{"fallback-model", "Bash", "", "claude -p hi --model opus --fallback-model sonnet", true},
+		// 12.11 сухой прогон: путь настроек из переменной — не модель
+		{"settings путь из переменной", "Bash", "", `S=/tmp/p; claude -p hi --settings $S/a.json`, false},
+		{"settings json с подстановкой", "Bash", "", `claude -p hi --settings "{\"model\":\"$M\"}"`, true},
+		{"agents json", "Bash", "", `claude -p hi --agents '{"r":{"description":"d","prompt":"p","model":"haiku"}}'`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -192,5 +210,27 @@ func TestUnguardedMentionsKeepRoute(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// --settings файлом: модель из файла настроек
+func TestModelGuardSettingsFile(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	dir := t.TempDir()
+	settings := filepath.Join(dir, "s.json")
+	if err := os.WriteFile(settings, []byte(`{"model":"sonnet"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for command, reject := range map[string]bool{
+		"claude -p hi --settings " + settings:              true,
+		"claude -p hi --settings " + dir + "/missing.json": false,
+	} {
+		got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.IsValid == reject {
+			t.Errorf("%s: valid=%v %v", command, got.IsValid, got.Violations)
+		}
 	}
 }

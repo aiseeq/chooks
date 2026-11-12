@@ -61,11 +61,30 @@ func TestEngine_DisabledToolsAreNotCreated(t *testing.T) {
 	engine := newEngine(t, &core.Config{
 		Tools: map[string]core.ToolConfig{
 			"jira_style": {Enabled: false},
+			"git_guard":  {Enabled: false},
 		},
 	})
 
 	if len(engine.tools) != 0 {
 		t.Errorf("выключенная проверка не должна создаваться, создано %d", len(engine.tools))
+	}
+}
+
+// git_guard без ключа в config.yaml включён: установленный config.yaml при
+// обновлении не перезаписывается
+func TestEngine_GitGuardOnWhenAbsent(t *testing.T) {
+	engine := newEngine(t, &core.Config{Tools: map[string]core.ToolConfig{}})
+	response, err := engine.ProcessPreToolUse(context.Background(), &core.ToolInput{
+		ToolName: "Bash",
+		// Каталог неизвестен — дерево не своё (временный каталог теста был бы своим)
+		Command: "git stash",
+		AgentID: "a1",
+	})
+	if err != nil {
+		t.Fatalf("обработка не удалась: %v", err)
+	}
+	if response.Action != core.HookActionBlock {
+		t.Errorf("суб-агенту git stash без ключа git_guard: %s", response.Action)
 	}
 }
 

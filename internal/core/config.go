@@ -92,6 +92,9 @@ func SaveConfig(config *Config, configPath string) error {
 func DefaultConfig() *Config {
 	return &Config{
 		Tools: map[string]ToolConfig{
+			"git_guard": {
+				Enabled: true,
+			},
 			"jira_style": {
 				Enabled: true,
 			},

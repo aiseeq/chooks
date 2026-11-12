@@ -33,26 +33,35 @@ func (e *Engine) initTools(config *core.Config) error {
 	constructors := []struct {
 		name string
 		new  func(core.ToolConfig, core.Logger) (core.ToolValidator, error)
+		// onWhenAbsent — без ключа в config.yaml проверка включена:
+		// установленный config.yaml при обновлении не перезаписывается
+		onWhenAbsent bool
 	}{
+		{name: "git_guard", new: func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
+			return tools.NewGitGuardTool(c, l)
+		}, onWhenAbsent: true},
 		{"jira_style", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
 			return tools.NewJiraStyleTool(c, l)
-		}},
+		}, false},
 		{"kill_guard", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
 			return tools.NewKillGuardTool(c, l)
-		}},
+		}, false},
 		{"model_guard", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
 			return tools.NewModelGuardTool(c, l)
-		}},
+		}, false},
 		{"rm_guard", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
 			return tools.NewRmGuardTool(c, l)
-		}},
+		}, false},
 		{"write_guard", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
 			return tools.NewWriteGuardTool(c, l)
-		}},
+		}, false},
 	}
 
 	for _, constructor := range constructors {
 		toolConfig, exists := config.Tools[constructor.name]
+		if !exists && constructor.onWhenAbsent {
+			toolConfig, exists = core.ToolConfig{Enabled: true}, true
+		}
 		if !exists || !toolConfig.Enabled {
 			continue
 		}

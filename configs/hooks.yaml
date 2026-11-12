@@ -45,6 +45,13 @@ tools:
   webfetch_fallback:
     enabled: true
 
+  # Суб-агентам Claude (не основной сессии) — отказ в git-командах, что стирают
+  # незакоммиченную работу или меняют запушенное: reset --hard, restore,
+  # checkout -- путь, clean, stash, force-push, удаление ветки на remote; в своём
+  # linked worktree можно. Без ключа включено
+  git_guard:
+    enabled: true
+
   # Блокирует явный выбор модели, отсутствующей в ~/.config/models/approved
   model_guard:
     enabled: false

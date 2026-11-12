@@ -129,23 +129,18 @@ func planPrice(path, provider string, now time.Time) (float64, error) {
 		if row["provider"] != provider {
 			continue
 		}
-		from, err := time.ParseInLocation(time.DateOnly, row["valid_from"], time.Local)
+		from, err := validFrom(row["valid_from"])
 		if err != nil {
-			if from, err = time.Parse(time.RFC3339, row["valid_from"]); err != nil {
-				return 0, fmt.Errorf("цены плана нет: %s valid_from %q: %w", path, row["valid_from"], err)
-			}
+			return 0, fmt.Errorf("цены плана нет: %s: %w", path, err)
 		}
 		if from.After(now) || (found && from.Before(since)) {
 			continue
 		}
 		found, since = true, from
-		price, priceErr = 0, nil
-		usd, err := strconv.ParseFloat(row["plan_usd_month"], 64)
-		if err != nil || usd <= 0 {
-			priceErr = fmt.Errorf("цены плана нет: %s plan_usd_month %q строки %s", path, row["plan_usd_month"], row["valid_from"])
-			continue
+		price, priceErr = rowPrice(row)
+		if priceErr != nil {
+			priceErr = fmt.Errorf("цены плана нет: %s: %w", path, priceErr)
 		}
-		price = usd
 	}
 	if err := sc.Err(); err != nil {
 		return 0, fmt.Errorf("цены плана нет: %s: %w", path, err)
@@ -159,4 +154,25 @@ func planPrice(path, provider string, now time.Time) (float64, error) {
 		return 0, priceErr
 	}
 	return price, nil
+}
+
+// validFrom — начало действия строки курсов: дата (местная полночь) или
+// RFC3339
+func validFrom(s string) (time.Time, error) {
+	from, err := time.ParseInLocation(time.DateOnly, s, time.Local)
+	if err != nil {
+		if from, err = time.Parse(time.RFC3339, s); err != nil {
+			return time.Time{}, fmt.Errorf("valid_from %q: %w", s, err)
+		}
+	}
+	return from, nil
+}
+
+// rowPrice — plan_usd_month строки курсов, положительный
+func rowPrice(row map[string]string) (float64, error) {
+	usd, err := strconv.ParseFloat(row["plan_usd_month"], 64)
+	if err != nil || usd <= 0 {
+		return 0, fmt.Errorf("plan_usd_month %q строки %s", row["plan_usd_month"], row["valid_from"])
+	}
+	return usd, nil
 }

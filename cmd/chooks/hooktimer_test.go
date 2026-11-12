@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/core"
 )
 
@@ -210,7 +211,9 @@ func TestHookTimer_SIGTERM(t *testing.T) {
 	if !ready {
 		t.Fatal("помощник не дошёл до ожидания сигнала")
 	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	// SIGTERM — то, что проверяется: хук должен сам выйти по нему. Запас до
+	// SIGKILL большой: убитый по запасу помощник даст другой код выхода
+	if _, err := proc.StopChild(cmd.Process.Pid, 10*time.Second, func() error { return cmd.Process.Signal(syscall.SIGTERM) }); err != nil {
 		t.Fatal(err)
 	}
 	err = cmd.Wait()

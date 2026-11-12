@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/akit/proc"
 )
 
 // Режим читается из /proc живого процесса, поэтому и проверяется на живом:
@@ -21,7 +23,9 @@ func startWithArgs(t *testing.T, args ...string) string {
 		t.Fatalf("не удалось запустить процесс: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
+		if _, err := proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() }); err != nil {
+			t.Errorf("процесс %d не остановлен: %v", cmd.Process.Pid, err)
+		}
 		_ = cmd.Wait()
 	})
 

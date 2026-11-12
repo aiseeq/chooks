@@ -383,3 +383,32 @@ func TestRenderPartialReset(t *testing.T) {
 		t.Errorf("старая сессия должна показать 60%%: %q", line)
 	}
 }
+
+// 12.11 11:28: одна сессия прислала 54%, через 2 с — 53%, другая сессия
+// тут же 54%. Доля сессии колеблется на процент: такое снижение — шум, а не
+// сброс, запись и журнал его не берут
+func TestMergeWeeklyLimitSessionJitter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "limits.json")
+	base := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	merge(t, path, 53, workResets, "a", base)
+	merge(t, path, 54, workResets, "a", base.Add(time.Second))
+	if merged, verdict := merge(t, path, 53, workResets, "a", base.Add(3*time.Second)); verdict != weekStale || merged.used != 54 {
+		t.Errorf("колебание сессии: %v, полоса %v, ожидалось 54", verdict, merged.used)
+	}
+	merge(t, path, 60, workResets, "b", base.Add(time.Hour))
+	merge(t, path, 61, workResets, "b", base.Add(time.Hour+time.Second))
+	if merged, verdict := merge(t, path, 60, workResets, "a", base.Add(time.Hour+2*time.Second)); verdict != weekStale || merged.used != 61 {
+		t.Errorf("запоздавшая отрисовка другой сессии: %v, полоса %v, ожидалось 61", verdict, merged.used)
+	}
+	_, _, steps, err := readLimitsAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shares []float64
+	for _, st := range steps {
+		shares = append(shares, st.SevenDay)
+	}
+	if fmt.Sprint(shares) != "[53 54 60 61]" {
+		t.Errorf("журнал: %v, ожидалось [53 54 60 61]", shares)
+	}
+}

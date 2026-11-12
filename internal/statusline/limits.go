@@ -58,7 +58,8 @@ func (w weeklyUsage) limit() *WeeklyLimit {
 // записала 57% между 61% других), и это не откат. Но доля и падает при той же
 // неделе: частичный сброс (12.11 после 100%). Поэтому запись помнит последнюю
 // долю каждой сессии: доля сессии, изменившаяся против её же прошлой, — свежий
-// ответ API и ставится в запись в обе стороны; повтор сессией своей прежней
+// ответ API и ставится в запись в обе стороны (вниз — от resetDropMin: доля
+// сессии колеблется на процент); повтор сессией своей прежней
 // доли запись не меняет (иначе отставшая сессия вернула бы 100% после
 // сброса), а первая доля сессии только поднимает её.
 //
@@ -262,7 +263,8 @@ func (s *limitsSnapshot) mergeWeek(week weeklyUsage, smp sample, stamp time.Time
 	case week.used == rec.SevenDay:
 		rec.SeenAt = stamp
 		verdict = weekConfirmed
-	case news == shareFresh || (news == shareFirst && week.used > rec.SevenDay):
+	case week.used > rec.SevenDay && news != shareRepeat,
+		news == shareFresh && (smp.exact || rec.SevenDay-week.used >= resetDropMin):
 		rec.SevenDay, rec.At, rec.SeenAt, rec.Session = week.used, stamp, stamp, smp.session
 	default:
 		merged.used = rec.SevenDay
@@ -270,6 +272,11 @@ func (s *limitsSnapshot) mergeWeek(week weeklyUsage, smp sample, stamp time.Time
 	}
 	return merged, verdict, rec.Account
 }
+
+// resetDropMin — снижение доли сессии на столько процентных пунктов и больше —
+// частичный сброс недели, меньше — шум: 12.11 11:28 одна сессия прислала 54%,
+// через 2 с — 53%, а другая тут же 54%. Сброс — десятки пунктов (100 → 53)
+const resetDropMin = 5.0
 
 // shareNews — что доля замера говорит о свежести
 type shareNews int
@@ -279,7 +286,9 @@ const (
 	// старый ответ API, поэтому только поднимает запись
 	shareFirst shareNews = iota
 	// shareFresh — новый ответ API: замер API токеном или доля сессии,
-	// изменившаяся против её же прошлой (ответы одной сессии идут по порядку)
+	// изменившаяся против её же прошлой: отставшая сессия свою долю только
+	// повторяет. Порядок ответов сессии не строгий (колебание на процент),
+	// поэтому вниз запись идёт от resetDropMin
 	shareFresh
 	// shareRepeat — сессия повторяет свою прежнюю долю: запись не меняет
 	shareRepeat

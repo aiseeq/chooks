@@ -90,7 +90,23 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		// ~ в пути --settings не раскроется: файл не читается, остальное проверяется
 		logger.Warn("model_guard: домашний каталог неизвестен", "error", err)
 	}
-	return bashModelCandidates(input.Command, func(path string) string { return absPath(path, input.CWD, home) }, logger)
+	readSettings := func(path string) []byte {
+		abs := absPath(path, input.CWD, home)
+		if abs == "" {
+			return nil
+		}
+		data, err := os.ReadFile(abs)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			// Файл настроек пишет та же команда: до её запуска его нет
+			return nil
+		case err != nil:
+			logger.Warn("model_guard: файл --settings не читается, модель из него не проверена", "path", abs, "error", err)
+			return nil
+		}
+		return data
+	}
+	return bashModelCandidates(input.Command, readSettings, logger)
 }
 
 // modelClients — программы, которым модель задают в командной строке
@@ -100,12 +116,12 @@ var modelClients = []string{"claude", "codex", "opencode"}
 // ищет akit shellcmd: он видит и вложенные скрипты (bash -c, ssh, here-doc на
 // вход оболочке). Команду, которую shellcmd не разобрал, проверяет прежний
 // лексер: без вложенных скриптов, но и без пропуска простых вызовов
-// resolve даёт абсолютный путь файла из команды, "" — не раскрыть
-func bashModelCandidates(command string, resolve func(string) string, logger core.Logger) []modelCandidate {
+// readSettings читает файл --settings по пути из команды, nil — не прочесть
+func bashModelCandidates(command string, readSettings func(string) []byte, logger core.Logger) []modelCandidate {
 	calls, err := shellcmd.Find(command, modelClients...)
 	if calls == nil && err != nil {
 		logger.Warn("model_guard: shellcmd не разобрал команду, проверка простых вызовов", "error", err)
-		return lexedModelCandidates(command, resolve)
+		return lexedModelCandidates(command, readSettings)
 	}
 	var found []modelCandidate
 	claude := false
@@ -114,7 +130,7 @@ func bashModelCandidates(command string, resolve func(string) string, logger cor
 		for i, a := range call.Args {
 			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`")}
 		}
-		found = append(found, candidatesFromArgs(call.Name, args, resolve)...)
+		found = append(found, candidatesFromArgs(call.Name, args, readSettings)...)
 		if call.Name == "claude" {
 			claude = true
 		}
@@ -126,7 +142,7 @@ func bashModelCandidates(command string, resolve func(string) string, logger cor
 }
 
 // lexedModelCandidates — модели вызовов агентов по прежнему лексеру
-func lexedModelCandidates(command string, resolve func(string) string) []modelCandidate {
+func lexedModelCandidates(command string, readSettings func(string) []byte) []modelCandidate {
 	var found []modelCandidate
 	claude := false
 	for _, words := range splitSimpleCommands(withoutHereDocBodies(command, false)) {
@@ -134,7 +150,7 @@ func lexedModelCandidates(command string, resolve func(string) string) []modelCa
 		if !slices.Contains(modelClients, name) {
 			continue
 		}
-		found = append(found, candidatesFromArgs(name, args, resolve)...)
+		found = append(found, candidatesFromArgs(name, args, readSettings)...)
 		if name == "claude" {
 			claude = true
 		}
@@ -211,7 +227,7 @@ func feedsShell(cmds [][]word) bool {
 	return false
 }
 
-func candidatesFromArgs(name string, args []word, resolve func(string) string) []modelCandidate {
+func candidatesFromArgs(name string, args []word, readSettings func(string) []byte) []modelCandidate {
 	var found []modelCandidate
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -231,7 +247,7 @@ func candidatesFromArgs(name string, args []word, resolve func(string) string) [
 		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
 			if i+1 < len(args) {
 				i++
-				found = append(found, jsonModelCandidates(a.text, args[i], resolve)...)
+				found = append(found, jsonModelCandidates(a.text, args[i], readSettings)...)
 			}
 		case name == "codex" && (a.text == "-c" || a.text == "--config"):
 			if i+1 < len(args) {
@@ -252,7 +268,7 @@ func candidatesFromArgs(name string, args []word, resolve func(string) string) [
 // экранированными кавычками внутри "…": "model": и \"ANTHROPIC_MODEL\":
 var jsonModelKey = regexp.MustCompile(`\b(?:model|[A-Z_]+_MODEL)\\*"\s*:`)
 
-func jsonModelCandidates(flag string, arg word, resolve func(string) string) []modelCandidate {
+func jsonModelCandidates(flag string, arg word, readSettings func(string) []byte) []modelCandidate {
 	if !arg.literal {
 		// Путь файла из переменной не прочесть, а JSON с подстановкой — модель
 		// переменной, если в нём есть поле модели
@@ -266,15 +282,9 @@ func jsonModelCandidates(flag string, arg word, resolve func(string) string) []m
 		if flag != "--settings" {
 			return nil
 		}
-		path := resolve(arg.text)
-		if path == "" {
+		if raw = readSettings(arg.text); raw == nil {
 			return nil
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		raw = data
 	}
 	var found []modelCandidate
 	add := func(model string) {

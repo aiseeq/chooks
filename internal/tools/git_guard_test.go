@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
@@ -55,6 +56,8 @@ func TestGitGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	tool.tempRoots = []string{scratch, "/var/tmp/gg-test"}
+	// Суб-агент стартовал до worktree own: worktree создан им
+	transcript := agentTranscript(t, "a1", time.Now().Add(-time.Hour))
 	cases := []struct {
 		name, command string
 		reject        bool
@@ -181,7 +184,7 @@ func TestGitGuard(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			input := &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: shared, AgentID: "a1", AgentType: "fighter"}
+			input := &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: shared, AgentID: "a1", AgentType: "fighter", TranscriptPath: transcript}
 			got, err := tool.ValidateTool(context.Background(), input)
 			if err != nil {
 				t.Fatal(err)
@@ -198,6 +201,89 @@ func TestGitGuard(t *testing.T) {
 				t.Errorf("основной сессии отказ: %v %v", err, main)
 			}
 		})
+	}
+}
+
+// agentTranscript — транскрипт основной сессии (каталог проекта -home-x) и
+// суб-агента id, стартовавшего в start
+func agentTranscript(t *testing.T, id string, start time.Time) string {
+	t.Helper()
+	main := filepath.Join(t.TempDir(), "-home-x", "s.jsonl")
+	sub := core.AgentTranscript(main, id)
+	if err := os.MkdirAll(filepath.Dir(sub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := `{"type":"user","message":{"content":"бриф"},"timestamp":"` + start.UTC().Format(time.RFC3339Nano) + `"}` + "\n"
+	if err := os.WriteFile(sub, []byte(first+`{"type":"assistant"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return main
+}
+
+// noTimestamp — транскрипт суб-агента a1, в первой записи которого нет времени
+func noTimestamp(t *testing.T) string {
+	t.Helper()
+	main := agentTranscript(t, "a1", time.Now())
+	if err := os.WriteFile(core.AgentTranscript(main, "a1"), []byte(`{"type":"user"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return main
+}
+
+// Свой linked worktree — только изоляции суб-агента или созданный после его
+// старта; чужой (другой сессии) — отказ
+func TestGitGuardAgentWorktree(t *testing.T) {
+	shared, own := gitGuardTree(t)
+	isolated := filepath.Join(shared, ".claude", "worktrees", "agent-a1")
+	other := filepath.Join(shared, ".claude", "worktrees", "agent-zz")
+	named := filepath.Join(shared, ".claude", "agent-a1") // имя как у изоляции, но не в worktrees
+	for _, wt := range []string{isolated, other, named} {
+		gitdir := filepath.Join(shared, ".git", "worktrees", filepath.Base(wt))
+		for path, text := range map[string]string{
+			filepath.Join(wt, ".git"):     "gitdir: " + gitdir + "\n",
+			filepath.Join(gitdir, "HEAD"): "ref: refs/heads/" + filepath.Base(wt) + "\n",
+		} {
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// Все worktree созданы за день до старта суб-агента
+	old := time.Now().Add(-24 * time.Hour)
+	for _, wt := range []string{own, isolated, other, named} {
+		if err := os.Chtimes(filepath.Join(wt, ".git"), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewGitGuardTool(core.ToolConfig{Enabled: true}, logger)
+	tool.tempRoots = nil
+	started := agentTranscript(t, "a1", time.Now().Add(-time.Hour))
+	cases := []struct {
+		name, dir, transcript string
+		valid                 bool
+	}{
+		{"worktree изоляции", isolated, started, true},
+		{"worktree изоляции другого агента", other, started, false},
+		{"имя изоляции не в worktrees", named, started, false},
+		{"в первой записи нет timestamp", own, noTimestamp(t), false},
+		{"чужой worktree, созданный до старта", own, started, false},
+		{"создан после старта", own, agentTranscript(t, "a1", old.Add(-time.Hour)), true},
+		{"транскрипта нет", own, filepath.Join(t.TempDir(), "-home-x", "s.jsonl"), false},
+		{"transcript_path пуст", own, "", false},
+	}
+	for _, tc := range cases {
+		input := &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: tc.dir, AgentID: "a1", TranscriptPath: tc.transcript}
+		got, err := tool.ValidateTool(context.Background(), input)
+		if err != nil || got.IsValid != tc.valid {
+			t.Errorf("%s: %v valid=%v, нужно %v", tc.name, err, got.IsValid, tc.valid)
+		}
 	}
 }
 
@@ -219,7 +305,7 @@ func TestGitGuardMasterInWorktree(t *testing.T) {
 		}
 	}
 	// Мастер в другом каталоге: worktree — суб-агента
-	input := &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: own, AgentID: "a1", TranscriptPath: "/p/-home-x/s.jsonl"}
+	input := &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: own, AgentID: "a1", TranscriptPath: agentTranscript(t, "a1", time.Now().Add(-time.Hour))}
 	if got, err := tool.ValidateTool(context.Background(), input); err != nil || !got.IsValid {
 		t.Errorf("свой worktree: %v %+v", err, got)
 	}

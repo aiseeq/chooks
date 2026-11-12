@@ -1,13 +1,18 @@
 package tools
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
@@ -88,7 +93,11 @@ func gitCalls(input *core.ToolInput, calls []shellcmd.Call, home string) ([]gitC
 	// GIT_DIR и GIT_WORK_TREE переносят git в другое репо: каталог неизвестен
 	envRepo := strings.Contains(input.Command, "GIT_DIR") || strings.Contains(input.Command, "GIT_WORK_TREE")
 	envConfig := gitConfigEnv.MatchString(input.Command)
-	ctx := commandContext{master: sessionProject(input.TranscriptPath)}
+	ctx := commandContext{
+		master:   sessionProject(input.TranscriptPath),
+		agentID:  input.AgentID,
+		agentLog: core.AgentTranscript(input.TranscriptPath, input.AgentID),
+	}
 	gits := make([]gitCall, len(calls))
 	plan := planCommand(input.Command, input.CWD, home, calls)
 	for i, c := range calls {
@@ -113,6 +122,8 @@ type commandContext struct {
 	master      string // каталог проекта основной сессии (sessionProject)
 	links       bool   // команда создаёт ссылки (ln): несуществующий пока каталог может оказаться ссылкой
 	branchMoved bool   // команда переключает ветку: HEAD worktree на момент push не тот, что сейчас
+	agentID     string // суб-агент: его worktree изоляции — .claude/worktrees/agent-<id>
+	agentLog    string // транскрипт суб-агента: первая запись — время его старта
 }
 
 // ownTree — опасная подкоманда g работает в дереве суб-агента: каталог во
@@ -143,12 +154,63 @@ func (t *GitGuardTool) ownTree(g gitCall, shared bool, ctx commandContext) bool 
 		return false
 	}
 	switch {
-	case wt.root == "" || masterIn(wt.root, ctx.master):
+	case wt.root == "" || masterIn(wt.root, ctx.master) || !t.agentWorktree(wt.root, ctx):
 		return false
 	case !shared:
 		return true
 	}
 	return g.sub == "push" && !ctx.branchMoved && leasePush(g.args, wt.branch)
+}
+
+// agentWorktree — linked worktree суб-агента, а не другой сессии: его
+// worktree изоляции (Agent isolation: .claude/worktrees/agent-<id>) или
+// созданный после его старта (.git-файл корня не старше первой записи
+// транскрипта суб-агента). Время не узнать — не его
+func (t *GitGuardTool) agentWorktree(root string, ctx commandContext) bool {
+	if filepath.Base(root) == "agent-"+ctx.agentID && filepath.Base(filepath.Dir(root)) == "worktrees" {
+		return true
+	}
+	info, err := os.Lstat(filepath.Join(root, ".git"))
+	if err != nil {
+		t.Logger().Warn("git_guard: .git worktree не прочитан", "root", root, "error", err)
+		return false
+	}
+	start, err := agentStart(ctx.agentLog)
+	if err != nil {
+		t.Logger().Warn("git_guard: время старта суб-агента неизвестно", "error", err)
+		return false
+	}
+	return !info.ModTime().Before(start)
+}
+
+// agentStartLine — предел первой записи транскрипта суб-агента (бриф);
+// 12.11 у 2000 транскриптов самая длинная — 11.8 КБ
+const agentStartLine = 256 << 10
+
+// agentStart — время старта суб-агента: timestamp первой записи его транскрипта
+func agentStart(transcript string) (time.Time, error) {
+	if transcript == "" {
+		return time.Time{}, errors.New("транскрипта суб-агента нет во входе хука")
+	}
+	f, err := os.Open(transcript)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("транскрипт суб-агента: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	line, err := bufio.NewReaderSize(f, agentStartLine).ReadSlice('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return time.Time{}, fmt.Errorf("первая запись %s: %w", transcript, err)
+	}
+	var record struct {
+		Timestamp time.Time `json:"timestamp"`
+	}
+	if err := json.Unmarshal(line, &record); err != nil {
+		return time.Time{}, fmt.Errorf("первая запись %s: %w", transcript, err)
+	}
+	if record.Timestamp.IsZero() {
+		return time.Time{}, fmt.Errorf("в первой записи %s нет timestamp", transcript)
+	}
+	return record.Timestamp, nil
 }
 
 // gitCall — вызов git: каталог репо, подкоманда и её аргументы

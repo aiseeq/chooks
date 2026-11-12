@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // Event — событие хука, после которого проверяются файлы сессии
@@ -190,17 +192,7 @@ func skillNameFromDir(dir string) string {
 // transcriptFor — транскрипт агента события: у субагента свой файл рядом
 // с транскриптом основного разговора
 func transcriptFor(event Event) string {
-	if event.TranscriptPath == "" {
-		return ""
-	}
-	if event.AgentID == "" {
-		return event.TranscriptPath
-	}
-	agent := safeName(event.AgentID)
-	if agent == "" {
-		return ""
-	}
-	return strings.TrimSuffix(event.TranscriptPath, ".jsonl") + "/subagents/agent-" + agent + ".jsonl"
+	return core.AgentTranscript(event.TranscriptPath, event.AgentID)
 }
 
 // Format — текст для контекста агента, по абзацу на файл

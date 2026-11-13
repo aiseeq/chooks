@@ -21,13 +21,17 @@ var globTail = regexp.MustCompile(`(/\*+)+/*$`)
 // command would remove a workspace directory» и в bypassPermissions (сверено
 // прогоном claude -p, таблица в тесте). Рабочая папка — cwd Bash на начало
 // команды; cd перед rm он учитывает, только если команда начинается с
-// cd <абсолютный путь> и дальше идут одни &&. Цель с /* на конце он сверяет
-// ещё и с дополнительными рабочими папками (--add-dir) — хуку их не видно
+// cd <абсолютный путь> в рабочую папку сессии и дальше идут одни && (сверено
+// на 2.1.323). Цель с /* на конце он сверяет ещё и с дополнительными рабочими
+// папками (--add-dir) — этого хук не повторяет
 func (t *RmGuardTool) workspaceReasons(s *shScript, cwd string) ([]string, error) {
 	if cwd == "" {
 		return nil, nil
 	}
-	cwd = leadingCd(s, cwd)
+	cwd, err := t.leadingCd(s, cwd)
+	if err != nil {
+		return nil, err
+	}
 	dirs := []string{path.Clean(cwd)}
 	real, err := realPath(dirs[0])
 	if err != nil {
@@ -73,10 +77,58 @@ func (t *RmGuardTool) workspaceReasons(s *shScript, cwd string) ([]string, error
 }
 
 // leadingCd рабочая папка, от которой Claude Code сверяет цели: каталог
-// ведущего cd <абсолютный путь>, если всё остальное соединено &&, иначе cwd
-func leadingCd(s *shScript, cwd string) string {
+// ведущего cd <абсолютный путь>, если всё остальное соединено && и каталог
+// лежит в рабочей папке сессии, иначе cwd. cd в папку вне рабочих Claude Code
+// 2.1.323 под bypassPermissions останавливает запросом «multiple operations …
+// require approval: cd …, rm …», если rm от исходного cwd задевает рабочую
+// папку (CHANGELOG 2.1.323: «judged an rm from the wrong folder»)
+func (t *RmGuardTool) leadingCd(s *shScript, cwd string) (string, error) {
+	dir, ok := leadingCdDir(s)
+	if !ok {
+		return cwd, nil
+	}
+	inside, err := t.inSessionDirs(dir)
+	if err != nil || !inside {
+		return cwd, err
+	}
+	return dir, nil
+}
+
+// inSessionDirs каталог лежит в рабочей папке сессии: папке проекта
+// (CLAUDE_PROJECT_DIR) или одной из --add-dir процесса CLAUDE_PID. Папка
+// проекта неизвестна — сессию не определить, cd считаем рабочим, как до 2.1.323
+func (t *RmGuardTool) inSessionDirs(dir string) (bool, error) {
+	project, ok := t.lookupEnv("CLAUDE_PROJECT_DIR")
+	if !ok || project == "" {
+		return true, nil
+	}
+	if within(dir, project) {
+		return true, nil
+	}
+	pid, _ := t.lookupEnv("CLAUDE_PID")
+	extra, err := t.addDirs(pid)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range extra {
+		if within(dir, d) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// within путь p — каталог root или лежит в нём
+func within(p, root string) bool {
+	p, root = path.Clean(p), path.Clean(root)
+	return p == root || root == "/" || strings.HasPrefix(p, root+"/")
+}
+
+// leadingCdDir каталог ведущего cd <абсолютный путь>, если всё остальное
+// соединено &&
+func leadingCdDir(s *shScript) (string, bool) {
 	if s.group || s.function {
-		return cwd
+		return "", false
 	}
 	var top []shCommand
 	for _, c := range s.cmds {
@@ -85,18 +137,18 @@ func leadingCd(s *shScript, cwd string) string {
 		}
 	}
 	if len(top) < 2 || len(top[0].words) != 2 || commandName(top[0].words[0].raw) != "cd" {
-		return cwd
+		return "", false
 	}
 	for _, c := range top[1:] {
 		if c.sep != "&&" {
-			return cwd
+			return "", false
 		}
 	}
 	dir := top[0].words[1]
 	if strings.ContainsAny(dir.text, "$`~") || !strings.HasPrefix(unquoteWord(dir.text), "/") {
-		return cwd
+		return "", false
 	}
-	return unquoteWord(dir.text)
+	return unquoteWord(dir.text), true
 }
 
 // workspaceTarget абсолютный путь цели и попала ли она в рабочую папку или
@@ -129,7 +181,7 @@ func (t *RmGuardTool) workspaceTarget(w shWord, cwd string, dirs []string) (stri
 			return "", false, nil
 		}
 		for _, d := range dirs {
-			if d == p || strings.HasPrefix(d, p+"/") {
+			if within(d, p) {
 				return target, true, nil
 			}
 		}
@@ -179,8 +231,7 @@ func (t *RmGuardTool) homeOrAbove(p string) bool {
 	if !ok || home == "" {
 		return false
 	}
-	home = path.Clean(home)
-	return p == home || strings.HasPrefix(home, p+"/")
+	return within(home, p)
 }
 
 // workspaceHint что сделать: уйти из удаляемой папки отдельным вызовом cd и

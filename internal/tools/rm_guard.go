@@ -37,6 +37,8 @@ import (
 type RmGuardTool struct {
 	*BaseTool
 	lookupEnv func(string) (string, bool)
+	// addDirs дополнительные рабочие папки сессии по CLAUDE_PID
+	addDirs func(pid string) ([]string, error)
 }
 
 // NewRmGuardTool создает проверку rm по переменной
@@ -44,6 +46,7 @@ func NewRmGuardTool(config core.ToolConfig, logger core.Logger) (*RmGuardTool, e
 	return &RmGuardTool{
 		BaseTool:  NewBaseTool("rm_guard", config.Enabled, core.ShellTools, logger),
 		lookupEnv: os.LookupEnv,
+		addDirs:   core.SessionAddDirs,
 	}, nil
 }
 

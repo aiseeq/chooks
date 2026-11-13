@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,12 @@ import (
 
 func validateRmIn(t *testing.T, command, cwd string) *core.ValidationResult {
 	t.Helper()
-	result, err := newRmGuard(t).ValidateTool(context.Background(),
+	return validateRmWith(t, newRmGuard(t), command, cwd)
+}
+
+func validateRmWith(t *testing.T, tool *RmGuardTool, command, cwd string) *core.ValidationResult {
+	t.Helper()
+	result, err := tool.ValidateTool(context.Background(),
 		&core.ToolInput{ToolName: "Bash", Command: command, CWD: cwd})
 	if err != nil {
 		t.Fatalf("ValidateTool: %v", err)
@@ -20,16 +26,37 @@ func validateRmIn(t *testing.T, command, cwd string) *core.ValidationResult {
 	return result
 }
 
+// sessionDirs сессия запущена в /home/u/lab/proj с --add-dir extra (nil —
+// без --add-dir)
+func sessionDirs(t *testing.T, tool *RmGuardTool, extra []string) {
+	t.Helper()
+	rmGuardEnv["CLAUDE_PROJECT_DIR"] = "/home/u/lab/proj"
+	rmGuardEnv["CLAUDE_PID"] = "4242"
+	t.Cleanup(func() {
+		delete(rmGuardEnv, "CLAUDE_PROJECT_DIR")
+		delete(rmGuardEnv, "CLAUDE_PID")
+	})
+	tool.addDirs = func(pid string) ([]string, error) {
+		if pid != "4242" {
+			t.Errorf("addDirs(%q), ждали pid из CLAUDE_PID", pid)
+		}
+		return extra, nil
+	}
+}
+
 // TestRmGuardWorkspaceMatchesClaudeCode третья форма: каждую команду прогнали
-// через claude -p --model opus в bypassPermissions (Claude Code 2.1.312) из
-// песочницы /…/lab/proj с --add-dir /…/lab/extra; двухшаговые — первым вызовом
-// cd в cwd из таблицы. true — Claude Code остановил её запросом «This command
-// would remove a workspace directory». Не повторяем: rm -rf lab/extra/* —
-// дополнительную рабочую папку хук не видит. cd …/extra && echo a | tail -1;
-// rm -rf …/proj Claude Code останавливает раньше другим запросом («multiple
-// operations … requires approval»), хук — по рабочей папке
+// через claude -p --model opus в bypassPermissions из песочницы /…/lab/proj с
+// --add-dir /…/lab/extra, хуки выключены; двухшаговые — первым вызовом cd в cwd
+// из таблицы. true — Claude Code остановил её запросом «This command would
+// remove a workspace directory». Сверено на 2.1.312, строки с cd — заново на
+// 2.1.323 (13.11, все совпали). Не повторяем: rm -rf lab/extra/* —
+// цель с /* Claude Code сверяет и с дополнительными папками. cd …/extra && echo
+// a | tail -1; rm -rf …/proj Claude Code останавливает раньше другим запросом
+// («multiple operations … requires approval»), хук — по рабочей папке
 func TestRmGuardWorkspaceMatchesClaudeCode(t *testing.T) {
 	const proj = "/home/u/lab/proj"
+	tool := newRmGuard(t)
+	sessionDirs(t, tool, []string{"/home/u/lab/extra"})
 	for _, tc := range []struct {
 		cwd, command string
 		deny         bool
@@ -63,9 +90,46 @@ func TestRmGuardWorkspaceMatchesClaudeCode(t *testing.T) {
 		{proj, `cd ../extra && rm -rf /home/u/lab/proj`, true},
 		{proj, `cd /home/u/lab/proj/sub && rm -rf ../sub`, true},
 	} {
-		if got := !validateRmIn(t, tc.command, tc.cwd).IsValid; got != tc.deny {
+		if got := !validateRmWith(t, tool, tc.command, tc.cwd).IsValid; got != tc.deny {
 			t.Errorf("cwd %s: %q: отказ %v, у Claude Code %v", tc.cwd, tc.command, got, tc.deny)
 		}
+	}
+}
+
+// TestRmGuardWorkspaceCdOutsideSession та же песочница без --add-dir
+// (Claude Code 2.1.323, 13.11): cd в папку вне рабочих Claude Code не
+// учитывает — rm рабочей папки останавливает запросом «This Bash command
+// contains multiple operations. The following parts require approval: cd …»,
+// rm прочего проходит
+func TestRmGuardWorkspaceCdOutsideSession(t *testing.T) {
+	const proj = "/home/u/lab/proj"
+	tool := newRmGuard(t)
+	sessionDirs(t, tool, nil)
+	for _, tc := range []struct {
+		command string
+		deny    bool
+	}{
+		{`cd /home/u/lab/extra && rm -rf /home/u/lab/proj`, true},
+		{`cd /home/u/lab/extra && rm -rf /home/u/lab/proj/sub`, false},
+		{`cd /home/u/lab/extra && rm -rf /home/u/lab/extra/f`, false},
+		{`cd /home/u/lab/proj/sub && rm -rf /home/u/lab/proj/sub`, true},
+	} {
+		if got := !validateRmWith(t, tool, tc.command, proj).IsValid; got != tc.deny {
+			t.Errorf("%q: отказ %v, у Claude Code %v", tc.command, got, tc.deny)
+		}
+	}
+}
+
+// TestRmGuardWorkspaceAddDirsError сбой чтения --add-dir — ошибка проверки, а
+// не молчаливый пропуск
+func TestRmGuardWorkspaceAddDirsError(t *testing.T) {
+	tool := newRmGuard(t)
+	sessionDirs(t, tool, nil)
+	tool.addDirs = func(string) ([]string, error) { return nil, errors.New("no proc") }
+	_, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash",
+		Command: `cd /home/u/lab/extra && rm -rf /home/u/lab/proj`, CWD: "/home/u/lab/proj"})
+	if err == nil {
+		t.Error("нет ошибки чтения --add-dir")
 	}
 }
 

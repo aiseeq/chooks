@@ -86,3 +86,23 @@ func TestPrintModeCmdline_NoProcess(t *testing.T) {
 		}
 	}
 }
+
+// TestAddDirArgs формы --add-dir, как их пишет cl (с «=») и как вариадический
+// флаг; относительные пути пропускаются
+func TestAddDirArgs(t *testing.T) {
+	args := []string{"claude", "--add-dir=/home/u/.cache/worktrees", "--model", "opus",
+		"--add-dir", "/a/b/", "rel", "/c", "--verbose", "/not-a-dir", "--add-dir=x"}
+	got := addDirArgs(args)
+	want := []string{"/home/u/.cache/worktrees", "/a/b", "/c"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("addDirArgs = %q, ждали %q", got, want)
+	}
+}
+
+// TestSessionAddDirs_NoPid без CLAUDE_PID папок нет и ошибки нет
+func TestSessionAddDirs_NoPid(t *testing.T) {
+	dirs, err := SessionAddDirs("")
+	if err != nil || dirs != nil {
+		t.Errorf("SessionAddDirs(\"\") = %q, %v", dirs, err)
+	}
+}

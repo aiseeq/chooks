@@ -109,7 +109,7 @@ func (s *killScan) simple(cmd []word, stdin cmdStdin, depth int) error {
 	case source == scriptStdin && stdin.hasHereString:
 		inner, source = stdin.hereString, scriptArg
 	case source == scriptStdin && stdin.piped:
-		s.reasons = append(s.reasons, name+" читает скрипт из вывода другой команды (… | "+name+"): проверить его до запуска нельзя")
+		s.addReason(scriptInputReason(name))
 		return nil
 	}
 	if source == scriptArg {
@@ -152,7 +152,9 @@ func findExecCommands(args []word) [][]word {
 // parsedCalls проверяет вызовы, найденные полным разбором оболочки
 // (akit/shellcmd): имя из переменной (K=kill; $K), $'kill', тела функций и
 // coproc, склеенные опции обёрток (sudo -iu). Вызов с именем из $(…) — отказ,
-// если в его тексте есть kill. Ошибка разбора — отказ: вызывается только для
+// если в его тексте есть kill. Оболочка, исполняющая текст из ввода или <(…)
+// (ScriptInput: bash <(…), source <(…), … | bash -), — отказ: shellcmd этот
+// текст не читает, kill в нём не виден как вызов. Ошибка разбора — отказ: вызывается только для
 // команд со словом kill, а kill за ошибкой (глубже предела вложенности akit,
 // в неразобранном вложенном скрипте) свой лексер может не увидеть
 func (s *killScan) parsedCalls() error {
@@ -162,6 +164,9 @@ func (s *killScan) parsedCalls() error {
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
 	for _, c := range calls {
+		if c.ScriptInput {
+			s.addReason(scriptInputReason(c.Name))
+		}
 		if c.Name == "" {
 			if strings.Contains(unquoted(c.Raw), "kill") {
 				s.addReason("имя команды вычисляется при запуске ($(…) или `…`) рядом с kill: проверить, что исполнится, нельзя")
@@ -181,6 +186,13 @@ func (s *killScan) parsedCalls() error {
 		}
 	}
 	return nil
+}
+
+// scriptInputReason причина отказа для оболочки, исполняющей текст из ввода:
+// одна на лексер (… | bash) и полный разбор (ScriptInput), чтобы addReason
+// не дал два отказа на один вызов
+func scriptInputReason(name string) string {
+	return name + " читает скрипт из ввода (… | " + name + " или <(…)): проверить его до запуска нельзя"
 }
 
 // addReason добавляет причину отказа без повторов: лексер и полный разбор

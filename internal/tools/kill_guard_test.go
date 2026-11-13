@@ -195,6 +195,18 @@ func TestKillGuardBlocks(t *testing.T) {
 		"`echo pkill` -u aisee",
 		`K=xargs; pgrep foo | $K kill`,
 		`K=pkill; $K -f "$NAME"`,
+		// оболочка исполняет текст из ввода, который shellcmd не прочитал
+		// (тикет kill-guard-script-input): kill в нём не виден как вызов
+		`echo 'kill 1' | tee | bash`,
+		`{ echo kill 1; } | bash`,
+		`printf '%s' 'kill 1 #\c' | bash`,
+		// их лексер уже ловил как «… | bash»; process substitution и
+		// «bash -» видит только ScriptInput полного разбора
+		`bash <(echo kill 1)`,
+		`source <(echo kill 1)`,
+		`. <(echo kill 1)`,
+		`bash < <(echo kill 1)`,
+		`echo kill 1 | bash -`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -244,6 +256,11 @@ func TestKillGuardAllows(t *testing.T) {
 		`killall opencode`,
 		`ps -eo pid,args | grep '[o]pencode'`,
 		`echo "kill $p"`,
+		// cat — не оболочка: kill в тексте не исполняется
+		`echo 'kill 1' | cat`,
+		// без слова kill сторож не вызывается
+		`echo hi | bash`,
+		`cat script.sh | bash`,
 		// перенаправление — не цель kill (ложные отказы 19–26.10)
 		`kill 455274 2>&1`,
 		`kill -0 455274 2>/dev/null`,

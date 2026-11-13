@@ -166,14 +166,16 @@ func pickFrom(s *Store, all []state) (*state, []state) {
 // спрашивался дольше этого: неделя могла начаться или сброситься
 const usageStale = 30 * time.Minute
 
-// needsUsage — неактивные живые учётки, чья неделя неизвестна или пуста: без
-// их доли и сброса правило выбора слепо, а частичный сброс недели (12.11) у
-// неактивной учётки виден только замером API
+// needsUsage — живые учётки, чья неделя неизвестна или пуста: без их доли и
+// сброса правило выбора слепо, а частичный сброс недели (12.11) у неактивной
+// учётки виден только замером API. Активная тоже: после /login сессии рисуют
+// её неделю первой долей, а первая доля запись только поднимает (13.11 сброс
+// с 99% до 0%, после /login запись так и стояла на 99%)
 func needsUsage(s *Store, usage map[string]Usage, now time.Time) []*Account {
 	var out []*Account
 	for _, st := range states(s, usage, now) {
 		a := st.account
-		if a.UUID == s.Active || (st.weekKnown && !st.empty) || now.Sub(a.UsageCheckedAt) < usageStale {
+		if (st.weekKnown && !st.empty) || now.Sub(a.UsageCheckedAt) < usageStale {
 			continue
 		}
 		out = append(out, a)

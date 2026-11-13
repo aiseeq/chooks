@@ -2,7 +2,6 @@ package accounts
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -125,15 +124,14 @@ func TestChoose(t *testing.T) {
 	}
 }
 
-// Неизвестная неделя неактивной учётки спрашивается не чаще usageStale
+// Неизвестная неделя учётки, активной тоже, спрашивается не чаще usageStale
 func TestNeedsUsage(t *testing.T) {
 	now := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
 	s := &Store{Active: "a", Accounts: []Account{account("a", 20*day, now), account("b", 20*day, now), account("c", 20*day, now)}}
 	s.Accounts[2].UsageCheckedAt = now.Add(-time.Minute)
 	usage := map[string]Usage{"b@example.com": {Week: Window{Used: 1, ResetsAt: now.Add(-time.Second)}}}
-	got := needsUsage(s, usage, now)
-	if len(got) != 1 || got[0].UUID != "b" {
-		t.Errorf("спросить расход: %v", fmt.Sprint(got))
+	if got := needUUIDs(needsUsage(s, usage, now)); got != "a b" {
+		t.Errorf("спросить расход: %q", got)
 	}
 }
 
@@ -158,8 +156,9 @@ func TestShortName(t *testing.T) {
 	}
 }
 
-// Пустая неактивная учётка перепроверяется раз в usageStale: частичный сброс
-// недели виден только замером API
+// Пустая учётка, активная тоже, перепроверяется раз в usageStale: частичный
+// сброс недели неактивной виден только замером API, а активной после /login
+// сессии рисуют первой долей, которая запись не опускает
 func TestNeedsUsageEmptyWeek(t *testing.T) {
 	now := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
 	s := &Store{Active: "a", Accounts: []Account{account("a", 20*day, now), account("b", 20*day, now), account("c", 20*day, now), account("d", 20*day, now)}}
@@ -169,8 +168,16 @@ func TestNeedsUsageEmptyWeek(t *testing.T) {
 		"a@example.com": {Week: week}, "b@example.com": {Week: week}, "c@example.com": {Week: week},
 		"d@example.com": {Week: Window{Used: 40, ResetsAt: now.Add(day)}},
 	}
-	got := needsUsage(s, usage, now)
-	if len(got) != 1 || got[0].UUID != "b" {
-		t.Errorf("перепроверить пустую: %v", fmt.Sprint(got))
+	if got := needUUIDs(needsUsage(s, usage, now)); got != "a b" {
+		t.Errorf("перепроверить пустую: %q", got)
 	}
+}
+
+// needUUIDs — учётки через пробел
+func needUUIDs(accounts []*Account) string {
+	ids := make([]string, len(accounts))
+	for i, a := range accounts {
+		ids[i] = a.UUID
+	}
+	return strings.Join(ids, " ")
 }

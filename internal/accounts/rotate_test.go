@@ -405,3 +405,79 @@ func readJournal(t *testing.T, f *fixture) []switchRecord {
 	}
 	return out
 }
+
+// weekJSON — ответ /api/oauth/usage с недельной долей
+func weekJSON(used float64, resets time.Time) string {
+	return fmt.Sprintf(`{"five_hour":null,"seven_day":{"utilization":%g,"resets_at":%q}}`, used, resets.Format(time.RFC3339))
+}
+
+// 13.11: неделю пустой учётки сбросили, и /login на неё случился раньше
+// очередного замера. Сессии рисуют её неделю первой долей, которая запись не
+// опускает, поэтому неделя только что вошедшей учётки спрашивается у API сразу
+// её же токеном: и новым входом (новая цепочка токенов), и возвратом к
+// сохранённому
+func TestLoginMeasuresActiveWeek(t *testing.T) {
+	for _, newChain := range []bool{true, false} {
+		t.Run(fmt.Sprintf("новая цепочка %v", newChain), func(t *testing.T) {
+			testLoginMeasuresActiveWeek(t, newChain)
+		})
+	}
+}
+
+func testLoginMeasuresActiveWeek(t *testing.T, newChain bool) {
+	f := twoAccounts(t)
+	resets := f.now.Add(3 * day).Truncate(time.Minute)
+	f.usage["work"] = weekJSON(99, resets)
+	f.usage["personal"] = weekJSON(100, f.now.Add(5*day).Truncate(time.Minute))
+	f.now = f.now.Add(usageStale)
+	f.save("personal")
+	if u := f.limits.usage[work.email]; u.Week.Used != 99 {
+		t.Fatalf("до сброса рабочая не спрошена: %+v", u.Week)
+	}
+
+	f.usage["work"] = weekJSON(0, resets)
+	f.now = f.now.Add(time.Minute)
+	if newChain {
+		// /login выдаёт новые токены новой цепочки: вход опознаётся по API
+		f.mu.Lock()
+		p := f.people["work"]
+		p.family = p.family.Add(day)
+		f.people["work"] = p
+		f.mu.Unlock()
+		f.writeConfig(p)
+		f.writeCreds(f.login("work", 7, 8*time.Hour))
+		if _, err := f.r.Rotate(context.Background(), Options{Force: true, Wait: true}); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		f.save("work")
+	}
+	if got := f.store().ActiveEmail(); got != work.email {
+		t.Fatalf("активна %q", got)
+	}
+	if u := f.limits.usage[work.email]; u.Week.Used != 0 {
+		t.Errorf("после /login неделя рабочей не спрошена: %+v", u.Week)
+	}
+	if f.refreshes != 0 {
+		t.Errorf("токен активной обновлялся: %d обновлений", f.refreshes)
+	}
+}
+
+// Токен активной истекает: расход не спрашивается и токен не обновляется —
+// его обновит Claude Code
+func TestActiveUsageSkipsExpiringToken(t *testing.T) {
+	f := twoAccounts(t)
+	f.writeCreds(f.login("work", 2, time.Minute))
+	f.usage["work"] = weekJSON(0, f.now.Add(3*day))
+	f.limits.set(work.email, 99, f.now.Add(3*day))
+	f.now = f.now.Add(usageStale)
+	if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if u := f.limits.usage[work.email]; u.Week.Used != 99 {
+		t.Errorf("расход спрошен истекающим токеном: %+v", u.Week)
+	}
+	if f.refreshes != 0 {
+		t.Errorf("токен активной обновлялся: %d обновлений", f.refreshes)
+	}
+}

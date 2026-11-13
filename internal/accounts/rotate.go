@@ -168,9 +168,7 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	known, err := s.byLogin(o)
 	switch {
 	case err == nil:
-		known.OAuth, known.SavedAt, known.Dead = raw, now, ""
-		s.Active, s.SyncedMtime = known.UUID, creds.mtime
-		r.copyOAuthAccount(known)
+		r.adoptKnown(s, known, raw, now, creds.mtime)
 		return nil
 	case !errors.Is(err, errUnknownLogin):
 		return err
@@ -194,6 +192,8 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 		a = &s.Accounts[len(s.Accounts)-1]
 	}
 	a.Email, a.OrgUUID, a.OAuth, a.SavedAt, a.Dead = prof.Email, prof.OrgUUID, raw, now, ""
+	// Новый вход: неделя учётки спрашивается сразу
+	a.UsageCheckedAt = time.Time{}
 	r.copyOAuthAccount(a)
 	if len(a.OAuthAccount) == 0 {
 		minimal, err := json.Marshal(map[string]string{
@@ -209,6 +209,17 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	s.Active, s.SyncedMtime, s.RetryAt = a.UUID, creds.mtime, time.Time{}
 	r.Log.Info("accounts: login saved", "account", a.Email)
 	return nil
+}
+
+// adoptKnown делает знакомый хранилищу вход активным: токены — в хранилище
+func (r *Rotator) adoptKnown(s *Store, known *Account, raw json.RawMessage, now, mtime time.Time) {
+	if known.UUID != s.Active {
+		// /login на другую учётку: её неделя спрашивается сразу
+		known.UsageCheckedAt = time.Time{}
+	}
+	known.OAuth, known.SavedAt, known.Dead = raw, now, ""
+	s.Active, s.SyncedMtime = known.UUID, mtime
+	r.copyOAuthAccount(known)
 }
 
 // copyOAuthAccount берёт oauthAccount из ~/.claude.json, если он этой учётки
@@ -264,12 +275,12 @@ func (r *Rotator) fresh(ctx context.Context, s *Store, a *Account, margin time.D
 	return a.oauth()
 }
 
-// fetchUsage спрашивает у API расход неактивной учётки и пишет его в снимок
+// fetchUsage спрашивает у API расход учётки и пишет его в снимок
 func (r *Rotator) fetchUsage(ctx context.Context, s *Store, a *Account) error {
 	now := r.Now()
 	a.UsageCheckedAt = now
-	o, err := r.fresh(ctx, s, a, usageMargin)
-	if err != nil {
+	o, ok, err := r.usageToken(ctx, s, a)
+	if err != nil || !ok {
 		return err
 	}
 	u, err := r.Client.Usage(ctx, o.AccessToken, now)
@@ -277,6 +288,25 @@ func (r *Rotator) fetchUsage(ctx context.Context, s *Store, a *Account) error {
 		return err
 	}
 	return r.Limits.Record(a.Email, u.Week, now)
+}
+
+// usageToken — токены для запроса расхода. Активную обновляет Claude Code,
+// поэтому её токен берётся как есть, а истекающий — пропуск (false без
+// ошибки): замер повторится через usageStale
+func (r *Rotator) usageToken(ctx context.Context, s *Store, a *Account) (oauth, bool, error) {
+	if a.UUID != s.Active {
+		o, err := r.fresh(ctx, s, a, usageMargin)
+		return o, err == nil, err
+	}
+	o, err := a.oauth()
+	if err != nil {
+		return o, false, err
+	}
+	if !o.expires().After(r.Now().Add(usageMargin)) {
+		r.Log.Info("accounts: active login token expiring, usage not fetched", "account", a.Email)
+		return o, false, nil
+	}
+	return o, true, nil
 }
 
 // Switch переключает на учётку вручную и выключает автоматическое
@@ -503,7 +533,7 @@ func pending(p Paths, s *Store, usage map[string]Usage, now time.Time) (string, 
 		return "", nil
 	}
 	if len(needsUsage(s, usage, now)) > 0 {
-		return "неделя неактивной учётки неизвестна или пуста", nil
+		return "неделя учётки неизвестна или пуста", nil
 	}
 	activeAlive := false
 	if active := s.byUUID(s.Active); active != nil {

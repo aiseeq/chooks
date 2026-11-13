@@ -120,16 +120,52 @@ func TestRmGuardWorkspaceCdOutsideSession(t *testing.T) {
 	}
 }
 
-// TestRmGuardWorkspaceAddDirsError сбой чтения --add-dir — ошибка проверки, а
-// не молчаливый пропуск
+// TestRmGuardWorkspaceAddDirsError сбой чтения --add-dir не выключает
+// проверку: cd не опознан, rm сверяется от обеих папок
 func TestRmGuardWorkspaceAddDirsError(t *testing.T) {
 	tool := newRmGuard(t)
 	sessionDirs(t, tool, nil)
 	tool.addDirs = func(string) ([]string, error) { return nil, errors.New("no proc") }
-	_, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash",
+	r, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash",
 		Command: `cd /home/u/lab/extra && rm -rf /home/u/lab/proj`, CWD: "/home/u/lab/proj"})
-	if err == nil {
-		t.Error("нет ошибки чтения --add-dir")
+	if err != nil || r.IsValid {
+		t.Errorf("должно отклоняться без ошибки: %v, %v", r, err)
+	}
+}
+
+// TestRmGuardWorkspaceUnseenAddDir дополнительная папка из
+// permissions.additionalDirectories или /add-dir хуку не видна, а Claude Code
+// 2.1.323 cd в неё учитывает и останавливает rm её самой («would remove a
+// workspace directory», прогон приёмки 13.11): неопознанный cd хук сверяет и
+// от папки cd
+func TestRmGuardWorkspaceUnseenAddDir(t *testing.T) {
+	tool := newRmGuard(t)
+	sessionDirs(t, tool, nil)
+	if validateRmWith(t, tool, `cd /home/u/lab/extra && rm -rf /home/u/lab/extra`, "/home/u/lab/proj").IsValid {
+		t.Error("rm папки cd вне опознанных рабочих должно отклоняться")
+	}
+}
+
+// TestRmGuardWorkspaceCdViaSymlink cd в папку проекта через ссылку Claude
+// Code 2.1.323 учитывает (прогон приёмки 13.11)
+func TestRmGuardWorkspaceCdViaSymlink(t *testing.T) {
+	lab := t.TempDir()
+	proj := filepath.Join(lab, "proj")
+	if err := os.MkdirAll(filepath.Join(proj, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(proj, filepath.Join(lab, "plink")); err != nil {
+		t.Fatal(err)
+	}
+	tool := newRmGuard(t)
+	sessionDirs(t, tool, nil)
+	rmGuardEnv["CLAUDE_PROJECT_DIR"] = proj
+	cmd := "cd " + lab + "/plink/sub && rm -rf " + proj + "/sub"
+	if validateRmWith(t, tool, cmd, proj).IsValid {
+		t.Errorf("%q должно отклоняться", cmd)
+	}
+	if !tool.inSessionDirs(lab + "/plink/sub") {
+		t.Error("cd через ссылку в проект не опознан как рабочий")
 	}
 }
 
@@ -217,5 +253,25 @@ func TestRmGuardWorkspaceRealPathError(t *testing.T) {
 		&core.ToolInput{ToolName: "Bash", Command: "rm -rf /x", CWD: filepath.Join(locked, "cwd")})
 	if err == nil && os.Geteuid() != 0 {
 		t.Error("нет ошибки realpath в папке без прав")
+	}
+}
+
+// TestRmGuardWorkspaceCdDirRealPathError сбой realpath папки неопознанного cd
+// не выключает проверку: rm рабочей папки от исходного cwd отклоняется
+func TestRmGuardWorkspaceCdDirRealPathError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root читает папку без прав")
+	}
+	locked := filepath.Join(t.TempDir(), "locked")
+	if err := os.Mkdir(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	tool := newRmGuard(t)
+	sessionDirs(t, tool, nil)
+	r, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash",
+		Command: "cd " + locked + "/x && rm -rf /home/u/lab/proj", CWD: "/home/u/lab/proj"})
+	if err != nil || r.IsValid {
+		t.Errorf("должно отклоняться без ошибки: %v, %v", r, err)
 	}
 }

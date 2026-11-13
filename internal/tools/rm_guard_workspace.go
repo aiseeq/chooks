@@ -28,10 +28,30 @@ func (t *RmGuardTool) workspaceReasons(s *shScript, cwd string) ([]string, error
 	if cwd == "" {
 		return nil, nil
 	}
-	cwd, err := t.leadingCd(s, cwd)
-	if err != nil {
-		return nil, err
+	var reasons []string
+	seen := map[string]bool{}
+	for _, base := range t.leadingCd(s, cwd) {
+		hits, err := t.workspaceHits(s, base)
+		if err != nil && base != cwd {
+			// папка cd вне рабочих — догадка хука, её сбой не выключает проверку
+			t.Logger().Debug("workspace check from cd dir skipped", "dir", base, "error", err)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, h := range hits {
+			if !seen[h] {
+				seen[h] = true
+				reasons = append(reasons, h)
+			}
+		}
 	}
+	return reasons, nil
+}
+
+// workspaceHits причины отказа для целей rm, сверенных от рабочей папки cwd
+func (t *RmGuardTool) workspaceHits(s *shScript, cwd string) ([]string, error) {
 	dirs := []string{path.Clean(cwd)}
 	real, err := realPath(dirs[0])
 	if err != nil {
@@ -76,46 +96,75 @@ func (t *RmGuardTool) workspaceReasons(s *shScript, cwd string) ([]string, error
 	return reasons, nil
 }
 
-// leadingCd рабочая папка, от которой Claude Code сверяет цели: каталог
-// ведущего cd <абсолютный путь>, если всё остальное соединено && и каталог
-// лежит в рабочей папке сессии, иначе cwd. cd в папку вне рабочих Claude Code
-// 2.1.323 под bypassPermissions останавливает запросом «multiple operations …
-// require approval: cd …, rm …», если rm от исходного cwd задевает рабочую
-// папку (CHANGELOG 2.1.323: «judged an rm from the wrong folder»)
-func (t *RmGuardTool) leadingCd(s *shScript, cwd string) (string, error) {
+// leadingCd рабочие папки, от которых Claude Code может сверять цели. Без
+// ведущего cd <абсолютный путь> в цепочке из одних && — cwd. cd в рабочую
+// папку сессии он учитывает — папка cd. cd в папку вне рабочих Claude Code
+// 2.1.323 под bypassPermissions не учитывает и останавливает rm, задевший
+// рабочую папку от исходного cwd, запросом «multiple operations … require
+// approval: cd …, rm …» (CHANGELOG 2.1.323: «judged an rm from the wrong
+// folder»). Хуку видны не все рабочие папки (additionalDirectories из
+// settings, /add-dir в беседе), поэтому cd, не опознанный как рабочий,
+// сверяем от обеих: лишний отказ дешевле окна разрешения
+func (t *RmGuardTool) leadingCd(s *shScript, cwd string) []string {
 	dir, ok := leadingCdDir(s)
 	if !ok {
-		return cwd, nil
+		return []string{cwd}
 	}
-	inside, err := t.inSessionDirs(dir)
-	if err != nil || !inside {
-		return cwd, err
+	if t.inSessionDirs(dir) {
+		return []string{dir}
 	}
-	return dir, nil
+	return []string{cwd, dir}
 }
 
-// inSessionDirs каталог лежит в рабочей папке сессии: папке проекта
-// (CLAUDE_PROJECT_DIR) или одной из --add-dir процесса CLAUDE_PID. Папка
-// проекта неизвестна — сессию не определить, cd считаем рабочим, как до 2.1.323
-func (t *RmGuardTool) inSessionDirs(dir string) (bool, error) {
+// inSessionDirs каталог опознан как лежащий в рабочей папке сессии: папке
+// проекта (CLAUDE_PROJECT_DIR) или одной из --add-dir процесса CLAUDE_PID,
+// с раскрытыми ссылками. Папка проекта неизвестна — сессию не определить, cd
+// считаем рабочим, как до 2.1.323. Сбой чтения ссылок или --add-dir — папка
+// не опознана: проверка не выключается, а сверяет от обеих папок
+func (t *RmGuardTool) inSessionDirs(dir string) bool {
 	project, ok := t.lookupEnv("CLAUDE_PROJECT_DIR")
 	if !ok || project == "" {
-		return true, nil
+		return true
 	}
-	if within(dir, project) {
-		return true, nil
+	dirForms := t.pathForms(dir)
+	if t.withinAny(dirForms, project) {
+		return true
 	}
 	pid, _ := t.lookupEnv("CLAUDE_PID")
 	extra, err := t.addDirs(pid)
 	if err != nil {
-		return false, err
+		t.Logger().Warn("session add-dirs unknown, cd treated as outside", "pid", pid, "error", err)
+		return false
 	}
-	for _, d := range extra {
-		if within(dir, d) {
-			return true, nil
+	return t.withinAny(dirForms, extra...)
+}
+
+// withinAny одна из форм каталога лежит в одном из корней (корни — и без ссылок)
+func (t *RmGuardTool) withinAny(dirForms []string, roots ...string) bool {
+	for _, r := range roots {
+		for _, rf := range t.pathForms(r) {
+			for _, df := range dirForms {
+				if within(df, rf) {
+					return true
+				}
+			}
 		}
 	}
-	return false, nil
+	return false
+}
+
+// pathForms путь как есть и без ссылок; сбой realpath — только как есть
+func (t *RmGuardTool) pathForms(p string) []string {
+	p = path.Clean(p)
+	real, err := realPath(p)
+	if err != nil {
+		t.Logger().Debug("realpath failed", "path", p, "error", err)
+		return []string{p}
+	}
+	if real != p {
+		return []string{p, real}
+	}
+	return []string{p}
 }
 
 // within путь p — каталог root или лежит в нём

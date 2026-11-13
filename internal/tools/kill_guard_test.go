@@ -217,6 +217,11 @@ func TestKillGuardBlocks(t *testing.T) {
 		`echo kill 1 | xargs -n 1 -I % sh -c '%'`,
 		`echo kill 1 | xargs -i bash -c {}`,
 		`echo kill 1 | parallel bash -c {}`,
+		// комментарий с \ в конце: mvdan/sh продолжает его на следующую
+		// строку, bash — нет (akit shellcmd-comment-continuation); kill
+		// после него ловит свой лексер
+		"echo x #\\\nkill 1",
+		"true # a\\\nkill -9 1",
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)

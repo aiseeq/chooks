@@ -207,6 +207,16 @@ func TestKillGuardBlocks(t *testing.T) {
 		`. <(echo kill 1)`,
 		`bash < <(echo kill 1)`,
 		`echo kill 1 | bash -`,
+		// скрипт eval и sh -c с подстановкой и ввод, который xargs -I и
+		// parallel подставляют в скрипт (тикет kill-guard-stdin-gaps)
+		`eval "$(echo kill 1)"`,
+		`eval $(echo kill 1)`,
+		`bash -c "$(echo kill 1)"`,
+		`kill 600; eval "$X"`,
+		`echo kill 1 | xargs -I{} bash -c {}`,
+		`echo kill 1 | xargs -n 1 -I % sh -c '%'`,
+		`echo kill 1 | xargs -i bash -c {}`,
+		`echo kill 1 | parallel bash -c {}`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -261,6 +271,14 @@ func TestKillGuardAllows(t *testing.T) {
 		// без слова kill сторож не вызывается
 		`echo hi | bash`,
 		`cat script.sh | bash`,
+		// подстрока kill в пути (skills) — не слово kill: скрипт с подстановкой
+		// и <(…) рядом с ней не отказ (ложные отказы на корпусе 13.11)
+		`bash -c "F=/home/u/.claude/skills/x.tsv; head -1 \$F"`,
+		`B=/tmp/s bash -c 'source <(sed -n "/^desc()/p" all.sh); f=/home/u/.claude/skills/a'`,
+		`ls -d /home/u/git/*/ | xargs -I{} sh -c 'git -C {} remote get-url origin; ls {}/.claude/skills'`,
+		// скрипт без подстановок проверяется сам
+		`eval 'kill 455274'`,
+		`bash -c 'echo $HOME; kill 455274'`,
 		// перенаправление — не цель kill (ложные отказы 19–26.10)
 		`kill 455274 2>&1`,
 		`kill -0 455274 2>/dev/null`,

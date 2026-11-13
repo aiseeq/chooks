@@ -273,6 +273,33 @@ func unwrapCommand(cmd []word) (name string, args []word, via string) {
 	return "", nil, via
 }
 
+// fedIntoScript — xargs или parallel подставляют ввод в аргументы команды:
+// xargs с -I, -i или --replace, parallel всегда ({} или ввод в конце). Для
+// sh -c и eval это значит, что ввод становится текстом скрипта
+func fedIntoScript(cmd []word) bool {
+	for i, w := range cmd {
+		switch filepath.Base(w.text) {
+		case "parallel":
+			return true
+		case "xargs":
+			opts := cmd[i+1:]
+			for j := 0; j < len(opts); j++ {
+				t := opts[j].text
+				switch {
+				case !strings.HasPrefix(t, "-") || t == "--":
+					return false
+				case strings.HasPrefix(t, "-I") || strings.HasPrefix(t, "-i") || strings.HasPrefix(t, "--replace"):
+					return true
+				case slices.Contains(wrapperValueOpts["xargs"], t):
+					j++ // значение опции: -n 1, -d '\n'
+				}
+			}
+			return false
+		}
+	}
+	return false
+}
+
 // afterWrapperOptions снимает позиционные аргументы обёртки перед командой:
 // длительность timeout, файл блокировки flock (flock файл -c 'скрипт' — как
 // sh -c)
@@ -365,8 +392,10 @@ var shellValueOpts = []string{"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 // innerScript скрипт, который команда исполнит как команды оболочки: аргумент
 // после -c у sh, bash и подобных (флаги -lc, -ec тоже), аргументы eval и
 // watch через пробел, первый аргумент trap, -c у su и runuser. scriptStdin —
-// оболочка читает скрипт из stdin (echo … | bash, bash <<< …)
-func innerScript(name string, args []word) (string, scriptSource) {
+// оболочка читает скрипт из stdin (echo … | bash, bash <<< …). Скрипт —
+// word: literal ложно, если в нём есть подстановка $ или `, — текст
+// вычисляется при запуске
+func innerScript(name string, args []word) (word, scriptSource) {
 	switch name {
 	case "eval":
 		return joinedScript(args)
@@ -375,41 +404,43 @@ func innerScript(name string, args []word) (string, scriptSource) {
 	case "trap":
 		args = skipOptions(args, nil)
 		if len(args) == 0 {
-			return "", noScript
+			return word{}, noScript
 		}
-		return args[0].text, scriptArg
+		return args[0], scriptArg
 	case "su", "runuser":
 		return optionScript(args)
 	}
 	if name == "ssh" || !shellNames[name] {
-		return "", noScript
+		return word{}, noScript
 	}
 	return shellArgScript(args)
 }
 
 // joinedScript аргументы через пробел, как их склеивают eval и watch
-func joinedScript(args []word) (string, scriptSource) {
+func joinedScript(args []word) (word, scriptSource) {
 	if len(args) == 0 {
-		return "", noScript
+		return word{}, noScript
 	}
 	texts := make([]string, 0, len(args))
+	literal := true
 	for _, a := range args {
 		texts = append(texts, a.text)
+		literal = literal && a.literal
 	}
-	return strings.Join(texts, " "), scriptArg
+	return word{text: strings.Join(texts, " "), literal: literal}, scriptArg
 }
 
 // optionScript значение -c или --command у su и runuser в любом месте
-func optionScript(args []word) (string, scriptSource) {
+func optionScript(args []word) (word, scriptSource) {
 	for i, a := range args {
 		switch {
 		case (a.text == "-c" || a.text == "--command") && i+1 < len(args):
-			return args[i+1].text, scriptArg
+			return args[i+1], scriptArg
 		case strings.HasPrefix(a.text, "--command="):
-			return strings.TrimPrefix(a.text, "--command="), scriptArg
+			return word{text: strings.TrimPrefix(a.text, "--command="), literal: a.literal}, scriptArg
 		}
 	}
-	return "", noScript
+	return word{}, noScript
 }
 
 // hasOptionScript — у su или runuser есть -c: команда — скрипт, а не слова
@@ -421,7 +452,7 @@ func hasOptionScript(args []word) bool {
 
 // shellArgScript скрипт sh, bash и подобных: строка после -c, иначе stdin,
 // если нет файла скрипта или есть -s
-func shellArgScript(args []word) (string, scriptSource) {
+func shellArgScript(args []word) (word, scriptSource) {
 	withC, withS := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i].text
@@ -430,7 +461,7 @@ func shellArgScript(args []word) (string, scriptSource) {
 			i++
 		case a == "--":
 			if withC && i+1 < len(args) {
-				return args[i+1].text, scriptArg
+				return args[i+1], scriptArg
 			}
 			return shellStdin(withS, i+1 < len(args))
 		case len(a) > 1 && (a[0] == '-' || a[0] == '+'):
@@ -439,10 +470,10 @@ func shellArgScript(args []word) (string, scriptSource) {
 			withC = withC || short && strings.ContainsRune(a[1:], 'c')
 			withS = withS || short && strings.ContainsRune(a[1:], 's')
 			if short && strings.ContainsRune(a[1:], 'n') {
-				return "", noScript // -n: только проверка синтаксиса, ничего не исполняется
+				return word{}, noScript // -n: только проверка синтаксиса, ничего не исполняется
 			}
 		case withC:
-			return a, scriptArg
+			return args[i], scriptArg
 		default:
 			return shellStdin(withS, true)
 		}
@@ -451,9 +482,9 @@ func shellArgScript(args []word) (string, scriptSource) {
 }
 
 // shellStdin оболочка читает скрипт из stdin без файла скрипта или с -s
-func shellStdin(withS, scriptFile bool) (string, scriptSource) {
+func shellStdin(withS, scriptFile bool) (word, scriptSource) {
 	if withS || !scriptFile {
-		return "", scriptStdin
+		return word{}, scriptStdin
 	}
-	return "", noScript
+	return word{}, noScript
 }

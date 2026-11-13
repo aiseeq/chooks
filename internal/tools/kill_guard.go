@@ -50,7 +50,7 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
-	scan := killScan{tool: t, command: input.Command}
+	scan := killScan{tool: t, command: input.Command, signalWord: signalWordRe.MatchString(unquoted(input.Command))}
 	if err := scan.walk(input.Command, 0); err != nil {
 		return nil, err
 	}
@@ -86,7 +86,14 @@ type killScan struct {
 	command string
 	procs   []procInfo
 	reasons []string
+	// signalWord — в команде без кавычек есть отдельное слово kill, pkill
+	// или killall: скрипт, который станет известен только при запуске, рядом
+	// с ним — отказ. Подстрока kill (skills) — не повод
+	signalWord bool
 }
+
+// signalWordRe отдельное слово kill, pkill, killall, killall5
+var signalWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(p?kill|killall5?)([^[:alnum:]_.-]|$)`)
 
 // walk проверяет простые команды скрипта; скрипт sh -c, eval, watch, trap,
 // su -c и here-string оболочки — тем же разбором на уровень глубже
@@ -107,17 +114,24 @@ func (s *killScan) simple(cmd []word, stdin cmdStdin, depth int) error {
 	inner, source := innerScript(name, args)
 	switch {
 	case source == scriptStdin && stdin.hasHereString:
-		inner, source = stdin.hereString, scriptArg
+		inner, source = word{text: stdin.hereString, literal: true}, scriptArg
 	case source == scriptStdin && stdin.piped:
 		s.addReason(scriptInputReason(name))
 		return nil
 	}
 	if source == scriptArg {
-		if depth >= maxScriptNesting {
+		switch {
+		case !inner.literal && s.signalWord:
+			s.addReason(name + " исполняет скрипт с подстановкой $ или ` (eval \"$(…)\", sh -c \"$X\"): текст станет известен только при запуске, проверить его нельзя")
+			return nil
+		case via != "" && s.signalWord && fedIntoScript(cmd):
+			s.addReason(name + " получает скрипт из ввода через " + via + " (-I, {}): проверить его до запуска нельзя")
+			return nil
+		case depth >= maxScriptNesting:
 			s.reasons = append(s.reasons, fmt.Sprintf("вложенность sh -c и eval глубже %d: проверить сигналы внутри нельзя", maxScriptNesting))
 			return nil
 		}
-		return s.walk(inner, depth+1)
+		return s.walk(inner.text, depth+1)
 	}
 	if name == "find" {
 		for _, exec := range findExecCommands(args) {
@@ -164,7 +178,7 @@ func (s *killScan) parsedCalls() error {
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
 	for _, c := range calls {
-		if c.ScriptInput {
+		if c.ScriptInput && s.signalWord {
 			s.addReason(scriptInputReason(c.Name))
 		}
 		if c.Name == "" {

@@ -218,6 +218,13 @@ func TestKillGuardBlocks(t *testing.T) {
 		`echo kill 1 | xargs -n 1 -I % sh -c '%'`,
 		`echo kill 1 | xargs -i bash -c {}`,
 		`echo kill 1 | parallel bash -c {}`,
+		// файл скрипта — дескриптор ввода, ввод из <&N и coproc-оболочка:
+		// ScriptInput akit v1.72.2 (shellcmd-script-input-fd-coproc)
+		`echo kill 1 | bash /dev/stdin`,
+		`exec 3< <(echo kill 1); bash <&3`,
+		`bash /dev/fd/3 3< <(echo kill 1)`,
+		`bash 3< <(echo kill 1) /dev/fd/3`,
+		`coproc bash; echo kill 1 >&${COPROC[1]}`,
 		// комментарий с \ в конце: mvdan/sh продолжает его на следующую
 		// строку, bash — нет (akit shellcmd-comment-continuation); kill
 		// после него ловит свой лексер

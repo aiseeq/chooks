@@ -253,6 +253,13 @@ func TestKillGuardBlocks(t *testing.T) {
 		// (shellcmd-comment-parse-error), ошибка разбора — отказ
 		"if true; then zz #\\\nfi; kill 1",
 		"for i in 1; do zz #\\\ndone; kill 1",
+		// строка тела heredoc без кавычек кончается \ + CR LF: mvdan/sh
+		// склеивает её с ограничителем, вызовы после heredoc пропадают без
+		// ошибки (akit shellcmd-carriage-return-words); kill ловит свой лексер
+		"cat <<E\nq \\\r\nE\nkill 1",
+		"cat <<E\r\nq \\\r\nE\r\nkill 1",
+		"cat <<E\nq \\\r\nE\r\nkill $P\r\n",
+		"cat <<E\nq \\\r\nE\npkill -f foo",
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)

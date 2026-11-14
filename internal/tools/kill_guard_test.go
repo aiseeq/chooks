@@ -110,7 +110,8 @@ func TestKillGuardBlocks(t *testing.T) {
 		`builtin kill 1500`,
 		// скрипт sh -c и eval — те же команды
 		// в тикете — $PPID; та же ветка вычисляемого PID, $PPID в литерале
-		// glint ложно считает исполняемым сигналом родителю
+		// glint (signal-implicit-target, строгое правило) считает исполняемым сигналом родителю:
+		// данные таблицы через поле структуры он не отличает от shell (тикет glint signal-table-through-struct-field отклонён)
 		`bash -c 'kill -9 $PID'`,
 		`sh -c "pkill -f claude"`,
 		`bash -lc 'kill 1500'`,

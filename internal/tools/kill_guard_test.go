@@ -225,6 +225,25 @@ func TestKillGuardBlocks(t *testing.T) {
 		`bash /dev/fd/3 3< <(echo kill 1)`,
 		`bash 3< <(echo kill 1) /dev/fd/3`,
 		`coproc bash; echo kill 1 >&${COPROC[1]}`,
+		// heredoc и here-string, прочитанные оболочкой как скрипт через путь
+		// дескриптора: вложенный скрипт akit v1.72.3 (shellcmd-heredoc-script-via-fd-path)
+		"bash /dev/stdin <<'E'\nkill 1\nE",
+		"bash /dev/fd/3 3<<'E'\nkill 1\nE",
+		"exec 3<<'E'\nkill 1\nE\nbash <&3",
+		`bash /dev/stdin <<< 'kill 1'`,
+		// source и . с путём дескриптора и /dev/fd/$fd после exec {fd}<:
+		// ScriptInput akit v1.72.3 (shellcmd-source-fd-path)
+		`exec 3< <(echo kill 1); source /dev/fd/3`,
+		`exec 3< <(echo kill 1); . /dev/fd/3`,
+		`exec 3< <(echo kill 1); source /proc/self/fd/3`,
+		`source /dev/fd/3 3< <(echo kill 1)`,
+		`source /dev/stdin < <(echo kill 1)`,
+		`echo kill 1 | source /dev/stdin`,
+		`echo kill 1 | . /dev/stdin`,
+		`echo kill 1 | source /proc/self/fd/0`,
+		`exec {fd}< <(echo kill 1); bash /dev/fd/$fd`,
+		`exec {fd}< <(echo kill 1); bash /proc/self/fd/$fd`,
+		`exec {fd}< <(echo kill 1); source /dev/fd/$fd`,
 		// комментарий с \ в конце: mvdan/sh продолжает его на следующую
 		// строку, bash — нет (akit shellcmd-comment-continuation); kill
 		// после него ловит свой лексер
@@ -327,6 +346,12 @@ func TestKillGuardAllows(t *testing.T) {
 		`kill \
   455274`,
 		`bash <<< 'kill 455274'`,
+		// скрипт из heredoc через /dev/stdin разбирается: kill с PID в нём —
+		// пропуск; source обычного файла — не ввод скрипта
+		"bash /dev/stdin <<'E'\nkill 455274\nE",
+		"bash /dev/stdin <<'E'\necho ok\nE\nkill 455274",
+		`source ./env.sh; kill 455274`,
+		`. ./env.sh && kill 455274`,
 		// || — не конвейер: тело here-doc проверяется само
 		"pgrep -x foo || bash <<'EOF'\nkill 455274\nEOF",
 		`pkill -0 konsole`,

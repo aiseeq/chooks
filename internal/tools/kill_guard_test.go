@@ -222,6 +222,10 @@ func TestKillGuardBlocks(t *testing.T) {
 		// после него ловит свой лексер
 		"echo x #\\\nkill 1",
 		"true # a\\\nkill -9 1",
+		// продолжение комментария съедает fi/done/}: разбор akit падает
+		// (shellcmd-comment-parse-error), ошибка разбора — отказ
+		"if true; then zz #\\\nfi; kill 1",
+		"for i in 1; do zz #\\\ndone; kill 1",
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)

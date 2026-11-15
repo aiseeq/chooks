@@ -224,6 +224,26 @@ func TestMergeWeeklyLimitExpiredSample(t *testing.T) {
 	}
 }
 
+// Прошедший замер на снимке с живой неделей: недель и строк журнала не
+// прибавилось; сброс ровно в now — уже прошёл
+func TestMergeWeeklyLimitExpiredOnPopulated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "limits.json")
+	now := workResets.Add(-time.Hour)
+	merge(t, path, 30, workResets, "live", now)
+	old := now.Add(-time.Hour)
+	for _, resets := range []time.Time{old, now} {
+		if _, verdict := merge(t, path, 90, resets, "old", now); verdict != weekExpired {
+			t.Errorf("сброс %v: вердикт %v, нужно weekExpired", resets, verdict)
+		}
+	}
+	if got := readSnapshot(t, path); len(got.Weeks) != 1 || got.SevenDay != 30 {
+		t.Errorf("снимок изменился: %+v", got)
+	}
+	if raw, err := os.ReadFile(limitsHistory(path)); err != nil || strings.Count(string(raw), "\n") != 1 {
+		t.Errorf("журнал: %q, %v", raw, err)
+	}
+}
+
 // Снимок прежней формы (без weeks) становится первой неделей
 func TestMergeWeeklyLimitLegacySnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "limits.json")

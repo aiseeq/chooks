@@ -17,3 +17,6 @@ coverage.out
 .DS_Store
 Thumbs.db
 /docs/tasks
+
+# Worktree агентов Claude Code (Agent isolation: worktree) - копии репозитория
+.claude/worktrees/

@@ -258,3 +258,15 @@ func TestStyleCmdDoc(t *testing.T) {
 		t.Errorf("без --doc на сводке с находками: код %d, вывод\n%s", code, out)
 	}
 }
+
+// --keys: префиксы без пробелов и в любом регистре, без --doc — ошибка
+func TestStyleCmdDocKeys(t *testing.T) {
+	out, code := runStyle(t, "OPS-1 сдвинут\nOTHER-2 чужой\nPROJ-3 тоже\n", "--doc", "--keys", " proj , ops", "-")
+	want := "1: ключ задачи без ссылки: \"OPS-1\""
+	if code != exitStyleViolations || !strings.HasPrefix(out, want) || strings.Contains(out, "OTHER-2") || !strings.Contains(out, "3: ключ задачи без ссылки: \"PROJ-3\"") {
+		t.Fatalf("--keys: код %d, вывод\n%s", code, out)
+	}
+	if _, code := runStyle(t, "текст", "--keys", "PROJ", "-"); code != exitStyleError {
+		t.Fatalf("--keys без --doc: код %d, нужно %d", code, exitStyleError)
+	}
+}

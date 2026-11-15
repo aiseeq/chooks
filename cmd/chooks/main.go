@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -809,6 +810,10 @@ Doc): заголовки, списки, ссылки, таблицы и выде
 1 - есть нарушения, 2 - черновик не прочитан.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(keys) > 0 && !doc {
+				*exitCode = exitStyleError
+				return errors.New("--keys only applies with --doc")
+			}
 			text, err := readDraft(cmd.InOrStdin(), args[0])
 			if err != nil {
 				*exitCode = exitStyleError
@@ -816,7 +821,7 @@ Doc): заголовки, списки, ссылки, таблицы и выде
 			}
 			findings := textstyle.CheckDraft(text)
 			if doc {
-				findings = textstyle.CheckDoc(text, keys)
+				findings = textstyle.CheckDoc(text, keyPrefixes(keys))
 			}
 			out := cmd.OutOrStdout()
 			for _, f := range findings {
@@ -831,6 +836,18 @@ Doc): заголовки, списки, ссылки, таблицы и выде
 	cmd.Flags().BoolVar(&doc, "doc", false, "документ markdown: разметка разрешена, ищет ключ без ссылки и относительную дату")
 	cmd.Flags().StringSliceVar(&keys, "keys", nil, "с --doc: префиксы ключей проектов через запятую")
 	return cmd
+}
+
+// keyPrefixes — префиксы ключей из --keys: без пробелов, заглавными
+// («si, ops» — SI и OPS), пустые отброшены
+func keyPrefixes(keys []string) []string {
+	var out []string
+	for _, k := range keys {
+		if k = strings.ToUpper(strings.TrimSpace(k)); k != "" {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // readDraft читает черновик из файла или stdin ("-")

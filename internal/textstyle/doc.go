@@ -41,7 +41,8 @@ func UnlinkedKey(prefixes []string) Marker {
 		}
 		project = `(?:` + strings.Join(quoted, "|") + `)`
 	}
-	key := regexp.MustCompile(`(?:^|[^\p{L}\p{N}_-])(` + project + `-\d+)`)
+	// «_» не граница: ключ в курсиве markdown (_KEY-1_) — тоже ключ
+	key := regexp.MustCompile(`(?:^|[^\p{L}\p{N}-])(` + project + `-\d+)`)
 	return Marker{
 		Description: UnlinkedKeyDescription,
 		Fix:         "ссылка markdown: '[KEY-12](https://…/browse/KEY-12)'",
@@ -49,12 +50,36 @@ func UnlinkedKey(prefixes []string) Marker {
 	}
 }
 
+// Тире и кавычки документа — любой такой знак, как у чек-листа сводки: в
+// markdown рядом с ними обычно разметка (**итог** — …, `api` — …, 10% — …),
+// и маркеры хука, ждущие букву по обе стороны, их пропускают
+var (
+	DocEmDash = Marker{
+		Description: EmDash.Description,
+		Fix:         EmDash.Fix,
+		Find:        RegexpFinder(regexp.MustCompile(`\S*[ \t]*—[ \t]*\S*`)),
+	}
+	DocEnDash = Marker{
+		Description: EnDash.Description,
+		Fix:         EnDash.Fix,
+		Find:        RegexpFinder(regexp.MustCompile(`\S*[ \t]*–[ \t]*\S*`)),
+	}
+	// DocQuotes пара кавычек целиком, иначе одиночная кавычка
+	DocQuotes = Marker{
+		Description: TypographicQuotes.Description,
+		Fix:         TypographicQuotes.Fix,
+		Find:        RegexpFinder(regexp.MustCompile(`[«“„][^«»“”„\n]*[»”“]|[«»“”„]`)),
+	}
+)
+
 // DocMarkers маркеры документа: тире, кавычки, обороты противопоставления,
 // десятичная запятая и маркеры документа. Markdown (заголовки, списки,
-// ссылки, таблицы, выделение) не нарушение. prefixes — как у UnlinkedKey
+// ссылки, таблицы, выделение) не нарушение. Оборот «не X, а Y» один на все
+// его формы («это не X, а Y», «не из X, а из Y»): одна находка на оборот.
+// prefixes — как у UnlinkedKey
 func DocMarkers(prefixes []string) []Marker {
 	return []Marker{
-		EmDash, EnDash, TypographicQuotes, ButNot, ThisIsNotBut, RepeatedPreposition, NotXButY,
+		DocEmDash, DocEnDash, DocQuotes, ButNot, NotXButY,
 		DecimalComma, UnlinkedKey(prefixes), RelativeDate,
 	}
 }
@@ -85,12 +110,19 @@ func findUnlinkedKey(key *regexp.Regexp, line string) string {
 var (
 	relativeWordPattern = regexp.MustCompile(`(?i)` + wordBoundary +
 		`((?:сегодня|завтра|вчера|послезавтра|позавчера|(?:сегодняшн|завтрашн|вчерашн)\p{L}+|` +
-		`на\s+(?:этой|следующей|прошлой)\s+неделе|через\s+неделю)(?:[^\p{L}\p{N}]|$))`)
-	// weekdayPattern день недели с предлогом. «Среда» — только «в среду»:
-	// «среда», «в среде» в тексте обычно окружение, а не день
+		`на\s+(?:этой|следующей|прошлой)\s+неделе|через\s+(?:неделю|день|месяц)|` +
+		`через\s+(?:две|три|четыре|пару|несколько)\s+(?:недел|дн|месяц)\p{L}*|` +
+		`(?:в|на)\s+(?:эти|этих|следующие|следующих|ближайшие|ближайших|прошлые|прошлых)\s+выходн\p{L}+)(?:[^\p{L}\p{N}]|$))`)
+	// weekdayPattern день недели с предлогом, полным именем или сокращением
+	// (пн, вт). Без предлога день в сводке — расписание («понедельник и
+	// четверг, 15:00»), «по четвергам» — повтор: не находки. «Среда» — только
+	// в формах дня («в среду», «к среде», «до среды»): «среда», «в среде» в
+	// тексте обычно окружение. «Выходные» — только с «эти», «следующие»:
+	// «начисления в выходные» — категория дней
 	weekdayPattern = regexp.MustCompile(`(?i)` + wordBoundary +
 		`((?:в|во|к|до|с|со|по|после)\s+(?:понедельник\p{L}*|вторник\p{L}*|четверг\p{L}*|пятниц\p{L}*|` +
-		`суббот\p{L}*|воскресень\p{L}*)|в\s+среду)(?:[^\p{L}\p{N}]|$)`)
+		`суббот\p{L}*|воскресень\p{L}*)|в\s+среду|к\s+среде|(?:до|с|со|после)\s+среды|` +
+		`(?:в|во|к|до|с|со|по|после)\s+(?:пн|вт|ср|чт|пт|сб|вс))(?:[^\p{L}\p{N}]|$)`)
 )
 
 // findRelativeDate ищет относительную дату; день недели с числом после него
@@ -100,8 +132,9 @@ func findRelativeDate(line string) string {
 		return strings.TrimRightFunc(m[1], func(r rune) bool { return !unicode.IsLetter(r) })
 	}
 	for _, loc := range weekdayPattern.FindAllStringSubmatchIndex(line, -1) {
-		if !datedAfter(line[loc[3]:]) {
-			return line[loc[2]:loc[3]]
+		day := line[loc[2]:loc[3]]
+		if !datedAfter(line[loc[3]:]) && !strings.HasSuffix(day, "ам") && !strings.HasSuffix(day, "ям") {
+			return day
 		}
 	}
 	return ""

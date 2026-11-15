@@ -6,6 +6,8 @@ version: 1
 settings:
   exclude:
     - vendor/**
+    # worktree агентов Claude Code — копии этого же репозитория
+    - .claude/worktrees/**
   min_severity: low
   output: console
 

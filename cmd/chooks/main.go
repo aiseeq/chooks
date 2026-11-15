@@ -788,12 +788,23 @@ const (
 
 // newStyleCmd создает команду проверки черновика текста от имени пользователя
 func newStyleCmd(exitCode *int) *cobra.Command {
-	return &cobra.Command{
-		Use:   "style <файл|->",
+	var doc bool
+	var keys []string
+	cmd := &cobra.Command{
+		Use:   "style [--doc [--keys PROJ,...]] <файл|->",
 		Short: "Проверить черновик текста по форме write-as-user",
 		Long: `Ищет в черновике (файл или stdin при "-") маркеры, которые запрещает скилл
 write-as-user: длинное и короткое тире, markdown, типографские кавычки, оборот
 "X, а не Y", число прописью, десятичную запятую, эмодзи, предисловия.
+
+С --doc проверяет документ markdown (сводку встречи перед импортом в Google
+Doc): заголовки, списки, ссылки, таблицы и выделение разрешены; ищет тире,
+типографские кавычки, обороты "X, а не Y" и "не X, а Y", десятичную запятую,
+ключ задачи вне ссылки markdown и URL, относительную дату (сегодня, завтра,
+вчера, на этой неделе, через неделю, день недели без числа после него).
+--keys PROJ,OPS - префиксы ключей проектов; без него находка - любой ключ
+вида ABC-12 (и UTF-8, SHA-256 тоже).
+
 Печатает найденное с номерами строк. Код выхода 0 - нарушений нет,
 1 - есть нарушения, 2 - черновик не прочитан.`,
 		Args: cobra.ExactArgs(1),
@@ -804,6 +815,9 @@ write-as-user: длинное и короткое тире, markdown, типог
 				return err
 			}
 			findings := textstyle.CheckDraft(text)
+			if doc {
+				findings = textstyle.CheckDoc(text, keys)
+			}
 			out := cmd.OutOrStdout()
 			for _, f := range findings {
 				fmt.Fprintf(out, "%d: %s: %q, нужно: %s\n", f.Line, f.Marker.Description, f.Fragment, f.Marker.Fix)
@@ -814,6 +828,9 @@ write-as-user: длинное и короткое тире, markdown, типог
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&doc, "doc", false, "документ markdown: разметка разрешена, ищет ключ без ссылки и относительную дату")
+	cmd.Flags().StringSliceVar(&keys, "keys", nil, "с --doc: префиксы ключей проектов через запятую")
+	return cmd
 }
 
 // readDraft читает черновик из файла или stdin ("-")

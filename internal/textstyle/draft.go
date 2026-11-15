@@ -67,9 +67,14 @@ type Finding struct {
 // CheckDraft проверяет черновик построчно: номер строки ведёт к месту правки,
 // а оборот через перенос строки в коротком сообщении почти не встречается
 func CheckDraft(text string) []Finding {
+	return check(text, DraftMarkers)
+}
+
+// check ищет маркеры построчно
+func check(text string, markers []Marker) []Finding {
 	var findings []Finding
 	for i, line := range strings.Split(text, "\n") {
-		for _, marker := range DraftMarkers {
+		for _, marker := range markers {
 			if fragment := marker.Find(line); fragment != "" {
 				findings = append(findings, Finding{Line: i + 1, Marker: marker, Fragment: strings.TrimSpace(fragment)})
 			}

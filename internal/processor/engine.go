@@ -71,6 +71,17 @@ func ToolNames() []string {
 	return names
 }
 
+// DefaultOnNames — ключи проверок, включённых без ключа в config.yaml
+func DefaultOnNames() []string {
+	var names []string
+	for _, c := range constructors {
+		if c.onWhenAbsent {
+			names = append(names, c.name)
+		}
+	}
+	return names
+}
+
 // initTools инициализирует проверки вызовов инструментов
 func (e *Engine) initTools(config *core.Config) error {
 	for _, constructor := range constructors {

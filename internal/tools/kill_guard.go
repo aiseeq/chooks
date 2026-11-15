@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // protectedComms процессы, без которых падает сессия пользователя целиком:
@@ -197,12 +198,53 @@ func (s *killScan) parsedCalls() error {
 		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду со словом kill, отказ", "error", err)
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
-	for _, c := range calls {
+	for i := 0; i < len(calls); i++ {
+		c := calls[i]
+		if assignmentWord(c.Name) {
+			after, err := afterAssignments(c)
+			if err != nil {
+				s.tool.Logger().Warn("kill_guard: команда за присваиванием не разобрана, отказ", "error", err)
+				s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
+			}
+			calls = append(calls, after...)
+			continue
+		}
 		if err := s.call(c, calls); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// assignmentWord — имя вызова оказалось присваиванием: обёртка (sudo X=1
+// kill …, sudo -u root X=1 kill …) ставит окружение перед программой, а
+// shellcmd v1.76.1 отдаёт присваивание именем вызова, программу — первым
+// аргументом. sudo считает переменной не только имя по правилам оболочки
+// (1X=2 тоже), а имя программы с = — редкость: снимается любое слово с =
+func assignmentWord(name string) bool {
+	return strings.Contains(name, "=")
+}
+
+// afterAssignments вызовы команды, которая исполнится за присваиванием
+// вызова c: его аргументы разбираются заново (там бывают ещё присваивания,
+// обёртки и оболочки), Via вызовов начинается с Via вызова c. Слова —
+// значения shellcmd, слово с подстановкой — исходный текст: в кавычках он
+// остаётся словом с $ и проверяется как вычисляемое (kill '$P' — PID при
+// запуске, setsid '$K' — ошибка разбора)
+func afterAssignments(c shellcmd.Call) ([]shellcmd.Call, error) {
+	quoted := make([]string, 0, len(c.Args))
+	for _, w := range c.Args {
+		q, err := syntax.Quote(w, syntax.LangBash)
+		if err != nil {
+			return nil, fmt.Errorf("слово %q за присваиванием: %w", w, err)
+		}
+		quoted = append(quoted, q)
+	}
+	calls, err := shellcmd.Calls(strings.Join(quoted, " "))
+	for k := range calls {
+		calls[k].Via = append(slices.Clone(c.Via), calls[k].Via...)
+	}
+	return calls, err
 }
 
 // call проверяет один вызов из разбора оболочки; calls — все вызовы

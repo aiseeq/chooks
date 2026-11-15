@@ -300,9 +300,71 @@ func TestKillGuardBlocks(t *testing.T) {
 		"cat <<E\"x\"\nfoo `\nEx\nkill 1500",
 		"cat <<-\"E\"x\n\tfoo \\\n\tEx\nkill 1500",
 		"cat <<\"\"\nfoo \\\n\nkill 1500",
+		// setsid — обёртка, и с сокращёнными длинными ключами (akit v1.76.1,
+		// shellcmd-setsid-ksh-fish); имя за setsid из подстановки — ошибка разбора
+		`setsid kill -9 -1`,
+		`setsid -f kill 1`,
+		`setsid --fo kill -9 -1`,
+		`setsid --wai kill 1`,
+		`setsid -f -- kill 1`,
+		`setsid -f bash -c 'kill -9 1'`,
+		`nohup setsid fish -c 'kill 1500'`,
+		`setsid $(echo kill) 1`,
+		`K=kill; setsid $K 455274`,
+		// ksh, mksh, fish — оболочки: скрипт из -c, here-string, heredoc и
+		// конвейера с литеральным echo разбирается
+		`ksh -c 'kill -9 -1'`,
+		`mksh -c 'kill -9 -1'`,
+		`fish -c 'kill -9 -1'`,
+		`fish --command='kill 1'`,
+		`ksh -ic 'kill 1500'`,
+		`echo 'kill -9 -1' | fish`,
+		`fish <<< 'kill -9 -1'`,
+		`mksh <<< 'kill 1500'`,
+		"ksh -s <<'E'\nkill 1\nE",
+		// у fish разбирается простое подмножество: подстановка, переменная,
+		// and/or, builtin первым словом — ошибка разбора; alias в ksh — тоже
+		`fish -c 'kill (pgrep opencode)'`,
+		`fish -c 'set p 1500; kill $p'`,
+		`fish -c 'kill 455274; and kill 1'`,
+		`fish -c "$X"; kill 455274`,
+		`ksh -c 'alias k=kill; k 1'`,
+		`cat f | fish; kill 455274`,
+		// присваивание после опций sudo: shellcmd v1.76.1 отдаёт его именем
+		// вызова, команда за ним разбирается заново
+		`sudo X=1 kill -9 -1`,
+		`sudo -u root X=1 kill -9 -1`,
+		`sudo -E X=1 kill 1`,
+		`sudo X=1 Y=2 kill 1500`,
+		`sudo X=1 timeout 5 kill 2100`,
+		`sudo X=1 kill $PID`,
+		`sudo X=1 bash -c 'kill 1500'`,
+		`sudo X=1 sudo Y=2 kill 1`,
+		`pgrep foo | xargs sudo X=1 kill`,
+		`sudo 1X=2 kill 1`,
+		`sudo X=1 nice kill 1`,
+		`sudo =x kill 1`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+}
+
+// Скрипт fish из нелитерального ввода и fish вне разбираемого подмножества
+// akit не разбирает: отказ называет ошибку разбора, а не цель kill
+func TestKillGuardParseErrorReason(t *testing.T) {
+	for _, command := range []string{
+		`cat f | fish; kill 455274`,
+		`cat kill-stale.sh | fish -n`,
+		`fish -c 'kill 455274; and true'`,
+		`K=kill; setsid $K 455274`,
+		`sudo X=1 fish -c 'kill 455274; and true'`,
+		`K=kill; sudo X=1 nohup setsid $K 455274`,
+	} {
+		r := validateKill(t, command)
+		if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), "разбор оболочки не прошёл") {
+			t.Errorf("%s: ждали отказ «разбор оболочки не прошёл», получили %v %v", command, r.IsValid, r.Suggestions)
 		}
 	}
 }
@@ -447,6 +509,32 @@ func TestKillGuardAllows(t *testing.T) {
 		`echo a | xargs -I{} echo sh {}; echo 1 | xargs sh -c 'echo $0'; kill 455274`,
 		`for b in /bin/true; do $b check -r raw-process-kill .; done`,
 		`G="git -C /tmp"; timeout 60 $G log -1; kill 455274`,
+		// setsid, ksh, mksh и fish с безопасной целью: скрипт разобран,
+		// kill в нём проверен
+		`setsid kill 455274`,
+		`setsid -f kill 455274`,
+		`setsid --fo kill 455274`,
+		`setsid --wait kill -0 455274`,
+		`setsid sleep 1; kill 455274`,
+		`setsid -w ksh -c 'kill 455274'`,
+		`setsid -f fish -c 'kill 455274'`,
+		`ksh -c 'kill 455274'`,
+		`mksh -c 'kill 455274'`,
+		`fish -c 'kill 455274'`,
+		`fish <<< 'kill 455274'`,
+		`mksh <<< 'kill 455274'`,
+		"ksh -s <<'E'\nkill 455274\nE",
+		`fish -c 'echo hi'; kill 455274`,
+		`fish -c 'string match kill x'`,
+		`cat kill-stale.sh | ksh -n`,
+		// за присваиванием после sudo — безопасная цель или не сигнал
+		`sudo X=1 kill 455274`,
+		`sudo -u root X=1 kill -0 455274`,
+		`sudo X=1 echo kill`,
+		`sudo X=1; kill 455274`,
+		// = внутри пути программы — не присваивание
+		`sudo ./build=1/run kill 1`,
+		`sudo X=1 echo 'x; kill 1'`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)

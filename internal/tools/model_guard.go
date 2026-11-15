@@ -161,14 +161,22 @@ func bashModelCandidates(command string, readSettings func(string) []byte, logge
 	if claude {
 		found = append(found, envModelCandidates(command, calls, logger)...)
 	}
+	if err != nil {
+		// вызовы найдены не все: вложенный скрипт, который akit не разобрал
+		// (fish вне простого подмножества: and, set -x, подстановка), отдаёт
+		// только вызов оболочки — модели в нём ищутся в тексте
+		logger.Warn("model_guard: shellcmd разобрал команду не целиком, модели ищутся и в тексте", "error", err)
+		found = append(found, textModelCandidates(command)...)
+	}
 	return found
 }
 
 // modelClientWord — отдельное слово claude, codex или opencode (не .claude/ и не claude-hooks)
 var modelClientWord = regexp.MustCompile(`(^|[^[:alnum:]_.-])(claude|codex|opencode)([^[:alnum:]_.-]|$)`)
 
-// envModelMention — присваивание переменной модели в тексте команды
-var envModelMention = regexp.MustCompile(`\b(ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)=["']?([^\s"';&|]*)`)
+// envModelMention — присваивание переменной модели в тексте команды: A=x
+// или set -x A x (fish)
+var envModelMention = regexp.MustCompile(`\b(?:(ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)=|set(?:\s+-\w+)*\s+(?:ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)\s+)["']?([^\s"';&|]*)`)
 
 // textModelCandidates — модели в тексте команды, которую не разобрала
 // оболочка: --model, -m у агента и присваивания переменных модели, если в

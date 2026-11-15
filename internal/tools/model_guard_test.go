@@ -124,6 +124,27 @@ func TestModelGuard(t *testing.T) {
 		{"незакрытый here-doc", "Bash", "", "ANTHROPIC_MODEL=sonnet claude -p hi <<EOF\nx", true},
 		{"незакрытый here-doc, одобренная", "Bash", "", "ANTHROPIC_MODEL=opus claude -p hi <<EOF\nx", false},
 		{"незакрытый here-doc, пустая", "Bash", "", "ANTHROPIC_MODEL= claude -p hi <<EOF\nx", false},
+		// setsid — обёртка, ksh, mksh и fish — оболочки (akit v1.76.1)
+		{"setsid", "Bash", "", "setsid -f claude --model sonnet -p hi", true},
+		{"setsid сокращённый ключ", "Bash", "", "setsid --fo claude --model sonnet -p hi", true},
+		{"setsid одобренная", "Bash", "", "setsid -f claude --model opus -p hi", false},
+		{"переменная перед setsid", "Bash", "", "ANTHROPIC_MODEL=sonnet setsid claude -p hi", true},
+		{"ksh -c", "Bash", "", "ksh -c 'claude --model sonnet -p hi'", true},
+		{"mksh -c", "Bash", "", "mksh -c 'claude --model sonnet -p hi'", true},
+		{"fish -c", "Bash", "", "fish -c 'claude --model sonnet -p hi'", true},
+		{"fish из echo", "Bash", "", "echo 'claude --model sonnet -p hi' | fish", true},
+		{"fish here-string", "Bash", "", "fish <<< 'claude --model sonnet -p hi'", true},
+		{"fish -c одобренная", "Bash", "", "fish -c 'claude --model opus -p hi'", false},
+		{"переменная в ksh -c", "Bash", "", "ksh -c 'ANTHROPIC_MODEL=sonnet claude -p hi'", true},
+		{"env перед fish", "Bash", "", "env ANTHROPIC_MODEL=sonnet fish -c 'claude -p hi'", true},
+		// fish вне подмножества akit: разбор даёт только вызов fish и ошибку,
+		// модели ищутся в тексте
+		{"fish and", "Bash", "", "fish -c 'claude --model sonnet -p hi; and true'", true},
+		{"fish set -x", "Bash", "", "fish -c 'set -x ANTHROPIC_MODEL sonnet; claude -p hi'", true},
+		{"fish set -gx", "Bash", "", "fish -c 'set -gx ANTHROPIC_MODEL sonnet; claude -p hi; and true'", true},
+		{"fish set без ключа", "Bash", "", "fish -c 'set ANTHROPIC_MODEL sonnet; claude -p hi'", true},
+		{"fish set -gx одобренной", "Bash", "", "fish -c 'set -gx ANTHROPIC_MODEL opus; claude -p hi'", false},
+		{"fish and одобренная", "Bash", "", "fish -c 'claude --model opus -p hi; and true'", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

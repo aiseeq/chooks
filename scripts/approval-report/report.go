@@ -117,7 +117,7 @@ func classDetails(w io.Writer, hits []Record, c int) {
 // popNotes — то, что разбор не видит: неразобранная оболочка, `sub -F` без цели, запись из
 // python/node, выкатка в пробе.
 func popNotes(w io.Writer, recs []Record) {
-	unparsed, varsUnparsed, specProt := 0, 0, 0
+	unparsed, varsUnparsed, specProt, specBody := 0, 0, 0, 0
 	var spec, possible, probe []Record
 	for _, r := range recs {
 		if r.V.Unparsed {
@@ -132,9 +132,12 @@ func popNotes(w io.Writer, recs []Record) {
 		if r.V.SpecFile && r.V.Mentioned[1] && !r.V.HitClass(1) {
 			specProt++
 		}
-		switch {
-		case len(r.V.Possible) == 0:
-		case r.V.Possible[0].Class == 3:
+		if slices.ContainsFunc(r.V.Hits, func(h Hit) bool { return h.Verb == specBodyVerb }) {
+			specBody++
+		}
+		switch ps := r.V.Unhit(); {
+		case len(ps) == 0:
+		case ps[0].Class == 3:
 			probe = append(probe, r)
 		default:
 			possible = append(possible, r)
@@ -142,18 +145,21 @@ func popNotes(w io.Writer, recs []Record) {
 	}
 	fmt.Fprintf(w, "Не видно разбором: оболочка не разобрала %d кандидатов (проверены регулярками), переменные вложенного скрипта не разобраны у %d; `sub -F файл`, цели которого нет ни в выводе (не дошёл или обрезан), ни в файле спецификации (файла уже нет или путь в переменной) — %d, из них с путём класса 1 в тексте и без попадания %d\n", unparsed, varsUnparsed, len(spec), specProt)
 	noteList(w, spec, func(r Record) string { return "файл " + specName(r.V.Spec) })
+	if specBody > 0 {
+		fmt.Fprintf(w, "`sub -F файл` с целями из файла спецификации (вывод их не показал): %d — цели по нынешнему содержимому файла, после вызова его могли переписать\n", specBody)
+	}
 	if len(possible) > 0 {
 		fmt.Fprintf(w, "Возможные записи из кода python/node (эвристика, в числа классов не входят): %d\n", len(possible))
 		noteList(w, possible, func(r Record) string {
-			h := r.V.Possible[0]
+			h := r.V.Unhit()[0]
 			return fmt.Sprintf("класс %d?, %s, %s", h.Class, h.Verb, h.Target)
 		})
 	}
 	if len(probe) > 0 {
 		fmt.Fprintf(w, "Выкатка в пробе с временным XDG_CONFIG_HOME (в класс 3 не входит, в его «отсеяно» входит): %d\n", len(probe))
 		noteList(w, probe, func(r Record) string {
-			h := r.V.Possible[0]
-			return h.Verb + " " + h.Target + ", мастер " + r.Agent.Master
+			h := r.V.Unhit()[0]
+			return h.Verb + " " + h.Target + ", " + h.Prod + ", мастер " + r.Agent.Master
 		})
 	}
 }

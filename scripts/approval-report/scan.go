@@ -523,7 +523,7 @@ func (w *workerScan) line(n int, line []byte) {
 func (w *workerScan) event(l *cxLine) (Event, bool) {
 	ev := Event{Tool: l.Item.Type, Command: l.Item.Command, Cwd: w.dir, Home: w.s.home}
 	switch l.Item.Type {
-	case "command_execution":
+	case codexCommand:
 	case "file_change":
 		for _, c := range l.Item.Changes {
 			ev.Paths = append(ev.Paths, c.Path)

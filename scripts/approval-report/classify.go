@@ -46,9 +46,15 @@ type Event struct {
 	Tool    string // Bash, Edit, Write, MultiEdit, NotebookEdit; у бойца — command_execution, file_change
 	Command string // текст команды оболочки
 	Paths   []string
-	Cwd     string
+	Cwd     string // у бойца — dir задачи: каталог вызова журнал codex не пишет
 	Home    string
 }
+
+// cwdRecorded — Cwd события и есть каталог вызова: у Claude он в транскрипте, у бойца codex — нет.
+func (ev Event) cwdRecorded() bool { return ev.Tool != codexCommand }
+
+// codexCommand — вызов оболочки бойца codex в его журнале.
+const codexCommand = "command_execution"
 
 // Hit — найденное действие класса 1–4.
 type Hit struct {
@@ -76,6 +82,17 @@ type Verdict struct {
 // SpecRef — файл спецификации `sub -F`: путь ("" — в неизвестной переменной) и каталог вызова
 // для относительных путей в нём.
 type SpecRef struct{ Path, Cwd string }
+
+// Unhit — возможные записи вне классов, в которые событие уже засчитано.
+func (v Verdict) Unhit() []Hit {
+	var out []Hit
+	for _, h := range v.Possible {
+		if !v.HitClass(h.Class) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
 
 // HitClass сообщает, есть ли попадание класса.
 func (v Verdict) HitClass(c int) bool {
@@ -111,7 +128,7 @@ func Classify(ev Event) Verdict {
 				v.Hits = append(v.Hits, Hit{Class: 1, Verb: ev.Tool, Target: np})
 			}
 		}
-	case "Bash", "command_execution":
+	case "Bash", codexCommand:
 		classifyShell(ev, &v)
 	}
 	for _, h := range v.Hits {
@@ -137,7 +154,7 @@ func classifyShell(ev Event, v *Verdict) {
 	}
 	vars, err := collectVars(cmd, homeVar(ev))
 	v.VarsUnparsed = err != nil
-	w := shellWalk{ev: ev, v: v, home: homeVar(ev), cwd: ev.Cwd, vars: vars}
+	w := shellWalk{ev: ev, v: v, home: homeVar(ev), cwd: ev.Cwd, cwdSure: ev.cwdRecorded(), vars: vars}
 	for _, c := range calls {
 		w.call(c)
 	}
@@ -149,6 +166,7 @@ type shellWalk struct {
 	v         *Verdict
 	home      string
 	cwd       string
+	cwdSure   bool // cwd — каталог вызова: записан в транскрипте или задан cd в команде
 	gitDirEnv string
 	vars      shellVars
 }
@@ -162,7 +180,7 @@ func (w *shellWalk) call(c shellcmd.Call) {
 	if w.track(c.Name, args) {
 		return
 	}
-	x := callCtx{ev: w.ev, home: w.home, cwd: w.cwd, gitDir: w.gitDirEnv, v: w.v, vars: vars}
+	x := callCtx{ev: w.ev, home: w.home, cwd: w.cwd, cwdSure: w.cwdSure, gitDir: w.gitDirEnv, v: w.v, vars: vars}
 	x.redirects(c)
 	if h, ok := callHandlers[c.Name]; ok {
 		h(x, c, args)
@@ -189,6 +207,7 @@ func (w *shellWalk) track(name string, args []string) bool {
 }
 
 func (w *shellWalk) cd(args []string) {
+	w.cwdSure = true
 	switch {
 	case len(args) == 0:
 		w.cwd = w.home
@@ -260,14 +279,39 @@ func (x callCtx) graft(c shellcmd.Call, args []string) {
 		return
 	}
 	h, ok := graftDeploy(args[1:])
-	switch {
-	case !ok:
-	case reTempConfig.MatchString(textBefore(x.ev.Command, c.Offset)):
-		h.Prod = "проба: временный XDG_CONFIG_HOME"
-		x.v.Possible = append(x.v.Possible, h)
-	default:
-		x.v.Hits = append(x.v.Hits, h)
+	if !ok {
+		return
 	}
+	if reTempConfig.MatchString(textBefore(x.ev.Command, c.Offset)) {
+		if note, probe := x.probeDir(); probe {
+			h.Prod = "проба: " + note
+			x.v.Possible = append(x.v.Possible, h)
+			return
+		}
+	}
+	x.v.Hits = append(x.v.Hits, h)
+}
+
+// probeDir — проба ли выкатка с временным конфигом по каталогу вызова: живой проект с
+// временным конфигом — выкатка. Каталог вызова бойца codex журнал не пишет (workdir вызова
+// задаёт модель, dir задачи — только умолчание; 1110-1204-load-wait-hunt выкатывал
+// синтетический проект из $TMPDIR без cd): без cd в команде он неизвестен.
+func (x callCtx) probeDir() (string, bool) {
+	switch {
+	case !x.cwdSure:
+		return "каталог вызова бойца не записан", true
+	case x.cwd == "":
+		return "каталог вызова неизвестен", true
+	case tempDir(x.cwd):
+		return "каталог " + x.cwd, true
+	}
+	return "", false
+}
+
+// tempDir — каталог во временном: /tmp, /var/tmp, claude-tmp, scratchpad.
+func tempDir(p string) bool {
+	p += "/"
+	return strings.HasPrefix(p, "/tmp/") || strings.HasPrefix(p, "/var/tmp/") || strings.Contains(p, "/claude-tmp/") || strings.Contains(p, "/scratchpad/")
 }
 
 // reTempConfig — XDG_CONFIG_HOME во временном каталоге: конфиг graft пробы, не живой.
@@ -321,6 +365,9 @@ func (v *Verdict) ResolveSpec(out, home, cwd string) {
 	v.SpecFile = !complete
 }
 
+// specBodyVerb — цель `sub -F файл` из нынешнего содержимого файла спецификации.
+const specBodyVerb = "sub -F (по файлу спецификации)"
+
 // ResolveSpecFile — цели `sub -F файл` из файла спецификации, когда вывод их не показал. Файл
 // читается при разборе отчёта, а не в момент события: он мог измениться после вызова.
 func (v *Verdict) ResolveSpecFile(body, home string) {
@@ -329,7 +376,7 @@ func (v *Verdict) ResolveSpecFile(body, home string) {
 	}
 	v.SpecFile = false
 	for _, p := range subSpecPaths(body) {
-		v.addSpecHit("sub -F (по файлу спецификации)", p, home, v.Spec.Cwd)
+		v.addSpecHit(specBodyVerb, p, home, v.Spec.Cwd)
 	}
 }
 
@@ -360,12 +407,13 @@ func assignPrefix(cmd string, off int) string {
 }
 
 type callCtx struct {
-	ev     Event
-	home   string // значение $HOME в команде, "" — переприсвоено
-	cwd    string
-	gitDir string // GIT_DIR из `export` раньше в команде
-	v      *Verdict
-	vars   map[string]string // переменные, присвоенные раньше в команде
+	ev      Event
+	home    string // значение $HOME в команде, "" — переприсвоено
+	cwd     string
+	cwdSure bool
+	gitDir  string // GIT_DIR из `export` раньше в команде
+	v       *Verdict
+	vars    map[string]string // переменные, присвоенные раньше в команде
 }
 
 var reHomeAssign = regexp.MustCompile(`(^|[\s;&|(])(export\s+)?HOME=`)

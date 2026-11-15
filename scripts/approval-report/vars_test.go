@@ -151,9 +151,69 @@ func TestScanSpecFile(t *testing.T) {
 		"a5306add:4: кандидат класса 1, отсеян",
 		"ни в файле спецификации (файла уже нет или путь в переменной) — 1, из них с путём класса 1 в тексте и без попадания 1",
 		"tl a5306add:4 — файл " + missing,
+		"`sub -F файл` с целями из файла спецификации (вывод их не показал): 1 — цели по нынешнему содержимому файла",
 	} {
 		if !strings.Contains(out.String(), s) {
 			t.Errorf("в отчёте нет %q:\n%s", s, out.String())
+		}
+	}
+}
+
+// Выкатка с временным XDG_CONFIG_HOME — проба, только когда и каталог вызова временный: живой
+// проект с временным конфигом — выкатка класса 3. Каталог вызова бойца не записан — проба с
+// пометкой (1110-1204-load-wait-hunt выкатывал синтетический проект из $TMPDIR без cd).
+func TestProbeCwd(t *testing.T) {
+	const deploy = `XDG_CONFIG_HOME="$(mktemp -d)" graft deploy test`
+	cases := []struct {
+		name, tool, cwd, cmd string
+		probe                string // "" — выкатка класса 3
+	}{
+		{"живой проект", "Bash", "/home/aisee/git/proj", deploy, ""},
+		{"временный проект", "Bash", "/home/aisee/.cache/claude-tmp/p/proj", deploy, "проба: каталог /home/aisee/.cache/claude-tmp/p/proj"},
+		{"/tmp", "Bash", "/tmp", deploy, "проба: каталог /tmp"},
+		{"scratchpad", "Bash", "/home/aisee/s/scratchpad", deploy, "проба: каталог /home/aisee/s/scratchpad"},
+		{"cd в живой проект", "Bash", "/tmp/x", "cd /home/aisee/git/proj && " + deploy, ""},
+		{"cd во временный", "Bash", "/home/aisee/git/proj", "cd /var/tmp/h/proj && " + deploy, "проба: каталог /var/tmp/h/proj"},
+		{"cd в переменную", "Bash", "/home/aisee/git/proj", `cd "$W/proj" && ` + deploy, "проба: каталог вызова неизвестен"},
+		{"боец без cd", "command_execution", "/home/aisee/.cache/worktrees/graft/hunt", deploy, "проба: каталог вызова бойца не записан"},
+		{"боец с cd в живой проект", "command_execution", "/home/aisee/.cache/worktrees/graft/hunt", "cd /home/aisee/git/proj && " + deploy, ""},
+		{"/tmpx — не временный", "Bash", "/tmpx/proj", deploy, ""},
+	}
+	for _, c := range cases {
+		v := Classify(Event{Tool: c.tool, Command: c.cmd, Cwd: c.cwd, Home: testHome})
+		if c.probe == "" {
+			if len(v.Possible) != 0 || !v.HitClass(3) {
+				t.Errorf("%s: ждём выкатку, Possible=%+v Hits=%+v", c.name, v.Possible, v.Hits)
+			}
+			continue
+		}
+		if len(v.Possible) != 1 || v.Possible[0].Prod != c.probe || v.HitClass(3) {
+			t.Errorf("%s: ждём %q, Possible=%+v Hits=%+v", c.name, c.probe, v.Possible, v.Hits)
+		}
+	}
+}
+
+// aae6443f:171, :553: событие, засчитанное в класс, не стоит в «возможных» того же класса;
+// возможная запись другого класса остаётся.
+func TestPossibleNotDoubled(t *testing.T) {
+	agent := &Agent{Pop: "sub", Short: "a1"}
+	recs := []Record{
+		{Agent: agent, Line: 1, V: Verdict{Hits: []Hit{{Class: 1, Verb: ">", Target: "/home/aisee/.claude/x.md"}}, Possible: []Hit{{Class: 1, Verb: "python3", Target: "/home/aisee/.claude/y.md"}}}},
+		{Agent: agent, Line: 2, V: Verdict{Possible: []Hit{{Class: 1, Verb: "python3", Target: "/home/aisee/.claude/z.md"}}}},
+		{Agent: agent, Line: 3, V: Verdict{Hits: []Hit{{Class: 2, Verb: "cfg commit"}}, Possible: []Hit{{Class: 1, Verb: "node", Target: "/home/aisee/.claude/w.md"}}}},
+		{Agent: agent, Line: 4, V: Verdict{Hits: []Hit{{Class: 3, Verb: "deploy", Target: "prod"}}, Possible: []Hit{{Class: 3, Verb: "deploy", Target: "test", Prod: "проба: каталог /tmp"}}}},
+	}
+	var out bytes.Buffer
+	popNotes(&out, recs)
+	got := out.String()
+	for _, s := range []string{"в числа классов не входят): 2\n", "tl a1:2 — класс 1?, python3, /home/aisee/.claude/z.md", "tl a1:3 — класс 1?, node, /home/aisee/.claude/w.md"} {
+		if !strings.Contains(got, s) {
+			t.Errorf("нет %q:\n%s", s, got)
+		}
+	}
+	for _, s := range []string{"tl a1:1 ", "tl a1:4 ", "Выкатка в пробе"} {
+		if strings.Contains(got, s) {
+			t.Errorf("лишнее %q:\n%s", s, got)
 		}
 	}
 }

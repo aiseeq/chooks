@@ -56,6 +56,20 @@ func TestCheckDocFindsMarkers(t *testing.T) {
 		{"вернёмся через две недели", RelativeDate.Description, "через две недели"},
 		{"доделаем в эти выходные", RelativeDate.Description, "в эти выходные"},
 		{"сдаём по пятницу", RelativeDate.Description, "по пятницу"},
+		{"созвон в следующий понедельник", RelativeDate.Description, "в следующий понедельник"},
+		{"выкатка в эту пятницу", RelativeDate.Description, "в эту пятницу"},
+		{"встреча в следующую среду", RelativeDate.Description, "в следующую среду"},
+		{"готово к пятнице", RelativeDate.Description, "к пятнице"},
+		{"как и на прошлой неделе", RelativeDate.Description, "на прошлой неделе"},
+		{"вернёмся через день", RelativeDate.Description, "через день"},
+		{"вернёмся через месяц", RelativeDate.Description, "через месяц"},
+		{"вернёмся через 2 недели", RelativeDate.Description, "через 2 недели"},
+		{"сдадим к концу недели", RelativeDate.Description, "к концу недели"},
+		{"со следующей недели новый график", RelativeDate.Description, "со следующей недели"},
+		{"обсуждали на днях", RelativeDate.Description, "на днях"},
+		{"в следующем месяце", RelativeDate.Description, "в следующем месяце"},
+		{"цитата „в работе“", TypographicQuotes.Description, "„в работе“"},
+		{"план – факт", EnDash.Description, "план – факт"},
 		{"Завтра, выкатка", RelativeDate.Description, "Завтра"},
 		{"в пятницу 14.11 созвон, итоги в понедельник", RelativeDate.Description, "в понедельник"},
 		{"задача _PROJ-19_ в работе", UnlinkedKeyDescription, "PROJ-19"},
@@ -90,6 +104,10 @@ func TestCheckDocRelativeDateLookalikes(t *testing.T) {
 		"релиз: понедельник и четверг, 15:00",
 		"Пятница - день релиза",
 		"Начисления в выходные",
+		"дежурства по воскресеньям",
+		"созвон в пятницу\t14.11",
+		"Задача не была закрыта в срок из-за долгого согласования с заказчиком, а затем ушла в отпуск",
+		"ключ SUB-PROJ-1 составной",
 	} {
 		if findings := CheckDoc(line, projKeys); len(findings) > 0 {
 			t.Errorf("%q: ложное срабатывание %v", line, descriptions(findings))
@@ -147,5 +165,12 @@ func TestCheckDocOneFindingPerTurn(t *testing.T) {
 func TestCheckDocDefaultKeyShape(t *testing.T) {
 	if findings := CheckDoc("пункт A-1 и B2-3", nil); len(findings) != 1 || findings[0].Fragment != "B2-3" {
 		t.Fatalf("находки %+v, нужна одна B2-3", findings)
+	}
+}
+
+// Префикс проекта — буквально: «.» в префиксе не любой символ
+func TestCheckDocKeyPrefixLiteral(t *testing.T) {
+	if findings := CheckDoc("ключ AXB-1", []string{"A.B"}); len(findings) > 0 {
+		t.Fatalf("префикс как шаблон: %+v", findings)
 	}
 }

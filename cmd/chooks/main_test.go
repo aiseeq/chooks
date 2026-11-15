@@ -270,3 +270,10 @@ func TestStyleCmdDocKeys(t *testing.T) {
 		t.Fatalf("--keys без --doc: код %d, нужно %d", code, exitStyleError)
 	}
 }
+
+// Пустой префикс в --keys («PROJ,») отбрасывается: «-5» не ключ
+func TestStyleCmdDocKeysEmptyPrefix(t *testing.T) {
+	if out, code := runStyle(t, "диапазон 3 -5\n", "--doc", "--keys", "PROJ,", "-"); code != exitAllowed || out != "" {
+		t.Fatalf("пустой префикс: код %d, вывод %q", code, out)
+	}
+}

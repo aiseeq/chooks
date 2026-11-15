@@ -100,7 +100,7 @@ func (r *Rotator) measure(ctx context.Context, s *Store) (map[string]Usage, bool
 	now := r.Now()
 	usage, err := r.Limits.Usage()
 	if err != nil {
-		r.Log.Warn("accounts: limits snapshot unreadable, no switch", "error", err)
+		r.Log.Warn("accounts: limits snapshot unreadable, no measure and no switch", "error", err)
 		return nil, false
 	}
 	if now.After(s.RetryAt) {
@@ -110,7 +110,7 @@ func (r *Rotator) measure(ctx context.Context, s *Store) (map[string]Usage, bool
 			}
 		}
 		if usage, err = r.Limits.Usage(); err != nil {
-			r.Log.Warn("accounts: limits snapshot unreadable, no switch", "error", err)
+			r.Log.Warn("accounts: limits snapshot unreadable, no measure and no switch", "error", err)
 			return nil, false
 		}
 	}

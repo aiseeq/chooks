@@ -284,11 +284,16 @@ func assertNoSecrets(t *testing.T, where, text string) {
 type fakeLimits struct {
 	mu    sync.Mutex
 	usage map[string]Usage
+	// err — снимок не прочесть
+	err error
 }
 
 func (l *fakeLimits) Usage() (map[string]Usage, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.err != nil {
+		return nil, l.err
+	}
 	out := make(map[string]Usage, len(l.usage))
 	maps.Copy(out, l.usage)
 	return out, nil

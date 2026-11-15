@@ -531,3 +531,35 @@ func TestLoginMeasuresActiveWeekAutoOff(t *testing.T) {
 		t.Errorf("при выключенном автопереключении активна %q, ждали %q", got, work.email)
 	}
 }
+
+// Снимок лимитов не прочесть: ни замера, ни переключения — и с мёртвой
+// активной, которую пустой снимок иначе сменил бы
+func TestRotateUnreadableLimitsNoSwitch(t *testing.T) {
+	f := twoAccounts(t)
+	f.now = f.now.Add(usageStale + switchCooldown)
+	f.limits.set(work.email, 100, f.now.Add(4*day))
+	f.usage["personal"] = weekJSON(10, f.now.Add(2*day).Truncate(time.Minute))
+	f.limits.mu.Lock()
+	f.limits.err = errors.New("снимок битый")
+	f.limits.mu.Unlock()
+	s := f.store()
+	active := s.ActiveEmail()
+	a, err := s.find(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Dead = "токен отозван"
+	if err := saveStore(f.p, s); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.r.Rotate(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.store().ActiveEmail(); got != active {
+		t.Errorf("при нечитаемом снимке переключилось на %q, было %q", got, active)
+	}
+	if u, ok := f.limits.usage[personal.email]; ok && u.Week.Used == 10 {
+		t.Errorf("при нечитаемом снимке расход личной спрошен: %+v", u.Week)
+	}
+}

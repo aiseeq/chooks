@@ -97,7 +97,7 @@ func TestClassify(t *testing.T) {
 // checkRow сверяет классы с попаданием и отсеянных кандидатов строки таблицы.
 func checkRow(t *testing.T, r row) {
 	t.Helper()
-	ev := Event{Tool: r.tool, Command: r.cmd, Cwd: r.cwd, Home: testHome}
+	ev := Event{Tool: r.tool, Command: r.cmd, Cwd: r.cwd, CallCwd: r.cwd != "", Home: testHome} // у бойца cwd строки — из rollout
 	if r.path != "" {
 		ev.Paths = []string{r.path}
 	}

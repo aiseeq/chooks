@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 type scanner struct {
@@ -476,16 +477,95 @@ type workerScan struct {
 	file    string
 	seen    map[string]bool
 	pending map[string]int // id `sub -F файл` → индекс в recs: цели — в выводе item.completed
+	path    string         // att*.jsonl
+	thread  string         // thread_id попытки: имя её rollout codex
+	occ     map[string]int // сколько раз команда с этим ключом уже встретилась в попытке
+	cwds    map[string][]string
+	cwdErr  error // rollout не прочитан
 }
 
 func (w *workerScan) att(path string) error {
 	w.file = filepath.Base(path)
+	w.path = path
 	w.seen = map[string]bool{}
 	w.pending = map[string]int{}
-	return eachLine(path, w.line)
+	w.thread, w.occ, w.cwds, w.cwdErr = "", map[string]int{}, nil, nil
+	return errors.Join(eachLine(path, w.line), w.cwdErr)
+}
+
+// callCwd — каталог вызова из rollout codex попытки: att*.jsonl его не пишет. Вызов в rollout
+// находится по тексту команды и номеру её повтора; rollout читается при первой нужде.
+func (w *workerScan) callCwd(key string, occ int) (string, bool) {
+	if w.cwds == nil && w.cwdErr == nil {
+		w.cwds, w.cwdErr = rolloutCwds(filepath.Dir(w.path), w.thread)
+		if w.cwds == nil {
+			w.cwds = map[string][]string{}
+		}
+	}
+	if list := w.cwds[key]; occ < len(list) {
+		return list[occ], true
+	}
+	return "", false
+}
+
+// rolloutCwds — каталоги вызовов оболочки из rollout codex: ключ команды → каталоги по порядку.
+// Нет thread_id или файла rollout (старые задачи) — пусто, без ошибки.
+func rolloutCwds(taskDir, thread string) (map[string][]string, error) {
+	if thread == "" {
+		return nil, nil
+	}
+	files, err := filepath.Glob(filepath.Join(taskDir, "codex", "sessions", "*", "*", "*", "rollout-*-"+thread+".jsonl"))
+	if err != nil || len(files) == 0 {
+		return nil, err
+	}
+	out := map[string][]string{}
+	err = eachLine(files[0], func(_ int, line []byte) {
+		if !bytes.Contains(line, []byte(`"CommandExecution"`)) {
+			return
+		}
+		var r struct {
+			Payload struct {
+				Type string `json:"type"`
+				Item struct {
+					Type    string   `json:"type"`
+					Command []string `json:"command"`
+					Cwd     string   `json:"cwd"`
+				} `json:"item"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(line, &r) != nil || r.Payload.Type != "item_completed" || r.Payload.Item.Type != "CommandExecution" {
+			return
+		}
+		key := commandKey(strings.Join(r.Payload.Item.Command, " "))
+		out[key] = append(out[key], strings.TrimPrefix(r.Payload.Item.Cwd, "file://"))
+	})
+	if err != nil {
+		return nil, fmt.Errorf("rollout %s: %w", filepath.Base(files[0]), err)
+	}
+	return out, nil
+}
+
+// commandKey — текст команды без кавычек, обратных косых и пробелов: att*.jsonl хранит argv
+// строкой в кавычках codex, rollout — массивом.
+func commandKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\'' || r == '"' || r == '\\' || unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func (w *workerScan) line(n int, line []byte) {
+	if bytes.HasPrefix(line, []byte(`{"type":"thread.started"`)) {
+		var t struct {
+			ID string `json:"thread_id"`
+		}
+		if json.Unmarshal(line, &t) == nil {
+			w.thread = t.ID
+		}
+		return
+	}
 	if !bytes.Contains(line, []byte(`"command_execution"`)) && !bytes.Contains(line, []byte(`"file_change"`)) {
 		return
 	}
@@ -506,9 +586,24 @@ func (w *workerScan) line(n int, line []byte) {
 		return
 	}
 	w.a.Events++
+	key, occ := "", 0
+	if ev.Tool == codexCommand {
+		key = commandKey(ev.Command)
+		occ = w.occ[key]
+		w.occ[key]++
+	}
 	v := Classify(ev)
 	if !interesting(v) {
 		return
+	}
+	if ev.Tool == codexCommand {
+		if cwd, ok := w.callCwd(key, occ); ok {
+			ev.Cwd, ev.CallCwd = cwd, true
+			v = Classify(ev)
+			if !interesting(v) {
+				return
+			}
+		}
 	}
 	switch {
 	case v.SpecFile && l.Type == "item.completed":

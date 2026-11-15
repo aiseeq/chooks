@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -104,5 +105,59 @@ func TestScanTree(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "secret") {
 		t.Error("в отчёт попал query")
+	}
+}
+
+// Каталог вызова бойца — из rollout codex по тексту команды и номеру её повтора: att*.jsonl его не
+// пишет, dir задачи — не каталог вызова (1110-1204-load-wait-hunt выкатывал синтетический проект
+// из $TMPDIR при dir в worktree graft). Вызова нет в rollout — каталог неизвестен, выкатка.
+func TestScanWorkerCallCwd(t *testing.T) {
+	root := t.TempDir()
+	worker := filepath.Join(root, "worker")
+	if err := os.MkdirAll(filepath.Join(root, "projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	task := filepath.Join(worker, "1110-1204-y")
+	writeFile(t, filepath.Join(task, "job.json"), `{"master":"g-master","dir":"/home/aisee/.cache/worktrees/graft/y","created":"2026-11-10T12:04:00+01:00"}`)
+	deploy := `/bin/bash -lc 'XDG_CONFIG_HOME=\"$TMPDIR/c\" graft deploy test'`
+	other := `/bin/bash -lc 'XDG_CONFIG_HOME=\"$TMPDIR/c\" graft deploy stage'`
+	// кавычки codex: двойные с \" внутри — в rollout тот же текст без экранирования
+	escaped := `/bin/bash -lc \"echo \\\"a\\\" && XDG_CONFIG_HOME=/tmp/c graft deploy dev\"`
+	writeFile(t, filepath.Join(task, "att1.jsonl"), strings.Join([]string{
+		`{"type":"thread.started","thread_id":"t2"}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"` + deploy + `","exit_code":0}}`,
+		`{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"` + deploy + `","exit_code":0}}`,
+		`{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"` + other + `","exit_code":0}}`,
+		`{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"` + escaped + `","exit_code":0}}`,
+	}, "\n")+"\n")
+	rollout := func(cwd string) string {
+		return `{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/bash","-lc","XDG_CONFIG_HOME=\"$TMPDIR/c\" graft deploy test"],"cwd":"file://` + cwd + `"}}}`
+	}
+	writeFile(t, filepath.Join(task, "codex", "sessions", "2026", "11", "10", "rollout-2026-11-10T12-09-35-t2.jsonl"), strings.Join([]string{
+		`{"type":"session_meta","payload":{"id":"t2"}}`,
+		rollout("/var/tmp/w/project"),
+		rollout("/home/aisee/git/proj"),
+		`{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/bash","-lc","echo \"a\" && XDG_CONFIG_HOME=/tmp/c graft deploy dev"],"cwd":"file:///tmp/e"}}}`,
+	}, "\n")+"\n")
+
+	from, _ := time.Parse(time.RFC3339, "2026-11-08T00:00:00+01:00")
+	to, _ := time.Parse(time.RFC3339, "2026-11-15T13:24:00+01:00")
+	sc := scanner{home: "/home/aisee", from: from, to: to, jobs: 1}
+	res, err := sc.run(filepath.Join(root, "projects"), worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[int]string{}
+	for _, r := range res.records {
+		switch {
+		case r.V.HitClass(3):
+			got[r.Line] = "выкатка"
+		case len(r.V.Possible) > 0:
+			got[r.Line] = r.V.Possible[0].Prod
+		}
+	}
+	want := map[int]string{2: "проба: каталог /var/tmp/w/project", 3: "выкатка", 4: "выкатка", 5: "проба: каталог /tmp/e"}
+	if !maps.Equal(got, want) {
+		t.Errorf("записи %v, ждём %v", got, want)
 	}
 }

@@ -39,8 +39,8 @@ var varRows = []row{
 	// Улучшения: старая форма sub на stdin, python-скрипт с путём, выкатка в пробе.
 	{name: "aeaaae5d:75 sub <<EOF старой формы", tool: "Bash", cmd: "cd /home/aisee/.claude/skills/dev-process/ && sub <<'EOF'\nSKILL.md\n«готово» - `check.md` рядом: проверка.\n«готово» - `check.md` рядом.\n=\nбойца - `check.md` рядом (бриф).\nбойца - `check.md` рядом.\nEOF", hits: []int{1}},
 	{name: "a01afbd7:136 python3 fx.py sub $S/…", tool: "Bash", cmd: "cd /tmp/s && S=/home/aisee/.claude/skills\npython3 fx.py sub $S/coordinator/SKILL.md '(старое' '(новое'", cands: []int{1}},
-	{name: "1110-1204 att1:66 deploy test с временным XDG_CONFIG_HOME", tool: "command_execution", cmd: `/bin/bash -lc 'XDG_CONFIG_HOME="$TMPDIR/load-hunt/config" XDG_CACHE_HOME="$TMPDIR/load-hunt/cache" graft deploy test > "$TMPDIR/load-hunt/deploy.log" 2>&1; cat "$TMPDIR/load-hunt/deploy.log"'`, cands: []int{3}},
-	{name: "deploy с export временного XDG_CONFIG_HOME", tool: "Bash", cmd: `P=$(mktemp -d); export XDG_CONFIG_HOME=$(mktemp -d) PATH=/tmp/bin:$PATH; graft deploy test`, cands: []int{3}},
+	{name: "1110-1204 att1:66 deploy test с временным XDG_CONFIG_HOME", tool: "command_execution", cmd: `/bin/bash -lc 'XDG_CONFIG_HOME="$TMPDIR/load-hunt/config" XDG_CACHE_HOME="$TMPDIR/load-hunt/cache" graft deploy test > "$TMPDIR/load-hunt/deploy.log" 2>&1; cat "$TMPDIR/load-hunt/deploy.log"'`, cwd: "/var/tmp/w/load-hunt/project", cands: []int{3}},
+	{name: "deploy с export временного XDG_CONFIG_HOME", tool: "Bash", cwd: "/tmp/w", cmd: `P=$(mktemp -d); export XDG_CONFIG_HOME=$(mktemp -d) PATH=/tmp/bin:$PATH; graft deploy test`, cands: []int{3}},
 }
 
 func TestClassifyVars(t *testing.T) {
@@ -78,7 +78,7 @@ func TestVarTargets(t *testing.T) {
 }
 
 func TestProbeAndScriptArg(t *testing.T) {
-	v := Classify(Event{Tool: "command_execution", Command: `/bin/bash -lc 'XDG_CONFIG_HOME="$TMPDIR/h/config" graft deploy test'`, Home: testHome})
+	v := Classify(Event{Tool: "command_execution", Command: `/bin/bash -lc 'XDG_CONFIG_HOME="$TMPDIR/h/config" graft deploy test'`, Cwd: "/var/tmp/h/p", CallCwd: true, Home: testHome})
 	if len(v.Possible) != 1 || v.Possible[0].Class != 3 || v.Possible[0].Target != "test" || v.HitClass(3) {
 		t.Errorf("выкатка в пробе: Possible=%+v Hits=%+v", v.Possible, v.Hits)
 	}
@@ -160,27 +160,49 @@ func TestScanSpecFile(t *testing.T) {
 }
 
 // Выкатка с временным XDG_CONFIG_HOME — проба, только когда и каталог вызова временный: живой
-// проект с временным конфигом — выкатка класса 3. Каталог вызова бойца не записан — проба с
-// пометкой (1110-1204-load-wait-hunt выкатывал синтетический проект из $TMPDIR без cd).
+// или неизвестный каталог с временным конфигом — выкатка класса 3. Если команда могла вернуться в
+// прежний каталог (popd, `cd -`, подоболочка, cd во вложенном скрипте), временными должны быть все
+// её каталоги. Формы — из повторной приёмки approval-report-polish 15.11.
 func TestProbeCwd(t *testing.T) {
 	const deploy = `XDG_CONFIG_HOME="$(mktemp -d)" graft deploy test`
+	const live, tmp = "/home/aisee/git/proj", "/tmp/p"
 	cases := []struct {
-		name, tool, cwd, cmd string
-		probe                string // "" — выкатка класса 3
+		name, tool, cwd string
+		callCwd         bool
+		cmd             string
+		probe           string // "" — выкатка класса 3
 	}{
-		{"живой проект", "Bash", "/home/aisee/git/proj", deploy, ""},
-		{"временный проект", "Bash", "/home/aisee/.cache/claude-tmp/p/proj", deploy, "проба: каталог /home/aisee/.cache/claude-tmp/p/proj"},
-		{"/tmp", "Bash", "/tmp", deploy, "проба: каталог /tmp"},
-		{"scratchpad", "Bash", "/home/aisee/s/scratchpad", deploy, "проба: каталог /home/aisee/s/scratchpad"},
-		{"cd в живой проект", "Bash", "/tmp/x", "cd /home/aisee/git/proj && " + deploy, ""},
-		{"cd во временный", "Bash", "/home/aisee/git/proj", "cd /var/tmp/h/proj && " + deploy, "проба: каталог /var/tmp/h/proj"},
-		{"cd в переменную", "Bash", "/home/aisee/git/proj", `cd "$W/proj" && ` + deploy, "проба: каталог вызова неизвестен"},
-		{"боец без cd", "command_execution", "/home/aisee/.cache/worktrees/graft/hunt", deploy, "проба: каталог вызова бойца не записан"},
-		{"боец с cd в живой проект", "command_execution", "/home/aisee/.cache/worktrees/graft/hunt", "cd /home/aisee/git/proj && " + deploy, ""},
-		{"/tmpx — не временный", "Bash", "/tmpx/proj", deploy, ""},
+		{"живой проект", "Bash", live, false, deploy, ""},
+		{"временный проект", "Bash", "/home/aisee/.cache/claude-tmp/p/proj", false, deploy, "проба: каталог /home/aisee/.cache/claude-tmp/p/proj"},
+		{"/tmp", "Bash", "/tmp", false, deploy, "проба: каталог /tmp"},
+		{"scratchpad", "Bash", "/home/aisee/s/scratchpad", false, deploy, "проба: каталог /home/aisee/s/scratchpad"},
+		{"/tmpx — не временный", "Bash", "/tmpx/proj", false, deploy, ""},
+		{"каталог не записан", "Bash", "", false, deploy, ""},
+		{"cd в живой проект", "Bash", tmp, false, "cd " + live + " && " + deploy, ""},
+		{"cd во временный", "Bash", live, false, "cd /var/tmp/h/proj && " + deploy, "проба: каталог /var/tmp/h/proj"},
+		{"cd в неизвестную переменную", "Bash", tmp, false, `cd "$W/proj" && ` + deploy, ""},
+		{"cd в git rev-parse", "Bash", tmp, false, `cd "$(git -C ` + live + ` rev-parse --show-toplevel)" && ` + deploy, ""},
+		{"cd в переменную из mktemp", "Bash", live, false, `W=$(mktemp -d); cd "$W" && ` + deploy, "проба: каталог из mktemp или $TMPDIR"},
+		{"cd в $TMPDIR", "Bash", live, false, `cd "$TMPDIR/p" && ` + deploy, "проба: каталог из mktemp или $TMPDIR"},
+		{"pushd и popd", "Bash", live, false, "pushd " + tmp + " && true; popd && " + deploy, ""},
+		{"popd после cd в стеке", "Bash", live, false, "pushd /tmp/a && cd /tmp/b && popd && " + deploy, ""},
+		{"popd во временных", "Bash", "/tmp/x", false, "pushd /tmp/a && cd /tmp/b && popd && " + deploy, "проба: каталог /tmp/a"},
+		{"cd -", "Bash", live, false, "cd " + tmp + " && cd - && " + deploy, ""},
+		{"выкатка после подоболочки", "Bash", live, false, "( cd " + tmp + "; true ); " + deploy, ""},
+		{"подоболочка из временного", "Bash", "/tmp/x", false, "( cd " + tmp + " && " + deploy + " )", "проба: каталог /tmp/p"},
+		{"cd в bash -c", "Bash", live, false, "bash -c 'cd " + tmp + "' && " + deploy, ""},
+		{"боец без каталога из rollout", "command_execution", tmp, false, deploy, ""},
+		{"боец, каталог из rollout временный", "command_execution", tmp, true, deploy, "проба: каталог /tmp/p"},
+		{"боец, каталог из rollout живой", "command_execution", live, true, deploy, ""},
+		{"боец с cd в живой проект", "command_execution", tmp, true, "cd " + live + " && " + deploy, ""},
+		{"временный конфиг у другого вызова", "Bash", tmp, false, `XDG_CONFIG_HOME=/tmp/c graft status; graft deploy prod`, ""},
+		{"export временного конфига", "Bash", tmp, false, `export XDG_CONFIG_HOME=/tmp/c; graft deploy test`, "проба: каталог /tmp/p"},
+		{"env с временным конфигом", "Bash", tmp, false, `env XDG_CONFIG_HOME=/tmp/c graft deploy test`, "проба: каталог /tmp/p"},
+		{"graft -C в живой проект", "Bash", tmp, false, `XDG_CONFIG_HOME=/tmp/c graft -C ` + live + ` deploy test`, ""},
+		{"graft -C во временный", "Bash", live, false, `XDG_CONFIG_HOME=/tmp/c graft -C /tmp/q deploy test`, "проба: каталог /tmp/q"},
 	}
 	for _, c := range cases {
-		v := Classify(Event{Tool: c.tool, Command: c.cmd, Cwd: c.cwd, Home: testHome})
+		v := Classify(Event{Tool: c.tool, Command: c.cmd, Cwd: c.cwd, CallCwd: c.callCwd, Home: testHome})
 		if c.probe == "" {
 			if len(v.Possible) != 0 || !v.HitClass(3) {
 				t.Errorf("%s: ждём выкатку, Possible=%+v Hits=%+v", c.name, v.Possible, v.Hits)
@@ -190,6 +212,10 @@ func TestProbeCwd(t *testing.T) {
 		if len(v.Possible) != 1 || v.Possible[0].Prod != c.probe || v.HitClass(3) {
 			t.Errorf("%s: ждём %q, Possible=%+v Hits=%+v", c.name, c.probe, v.Possible, v.Hits)
 		}
+	}
+	// graft -C без временного конфига — выкатка (раньше не распознавалась вовсе)
+	if v := Classify(Event{Tool: "Bash", Command: "graft -C " + live + " deploy prod", Cwd: tmp, Home: testHome}); !v.HitClass(3) {
+		t.Errorf("graft -C … deploy prod: Hits=%+v", v.Hits)
 	}
 }
 
@@ -215,5 +241,44 @@ func TestPossibleNotDoubled(t *testing.T) {
 		if strings.Contains(got, s) {
 			t.Errorf("лишнее %q:\n%s", s, got)
 		}
+	}
+}
+
+// Запись в «возможных» — первая вне засчитанных классов: Possible[0] того же класса, что попадание,
+// не показывается вместо неё.
+func TestPossibleFirstUnhit(t *testing.T) {
+	recs := []Record{{Agent: &Agent{Pop: "sub", Short: "a1"}, Line: 1, V: Verdict{
+		Hits:     []Hit{{Class: 4, Verb: "POST", Target: "x.atlassian.net"}},
+		Possible: []Hit{{Class: 4, Verb: "python3", Target: "atlassian/bitbucket"}, {Class: 1, Verb: "node", Target: "/home/aisee/.claude/w.md"}},
+	}}}
+	var out bytes.Buffer
+	popNotes(&out, recs)
+	if want := "tl a1:1 — класс 1?, node, /home/aisee/.claude/w.md"; !strings.Contains(out.String(), want) {
+		t.Errorf("нет %q:\n%s", want, out.String())
+	}
+}
+
+// Строка пробы — из записей вне засчитанных классов, с пометкой каталога; строка про `sub -F` по
+// файлу спецификации — только когда такие цели есть, и считает события по глаголу, не по классу.
+func TestProbeNoteLine(t *testing.T) {
+	agent := &Agent{Pop: "sub", Short: "a1", Master: "m"}
+	recs := []Record{
+		{Agent: agent, Line: 1, V: Verdict{Hits: []Hit{{Class: 1, Verb: ">", Target: "/home/aisee/.claude/x.md"}}, Possible: []Hit{{Class: 1, Verb: "python3", Target: "/home/aisee/.claude/y.md"}, {Class: 3, Verb: "deploy", Target: "test", Prod: "проба: каталог /tmp/p"}}}},
+		{Agent: agent, Line: 2, V: Verdict{Hits: []Hit{{Class: 1, Verb: ">", Target: "/home/aisee/.claude/z.md"}}}},
+	}
+	var out bytes.Buffer
+	popNotes(&out, recs)
+	got := out.String()
+	if want := "tl a1:1 — deploy test, проба: каталог /tmp/p, мастер m"; !strings.Contains(got, want) {
+		t.Errorf("нет %q:\n%s", want, got)
+	}
+	if strings.Contains(got, "файла спецификации (вывод") || strings.Contains(got, "python3") {
+		t.Errorf("лишняя строка:\n%s", got)
+	}
+	recs[1].V.Hits = append(recs[1].V.Hits, Hit{Class: 1, Verb: specBodyVerb, Target: "/home/aisee/.claude/w.md"})
+	out.Reset()
+	popNotes(&out, recs)
+	if want := "(вывод их не показал): 1 — "; !strings.Contains(out.String(), want) {
+		t.Errorf("нет %q:\n%s", want, out.String())
 	}
 }

@@ -16,6 +16,17 @@ import (
 type Config struct {
 	Tools  map[string]ToolConfig `yaml:"tools"`
 	Logger LoggerConfig          `yaml:"logger"`
+	Style  StyleConfig           `yaml:"style"`
+}
+
+// StyleConfig — ключи задач для chooks style: префиксы проектов и адрес
+// задачи. Имена рабочих проектов — только в конфиге пользователя, не в коде
+type StyleConfig struct {
+	// KeyPrefixes — префиксы ключей задач («PROJ»); --keys их заменяет
+	KeyPrefixes []string `yaml:"key_prefixes"`
+	// IssueURL — адрес задачи без ключа («https://jira.example/browse/»):
+	// черновик получает голый URL с ключом
+	IssueURL string `yaml:"issue_url"`
 }
 
 // ToolConfig конфигурация инструмента

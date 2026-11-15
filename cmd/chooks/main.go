@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -796,7 +795,7 @@ func newStyleCmd(exitCode *int) *cobra.Command {
 	var doc bool
 	var keys []string
 	cmd := &cobra.Command{
-		Use:   "style [--doc [--keys PROJ,...]] <файл|->",
+		Use:   "style [--doc] [--keys PROJ,...] <файл|->",
 		Short: "Проверить черновик текста по форме write-as-user",
 		Long: `Ищет в черновике (файл или stdin при "-") маркеры, которые запрещает скилл
 write-as-user: длинное и короткое тире, markdown, типографские кавычки, оборот
@@ -807,25 +806,34 @@ Doc): заголовки, списки, ссылки, таблицы и выде
 типографские кавычки, обороты "X, а не Y" и "не X, а Y", десятичную запятую,
 ключ задачи вне ссылки markdown и URL, относительную дату (сегодня, завтра,
 вчера, на этой неделе, через неделю, день недели без числа после него).
---keys PROJ,OPS - префиксы ключей проектов; без него находка - любой ключ
-вида ABC-12 (и UTF-8, SHA-256 тоже).
+
+Ключ задачи: префиксы проектов - --keys PROJ,OPS, без него - style.key_prefixes
+конфига chooks. В черновике ключ вне URL - находка с подсказкой голого URL
+(style.issue_url конфига + ключ); без префиксов ключ в черновике не ищется.
+В документе без префиксов находка - любой ключ вида ABC-12 (и UTF-8,
+SHA-256 тоже).
 
 Печатает найденное с номерами строк. Код выхода 0 - нарушений нет,
 1 - есть нарушения, 2 - черновик не прочитан.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(keys) > 0 && !doc {
+			config, err := core.LoadConfig(configPath)
+			if err != nil {
 				*exitCode = exitStyleError
-				return errors.New("--keys only applies with --doc")
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+			prefixes := keyPrefixes(keys)
+			if len(keys) == 0 {
+				prefixes = keyPrefixes(config.Style.KeyPrefixes)
 			}
 			text, err := readDraft(cmd.InOrStdin(), args[0])
 			if err != nil {
 				*exitCode = exitStyleError
 				return err
 			}
-			findings := textstyle.CheckDraft(text)
+			findings := textstyle.CheckDraftKeys(text, prefixes, config.Style.IssueURL)
 			if doc {
-				findings = textstyle.CheckDoc(text, keyPrefixes(keys))
+				findings = textstyle.CheckDoc(text, prefixes)
 			}
 			out := cmd.OutOrStdout()
 			for _, f := range findings {
@@ -838,7 +846,7 @@ Doc): заголовки, списки, ссылки, таблицы и выде
 		},
 	}
 	cmd.Flags().BoolVar(&doc, "doc", false, "документ markdown: разметка разрешена, ищет ключ без ссылки и относительную дату")
-	cmd.Flags().StringSliceVar(&keys, "keys", nil, "с --doc: префиксы ключей проектов через запятую")
+	cmd.Flags().StringSliceVar(&keys, "keys", nil, "префиксы ключей проектов через запятую (заменяют style.key_prefixes конфига)")
 	return cmd
 }
 

@@ -127,6 +127,11 @@ func TestRunSessionEvent_BrokenTaskBookkeepingKeepsPause(t *testing.T) {
 // runStyle запускает команду style и возвращает её вывод и exit-код
 func runStyle(t *testing.T, stdin string, args ...string) (string, int) {
 	t.Helper()
+	if configPath == "" {
+		// Конфиг пользователя (его префиксы ключей) не влияет на тесты:
+		// файла нет — значения по умолчанию
+		useConfig(t, filepath.Join(t.TempDir(), "none.yaml"))
+	}
 	exitCode := exitAllowed
 	cmd := newStyleCmd(&exitCode)
 	var out strings.Builder
@@ -259,15 +264,81 @@ func TestStyleCmdDoc(t *testing.T) {
 	}
 }
 
-// --keys: префиксы без пробелов и в любом регистре, без --doc — ошибка
+// --keys: префиксы без пробелов и в любом регистре
 func TestStyleCmdDocKeys(t *testing.T) {
 	out, code := runStyle(t, "OPS-1 сдвинут\nOTHER-2 чужой\nPROJ-3 тоже\n", "--doc", "--keys", " proj , ops", "-")
 	want := "1: ключ задачи без ссылки: \"OPS-1\""
 	if code != exitStyleViolations || !strings.HasPrefix(out, want) || strings.Contains(out, "OTHER-2") || !strings.Contains(out, "3: ключ задачи без ссылки: \"PROJ-3\"") {
 		t.Fatalf("--keys: код %d, вывод\n%s", code, out)
 	}
-	if _, code := runStyle(t, "текст", "--keys", "PROJ", "-"); code != exitStyleError {
-		t.Fatalf("--keys без --doc: код %d, нужно %d", code, exitStyleError)
+}
+
+// useConfig — путь конфига, как у --config, до конца теста
+func useConfig(t *testing.T, path string) {
+	t.Helper()
+	saved := configPath
+	configPath = path
+	t.Cleanup(func() { configPath = saved })
+}
+
+// styleConfig кладёт конфиг chooks с телом body и делает его конфигом теста
+func styleConfig(t *testing.T, body string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	useConfig(t, path)
+}
+
+// Ключ задачи в черновике: вне URL — находка с голым URL из конфига, внутри
+// URL — нет; --keys заменяет префиксы конфига; без префиксов вывод прежний
+func TestStyleCmdDraftKey(t *testing.T) {
+	styleConfig(t, "style:\n  key_prefixes: [PROJ]\n  issue_url: https://jira.example/browse/\n")
+	out, code := runStyle(t, "Готово\nсм. PROJ-12\n", "-")
+	want := "2: ключ задачи без ссылки: \"PROJ-12\", нужно: голый URL: 'https://jira.example/browse/<ключ>'\n"
+	if code != exitStyleViolations || out != want {
+		t.Fatalf("ключ вне URL: код %d, вывод %q", code, out)
+	}
+	if out, code := runStyle(t, "см. https://jira.example/browse/PROJ-12\n", "-"); code != exitAllowed || out != "" {
+		t.Errorf("ключ в URL: код %d, вывод %q", code, out)
+	}
+	if out, code := runStyle(t, "OPS-3 и PROJ-4\n", "--keys", "ops", "-"); code != exitStyleViolations || !strings.Contains(out, "OPS-3") || strings.Contains(out, "PROJ-4") {
+		t.Errorf("--keys без --doc: код %d, вывод %q", code, out)
+	}
+	if out, code := runStyle(t, "OTHER-5 чужой\n", "-"); code != exitAllowed || out != "" {
+		t.Errorf("чужой префикс: код %d, вывод %q", code, out)
+	}
+	// --doc без --keys берёт префиксы конфига: чужой ключ не находка
+	if out, code := runStyle(t, "OTHER-5 и PROJ-6\n", "--doc", "-"); code != exitStyleViolations || strings.Contains(out, "OTHER-5") || !strings.Contains(out, "PROJ-6") {
+		t.Errorf("--doc с префиксами конфига: код %d, вывод %q", code, out)
+	}
+}
+
+// Без префиксов (ни --keys, ни конфига) ключ в черновике не ищется: UTF-8
+// и SHA-256 не находки; адреса нет — в подсказке шаблон
+func TestStyleCmdDraftKeyDefaults(t *testing.T) {
+	if out, code := runStyle(t, "кодировка UTF-8, хеш SHA-256, PROJ-1\n", "-"); code != exitAllowed || out != "" {
+		t.Errorf("без префиксов: код %d, вывод %q", code, out)
+	}
+	out, code := runStyle(t, "PROJ-1\n", "--keys", "PROJ", "-")
+	if code != exitStyleViolations || !strings.Contains(out, "голый URL: 'https://…/browse/<ключ>'") {
+		t.Errorf("без адреса: код %d, вывод %q", code, out)
+	}
+}
+
+// Битый конфиг — ошибка команды (код 2), не молчаливая проверка без ключей
+func TestStyleCmdBadConfig(t *testing.T) {
+	styleConfig(t, "style:\n  key_prefix: [PROJ]\n")
+	exitCode := exitAllowed
+	cmd := newStyleCmd(&exitCode)
+	cmd.SetIn(strings.NewReader("текст\n"))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"-"})
+	err := cmd.Execute()
+	if exitCode != exitStyleError || err == nil || !strings.Contains(err.Error(), "key_prefix") {
+		t.Errorf("битый конфиг: код %d, ошибка %v", exitCode, err)
 	}
 }
 

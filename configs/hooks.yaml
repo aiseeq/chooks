@@ -93,3 +93,10 @@ tools:
     desktop: true
     # Клик по уведомлению переводит фокус на окно терминала (KDE Plasma, X11 и Wayland)
     activate_on_click: true
+
+# Ключи задач для chooks style: префиксы проектов (--keys их заменяет) и адрес
+# задачи без ключа — черновик получает голый URL задачи. Без префиксов ключ в
+# черновике не ищется
+# style:
+#   key_prefixes: [PROJ]
+#   issue_url: https://jira.example/browse/

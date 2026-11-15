@@ -2,6 +2,7 @@ package textstyle
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -62,6 +63,29 @@ type Finding struct {
 	Line     int
 	Marker   Marker
 	Fragment string
+}
+
+// DraftKey ключ задачи вне URL в черновике чата или письма: людям ключ —
+// ссылкой, а markdown в черновике запрещён (MarkdownLink), поэтому голым URL.
+// Поиск — тот же, что у UnlinkedKey; issueURL — адрес задачи без ключа,
+// пусто — в подсказке шаблон
+func DraftKey(prefixes []string, issueURL string) Marker {
+	m := UnlinkedKey(prefixes)
+	if issueURL == "" {
+		issueURL = "https://…/browse/"
+	}
+	m.Fix = "голый URL: '" + issueURL + "<ключ>'"
+	return m
+}
+
+// CheckDraftKeys проверяет черновик маркерами черновика и ключом задачи.
+// prefixes пусто — ключ не ищется: в чате любой «ABC-12» (UTF-8, SHA-256)
+// был бы ложной находкой
+func CheckDraftKeys(text string, prefixes []string, issueURL string) []Finding {
+	if len(prefixes) == 0 {
+		return CheckDraft(text)
+	}
+	return check(text, append(slices.Clip(DraftMarkers), DraftKey(prefixes, issueURL)))
 }
 
 // CheckDraft проверяет черновик построчно: номер строки ведёт к месту правки,

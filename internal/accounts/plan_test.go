@@ -157,6 +157,16 @@ func TestPlanUnitTier(t *testing.T) {
 		{"колонки tier нет", ratesHead + "2026-03-01\tanthropic\tultra\t200\t1600\n", five, "146%"},
 		{"хранилища нет — тариф не известен", ratesTierHead +
 			"2026-03-01\tanthropic\tultra\t200\t1600\tdefault_claude_max_20x\n", nil, "73%" + OtherUnitMark},
+		{"поле tier пустое, хранилища нет", ratesTierHead +
+			"2026-03-01\tanthropic\tultra\t200\t1600\t\n", nil, "73%" + OtherUnitMark},
+		{"строка короче шапки, хранилища нет", ratesTierHead +
+			"2026-03-01\tanthropic\tultra\t200\t1600\n", nil, "73%" + OtherUnitMark},
+		{"мёртвая учётка с другим тарифом не мешает", ratesTierHead +
+			"2026-03-01\tanthropic\tultra\t200\t1600\tdefault_claude_max_20x\n",
+			&Store{Accounts: []Account{tiered(t, "a", "default_claude_max_20x", now), dead(tiered(t, "b", "default_claude_max_5x", now))}}, "146%"},
+		{"токены живой учётки не разобрать", ratesTierHead +
+			"2026-03-01\tanthropic\tultra\t200\t1600\tdefault_claude_max_20x\n",
+			&Store{Accounts: []Account{tiered(t, "a", "default_claude_max_20x", now), {UUID: "b", OAuth: json.RawMessage(`{"claudeAiOauth":`)}}}, "73%" + OtherUnitMark},
 		{"у живой учётки тарифа нет", ratesTierHead +
 			"2026-03-01\tanthropic\tultra\t200\t1600\tdefault_claude_max_20x\n",
 			&Store{Accounts: []Account{tiered(t, "a", "default_claude_max_20x", now), tiered(t, "b", "", now)}}, "73%" + OtherUnitMark},
@@ -173,4 +183,10 @@ func TestPlanUnitTier(t *testing.T) {
 			}
 		})
 	}
+}
+
+// dead — учётка, помеченная мёртвой
+func dead(a Account) Account {
+	a.Dead = "токен отозван"
+	return a
 }

@@ -88,7 +88,7 @@ func (s *Store) PlanUnit(now time.Time) Unit {
 	if err != nil {
 		return Unit{Why: err.Error()}
 	}
-	if tier := s.Tier(); plan.tierKnown && plan.tier != tier {
+	if tier := s.Tier(); plan.tierKnown && (tier == "" || plan.tier != tier) {
 		if tier == "" {
 			tier = "не известен"
 		}

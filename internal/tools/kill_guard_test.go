@@ -395,3 +395,36 @@ func TestKillGuardAllows(t *testing.T) {
 		}
 	}
 }
+
+// Отрицательный PID меньше -1 — одна группа процессов, -1 — все процессы
+// пользователя, 0 — своя группа, 1 — init: причины различимы, отказ во всех
+func TestKillGuardGroupReasons(t *testing.T) {
+	for _, tc := range []struct{ command, want, not string }{
+		{`kill -TERM -- -1447549`, "группе процессов 1447549", "все процессы"},
+		{`kill -9 -1`, "всем процессам пользователя", "группе процессов"},
+		{`kill -TERM 0`, "своей группе процессов", "всем процессам"},
+		{`kill 1`, "init", "группе процессов"},
+	} {
+		r := validateKill(t, tc.command)
+		reasons := strings.Join(r.Suggestions, "\n")
+		if r.IsValid || !strings.Contains(reasons, tc.want) || strings.Contains(reasons, tc.not) {
+			t.Errorf("%s: ждали отказ с «%s» и без «%s», получили %v %q", tc.command, tc.want, tc.not, r.IsValid, reasons)
+		}
+	}
+}
+
+// Подсказка к отказу на группу не выдаёт завершение отдельных PID за то же
+// самое; к прочим отказам — обычная подсказка про литеральный PID
+func TestKillGuardGroupHint(t *testing.T) {
+	group := validateKill(t, `kill -TERM -- -1447549`).Suggestions
+	if slices.Contains(group, killGuardHint) || !slices.Contains(group, killGroupHint) {
+		t.Errorf("группа: ждали только подсказку группы, получили %q", group)
+	}
+	mixed := validateKill(t, `kill -TERM -- -1447549; kill 1`).Suggestions
+	if !slices.Contains(mixed, killGuardHint) || !slices.Contains(mixed, killGroupHint) {
+		t.Errorf("группа и init: ждали обе подсказки, получили %q", mixed)
+	}
+	if plain := validateKill(t, `kill 1`).Suggestions; slices.Contains(plain, killGroupHint) {
+		t.Errorf("init: подсказка группы лишняя: %q", plain)
+	}
+}

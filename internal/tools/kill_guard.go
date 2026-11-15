@@ -44,6 +44,10 @@ func NewKillGuardTool(config core.ToolConfig, logger core.Logger) (*KillGuardToo
 
 const killGuardHint = "Найди PID отдельной командой (ps -o pid,ppid,comm,args -p … или pgrep -a '[x]yz'), посмотри на вывод и убей литералом: kill 12345"
 
+// killGroupHint подсказка к отказу на сигнал группе: отдельные PID группу не
+// заменяют — процесс, который группа породит после перечисления, сигнал не получит
+const killGroupHint = "Сигнал отдельным PID — не то же, что группе: процессы, которые появятся в группе после перечисления, его не получат. Перечисли группу отдельной командой (pgrep -a -g 12345), посмотри на вывод, убей её PID литералами (kill 12346 12347) и проверь группу снова"
+
 // ValidateTool проверяет команды, посылающие сигналы процессам
 func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
 	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(unquoted(input.Command), "kill") {
@@ -66,7 +70,20 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 		violations = append(violations, core.NewViolation("kill_guard",
 			"Сигнал может убить не тот процесс или саму сессию:", r, core.LevelCritical, 0, 0))
 	}
-	return core.NewValidationResult(false, violations, append(scan.reasons, killGuardHint)), nil
+	return core.NewValidationResult(false, violations, append(scan.reasons, scan.hints()...)), nil
+}
+
+// hints подсказки к отказу: про группу — если есть отказ на сигнал группе,
+// обычная про литеральный PID — если есть другие отказы
+func (s *killScan) hints() []string {
+	var out []string
+	if len(s.groupReasons) > 0 {
+		out = append(out, killGroupHint)
+	}
+	if len(s.reasons) > len(s.groupReasons) {
+		out = append(out, killGuardHint)
+	}
+	return out
 }
 
 // unquoted команда без кавычек и \: k\ill и 'k'ill оболочка исполнит как kill
@@ -86,6 +103,8 @@ type killScan struct {
 	command string
 	procs   []procInfo
 	reasons []string
+	// groupReasons — те из reasons, что про сигнал группе процессов (kill -N)
+	groupReasons []string
 	// signalWord — в команде без кавычек есть отдельное слово kill, pkill
 	// или killall: скрипт, который станет известен только при запуске, рядом
 	// с ним — отказ. Подстрока kill (skills) — не повод
@@ -233,33 +252,38 @@ func (s *killScan) check(name string, args []word, via string) error {
 		s.procs = procs
 	}
 	var reason string
+	group := false
 	switch {
 	case via != "":
 		reason = name + " через " + via + ": цели приходят из ввода или списка, проверить их до запуска нельзя"
 	case name == "killall5":
 		reason = "killall5 шлёт сигнал всем процессам системы вне своей сессии: погасит все сессии Claude"
 	case name == "kill":
-		reason = s.tool.checkKill(args, s.procs)
+		reason, group = s.tool.checkKill(args, s.procs)
 	default:
 		reason = s.tool.checkPattern(name, args, s.command, s.procs)
 	}
 	if reason != "" {
 		s.addReason(reason)
 	}
+	if group && !slices.Contains(s.groupReasons, reason) {
+		s.groupReasons = append(s.groupReasons, reason)
+	}
 	return nil
 }
 
 // checkKill проверяет цели kill: только литеральные PID и job spec, ни один
-// не задевает сессию. Сигнал 0 лишь проверяет, жив ли процесс, — цели любые
-func (t *KillGuardTool) checkKill(args []word, procs []procInfo) string {
+// не задевает сессию. Сигнал 0 лишь проверяет, жив ли процесс, — цели любые.
+// group — отказ из-за сигнала группе процессов (PID меньше -1)
+func (t *KillGuardTool) checkKill(args []word, procs []procInfo) (reason string, group bool) {
 	targets := args
 	if len(targets) > 0 && strings.HasPrefix(targets[0].text, "-") && targets[0].literal {
 		switch targets[0].text {
 		case "-l", "-L", "--list", "--table", "-0", "--signal=0":
-			return ""
+			return "", false
 		case "-s", "-n", "--signal":
 			if len(targets) > 1 && targets[1].literal && targets[1].text == "0" {
-				return ""
+				return "", false
 			}
 			targets = targets[min(2, len(targets)):]
 		default:
@@ -272,20 +296,28 @@ func (t *KillGuardTool) checkKill(args []word, procs []procInfo) string {
 	ancestors := t.ancestors(procs)
 	for _, w := range targets {
 		if !w.literal {
-			return fmt.Sprintf("kill %s: PID вычисляется при запуске, проверить его заранее нельзя", w.text)
+			return fmt.Sprintf("kill %s: PID вычисляется при запуске, проверить его заранее нельзя", w.text), false
 		}
 		if strings.HasPrefix(w.text, "%") {
 			continue
 		}
 		pid, err := strconv.Atoi(w.text)
 		if err != nil {
-			return fmt.Sprintf("kill %s: цель не PID (%v)", w.text, err)
+			return fmt.Sprintf("kill %s: цель не PID (%v)", w.text, err), false
+		}
+		switch {
+		case pid < -1:
+			return fmt.Sprintf("kill %d: сигнал группе процессов %d целиком; кто в ней, проверка не сверяет", pid, -pid), true
+		case pid == -1:
+			return "kill -1: сигнал всем процессам пользователя — всем сессиям Claude и терминалам", false
+		case pid == 0:
+			return "kill 0: сигнал своей группе процессов — той, где идёт сама эта команда", false
 		}
 		if reason := t.dangerous(pid, procs, ancestors); reason != "" {
-			return fmt.Sprintf("kill %d: %s", pid, reason)
+			return fmt.Sprintf("kill %d: %s", pid, reason), false
 		}
 	}
-	return ""
+	return "", false
 }
 
 // patternArgs разобранные аргументы pkill или killall
@@ -401,7 +433,7 @@ func (t *KillGuardTool) checkPattern(name string, args []word, command string, p
 // dangerous возвращает причину, по которой процесс трогать нельзя
 func (t *KillGuardTool) dangerous(pid int, procs []procInfo, ancestors map[int]bool) string {
 	if pid <= 1 {
-		return "PID ≤ 1 — это init или все процессы пользователя (группа процессов)"
+		return "PID 1 — init (systemd), на нём держится система"
 	}
 	if pid == t.selfPID || ancestors[pid] {
 		return "предок этой сессии Claude (claude, оболочка, терминал или менеджер сессии)"

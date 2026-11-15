@@ -54,7 +54,8 @@ func TestCheckDraftAllowsHisVoice(t *testing.T) {
 }
 
 // Подсказка ключа — голый URL с самим ключом: адрес своего префикса, без
-// адреса — шаблон; маркеры без своей подсказки — прежний Fix
+// адреса — шаблон; маркеры без своей подсказки — прежний Fix. Fix ключа —
+// тот же голый URL с шаблоном: его читает тот, кто не зовёт Hint
 func TestDraftKeyHint(t *testing.T) {
 	urls := map[string]string{"PROJ": "https://jira.example/browse/"}
 	var got []string
@@ -65,6 +66,34 @@ func TestDraftKeyHint(t *testing.T) {
 		"OPS-3 — PROJ-12: " + EmDash.Fix,
 		"PROJ-12: голый URL: 'https://jira.example/browse/PROJ-12'",
 		"OPS-3: голый URL: 'https://…/browse/OPS-3'",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("подсказки %v, нужно %v", got, want)
+	}
+	m := DraftKey([]string{"PROJ"}, urls)
+	if want := "голый URL: 'https://…/browse/<ключ>'"; m.Fix != want {
+		t.Errorf("Fix %q, нужно %q", m.Fix, want)
+	}
+	m.FixFor = nil
+	if got := m.Hint("PROJ-12"); got != m.Fix {
+		t.Errorf("Hint без FixFor %q, нужно Fix %q", got, m.Fix)
+	}
+}
+
+// Адрес — по префиксу ключа целиком, какой бы длины префикс ни был: у
+// каждого префикса свой адрес
+func TestDraftKeyHintPrefixLength(t *testing.T) {
+	urls := map[string]string{
+		"PROJ": "https://jira.example/browse/",
+		"OPS":  "https://ops.jira.example/browse/",
+	}
+	var got []string
+	for _, f := range CheckDraftKeys("OPS-3 и PROJ-12", []string{"PROJ", "OPS"}, urls) {
+		got = append(got, f.Marker.Hint(f.Fragment))
+	}
+	want := []string{
+		"голый URL: 'https://ops.jira.example/browse/OPS-3'",
+		"голый URL: 'https://jira.example/browse/PROJ-12'",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("подсказки %v, нужно %v", got, want)

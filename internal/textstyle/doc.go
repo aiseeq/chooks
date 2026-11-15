@@ -109,15 +109,16 @@ var (
 // findUnlinkedKeys ищет ключи задачи вне ссылок: ссылки и URL заменяются
 // пробелами той же длины, чтобы ключ рядом со ссылкой не склеился с ней.
 // Правая граница — проверкой знака после номера: в RE2 нет lookahead, а
-// съеденный знак отнял бы левую границу у ключа сразу за ним. Повтор
-// ключа в строке — одна находка
+// съеденный знак отнял бы левую границу у ключа сразу за ним. Знак после
+// номера — из исходной строки: в PROJ-1https://… за номером буква, хотя URL
+// уже заменён пробелами. Повтор ключа в строке — одна находка
 func findUnlinkedKeys(key *regexp.Regexp, line string) []string {
 	bare := linkedPattern.ReplaceAllStringFunc(line, func(s string) string {
 		return strings.Repeat(" ", len(s))
 	})
 	var keys []string
 	for _, m := range key.FindAllStringSubmatchIndex(bare, -1) {
-		next, _ := utf8.DecodeRuneInString(bare[m[3]:])
+		next, _ := utf8.DecodeRuneInString(line[m[3]:])
 		found := bare[m[2]:m[3]]
 		if unicode.IsLetter(next) || unicode.IsNumber(next) || slices.Contains(keys, found) {
 			continue

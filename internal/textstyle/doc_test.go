@@ -333,7 +333,9 @@ func TestCheckDocReportsLineNumbers(t *testing.T) {
 var projKeys = []string{"PROJ"}
 
 // Каждый ключ строки — своя находка, повтор ключа — одна; за номером не
-// буква и не цифра, дефис можно: ветка feature/PROJ-12-fix ведёт к задаче
+// буква и не цифра (² тоже цифра), дефис можно: ветка feature/PROJ-12-fix
+// ведёт к задаче. Знак за номером — из исходной строки, не из строки с
+// URL, заменёнными пробелами: в PROJ-1https://… за номером буква
 func TestCheckDocKeysOnLine(t *testing.T) {
 	cases := map[string][]string{
 		"PROJ-1 и PROJ-2":                   {"PROJ-1", "PROJ-2"},
@@ -342,6 +344,8 @@ func TestCheckDocKeysOnLine(t *testing.T) {
 		"ветка feature/PROJ-12-fix":         {"PROJ-12"},
 		"PROJ-7_ и PROJ-8.":                 {"PROJ-7", "PROJ-8"},
 		"PROJ-1٣ не ключ":                   nil,
+		"PROJ-1² не ключ":                   nil,
+		"PROJ-1https://x/PROJ-2":            nil,
 		"[PROJ-1](https://x/PROJ-1) PROJ-9": {"PROJ-9"},
 	}
 	for line, want := range cases {

@@ -90,24 +90,28 @@ var rows = []row{
 
 func TestClassify(t *testing.T) {
 	for _, r := range rows {
-		t.Run(r.name, func(t *testing.T) {
-			ev := Event{Tool: r.tool, Command: r.cmd, Cwd: r.cwd, Home: testHome}
-			if r.path != "" {
-				ev.Paths = []string{r.path}
-			}
-			v := Classify(ev)
-			var hits, cands []int
-			for c := 1; c <= 4; c++ {
-				if v.HitClass(c) {
-					hits = append(hits, c)
-				} else if v.Mentioned[c] {
-					cands = append(cands, c)
-				}
-			}
-			if !slices.Equal(hits, r.hits) || !slices.Equal(cands, r.cands) {
-				t.Errorf("попадания %v (ждём %v), отсеянные кандидаты %v (ждём %v); hits=%+v", hits, r.hits, cands, r.cands, v.Hits)
-			}
-		})
+		t.Run(r.name, func(t *testing.T) { checkRow(t, r) })
+	}
+}
+
+// checkRow сверяет классы с попаданием и отсеянных кандидатов строки таблицы.
+func checkRow(t *testing.T, r row) {
+	t.Helper()
+	ev := Event{Tool: r.tool, Command: r.cmd, Cwd: r.cwd, Home: testHome}
+	if r.path != "" {
+		ev.Paths = []string{r.path}
+	}
+	v := Classify(ev)
+	var hits, cands []int
+	for c := 1; c <= 4; c++ {
+		if v.HitClass(c) {
+			hits = append(hits, c)
+		} else if v.Mentioned[c] {
+			cands = append(cands, c)
+		}
+	}
+	if !slices.Equal(hits, r.hits) || !slices.Equal(cands, r.cands) {
+		t.Errorf("попадания %v (ждём %v), отсеянные кандидаты %v (ждём %v); hits=%+v", hits, r.hits, cands, r.cands, v.Hits)
 	}
 }
 

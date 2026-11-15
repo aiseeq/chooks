@@ -3,13 +3,17 @@ package main
 // Классификатор действий «по да» (тикет subagent-approval-actions-report).
 //
 // Команды оболочки разбирает github.com/aiseeq/akit/shellcmd (mvdan.cc/sh): он снимает обёртки
-// (`bash -c`, `graft exec --`, `timeout`, `sudo`), подставляет переменные, присвоенные в той же
-// команде (`G="git --git-dir=…"; $G commit`), и отдаёт перенаправления с телами heredoc.
+// (`bash -c`, `graft exec --`, `timeout`, `sudo`), подставляет переменные на место имени программы
+// (`G="git --git-dir=…"; $G commit`) и отдаёт перенаправления с телами heredoc. Переменные в
+// аргументах и целях перенаправлений подставляет vars.go: литеральные значения присваиваний
+// раньше в той же команде (`F=~/.claude/x; sub a b "$F"`).
 // Ограничения разбора:
-//   - Цель записи берётся из слов команды: путь в переменной из окружения (`$D/x`) и записи из
-//     кода python/perl/node не видны. Записи из кода выдаются отдельно как «возможные»
-//     (эвристика по тексту скрипта) и в числа классов не входят. Цели `sub -F файл` берутся из
-//     вывода sub в транскрипте («sub: N replacements in M files: …», ResolveSpec).
+//   - Цель записи берётся из слов команды: путь в переменной из окружения или с подстановкой
+//     команды (`D=$(mktemp -d)`) и записи из кода python/perl/node не видны. Записи из кода
+//     выдаются отдельно как «возможные» (эвристика по тексту скрипта или путь класса 1 в
+//     аргументах скрипта рядом со словом правки) и в числа классов не входят. Цели `sub -F файл`
+//     берутся из вывода sub в транскрипте («sub: N replacements in M files: …», ResolveSpec);
+//     вывод неполный (`| cut -c1-80`) — из файла спецификации, если он ещё есть (ResolveSpecFile).
 //   - Команда, которая присваивает HOME (`export HOME=$W/h` в пробе), делает `$HOME` и `~`
 //     неизвестными: запись туда не считается.
 //   - Каталог для относительного пути — cwd записи транскрипта (у бойца — dir задачи) плюс
@@ -18,7 +22,9 @@ package main
 //     тексту: только явные формы (`> ~/.claude/…`, `tee`, `lex build`, `cfg commit`,
 //     `--git-dir=….claude-config.git … commit|push`, `graft deploy …`); такие попадания
 //     помечены «(regex)».
-//   - Класс 3: prod — цель, в имени которой есть «prod»; цель в переменной — «?».
+//   - Класс 3: prod — цель, в имени которой есть «prod»; цель в переменной — «?». Выкатка с
+//     временным XDG_CONFIG_HOME (`$TMPDIR`, `/tmp`, mktemp, scratchpad) — проба: в число класса
+//     не входит, печатается отдельной строкой.
 //   - Класс 4: метод curl — `-X/--request`, иначе POST при `-d/--data*/-F/--json`, PUT при `-T`;
 //     поиск через POST (`/search`, `/jql`, `bulkfetch`) — чтение. «Своя задача» — ключ задачи
 //     из URL встречается в задании агента (первое сообщение суб-агента, brief*.md бойца).
@@ -29,6 +35,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/akit/shellcmd"
@@ -57,10 +64,18 @@ type Hit struct {
 type Verdict struct {
 	Hits      []Hit
 	Mentioned [5]bool // кандидат класса: в тексте есть признак класса (путь, cfg, graft deploy, curl+atlassian)
-	Possible  []Hit   // эвристика по коду скрипта, в числа классов не входит
-	Unparsed  bool    // оболочка не разобрала команду: работали регулярки
-	SpecFile  bool    // `sub -F файл`: цели в файле спецификации, ждут вывода sub (ResolveSpec)
+	// Possible — вне чисел классов: эвристика по коду скрипта (класс 1, 4) и выкатка в пробе
+	// с временным конфигом graft (класс 3).
+	Possible     []Hit
+	Unparsed     bool     // оболочка не разобрала команду: работали регулярки
+	VarsUnparsed bool     // вложенный скрипт не разобран: переменные из него не подставлены
+	SpecFile     bool     // `sub -F файл`: цели в файле спецификации, ждут вывода sub (ResolveSpec)
+	Spec         *SpecRef // файл спецификации `sub -F`
 }
+
+// SpecRef — файл спецификации `sub -F`: путь ("" — в неизвестной переменной) и каталог вызова
+// для относительных путей в нём.
+type SpecRef struct{ Path, Cwd string }
 
 // HitClass сообщает, есть ли попадание класса.
 func (v Verdict) HitClass(c int) bool {
@@ -120,7 +135,9 @@ func classifyShell(ev Event, v *Verdict) {
 		regexFallback(ev, v)
 		return
 	}
-	w := shellWalk{ev: ev, v: v, home: homeVar(ev), cwd: ev.Cwd}
+	vars, err := collectVars(cmd, homeVar(ev))
+	v.VarsUnparsed = err != nil
+	w := shellWalk{ev: ev, v: v, home: homeVar(ev), cwd: ev.Cwd, vars: vars}
 	for _, c := range calls {
 		w.call(c)
 	}
@@ -133,17 +150,19 @@ type shellWalk struct {
 	home      string
 	cwd       string
 	gitDirEnv string
+	vars      shellVars
 }
 
 func (w *shellWalk) call(c shellcmd.Call) {
+	vars := w.vars.at(c.Offset)
 	args := make([]string, len(c.Args))
 	for i, a := range c.Args {
-		args[i] = unquote(a)
+		args[i] = expandVars(unquote(a), vars)
 	}
 	if w.track(c.Name, args) {
 		return
 	}
-	x := callCtx{ev: w.ev, home: w.home, cwd: w.cwd, gitDir: w.gitDirEnv, v: w.v}
+	x := callCtx{ev: w.ev, home: w.home, cwd: w.cwd, gitDir: w.gitDirEnv, v: w.v, vars: vars}
 	x.redirects(c)
 	if h, ok := callHandlers[c.Name]; ok {
 		h(x, c, args)
@@ -209,7 +228,7 @@ var callHandlers = map[string]callHandler{
 	"lex":      func(x callCtx, _ shellcmd.Call, args []string) { x.lex(args) },
 	"git":      func(x callCtx, c shellcmd.Call, args []string) { x.gitCall(c, args) },
 	"cfg":      func(x callCtx, _ shellcmd.Call, args []string) { x.cfg(args) },
-	"graft":    func(x callCtx, _ shellcmd.Call, args []string) { x.graft(args) },
+	"graft":    func(x callCtx, c shellcmd.Call, args []string) { x.graft(c, args) },
 	"curl":     func(x callCtx, _ shellcmd.Call, args []string) { x.curl(args, x.ev.Command) },
 	"":         func(x callCtx, c shellcmd.Call, _ []string) { x.dynamic(c) },
 }
@@ -236,13 +255,30 @@ func (x callCtx) cfg(args []string) {
 	}
 }
 
-func (x callCtx) graft(args []string) {
+func (x callCtx) graft(c shellcmd.Call, args []string) {
 	if len(args) == 0 || args[0] != "deploy" {
 		return
 	}
-	if h, ok := graftDeploy(args[1:]); ok {
+	h, ok := graftDeploy(args[1:])
+	switch {
+	case !ok:
+	case reTempConfig.MatchString(textBefore(x.ev.Command, c.Offset)):
+		h.Prod = "проба: временный XDG_CONFIG_HOME"
+		x.v.Possible = append(x.v.Possible, h)
+	default:
 		x.v.Hits = append(x.v.Hits, h)
 	}
+}
+
+// reTempConfig — XDG_CONFIG_HOME во временном каталоге: конфиг graft пробы, не живой.
+var reTempConfig = regexp.MustCompile(`\bXDG_CONFIG_HOME=["']?(\$\{?TMPDIR\b|\$\(mktemp|/tmp/|/var/tmp/|[^\s;&|]*(claude-tmp|scratchpad)/)`)
+
+// textBefore — текст команды до вызова (присваивания и export перед ним); вызов не в тексте — вся команда.
+func textBefore(cmd string, off int) string {
+	if off < 0 || off > len(cmd) {
+		return cmd
+	}
+	return cmd[:off]
 }
 
 func (x callCtx) dynamic(c shellcmd.Call) {
@@ -258,28 +294,57 @@ func mayWriteRelative(ev Event) bool {
 }
 
 var (
-	reSubDone = regexp.MustCompile(`(?m)^sub: \d+ replacements? in \d+ files?: (.*)$`)
+	reSubDone = regexp.MustCompile(`(?m)^sub: \d+ replacements? in (\d+) files?: (.*)$`)
 	reSubFile = regexp.MustCompile(`(?:^|, )(\S+) \d+ \(lines? `)
 	reSubMsg  = regexp.MustCompile(`(?m)^sub: `)
 )
 
 // ResolveSpec дополняет событие `sub -F файл` путями из вывода sub
 // («sub: 9 replacements in 8 files: /путь 1 (line 4), …»; относительный путь — от cwd события).
-// Другая строка «sub: …» (несовпадение, ошибка) значит, что sub ничего не записал;
-// без строк «sub: » (вывод обрезан или не дошёл) цель остаётся невидимой.
+// Другая строка «sub: …» (несовпадение, ошибка) значит, что sub ничего не записал.
+// Без строк «sub: » (вывод не дошёл) или с неполным списком файлов (вывод обрезан `cut`)
+// цели остаются невидимыми: SpecFile остаётся, их ищет ResolveSpecFile.
 func (v *Verdict) ResolveSpec(out, home, cwd string) {
 	if !v.SpecFile || !reSubMsg.MatchString(out) {
 		return
 	}
-	v.SpecFile = false
+	complete := true
 	for _, d := range reSubDone.FindAllStringSubmatch(out, -1) {
-		for _, m := range reSubFile.FindAllStringSubmatch(d[1], -1) {
-			if np, ok := normPath(m[1], home, cwd); ok && protected(np, home) {
-				v.Hits = append(v.Hits, Hit{Class: 1, Verb: "sub -F (по выводу)", Target: np})
-				v.Mentioned[1] = true
-			}
+		files := reSubFile.FindAllStringSubmatch(d[2], -1)
+		if n, err := strconv.Atoi(d[1]); err != nil || len(files) < n {
+			complete = false
+		}
+		for _, m := range files {
+			v.addSpecHit("sub -F (по выводу)", m[1], home, cwd)
 		}
 	}
+	v.SpecFile = !complete
+}
+
+// ResolveSpecFile — цели `sub -F файл` из файла спецификации, когда вывод их не показал. Файл
+// читается при разборе отчёта, а не в момент события: он мог измениться после вызова.
+func (v *Verdict) ResolveSpecFile(body, home string) {
+	if !v.SpecFile {
+		return
+	}
+	v.SpecFile = false
+	for _, p := range subSpecPaths(body) {
+		v.addSpecHit("sub -F (по файлу спецификации)", p, home, v.Spec.Cwd)
+	}
+}
+
+func (v *Verdict) addSpecHit(verb, p, home, cwd string) {
+	np, ok := normPath(p, home, cwd)
+	if !ok || !protected(np, home) {
+		return
+	}
+	for _, h := range v.Hits {
+		if h.Class == 1 && h.Target == np {
+			return
+		}
+	}
+	v.Hits = append(v.Hits, Hit{Class: 1, Verb: verb, Target: np})
+	v.Mentioned[1] = true
 }
 
 // assignPrefix — текст простой команды перед именем программы: там стоят присваивания `GIT_DIR=…`.
@@ -300,6 +365,7 @@ type callCtx struct {
 	cwd    string
 	gitDir string // GIT_DIR из `export` раньше в команде
 	v      *Verdict
+	vars   map[string]string // переменные, присвоенные раньше в команде
 }
 
 var reHomeAssign = regexp.MustCompile(`(^|[\s;&|(])(export\s+)?HOME=`)
@@ -325,7 +391,7 @@ func (x callCtx) redirects(c shellcmd.Call) {
 	for _, r := range c.Redirs {
 		switch r.Op {
 		case ">", ">>", ">|", "&>", "&>>", ">&":
-			t := unquote(r.Target)
+			t := expandVars(unquote(r.Target), x.vars)
 			if t == "-" || t == "" || strings.Trim(t, "0123456789") == "" {
 				continue
 			}
@@ -389,19 +455,58 @@ func (x callCtx) sub(c shellcmd.Call, args []string) {
 	case spec == "" || spec == "-":
 		for _, r := range c.Redirs {
 			if r.Op == "<<" || r.Op == "<<-" {
-				x.writeTargets("sub", subSpecPaths(r.Body))
+				x.writeTargets("sub", subSpecPaths(x.heredocBody(r)))
 			}
 			if r.Op == "<<<" {
-				x.writeTargets("sub", subSpecPaths(unquote(r.Target)))
+				x.writeTargets("sub", subSpecPaths(expandVars(unquote(r.Target), x.vars)))
 			}
 		}
 	default:
-		x.v.SpecFile = true
+		x.specFile(spec)
 	}
 }
 
+// specFile — `sub -F файл`: цели ждут вывода sub или самого файла.
+func (x callCtx) specFile(spec string) {
+	x.v.SpecFile = true
+	x.v.Spec = &SpecRef{Cwd: x.cwd}
+	if np, ok := normPath(spec, x.home, x.cwd); ok {
+		x.v.Spec.Path = np
+	}
+}
+
+// heredocBody — тело heredoc; ограничитель без кавычек (видно по строке с `<<` в исходной
+// команде) — с подстановкой известных переменных. Тела нет в исходном тексте — без подстановки.
+func (x callCtx) heredocBody(r shellcmd.Redir) string {
+	cmd := x.ev.Command
+	if r.BodyStart <= 0 || r.BodyStart > len(cmd) {
+		return r.Body
+	}
+	head := cmd[:r.BodyStart-1]
+	if i := strings.LastIndex(head, "\n"); i >= 0 {
+		head = head[i+1:]
+	}
+	i := strings.LastIndex(head, "<<")
+	if i < 0 {
+		return r.Body
+	}
+	if d := strings.TrimLeft(head[i+2:], "- \t"); d == "" || strings.ContainsAny(d[:1], `'"\`) {
+		return r.Body
+	}
+	return expandVars(r.Body, x.vars)
+}
+
 // subSpecPaths — строки путей спецификации sub: непустые строки вне блоков SEARCH/REPLACE.
+// Без маркеров SEARCH (старая форма «путь, OLD, NEW» с разделителем «=») путь — только первая строка.
 func subSpecPaths(body string) []string {
+	if !strings.Contains(body, "<<<<<<< SEARCH") {
+		for line := range strings.SplitSeq(body, "\n") {
+			if t := strings.TrimSpace(line); t != "" {
+				return []string{t}
+			}
+		}
+		return nil
+	}
 	var out []string
 	in := false
 	for line := range strings.SplitSeq(body, "\n") {
@@ -584,7 +689,7 @@ func (x callCtx) git(args []string, gitDir string) {
 		return
 	}
 	np, ok := normPath(gitDir, x.home, x.cwd)
-	if !ok || filepath.Base(np) != ".claude-config.git" {
+	if !ok || np != x.ev.Home+"/.claude-config.git" {
 		return
 	}
 	x.v.Hits = append(x.v.Hits, Hit{Class: 2, Verb: "git " + sub, Target: np})
@@ -830,8 +935,33 @@ func scriptProtectedWrite(s, home string) string {
 	return ""
 }
 
-// scriptWrites — эвристика по тексту скрипта python/node: в числа классов не входит.
+// scriptEditVerbs — слова правки в аргументах скрипта: `python3 fx.py sub <путь> …`.
+var scriptEditVerbs = map[string]bool{"sub": true, "replace": true, "write": true, "edit": true, "patch": true, "apply": true, "fix": true, "set": true, "add": true, "append": true}
+
+// scriptArgWrite — путь класса 1 в аргументах скрипта, если рядом слово правки; запуск без файла скрипта — "".
+func (x callCtx) scriptArgWrite(args []string) (script, target string) {
+	pos := positional(args, map[string]bool{"-m": true, "-W": true, "-X": true})
+	if len(pos) < 2 || slices.Contains(args, "-c") || slices.Contains(args, "-e") {
+		return "", ""
+	}
+	edit := false
+	for _, a := range pos[1:] {
+		edit = edit || scriptEditVerbs[a]
+		if np, ok := normPath(a, x.home, x.cwd); ok && protected(np, x.ev.Home) && target == "" {
+			target = np
+		}
+	}
+	if !edit {
+		return "", ""
+	}
+	return filepath.Base(pos[0]), target
+}
+
+// scriptWrites — эвристика по тексту скрипта python/node и по его аргументам: в числа классов не входит.
 func (x callCtx) scriptWrites(c shellcmd.Call, args []string) {
+	if script, t := x.scriptArgWrite(args); t != "" {
+		x.v.Possible = append(x.v.Possible, Hit{Class: 1, Verb: c.Name + " " + script + " (аргумент)", Target: t})
+	}
 	var body strings.Builder
 	for i, a := range args {
 		if (a == "-c" || a == "-e") && i+1 < len(args) {

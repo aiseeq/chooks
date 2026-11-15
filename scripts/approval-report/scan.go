@@ -140,6 +140,28 @@ func (s *scanner) add(a *Agent, recs []Record, pop string, files int, err error)
 	}
 }
 
+// specFiles — цели `sub -F файл`, не видные в выводе, из файла спецификации; файла уже нет —
+// событие остаётся в «не видно разбором».
+func (s *scanner) specFiles(recs []Record) error {
+	var errs []error
+	for i := range recs {
+		v := &recs[i].V
+		if !v.SpecFile || v.Spec == nil || v.Spec.Path == "" {
+			continue
+		}
+		body, err := os.ReadFile(v.Spec.Path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("строка %d, файл спецификации: %w", recs[i].Line, err))
+			continue
+		}
+		v.ResolveSpecFile(string(body), s.home)
+	}
+	return errors.Join(errs...)
+}
+
 // eachLine читает файл потоком: строки любой длины, номер с 1.
 func eachLine(path string, fn func(n int, line []byte)) error {
 	f, err := os.Open(path)
@@ -214,6 +236,9 @@ func (s *scanner) scanSub(path string, short map[string]string, names *parentNam
 		x.a.Short = id[:min(8, len(id))]
 	}
 	if err := eachLine(path, x.line); err != nil {
+		x.errs = append(x.errs, err)
+	}
+	if err := s.specFiles(x.recs); err != nil {
 		x.errs = append(x.errs, err)
 	}
 	a := x.a
@@ -400,6 +425,9 @@ func (s *scanner) scanWorker(dir string, atts []string) {
 		if err := w.att(att); err != nil {
 			errs = append(errs, fmt.Errorf("%s/%s: %w", task, filepath.Base(att), err))
 		}
+	}
+	if err := s.specFiles(w.recs); err != nil {
+		errs = append(errs, fmt.Errorf("%s: %w", task, err))
 	}
 	s.add(w.a, w.recs, "worker", len(atts), errors.Join(errs...))
 }

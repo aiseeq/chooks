@@ -114,39 +114,65 @@ func classDetails(w io.Writer, hits []Record, c int) {
 	}
 }
 
-// popNotes — то, что разбор не видит: неразобранная оболочка, `sub -F` без цели, запись из python/node.
+// popNotes — то, что разбор не видит: неразобранная оболочка, `sub -F` без цели, запись из
+// python/node, выкатка в пробе.
 func popNotes(w io.Writer, recs []Record) {
-	unparsed, spec, specProt := 0, 0, 0
-	var possible []Record
+	unparsed, varsUnparsed, specProt := 0, 0, 0
+	var spec, possible, probe []Record
 	for _, r := range recs {
 		if r.V.Unparsed {
 			unparsed++
 		}
+		if r.V.VarsUnparsed {
+			varsUnparsed++
+		}
 		if r.V.SpecFile {
-			spec++
+			spec = append(spec, r)
 		}
 		if r.V.SpecFile && r.V.Mentioned[1] && !r.V.HitClass(1) {
 			specProt++
-			if listAll {
-				fmt.Fprintf(w, "  sub -F без цели, путь класса 1 в тексте: %s\n", r.Ref())
-			}
 		}
-		if len(r.V.Possible) > 0 {
+		switch {
+		case len(r.V.Possible) == 0:
+		case r.V.Possible[0].Class == 3:
+			probe = append(probe, r)
+		default:
 			possible = append(possible, r)
 		}
 	}
-	fmt.Fprintf(w, "Не видно разбором: оболочка не разобрала %d кандидатов (проверены регулярками), `sub -F файл` без цели в команде %d (из них с путём класса 1 в тексте и без попадания %d)\n", unparsed, spec, specProt)
-	if len(possible) == 0 {
-		return
+	fmt.Fprintf(w, "Не видно разбором: оболочка не разобрала %d кандидатов (проверены регулярками), переменные вложенного скрипта не разобраны у %d; `sub -F файл`, цели которого нет ни в выводе (не дошёл или обрезан), ни в файле спецификации (файла уже нет или путь в переменной) — %d, из них с путём класса 1 в тексте и без попадания %d\n", unparsed, varsUnparsed, len(spec), specProt)
+	noteList(w, spec, func(r Record) string { return "файл " + specName(r.V.Spec) })
+	if len(possible) > 0 {
+		fmt.Fprintf(w, "Возможные записи из кода python/node (эвристика, в числа классов не входят): %d\n", len(possible))
+		noteList(w, possible, func(r Record) string {
+			h := r.V.Possible[0]
+			return fmt.Sprintf("класс %d?, %s, %s", h.Class, h.Verb, h.Target)
+		})
 	}
-	fmt.Fprintf(w, "Возможные записи из кода python/node (эвристика, в числа классов не входят): %d\n", len(possible))
+	if len(probe) > 0 {
+		fmt.Fprintf(w, "Выкатка в пробе с временным XDG_CONFIG_HOME (в класс 3 не входит, в его «отсеяно» входит): %d\n", len(probe))
+		noteList(w, probe, func(r Record) string {
+			h := r.V.Possible[0]
+			return h.Verb + " " + h.Target + ", мастер " + r.Agent.Master
+		})
+	}
+}
+
+// noteList печатает события примечания: 3 первых, с --list — все.
+func noteList(w io.Writer, recs []Record, line func(Record) string) {
 	if !listAll {
-		possible = possible[:min(3, len(possible))]
+		recs = recs[:min(3, len(recs))]
 	}
-	for _, r := range possible {
-		h := r.V.Possible[0]
-		fmt.Fprintf(w, "    %s — класс %d?, %s, %s\n", r.Ref(), h.Class, h.Verb, h.Target)
+	for _, r := range recs {
+		fmt.Fprintf(w, "    %s — %s\n", r.Ref(), line(r))
 	}
+}
+
+func specName(s *SpecRef) string {
+	if s == nil || s.Path == "" {
+		return "в переменной"
+	}
+	return s.Path
 }
 
 func pct(a, b int) string {

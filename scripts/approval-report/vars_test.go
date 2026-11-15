@@ -183,6 +183,8 @@ func TestProbeCwd(t *testing.T) {
 		{"cd в неизвестную переменную", "Bash", tmp, false, `cd "$W/proj" && ` + deploy, ""},
 		{"cd в git rev-parse", "Bash", tmp, false, `cd "$(git -C ` + live + ` rev-parse --show-toplevel)" && ` + deploy, ""},
 		{"cd в переменную из mktemp", "Bash", live, false, `W=$(mktemp -d); cd "$W" && ` + deploy, "проба: каталог из mktemp или $TMPDIR"},
+		{"cd в переменную из mktemp, переприсвоенную", "Bash", live, false, `W=$(mktemp -d); W=$(git rev-parse --show-toplevel); cd "$W" && ` + deploy, ""},
+		{"cd в переменную до её присваивания из mktemp", "Bash", live, false, `cd "$W" && W=$(mktemp -d) && ` + deploy, ""},
 		{"cd в $TMPDIR", "Bash", live, false, `cd "$TMPDIR/p" && ` + deploy, "проба: каталог из mktemp или $TMPDIR"},
 		{"pushd и popd", "Bash", live, false, "pushd " + tmp + " && true; popd && " + deploy, ""},
 		{"popd после cd в стеке", "Bash", live, false, "pushd /tmp/a && cd /tmp/b && popd && " + deploy, ""},
@@ -217,23 +219,28 @@ func TestProbeCwd(t *testing.T) {
 		{"подстановка процесса >( — не подоболочка", "Bash", live, false, "echo a > >(cat); cd " + tmp + " && " + deploy, "проба: каталог /tmp/p"},
 	}
 	for _, c := range cases {
-		v := Classify(Event{Tool: c.tool, Command: c.cmd, Cwd: c.cwd, CallCwd: c.callCwd, Home: testHome})
-		if v.Unparsed {
-			t.Errorf("%s: разбор оболочкой сорван, ответ — от регулярок", c.name)
-		}
-		if c.probe == "" {
-			if len(v.Possible) != 0 || !v.HitClass(3) {
-				t.Errorf("%s: ждём выкатку, Possible=%+v Hits=%+v", c.name, v.Possible, v.Hits)
-			}
-			continue
-		}
-		if len(v.Possible) != 1 || v.Possible[0].Prod != c.probe || v.HitClass(3) {
-			t.Errorf("%s: ждём %q, Possible=%+v Hits=%+v", c.name, c.probe, v.Possible, v.Hits)
-		}
+		checkProbe(t, c.name, Classify(Event{Tool: c.tool, Command: c.cmd, Cwd: c.cwd, CallCwd: c.callCwd, Home: testHome}), c.probe)
 	}
 	// graft -C без временного конфига — выкатка (раньше не распознавалась вовсе)
 	if v := Classify(Event{Tool: "Bash", Command: "graft -C " + live + " deploy prod", Cwd: tmp, Home: testHome}); !v.HitClass(3) {
 		t.Errorf("graft -C … deploy prod: Hits=%+v", v.Hits)
+	}
+}
+
+// checkProbe — выкатка с временным конфигом: проба с пометкой probe или ("") выкатка класса 3.
+func checkProbe(t *testing.T, name string, v Verdict, probe string) {
+	t.Helper()
+	if v.Unparsed {
+		t.Errorf("%s: разбор оболочкой сорван, ответ — от регулярок", name)
+	}
+	if probe == "" {
+		if len(v.Possible) != 0 || !v.HitClass(3) {
+			t.Errorf("%s: ждём выкатку, Possible=%+v Hits=%+v", name, v.Possible, v.Hits)
+		}
+		return
+	}
+	if len(v.Possible) != 1 || v.Possible[0].Prod != probe || v.HitClass(3) {
+		t.Errorf("%s: ждём %q, Possible=%+v Hits=%+v", name, probe, v.Possible, v.Hits)
 	}
 }
 

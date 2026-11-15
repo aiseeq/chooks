@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +67,21 @@ var rows = []row{
 	{name: "cfg status — чтение", tool: "Bash", cmd: `cfg status -sb; cfg diff -- .claude/CLAUDE.md`, cands: []int{1, 2}},
 	{name: "git diff конфиг-репо — чтение", tool: "Bash", cmd: `git --git-dir=/home/aisee/.claude-config.git --work-tree=/home/aisee diff -- .claude/skills`, cands: []int{1, 2}},
 	{name: "commit в другом репо", tool: "Bash", cmd: `git -C /home/aisee/git/chooks commit -m 'про .claude-config.git'`, cands: []int{2}},
+	// GIT_DIR окружения вызова: export, env, подоболочка, вложенный скрипт (тикет approval-report-export-decl).
+	{name: "export GIT_DIR, затем commit", tool: "Bash", cmd: `export GIT_DIR=$HOME/.claude-config.git; git commit -m x`, hits: []int{2}},
+	{name: "export GIT_DIR с GIT_WORK_TREE, push", tool: "Bash", cmd: `export GIT_DIR=~/.claude-config.git GIT_WORK_TREE=$HOME && git push origin main`, hits: []int{2}},
+	{name: "env GIT_DIR=", tool: "Bash", cmd: `env GIT_DIR=/home/aisee/.claude-config.git git commit -m x`, hits: []int{2}},
+	{name: "GIT_DIR из переменной", tool: "Bash", cmd: `R=/home/aisee/.claude-config.git; export GIT_DIR="$R"; git commit -m x`, hits: []int{2}},
+	{name: "export GIT_DIR во вложенном скрипте и commit в нём", tool: "Bash", cmd: `bash -c 'export GIT_DIR=$HOME/.claude-config.git; git commit -m x'`, hits: []int{2}},
+	{name: "export GIT_DIR в одной ветке — запас в сторону попадания", tool: "Bash", cmd: `if [ -d x ]; then export GIT_DIR=$HOME/.claude-config.git; fi; git commit -m x`, hits: []int{2}},
+	{name: "GIT_DIR без export", tool: "Bash", cmd: `GIT_DIR=/home/aisee/.claude-config.git; git commit -m x`, cands: []int{2}},
+	{name: "export GIT_DIR в подоболочке", tool: "Bash", cmd: `(export GIT_DIR=$HOME/.claude-config.git); git commit -m x`, cands: []int{2}},
+	{name: "export GIT_DIR во вложенном скрипте", tool: "Bash", cmd: `bash -c 'export GIT_DIR=$HOME/.claude-config.git'; git commit -m x`, cands: []int{2}},
+	{name: "env -u GIT_DIR", tool: "Bash", cmd: `export GIT_DIR=$HOME/.claude-config.git; env -u GIT_DIR git commit -m x`, cands: []int{2}},
+	{name: "unset GIT_DIR", tool: "Bash", cmd: `export GIT_DIR=$HOME/.claude-config.git; unset GIT_DIR; git commit -m x`, cands: []int{2}},
+	{name: "unset GIT_DIR в одной ветке — запас в сторону попадания", tool: "Bash", cmd: `export GIT_DIR=$HOME/.claude-config.git; [ -d x ] && unset GIT_DIR; git commit -m x`, hits: []int{2}},
+	{name: "GIT_DIR в heredoc оболочки — по регулярке", tool: "Bash", cmd: "bash <<'E'\nGIT_DIR=/home/aisee/.claude-config.git git commit -m x\nE", hits: []int{2}},
+	{name: "GIT_DIR у другого вызова", tool: "Bash", cmd: `GIT_DIR=$HOME/.claude-config.git git status; git commit -m x`, cands: []int{2}},
 
 	// Класс 3.
 	{name: "deploy prod", tool: "Bash", cmd: `graft deploy prod 2>&1 | tail`, hits: []int{3}},
@@ -201,5 +217,147 @@ func TestPossiblePython(t *testing.T) {
 	v = Classify(Event{Tool: "command_execution", Command: "/bin/bash -lc \"python3 - <<'PY'\np='/home/aisee/.claude/improve/out/night.json'\na=[d('x','tl 2a7ed31d:1285; ~/.claude/decisions.md:784')]\nwith open(p,'w') as f: f.write('x')\nPY\"", Home: testHome})
 	if len(v.Possible) != 0 {
 		t.Fatalf("путь в данных — не запись: %+v", v.Possible)
+	}
+}
+
+// Временный XDG_CONFIG_HOME по окружению вызова (vars.go, callEnv): export действует в той же
+// оболочке и во вложенных в неё после него; подоболочка, `$( … )`, элемент конвейера и вложенный
+// `bash -c` — свои процессы; env -i, env -u, sudo без -E, ssh снимают конфиг; неясное окружение
+// (ветка, функция, eval) — выкатка. Формы — из приёмки approval-report-polish, раунд 4.
+func TestTempConfigEnv(t *testing.T) {
+	const tmp = "/tmp/p"
+	const probe = "проба: каталог /tmp/p"
+	const exp = `export XDG_CONFIG_HOME=/tmp/c; `
+	cases := []struct {
+		name, tool, cmd string
+		probe           string // "" — выкатка класса 3
+	}{
+		// живая выкатка
+		{"export во вложенном скрипте обёртки бойца", "command_execution", `/bin/bash -lc 'bash -c "export XDG_CONFIG_HOME=/tmp/c"; graft deploy prod'`, ""},
+		{"export в тексте echo у бойца", "command_execution", `/bin/bash -lc 'echo "export XDG_CONFIG_HOME=/tmp/c"; graft deploy prod'`, ""},
+		{"export и выкатка в разных вложенных скриптах", "Bash", `bash -c 'export XDG_CONFIG_HOME=/tmp/c' ; bash -c 'graft deploy prod'`, ""},
+		{"export в подстановке команды", "Bash", `X=$(export XDG_CONFIG_HOME=/tmp/c; echo); graft deploy prod`, ""},
+		{"export в конвейере", "Bash", `export XDG_CONFIG_HOME=/tmp/c | true; graft deploy prod`, ""},
+		{"export в задании &", "Bash", `export XDG_CONFIG_HOME=/tmp/c & graft deploy prod`, ""},
+		{"env --unset=", "Bash", exp + `env --unset=XDG_CONFIG_HOME graft deploy prod`, ""},
+		{"env -uИМЯ", "Bash", exp + `env -uXDG_CONFIG_HOME graft deploy prod`, ""},
+		{"env -i", "Bash", exp + `env -i graft deploy prod`, ""},
+		{"env -i с присваиванием", "Bash", exp + `env -i A=1 graft deploy prod`, ""},
+		{"env -", "Bash", exp + `env - graft deploy prod`, ""},
+		{"env --ignore-environment", "Bash", exp + `env --ignore-environment graft deploy prod`, ""},
+		{"env -S — окружение не разобрано", "Bash", exp + `env -S 'A=1' graft deploy prod`, ""},
+		{"sudo без -E", "Bash", exp + `sudo graft deploy prod`, ""},
+		{"sudo -u без -E", "Bash", exp + `sudo -u root graft deploy prod`, ""},
+		{"ssh", "Bash", exp + `ssh host graft deploy prod`, ""},
+		{"export в ветке if", "Bash", `if [ -d x ]; then export XDG_CONFIG_HOME=/tmp/c; fi; graft deploy prod`, ""},
+		{"export после && — мог не исполниться", "Bash", `cd /tmp/p && export XDG_CONFIG_HOME=/tmp/c; graft deploy prod`, ""},
+		{"export после || ", "Bash", `false || export XDG_CONFIG_HOME=/tmp/c; graft deploy prod`, ""},
+		{"export в цикле", "Bash", `for i in 1; do export XDG_CONFIG_HOME=/tmp/c; done; graft deploy prod`, ""},
+		{"присваивание, затем export без значения во вложенном скрипте", "Bash", `XDG_CONFIG_HOME=/tmp/c; bash -c 'export XDG_CONFIG_HOME; graft deploy prod'`, ""},
+		{"env -i перед вложенным скриптом", "Bash", exp + `env -i bash -c 'graft deploy prod'`, ""},
+		{"живой export в одной ветке после временного", "Bash", exp + `if [ -d x ]; then export XDG_CONFIG_HOME=/home/aisee/.config; fi; graft deploy prod`, ""},
+		{"TMPDIR переприсвоен живым", "Bash", `TMPDIR=/home/aisee/x; export XDG_CONFIG_HOME=$TMPDIR/c; graft deploy prod`, ""},
+		{"declare +x с присваиванием", "Bash", exp + `declare +x XDG_CONFIG_HOME=/tmp/d; graft deploy prod`, ""},
+		{"присваивание после export в одной ветке", "Bash", `if [ -d x ]; then export XDG_CONFIG_HOME=/tmp/c; fi; XDG_CONFIG_HOME=/tmp/c; graft deploy prod`, ""},
+		{"export в цикле while", "Bash", `while false; do export XDG_CONFIG_HOME=/tmp/c; done; graft deploy prod`, ""},
+		{"export в case", "Bash", `case x in y) export XDG_CONFIG_HOME=/tmp/c;; esac; graft deploy prod`, ""},
+		{"export в одной ветке if/else", "Bash", `if [ -d x ]; then export XDG_CONFIG_HOME=/tmp/c; else true; fi; graft deploy prod`, ""},
+		{"export после || и && выкатка", "Bash", `false || export XDG_CONFIG_HOME=/tmp/c && graft deploy prod`, ""},
+		{"export в задании внутри &&", "Bash", `true && export XDG_CONFIG_HOME=/tmp/c & graft deploy prod`, ""},
+		{"env --unset ИМЯ", "Bash", exp + `env --unset XDG_CONFIG_HOME graft deploy prod`, ""},
+		{"env с неизвестной опцией", "Bash", exp + `env --frobnicate graft deploy prod`, ""},
+		{"env с живым конфигом", "Bash", exp + `env XDG_CONFIG_HOME=/home/aisee/.config graft deploy prod`, ""},
+		{"sudo --", "Bash", exp + `sudo -- graft deploy prod`, ""},
+		{"sudo -u root без -E", "Bash", exp + `sudo -u root -- graft deploy prod`, ""},
+		{"export -f не снимает и не ставит", "Bash", `export -f XDG_CONFIG_HOME=/tmp/c; graft deploy prod`, ""},
+		{"declare без -x", "Bash", `declare XDG_CONFIG_HOME=/tmp/c; graft deploy prod`, ""},
+		{"export без значения после ветки", "Bash", `if [ -d x ]; then XDG_CONFIG_HOME=/tmp/c; fi; export XDG_CONFIG_HOME; graft deploy prod`, ""},
+		{"export в функции", "Bash", `f() { export XDG_CONFIG_HOME=/tmp/c; }; f; graft deploy prod`, ""},
+		{"живой конфиг в функции после временного", "Bash", exp + `f() { export XDG_CONFIG_HOME=/home/aisee/.config; }; f; graft deploy prod`, ""},
+		{"eval после export", "Bash", exp + `eval "$S"; graft deploy prod`, ""},
+		{"source после export", "Bash", exp + `. ./env.sh; graft deploy prod`, ""},
+		{"присваивание без export", "Bash", `XDG_CONFIG_HOME=/tmp/c; graft deploy prod`, ""},
+		{"export -n", "Bash", exp + `export -n XDG_CONFIG_HOME; graft deploy prod`, ""},
+		{"declare +x", "Bash", exp + `declare +x XDG_CONFIG_HOME; graft deploy prod`, ""},
+		{"переменная из mktemp переприсвоена", "Bash", `D=$(mktemp -d); D=/home/aisee/.config; export XDG_CONFIG_HOME=$D; graft deploy prod`, ""},
+		{"живой export вплотную к ;", "Bash", `export XDG_CONFIG_HOME=/home/aisee/.config;graft deploy prod`, ""},
+		{"export в строке после \\ в одинарных кавычках", "Bash", `echo 'x\'"; export XDG_CONFIG_HOME=/tmp/c"; graft deploy prod`, ""},
+		// проба
+		{"export, затем вложенный скрипт", "Bash", exp + `bash -c 'graft deploy test'`, probe},
+		{"export в обеих ветках if", "Bash", `if [ -d x ]; then export XDG_CONFIG_HOME=/tmp/c; elif [ -d y ]; then export XDG_CONFIG_HOME=/tmp/c; else export XDG_CONFIG_HOME=/tmp/c; fi; graft deploy test`, probe},
+		{"unset -f не снимает переменную", "Bash", exp + `unset -f XDG_CONFIG_HOME; graft deploy test`, probe},
+		{"export внешней оболочки во вложенный скрипт в двойных кавычках", "Bash", `bash -c "export XDG_CONFIG_HOME=$TMPDIR/c; graft deploy test"`, probe},
+		{"вложенный скрипт без кавычек", "Bash", `bash -c export\ XDG_CONFIG_HOME=/tmp/c\;"graft deploy test"`, probe},
+		{"префикс у вложенного скрипта", "Bash", `XDG_CONFIG_HOME=/tmp/c bash -c 'graft deploy test'`, probe},
+		{"env -- с временным конфигом", "Bash", `env -- XDG_CONFIG_HOME=/tmp/c graft deploy test`, probe},
+		{"env с временным конфигом из $TMPDIR", "Bash", `env XDG_CONFIG_HOME="$TMPDIR/c" graft deploy test`, probe},
+		{"env -v --chdir=", "Bash", exp + `env -v --chdir=/tmp/p graft deploy test`, probe},
+		{"env --chdir каталог -0", "Bash", exp + `env --chdir /tmp/p -0 graft deploy test`, probe},
+		{"env -C каталог", "Bash", exp + `env -C/tmp/p graft deploy test`, probe},
+		{"env --default-signal", "Bash", exp + `env --default-signal graft deploy test`, probe},
+		{"sudo --preserve-env", "Bash", exp + `sudo --preserve-env graft deploy test`, probe},
+		{"sudo -u root -E", "Bash", exp + `sudo -u root -E graft deploy test`, probe},
+		{"sudo --user root -E", "Bash", exp + `sudo --user root -E graft deploy test`, probe},
+		{"sudo -Eu root", "Bash", exp + `sudo -Eu root graft deploy test`, probe},
+		{"sudo -uroot -E", "Bash", exp + `sudo -uroot -E graft deploy test`, probe},
+		{"timeout перед выкаткой", "Bash", exp + `timeout 60 graft deploy test`, probe},
+		{"export, затем timeout и вложенный скрипт", "Bash", exp + `timeout 60 bash -c 'graft deploy test'`, probe},
+		{"апостроф в комментарии до export", "Bash", "# it's\n" + exp + `graft deploy test`, probe},
+		{"апостроф в heredoc до export", "Bash", "cat <<'E'\nit's\nE\n" + exp + `graft deploy test`, probe},
+		{"\\ в одинарных кавычках до export", "Bash", `echo 'a\'; ` + exp + `graft deploy test`, probe},
+		{"апостроф в двойных кавычках до export", "Bash", `echo "it's"; ` + exp + `graft deploy test`, probe},
+		{"временное присваивание после export", "Bash", exp + `XDG_CONFIG_HOME=/tmp/d; graft deploy test`, probe},
+		{"export вплотную к ;", "Bash", `export XDG_CONFIG_HOME=/tmp/c;graft deploy test`, probe},
+		{"живой конфиг у префикса другого вызова", "Bash", exp + `XDG_CONFIG_HOME=/home/aisee/.config graft status; graft deploy test`, probe},
+		{"export && выкатка", "Bash", `cd /tmp/p && export XDG_CONFIG_HOME=/tmp/c && graft deploy test`, probe},
+		{"export без значения, затем присваивание", "Bash", `export XDG_CONFIG_HOME; XDG_CONFIG_HOME=/tmp/c; graft deploy test`, probe},
+		{"присваивание, затем export без значения", "Bash", `XDG_CONFIG_HOME=/tmp/c; export XDG_CONFIG_HOME; graft deploy test`, probe},
+		{"declare -x", "Bash", `declare -x XDG_CONFIG_HOME=/tmp/c; graft deploy test`, probe},
+		{"export из переменной mktemp", "Bash", `D=$(mktemp -d); export XDG_CONFIG_HOME="$D/c"; graft deploy test`, probe},
+		{"env -i с временным конфигом", "Bash", `env -i XDG_CONFIG_HOME=/tmp/c graft deploy test`, probe},
+		{"env -u другой переменной", "Bash", exp + `env -u A -C /tmp/p graft deploy test`, probe},
+		{"sudo -E", "Bash", exp + `sudo -E graft deploy test`, probe},
+		{"sudo --preserve-env=", "Bash", exp + `sudo --preserve-env=XDG_CONFIG_HOME graft deploy test`, probe},
+		{"выкатка в конвейере", "Bash", exp + `graft deploy test | tee /tmp/p/log`, probe},
+		{"export в ветке и после неё", "Bash", `if [ -d x ]; then export XDG_CONFIG_HOME=/tmp/c; fi; ` + exp + `graft deploy test`, probe},
+		{"боец: двойные кавычки codex с \\$TMPDIR", "command_execution", `/bin/bash -lc "export XDG_CONFIG_HOME=\"\$TMPDIR/c\"; echo \"it's\"; graft deploy test"`, probe},
+		{"боец: префикс в двойных кавычках codex", "command_execution", `/bin/bash -lc "XDG_CONFIG_HOME=\"\$TMPDIR/c\" graft deploy test"`, probe},
+		{"боец: export во вложенном скрипте с выкаткой", "command_execution", `/bin/bash -lc 'bash -c "export XDG_CONFIG_HOME=/tmp/c; graft deploy test"'`, probe},
+	}
+	for _, c := range cases {
+		checkProbe(t, c.name, Classify(Event{Tool: c.tool, Command: c.cmd, Cwd: tmp, CallCwd: c.tool == codexCommand, Home: testHome}), c.probe)
+	}
+	// GNU env кончает опции на первом присваивании: `env A=1 -u X graft …` запускает программу «-u»,
+	// выкатки нет, и пробой она не становится
+	if v := Classify(Event{Tool: "Bash", Command: exp + `env A=1 -u XDG_CONFIG_HOME graft deploy test`, Cwd: tmp, Home: testHome}); len(v.Possible) != 0 {
+		t.Errorf("env A=1 -u: Possible=%+v", v.Possible)
+	}
+}
+
+// sudo с присваиванием в словах: проходит ли оно, решает политика sudoers — переменная неясна.
+// GNU env кончает опции на первом не-опционном слове.
+// Через Classify не проверить: shellcmd (akit v1.76.0) берёт за программу `sudo X=/tmp/c graft`
+// последний компонент значения присваивания.
+func TestSudoAssignEnv(t *testing.T) {
+	const exp = `export XDG_CONFIG_HOME=/tmp/c; `
+	for _, c := range []struct {
+		cmd     string
+		unclear bool
+	}{
+		{`sudo XDG_CONFIG_HOME=/tmp/c graft deploy test`, true},
+		{`sudo -E XDG_CONFIG_HOME=/tmp/c graft deploy test`, true},
+		{`sudo --user=root -E -- graft deploy test`, false},
+		// GNU env кончает опции на первом присваивании: «-u» — программа, окружение не тронуто
+		{`env A=1 -u XDG_CONFIG_HOME graft deploy test`, false},
+	} {
+		sv, err := collectVars(exp+c.cmd, testHome, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env, ok := sv.callEnv(len(exp) + strings.Index(c.cmd, "graft"))
+		v, _ := env.get("XDG_CONFIG_HOME")
+		if !ok || v.unclear != c.unclear || !c.unclear && !(v.set && v.exported && v.temp) {
+			t.Errorf("%s: найден %v, XDG_CONFIG_HOME %+v, ждём неясность %v", c.cmd, ok, v, c.unclear)
+		}
 	}
 }

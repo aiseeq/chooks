@@ -165,8 +165,9 @@ func TestScanWorkerCallCwd(t *testing.T) {
 }
 
 // Все попытки задачи пишут в один rollout: номер повтора команды считается по thread через
-// попытки по номеру (att2 раньше att10), и попытка вне окна тоже считается. Каталог в rollout —
-// в URL-кодировке. Каталог из rollout может сделать событие неинтересным: тогда записи нет.
+// попытки по номеру (att2 раньше att10, попытка без номера — последней), и попытка вне окна тоже
+// считается. Каталог в rollout — в URL-кодировке. Каталог из rollout может сделать событие
+// неинтересным: тогда записи нет.
 func TestScanWorkerAttempts(t *testing.T) {
 	root := t.TempDir()
 	worker := filepath.Join(root, "worker")
@@ -191,7 +192,7 @@ func TestScanWorkerAttempts(t *testing.T) {
 	att("att10.jsonl", item("item_1", deploy))
 	// попытка в другом thread: свой счёт повторов
 	writeFile(t, filepath.Join(task, "att11.jsonl"), `{"type":"thread.started","thread_id":"t4"}`+"\n"+item("item_1", deploy)+"\n")
-	writeFile(t, filepath.Join(task, "attX.jsonl"), `{"type":"thread.started","thread_id":"t5"}`+"\n")
+	att("attX.jsonl", item("item_1", deploy))
 	rec := func(cmd, cwd string) string {
 		return `{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/bash","-lc","` + cmd + `"],"cwd":"file://` + cwd + `"}}}`
 	}
@@ -200,6 +201,7 @@ func TestScanWorkerAttempts(t *testing.T) {
 		rec("XDG_CONFIG_HOME=/tmp/c graft deploy test", "/var/tmp/%D1%8F"),
 		rec("echo a > SKILL.md", "/tmp/q"),
 		rec("XDG_CONFIG_HOME=/tmp/c graft deploy test", "/home/aisee/git/proj2"),
+		rec("XDG_CONFIG_HOME=/tmp/c graft deploy test", "/var/tmp/x"),
 	}, "\n")+"\n")
 	writeFile(t, filepath.Join(task, "codex", "sessions", "2026", "11", "09", "rollout-2026-11-09T20-00-00-t4.jsonl"), rec("XDG_CONFIG_HOME=/tmp/c graft deploy test", "/var/tmp/b")+"\n")
 
@@ -221,7 +223,7 @@ func TestScanWorkerAttempts(t *testing.T) {
 			got[ref] = "запись без класса"
 		}
 	}
-	want := map[string]string{"att2.jsonl:2": "проба: каталог /var/tmp/я", "att10.jsonl:2": "выкатка", "att11.jsonl:2": "проба: каталог /var/tmp/b"}
+	want := map[string]string{"att2.jsonl:2": "проба: каталог /var/tmp/я", "att10.jsonl:2": "выкатка", "att11.jsonl:2": "проба: каталог /var/tmp/b", "attX.jsonl:2": "проба: каталог /var/tmp/x"}
 	if !maps.Equal(got, want) {
 		t.Errorf("записи %v, ждём %v", got, want)
 	}

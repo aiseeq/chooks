@@ -23,8 +23,9 @@ package main
 //     `--git-dir=….claude-config.git … commit|push`, `graft deploy …`); такие попадания
 //     помечены «(regex)».
 //   - Класс 3: prod — цель, в имени которой есть «prod»; цель в переменной — «?». Выкатка с
-//     временным XDG_CONFIG_HOME (`$TMPDIR`, `/tmp`, mktemp, scratchpad) — проба: в число класса
-//     не входит, печатается отдельной строкой.
+//     временным XDG_CONFIG_HOME (`$TMPDIR`, `/tmp`, mktemp, scratchpad) в окружении вызова
+//     (vars.go: префикс, env, export в той же или внешней оболочке) — проба: в число класса не
+//     входит, печатается отдельной строкой. GIT_DIR класса 2 — из того же окружения.
 //   - Класс 4: метод curl — `-X/--request`, иначе POST при `-d/--data*/-F/--json`, PUT при `-T`;
 //     поиск через POST (`/search`, `/jql`, `bulkfetch`) — чтение. «Своя задача» — ключ задачи
 //     из URL встречается в задании агента (первое сообщение суб-агента, brief*.md бойца).
@@ -155,7 +156,7 @@ func classifyShell(ev Event, v *Verdict) {
 		regexFallback(ev, v)
 		return
 	}
-	vars, err := collectVars(cmd, homeVar(ev))
+	vars, err := collectVars(cmd, homeVar(ev), calls)
 	v.VarsUnparsed = err != nil
 	start := dirMark{path: ev.Cwd, temp: ev.cwdRecorded() && ev.Cwd != "" && tempDir(ev.Cwd)}
 	w := shellWalk{ev: ev, v: v, home: homeVar(ev), cwd: ev.Cwd, dirs: dirState{cur: start, allTemp: start.temp}, vars: vars}
@@ -164,15 +165,14 @@ func classifyShell(ev Event, v *Verdict) {
 	}
 }
 
-// shellWalk — состояние разбора одной команды: каталог и GIT_DIR меняются по ходу вызовов.
+// shellWalk — состояние разбора одной команды: каталог меняется по ходу вызовов.
 type shellWalk struct {
-	ev        Event
-	v         *Verdict
-	home      string
-	cwd       string
-	dirs      dirState
-	gitDirEnv string
-	vars      shellVars
+	ev   Event
+	v    *Verdict
+	home string
+	cwd  string
+	dirs dirState
+	vars shellVars
 }
 
 func (w *shellWalk) call(c shellcmd.Call) {
@@ -184,7 +184,7 @@ func (w *shellWalk) call(c shellcmd.Call) {
 	if w.track(c, args) {
 		return
 	}
-	x := callCtx{ev: w.ev, home: w.home, cwd: w.cwd, dirs: w.dirs, gitDir: w.gitDirEnv, v: w.v, vars: vars}
+	x := callCtx{ev: w.ev, home: w.home, cwd: w.cwd, dirs: w.dirs, v: w.v, vars: vars, sv: &w.vars}
 	x.redirects(c)
 	if h, ok := callHandlers[c.Name]; ok {
 		h(x, c, args)
@@ -194,7 +194,7 @@ func (w *shellWalk) call(c shellcmd.Call) {
 	}
 }
 
-// track ведёт cd/pushd/popd (true: больше вызов ничего не делает) и `export GIT_DIR=`.
+// track ведёт cd/pushd/popd (true: больше вызов ничего не делает).
 func (w *shellWalk) track(c shellcmd.Call, args []string) bool {
 	switch c.Name {
 	case "cd", "pushd":
@@ -202,24 +202,18 @@ func (w *shellWalk) track(c shellcmd.Call, args []string) bool {
 		if len(c.Via) > 0 {
 			w.dirs.restorable = true
 		}
-		w.cd(args)
+		w.cd(c, args)
 		return true
 	case "popd":
 		w.dirs.restorable = true
 		w.dirs.move(w.dirs.prev)
 		w.cwd = w.dirs.cur.path
 		return true
-	case "export":
-		for _, a := range args {
-			if val, ok := strings.CutPrefix(a, "GIT_DIR="); ok {
-				w.gitDirEnv = val
-			}
-		}
 	}
 	return false
 }
 
-func (w *shellWalk) cd(args []string) {
+func (w *shellWalk) cd(c shellcmd.Call, args []string) {
 	switch {
 	case len(args) == 0:
 		w.dirs.move(dirMark{path: w.home})
@@ -229,7 +223,7 @@ func (w *shellWalk) cd(args []string) {
 	default:
 		np, ok := normPath(args[0], w.home, w.cwd)
 		if !ok {
-			w.dirs.move(dirMark{temp: tempArg(args[0], w.ev.Command)})
+			w.dirs.move(dirMark{temp: tempArg(args[0], w.vars, c.Offset)})
 			break
 		}
 		w.dirs.move(dirMark{path: np, temp: tempDir(np)})
@@ -296,9 +290,16 @@ func (x callCtx) dd(args []string) {
 	}
 }
 
+// gitCall — git с GIT_DIR окружения вызова (export или префикс, в том числе через env). Неясный
+// GIT_DIR (присвоен в одной ветке) берётся своим значением: запас в сторону попадания. Вызов,
+// которого нет в разборе окружения, — по регулярке у префикса.
 func (x callCtx) gitCall(c shellcmd.Call, args []string) {
-	gd := x.gitDir
-	if m := reGitDirEnv.FindStringSubmatch(assignPrefix(x.ev.Command, c.Offset) + " " + c.Raw); m != nil {
+	gd := ""
+	if env, ok := x.sv.callEnv(c.Offset); ok {
+		if v, _ := env.get("GIT_DIR"); v.exported {
+			gd = v.val // не литерал — "", normPath его отбросит
+		}
+	} else if m := reGitDirEnv.FindStringSubmatch(assignPrefix(x.ev.Command, c.Offset) + " " + c.Raw); m != nil {
 		gd = unquote(m[1])
 	}
 	x.git(args, gd)
@@ -317,7 +318,7 @@ func (x callCtx) graft(c shellcmd.Call, args []string) {
 		if ok {
 			dirs.move(dirMark{path: np, temp: tempDir(np)})
 		} else {
-			dirs.move(dirMark{temp: tempArg(args[1], x.ev.Command)})
+			dirs.move(dirMark{temp: tempArg(args[1], *x.sv, c.Offset)})
 		}
 		args = args[2:]
 	}
@@ -338,53 +339,16 @@ func (x callCtx) graft(c shellcmd.Call, args []string) {
 	x.v.Hits = append(x.v.Hits, h)
 }
 
-// tempConfig — у вызова временный XDG_CONFIG_HOME: присваиванием перед ним (в том числе через
-// env) или `export` раньше в команде. Присваивание перед другим вызовом его не касается.
+// tempConfig — у вызова временный XDG_CONFIG_HOME в окружении (vars.go, callEnv): префикс, env
+// или export в той же оболочке или во внешней раньше вызова. Неясное окружение (ветка, sudo без
+// -E, вызов не найден в разборе) — не проба.
 func (x callCtx) tempConfig(c shellcmd.Call) bool {
-	if c.Offset < 0 {
+	env, ok := x.sv.callEnv(c.Offset)
+	if !ok {
 		return false
 	}
-	pre := x.ev.Command[:c.Offset]
-	if i := strings.LastIndexAny(pre, "\n;&|"); i >= 0 {
-		pre = pre[i+1:]
-	}
-	// присваивание перед вызовом: `$(mktemp)` в значении — не граница, как у assignPrefix;
-	// `env -u XDG_CONFIG_HOME` снимает и его, и export
-	if reEnvUnset.MatchString(pre) {
-		return false
-	}
-	if reTempConfig.MatchString(pre) {
-		return true
-	}
-	// действует последний export или unset (shellcmd не отдаёт их вызовами — ищутся по тексту):
-	// из подоболочки и из вложенного скрипта оболочки (в кавычках, а вызов — нет, или наоборот) он мог не
-	// дойти до вызова; простое присваивание после export меняет значение
-	before := x.ev.Command[:c.Offset]
-	ms := reConfigExport.FindAllStringSubmatchIndex(before, -1)
-	if len(ms) == 0 || reSubshell.MatchString(before) {
-		return false
-	}
-	m := ms[len(ms)-1]
-	if m[2] < 0 || inQuotes(before[:m[0]]) != slices.ContainsFunc(c.Via, shellcmd.IsShell) || reConfigAssign.MatchString(before[m[1]:]) {
-		return false
-	}
-	return reTempValue.MatchString(strings.TrimLeft(before[m[2]:m[3]], `"'`))
-}
-
-// inQuotes — конец текста внутри незакрытых кавычек: одинарных или двойных (с \ вне одинарных).
-func inQuotes(s string) bool {
-	var single, double bool
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case c == '\\' && !single:
-			i++
-		case c == '\'' && !double:
-			single = !single
-		case c == '"' && !single:
-			double = !double
-		}
-	}
-	return single || double
+	v, _ := env.get("XDG_CONFIG_HOME")
+	return v.exported && v.temp && !v.unclear
 }
 
 // probeDir — проба ли выкатка с временным конфигом по каталогу вызова: только из временного
@@ -407,17 +371,14 @@ func probeDir(d dirState, cmd string, off int) (string, bool) {
 var reSubshell = regexp.MustCompile(`(^|[^$<>=])\(`)
 
 // tempArg — неразобранный путь cd во временном каталоге: `$(mktemp …)`, `$TMPDIR/…` или
-// переменная, присвоенная в команде из них.
-func tempArg(arg, cmd string) bool {
+// переменная, последнее присваивание которой перед вызовом (off) — из них.
+func tempArg(arg string, sv shellVars, off int) bool {
 	arg = unquote(arg)
 	if reTempValue.MatchString(arg) {
 		return true
 	}
 	m := reLeadVar.FindStringSubmatch(arg)
-	if m == nil {
-		return false
-	}
-	return regexp.MustCompile(`(^|[\s;&|(])` + regexp.QuoteMeta(m[1]) + `=["']?` + tempValue).MatchString(cmd)
+	return m != nil && sv.tempVar(m[1], off)
 }
 
 // tempValue — начало значения во временном каталоге.
@@ -433,16 +394,6 @@ func tempDir(p string) bool {
 	p += "/"
 	return strings.HasPrefix(p, "/tmp/") || strings.HasPrefix(p, "/var/tmp/") || strings.Contains(p, "/claude-tmp/") || strings.Contains(p, "/scratchpad/")
 }
-
-// reTempConfig — XDG_CONFIG_HOME во временном каталоге: конфиг graft пробы, не живой.
-var (
-	reTempConfig = regexp.MustCompile(`\bXDG_CONFIG_HOME=["']?` + tempValue)
-	// export с значением (группа 1) или unset (группы 1 нет)
-	reConfigExport = regexp.MustCompile(`\bexport\s[^;&|\n]*\bXDG_CONFIG_HOME=([^\s;&|]+)|\bunset\s[^;&|\n]*\bXDG_CONFIG_HOME\b`)
-	// reConfigAssign — простое присваивание XDG_CONFIG_HOME отдельной командой (не префикс вызова)
-	reConfigAssign = regexp.MustCompile(`(^|[\n;&|])\s*XDG_CONFIG_HOME=[^\s;&|]*\s*($|[\n;&|])`)
-	reEnvUnset     = regexp.MustCompile(`\benv\s(?:[^;&|\n]*\s)?-u\s*XDG_CONFIG_HOME\b`)
-)
 
 func (x callCtx) dynamic(c shellcmd.Call) {
 	if reDynGit.MatchString(c.Raw) {
@@ -526,13 +477,13 @@ func assignPrefix(cmd string, off int) string {
 }
 
 type callCtx struct {
-	ev     Event
-	home   string // значение $HOME в команде, "" — переприсвоено
-	cwd    string
-	dirs   dirState
-	gitDir string // GIT_DIR из `export` раньше в команде
-	v      *Verdict
-	vars   map[string]string // переменные, присвоенные раньше в команде
+	ev   Event
+	home string // значение $HOME в команде, "" — переприсвоено
+	cwd  string
+	dirs dirState
+	v    *Verdict
+	vars map[string]string // переменные, присвоенные раньше в команде
+	sv   *shellVars        // присваивания и окружения вызовов команды
 }
 
 var reHomeAssign = regexp.MustCompile(`(^|[\s;&|(])(export\s+)?HOME=`)

@@ -79,6 +79,7 @@ func execute() int {
 		newHookCmd(hookWebFetchFallback, "Подменить отказ сайта в ответе WebFetch текстом из webtext (PostToolUse), на упавший WebFetch добавить его контекстом (PostToolUseFailure)", &exitCode),
 		newHookCmd(hookNoPrompt, "Отказать окну, ждущему ввода человека (PermissionRequest, Elicitation)", &exitCode),
 		newHookCmd(hookUnsentCheck, "Не выпустить ответ «текст не отправлен» без reddy history в ходе (Stop)", &exitCode),
+		newNightHintCmd(&exitCode),
 		newNotifyCmd(),
 		newStatusLineCmd(),
 		newLimitsCmd(),
@@ -254,6 +255,9 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		return exitAllowed, nil
 	case hookUnsentCheck:
 		runUnsentCheck(parseSessionInput(logger, hookType, data), logger, os.Stdout)
+		return exitAllowed, nil
+	case hookNightHint:
+		defaultNightHint(ctx, data, config, logger)
 		return exitAllowed, nil
 	case hookNoPrompt:
 		if err := runNoPrompt(data, logger, os.Stdout); err != nil {

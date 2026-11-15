@@ -45,6 +45,14 @@ tools:
   webfetch_fallback:
     enabled: true
 
+  # Ночью при заблокированном экране (22:00–09:00, LockedHint сессии seat0)
+  # кладёт агенту подсказку: пользователь спит, вопрос — блоком в Сон
+  # (SessionStart и UserPromptSubmit раз за ночь, PreToolUse AskUserQuestion,
+  # Stop с ❓; подкоманда night-hint). Включает регистрация подкоманды в
+  # settings.json; без ключа включено
+  night_hint:
+    enabled: true
+
   # Суб-агентам Claude (не основной сессии) — отказ в git-командах, что стирают
   # незакоммиченную работу или меняют запушенное: reset --hard, restore,
   # checkout -- путь, clean, stash, force-push, удаление ветки на remote; в своём

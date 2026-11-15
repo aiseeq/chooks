@@ -107,6 +107,9 @@ func DefaultConfig() *Config {
 			"rm_guard": {
 				Enabled: true,
 			},
+			"rsync_guard": {
+				Enabled: true,
+			},
 			"write_guard": {
 				Enabled: true,
 			},

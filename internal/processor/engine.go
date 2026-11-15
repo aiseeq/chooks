@@ -40,6 +40,9 @@ func (e *Engine) initTools(config *core.Config) error {
 		{name: "git_guard", new: func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
 			return tools.NewGitGuardTool(c, l)
 		}, onWhenAbsent: true},
+		{name: "rsync_guard", new: func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
+			return tools.NewRsyncGuardTool(c, l)
+		}, onWhenAbsent: true},
 		{"jira_style", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
 			return tools.NewJiraStyleTool(c, l)
 		}, false},

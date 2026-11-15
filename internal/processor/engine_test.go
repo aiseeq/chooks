@@ -60,8 +60,9 @@ func TestEngine_AllowsOrdinaryCommand(t *testing.T) {
 func TestEngine_DisabledToolsAreNotCreated(t *testing.T) {
 	engine := newEngine(t, &core.Config{
 		Tools: map[string]core.ToolConfig{
-			"jira_style": {Enabled: false},
-			"git_guard":  {Enabled: false},
+			"jira_style":  {Enabled: false},
+			"git_guard":   {Enabled: false},
+			"rsync_guard": {Enabled: false},
 		},
 	})
 

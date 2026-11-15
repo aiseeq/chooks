@@ -139,6 +139,9 @@ const (
 	// weekStale — доля расходится с записанной, а свежим ответом API она не
 	// опознана: сессия видит старый ответ
 	weekStale
+	// weekExpired — сброс недели замера уже прошёл (сессия простояла через
+	// сброс, фикстура): замер не неделя, запись и журнал не меняются
+	weekExpired
 )
 
 // LimitsFile — путь снимка. Каталог состояния, а не времени выполнения:
@@ -201,7 +204,7 @@ func mergeLimits(path string, smp sample, now time.Time) (mergeResult, error) {
 }
 
 // merge вносит замер в неделю его сброса, убирает прошедшие недели и
-// пересчитывает верхние поля
+// пересчитывает верхние поля. Замер с прошедшим сбросом не вносится
 func (s *limitsSnapshot) merge(smp sample, now time.Time) mergeResult {
 	stamp := now.Truncate(time.Second)
 	kept := s.Weeks[:0]
@@ -212,8 +215,10 @@ func (s *limitsSnapshot) merge(smp sample, now time.Time) mergeResult {
 	}
 	s.Weeks = kept
 
-	var res mergeResult
-	res.merged, res.verdict, res.owner = s.mergeWeek(smp.week, smp, stamp)
+	res := mergeResult{merged: smp.week, verdict: weekExpired}
+	if smp.week.resetsAt.After(now) {
+		res.merged, res.verdict, res.owner = s.mergeWeek(smp.week, smp, stamp)
+	}
 	if !smp.exact || !s.ResetsAt.After(now) {
 		// Замер API — обычно неактивной учётки: верхние поля (учётка, что
 		// тратит сейчас) он не меняет, пока их неделя не кончилась

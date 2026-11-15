@@ -389,6 +389,21 @@ func TestRenderWithoutRateLimitsShowsActiveWeek(t *testing.T) {
 	}
 }
 
+// Доля во входе с прошедшим сбросом — от недели, которой уже нет: полоса
+// по ней не рисуется, при известной неделе активной — по снимку
+func TestRenderExpiredWeekInput(t *testing.T) {
+	isolateRender(t)
+	writeStore(t, true)
+	now := time.Now()
+	if line := renderInput(t, "old", 87, now.Add(-time.Hour).Truncate(time.Hour)); strings.Contains(line, "87%") {
+		t.Errorf("полоса прошедшей недели: %q", line)
+	}
+	renderInput(t, "s", 12, now.Add(4*24*time.Hour).Truncate(time.Hour))
+	if line := renderInput(t, "old", 87, now.Add(-time.Hour).Truncate(time.Hour)); strings.Contains(line, "87%") || !strings.Contains(line, "12%") {
+		t.Errorf("полоса при известной неделе активной: %q", line)
+	}
+}
+
 // Цвет полосы — прогноз пула: доля активной мала, но темп по журналу
 // опустошает обе учётки до сброса — полоса красная, без значка; сводка
 // называет момент

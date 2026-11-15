@@ -154,6 +154,10 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 			// В лог не пишется: строка статуса рисуется чаще раза в секунду на
 			// сессию, и эта запись вытесняла из лога всё остальное за часы
 			input.RateLimits.SevenDay = res.merged.limit()
+		case res.verdict == weekExpired:
+			// Доля прошедшей недели о нынешней ничего не говорит: полоса —
+			// по неделе активной учётки из снимка, нет её — полосы нет
+			input.RateLimits.SevenDay = nil
 		}
 		owner, snapshot = res.owner, res.snapshot
 	} else if limit != nil {

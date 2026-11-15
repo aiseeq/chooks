@@ -197,6 +197,33 @@ func TestMergeWeeklyLimitDropsPastWeek(t *testing.T) {
 	}
 }
 
+// Замер с прошедшим сбросом (сессия простояла через сброс) — не неделя:
+// записи и строки журнала не прибавляется, а полоса по нему не рисуется;
+// тот же замер до сброса — запись и строка есть
+func TestMergeWeeklyLimitExpiredSample(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "limits.json")
+	after := workResets.Add(time.Hour)
+	res, err := mergeLimits(path, sample{week: weeklyUsage{used: 80, resetsAt: workResets}, session: "s"}, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.verdict != weekExpired {
+		t.Errorf("вердикт %v, нужно weekExpired", res.verdict)
+	}
+	if got := readSnapshot(t, path); len(got.Weeks) != 0 {
+		t.Errorf("прошедшая неделя записана: %+v", got.Weeks)
+	}
+	if _, err := os.Stat(limitsHistory(path)); !os.IsNotExist(err) {
+		t.Errorf("журнал тронут: %v", err)
+	}
+	if _, verdict := merge(t, path, 80, workResets, "s", workResets.Add(-time.Hour)); verdict != weekChanged {
+		t.Errorf("до сброса: вердикт %v", verdict)
+	}
+	if raw, err := os.ReadFile(limitsHistory(path)); err != nil || strings.Count(string(raw), "\n") != 1 {
+		t.Errorf("до сброса строка журнала одна: %q, %v", raw, err)
+	}
+}
+
 // Снимок прежней формы (без weeks) становится первой неделей
 func TestMergeWeeklyLimitLegacySnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "limits.json")

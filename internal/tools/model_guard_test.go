@@ -111,8 +111,9 @@ func TestModelGuard(t *testing.T) {
 			if got.IsValid == tc.reject {
 				t.Fatalf("valid=%v violations=%v", got.IsValid, got.Violations)
 			}
-			// Подсказка — отдельной строкой, не повтором причины
-			if tc.reject && (!slices.Equal(got.Suggestions, []string{modelGuardHint}) || strings.Contains(got.Violations[0].Message, modelGuardHint)) {
+			// Подсказка — отдельной строкой, не повтором причины; текст —
+			// литералом: он называет место правила в ~/.claude/CLAUDE.md
+			if tc.reject && (!slices.Equal(got.Suggestions, []string{wantModelGuardHint}) || strings.Contains(got.Violations[0].Message, wantModelGuardHint)) {
 				t.Errorf("подсказка: %q %q", got.Violations[0].Message, got.Suggestions)
 			}
 		})
@@ -267,3 +268,7 @@ func TestModelGuardSettingsFile(t *testing.T) {
 		}
 	}
 }
+
+// wantModelGuardHint ожидаемая подсказка отказа: раздел и первые слова
+// правила о моделях в ~/.claude/CLAUDE.md (номер строки плавает)
+const wantModelGuardHint = `Правило ~/.claude/CLAUDE.md, раздел «Что разрешает «да»»: «Модели бери только из ~/.config/models/approved» (кому какая — в шапке файла); бойцы GPT — через worker; новая модель — только через бенчмарк llmark и одобрение пользователя`

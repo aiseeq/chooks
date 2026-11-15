@@ -17,7 +17,7 @@ import (
 
 const defaultApprovedModelsPath = "~/.config/models/approved"
 
-const modelGuardHint = `Правило ~/.claude/CLAUDE.md "Модели"; Luna и Sol — через worker; новая модель — только через бенчмарк llmark и одобрение пользователя`
+const modelGuardHint = `Правило ~/.claude/CLAUDE.md, раздел «Что разрешает «да»»: «Модели бери только из ~/.config/models/approved» (кому какая — в шапке файла); бойцы GPT — через worker; новая модель — только через бенчмарк llmark и одобрение пользователя`
 
 type approvedModel struct{ name, id string }
 

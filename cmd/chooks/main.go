@@ -64,8 +64,10 @@ func execute() int {
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "подробный вывод")
 	rootCmd.PersistentFlags().DurationVar(&timeout, "timeout", 5*time.Second, "таймаут обработки")
 
+	preToolUse := newHookCmd(hookPreToolUse, "Проверить вызов инструмента до запуска (PreToolUse): kill, rm, rsync, git, модель, стиль Jira", &exitCode)
+	preToolUse.Long = preToolUseLong
 	rootCmd.AddCommand(
-		newHookCmd(hookPreToolUse, "Обработать PreToolUse hook", &exitCode),
+		preToolUse,
 		newHookCmd(hookStop, "Обработать Stop hook", &exitCode),
 		newHookCmd(hookStopFailure, "Обработать StopFailure hook (ход оборван ошибкой API)", &exitCode),
 		newHookCmd(hookNotification, "Обработать Notification hook", &exitCode),

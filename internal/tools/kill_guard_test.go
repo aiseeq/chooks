@@ -260,6 +260,15 @@ func TestKillGuardBlocks(t *testing.T) {
 		"cat <<E\r\nq \\\r\nE\r\nkill 1",
 		"cat <<E\nq \\\r\nE\r\nkill $P\r\n",
 		"cat <<E\nq \\\r\nE\npkill -f foo",
+		// ограничитель heredoc в кавычках не целиком (<<"E"x): mvdan/sh
+		// разбирает тело как некавыченное, \ + LF склеивает строку с
+		// ограничителем, вызовы после heredoc пропадают без ошибки (akit
+		// shellcmd-heredoc-partly-quoted-delimiter); kill ловит свой лексер
+		"cat <<\"E\"x\nfoo \\\nEx\nkill -9 -1",
+		"cat <<'E'x\n$(\nEx\nkill 1500",
+		"cat <<E\"x\"\nfoo `\nEx\nkill 1500",
+		"cat <<-\"E\"x\n\tfoo \\\n\tEx\nkill 1500",
+		"cat <<\"\"\nfoo \\\n\nkill 1500",
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)

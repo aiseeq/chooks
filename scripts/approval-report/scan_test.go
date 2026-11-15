@@ -317,6 +317,7 @@ func TestScanWindowBoundary(t *testing.T) {
 		"att1.jsonl": {ts("2026-11-07T21:00:00Z"), ts("2026-11-15T13:00:00Z")},
 		"att2.jsonl": {ts("2026-11-15T13:30:00Z"), ts("2026-11-15T14:00:00Z")},
 		"att3.jsonl": {ts("2026-11-15T14:00:00Z"), ts("2026-11-15T14:10:00Z")},
+		"att5.jsonl": {ts("2026-11-15T14:20:00Z"), ts("2026-11-15T14:30:00Z")},
 		"att4.jsonl": {{}, ts("2026-11-07T22:00:00Z")},
 		"att6.jsonl": {{}, old},
 	}
@@ -395,8 +396,10 @@ func TestScanWindowBoundary(t *testing.T) {
 		}
 	}
 
-	// после окна: новая попытка (первый вызов не закончен), её вызовы в rollout и запись суб-агента
+	// после окна: новая попытка (первый вызов не закончен), её вызовы в rollout, попытка без вызовов
+	// и запись суб-агента
 	writeFile(t, filepath.Join(task, "att3.jsonl"), thread+"\n"+item("started", "item_1", cmdY)+"\n"+done("item_2", cmdX)+"\n"+change("item_3", ra)+"\n")
+	writeFile(t, filepath.Join(task, "att5.jsonl"), thread+"\n")
 	writeFile(t, rollout, strings.Join(append(lines, rec("2026-11-15T14:00:00Z", 0, 0, cmdX), fc("2026-11-15T14:00:01Z", ra)), "\n")+"\n")
 	writeFile(t, filepath.Join(sess, "agent-a1.jsonl"), use("2026-11-07T22:00:00Z")+"\n"+use("2026-11-10T10:00:00Z")+"\n"+use("2026-11-15T14:00:00Z")+"\n")
 	if _, second := scan(); second != first {
@@ -431,7 +434,7 @@ func TestRolloutCall(t *testing.T) {
 	}
 	task := t.TempDir()
 	writeFile(t, filepath.Join(task, "codex", "sessions", "2026", "11", "10", "rollout-x-t7.jsonl"), `{"timestamp":"вчера",`+fc+"\n")
-	if calls, err := rolloutCalls(task, "t7"); err == nil || !strings.Contains(err.Error(), "строка 1") || calls == nil || len(calls.order) != 1 {
+	if calls, err := rolloutCalls(task, "t7"); err == nil || !strings.Contains(err.Error(), "строка 1") || calls == nil || len(calls.calls) != 1 {
 		t.Errorf("вызовы %v, ошибка %v", calls, err)
 	}
 }
@@ -541,5 +544,151 @@ func TestScanWorkerCutAttempts(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("записи:\n%s\nждём:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// Время файла через настоящий statx: у нового файла время создания — время записи, и при записи в ту
+// же наносекунду; файл с временем записи раньше создания (скопирован с прежним временем) — без
+// времени создания, как и файл на файловой системе без него (procfs).
+func TestFileTimes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "att1.jsonl")
+	before := time.Now().Add(-time.Second)
+	writeFile(t, path, "{}\n")
+	after := time.Now().Add(time.Second)
+	sc := scanner{}
+	born, mod, err := sc.fileTimes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if born.Before(before) || born.After(after) || mod.Before(before) || mod.After(after) {
+		t.Errorf("создание %v, запись %v, ждём между %v и %v", born, mod, before, after)
+	}
+	if err := os.Chtimes(path, born, born); err != nil {
+		t.Fatal(err)
+	}
+	if b, m, err := sc.fileTimes(path); err != nil || !b.Equal(born) || !m.Equal(born) {
+		t.Errorf("запись в миг создания: создание %v, запись %v, ошибка %v; ждём %v", b, m, err, born)
+	}
+	old := time.Date(2026, 11, 10, 10, 30, 0, 0, time.UTC)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	born, mod, err = sc.fileTimes(path)
+	if err != nil || !born.IsZero() || !mod.Equal(old) {
+		t.Errorf("копия: создание %v, запись %v, ошибка %v; ждём нулевое создание и запись %v", born, mod, err, old)
+	}
+	if born, _, err := fileTimes("/proc/self/status"); err != nil || !born.IsZero() {
+		t.Errorf("procfs: создание %v, ошибка %v; ждём нулевое", born, err)
+	}
+}
+
+// Скопированная попытка (время создания позже последней записи) не теряет вызовов: нижней границы
+// у неё нет. Время файлов — настоящее, statx.
+func TestScanWorkerCopiedAttempt(t *testing.T) {
+	root := t.TempDir()
+	worker := filepath.Join(root, "worker")
+	if err := os.MkdirAll(filepath.Join(root, "projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	task := filepath.Join(worker, "1110-1000-k")
+	writeFile(t, filepath.Join(task, "job.json"), `{"master":"m","dir":"/var/tmp/k","created":"2026-11-10T10:00:00+01:00"}`)
+	cmd := "echo a > /home/aisee/.claude/CLAUDE.md"
+	att := filepath.Join(task, "att1.jsonl")
+	writeFile(t, att, `{"type":"thread.started","thread_id":"t10"}`+"\n"+
+		`{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc '`+cmd+`'"}}`+"\n")
+	writeFile(t, filepath.Join(task, "codex", "sessions", "2026", "11", "10", "rollout-2026-11-10T10-00-00-t10.jsonl"),
+		`{"timestamp":"2026-11-10T10:00:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/bash","-lc","`+cmd+`"],"cwd":"file:///home/aisee","duration":{"secs":0,"nanos":0}}}}`+"\n")
+	old := time.Date(2026, 11, 10, 10, 30, 0, 0, time.UTC)
+	if err := os.Chtimes(att, old, old); err != nil {
+		t.Fatal(err)
+	}
+	from, _ := time.Parse(time.RFC3339, "2026-11-08T00:00:00+01:00")
+	sc := scanner{home: "/home/aisee", from: from, to: time.Now().Add(time.Hour), jobs: 1}
+	res, err := sc.run(filepath.Join(root, "projects"), worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.records) != 1 || res.records[0].Time.UTC().Format(time.RFC3339) != "2026-11-10T10:00:00Z" {
+		t.Errorf("записи %v, ждём одну со временем 2026-11-10T10:00:00Z", res.records)
+	}
+}
+
+// Сопоставление с rollout: параллельные вызовы одной команды — по времени начала (rollout пишет по
+// завершении, att — по началу), и с маской секрета тоже; вызов rollout достаётся одному вызову
+// попытки, хотя подходит и к открытому ключу, и к маске; команда с байтом NUL (в att — заглушка) —
+// по своему вызову rollout.
+func TestScanWorkerRolloutMatch(t *testing.T) {
+	root := t.TempDir()
+	worker := filepath.Join(root, "worker")
+	if err := os.MkdirAll(filepath.Join(root, "projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	task := filepath.Join(worker, "1110-1500-p")
+	writeFile(t, filepath.Join(task, "job.json"), `{"master":"m","dir":"/var/tmp/p","created":"2026-11-10T15:00:00+01:00"}`)
+	cmdA := "echo a > /home/aisee/.claude/CLAUDE.md"
+	token := func(s string) string { return "echo token=" + s + " > /home/aisee/.claude/CLAUDE.md" }
+	item := func(typ, id, cmd string) string {
+		return `{"type":"item.` + typ + `","item":{"id":"` + id + `","type":"command_execution","command":"` + cmd + `"}}`
+	}
+	bash := func(cmd string) string { return `/bin/bash -lc '` + cmd + `'` }
+	writeFile(t, filepath.Join(task, "att1.jsonl"), strings.Join([]string{
+		`{"type":"thread.started","thread_id":"t9"}`,
+		item("started", "item_1", bash(cmdA)), // 2: начат 14:00:00
+		item("started", "item_2", bash(cmdA)), // 3: начат 14:00:03, закончен раньше
+		item("completed", "item_2", bash(cmdA)),
+		item("completed", "item_1", bash(cmdA)),
+		item("completed", "item_3", bash(token("plain"))),  // 6: открытый текст, подходит и к маске
+		item("started", "item_4", bash(token(redactMark))), // 7: маска, начат 14:02:00
+		item("started", "item_5", bash(token(redactMark))), // 8: маска, начат 14:02:03, закончен раньше
+		item("completed", "item_5", bash(token(redactMark))),
+		item("completed", "item_4", bash(token(redactMark))),
+		item("completed", "item_6", nulCommand), // 11: в rollout — после окна
+	}, "\n")+"\n")
+	rec := func(ts string, secs int, cmd string) string {
+		return `{"timestamp":"` + ts + `","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/bash","-lc","` + cmd + `"],"cwd":"file:///home/aisee","duration":{"secs":` + strconv.Itoa(secs) + `,"nanos":0}}}}`
+	}
+	writeFile(t, filepath.Join(task, "codex", "sessions", "2026", "11", "10", "rollout-2026-11-10T14-00-00-t9.jsonl"), strings.Join([]string{
+		rec("2026-11-10T14:00:05Z", 2, cmdA),
+		rec("2026-11-10T14:00:10Z", 10, cmdA),
+		rec("2026-11-10T14:01:00Z", 0, token("plain")),
+		rec("2026-11-10T14:02:05Z", 2, token("sk-def")),
+		rec("2026-11-10T14:02:10Z", 10, token("sk-abc")),
+		rec("2026-11-16T00:00:00Z", 0, `rg -n '^\u0000' /dev/null`),
+	}, "\n")+"\n")
+	at := func(s string) time.Time {
+		v, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	from, _ := time.Parse(time.RFC3339, "2026-11-08T00:00:00+01:00")
+	to, _ := time.Parse(time.RFC3339, "2026-11-15T13:24:00+01:00")
+	sc := scanner{home: "/home/aisee", from: from, to: to, jobs: 1, times: func(string) (born, mod time.Time, err error) {
+		return at("2026-11-10T13:59:00Z"), at("2026-11-16T01:00:00Z"), nil
+	}}
+	res, err := sc.run(filepath.Join(root, "projects"), worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range res.records {
+		got = append(got, r.Ref()+" "+r.Time.UTC().Format(time.RFC3339))
+	}
+	want := []string{
+		"1110-1500-p/att1.jsonl:2 2026-11-10T14:00:00Z",
+		"1110-1500-p/att1.jsonl:3 2026-11-10T14:00:03Z",
+		"1110-1500-p/att1.jsonl:6 2026-11-10T14:01:00Z",
+		"1110-1500-p/att1.jsonl:7 2026-11-10T14:02:00Z",
+		"1110-1500-p/att1.jsonl:8 2026-11-10T14:02:03Z",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("записи:\n%s\nждём:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// вызов с NUL — со временем после окна: не в счёте вызовов и не без времени
+	for _, a := range res.agents {
+		if a.Pop == "worker" && (a.Events != 5 || a.Untimed != 0) {
+			t.Errorf("вызовов %d, без времени %d; ждём 5 и 0", a.Events, a.Untimed)
+		}
 	}
 }

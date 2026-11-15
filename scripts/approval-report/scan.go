@@ -33,11 +33,18 @@ type scanner struct {
 	times func(path string) (born, mod time.Time, err error)
 }
 
+// fileTimes — время файла попытки. Создание позже последней записи — файл скопирован с прежним
+// временем записи (cp -p, восстановление): время создания не граница вызовов, файл без нижней границы.
 func (s *scanner) fileTimes(path string) (born, mod time.Time, err error) {
 	if s.times != nil {
-		return s.times(path)
+		born, mod, err = s.times(path)
+	} else {
+		born, mod, err = fileTimes(path)
 	}
-	return fileTimes(path)
+	if born.After(mod) {
+		born = time.Time{}
+	}
+	return born, mod, err
 }
 
 func (s *scanner) run(projects, worker string) (result, error) {
@@ -455,7 +462,7 @@ func (s *scanner) scanWorker(dir string, atts []string, recent map[string]bool) 
 		master = j.Owner.Name
 	}
 	w := &workerScan{s: s, a: &Agent{Pop: "worker", ID: task, Short: task, Master: master}, dir: j.Dir,
-		next: map[string]map[string]int{}, rollouts: map[string]*rollout{}}
+		rollouts: map[string]*rollout{}}
 	keys, err := briefKeys(dir)
 	var errs []error
 	if err != nil {
@@ -520,18 +527,16 @@ func briefKeys(dir string) (map[string]bool, error) {
 
 // workerScan — разбор попыток бойца; записи копятся по всем попыткам задачи.
 type workerScan struct {
-	s      *scanner
-	a      *Agent
-	dir    string
-	recs   []Record
-	files  int // попыток с вызовами в окне; попытка без вызовов — по времени файла
-	file   string
-	path   string         // att*.jsonl
-	items  []attItem      // вызовы попытки по порядку
-	seen   map[string]int // id item → индекс в items
-	thread string         // thread_id попытки: имя её rollout codex
-	// next — по thread: ключ вызова → первый ещё не сопоставленный вызов rollout с этим ключом
-	next     map[string]map[string]int
+	s        *scanner
+	a        *Agent
+	dir      string
+	recs     []Record
+	files    int // попыток с вызовами в окне; попытка без вызовов — по времени файла
+	file     string
+	path     string              // att*.jsonl
+	items    []attItem           // вызовы попытки по порядку
+	seen     map[string]int      // id item → индекс в items
+	thread   string              // thread_id попытки: имя её rollout codex
 	rollouts map[string]*rollout // по thread
 	callErr  error               // rollout не прочитан
 }
@@ -573,8 +578,9 @@ func (w *workerScan) att(path string, countOnly bool) error {
 		return errors.Join(err, w.callErr, terr)
 	}
 	in := w.inWindow(calls, born, mod)
-	// попытка без вызовов времени не имеет: в окне, если менялась с его начала (прежнее правило)
-	if slices.Contains(in, true) || len(w.items) == 0 {
+	// попытка без вызовов — по времени файла: создана не позже конца окна (что менялась с его начала,
+	// проверено до разбора — иначе countOnly)
+	if slices.Contains(in, true) || (len(w.items) == 0 && !born.After(w.s.to)) {
 		w.files++
 	}
 	for i := range w.items {
@@ -588,8 +594,9 @@ func (w *workerScan) att(path string, countOnly bool) error {
 // fileSlack — запас на то, что время файла попытки и время записи rollout пишутся не разом.
 const fileSlack = 5 * time.Second
 
-// lookup — вызовы попытки в rollout: по ключу и порядку в thread, начатые не раньше создания файла
-// попытки и не позже последней записи в него. Вызов rollout, начатый до создания файла, —
+// lookup — вызовы попытки в rollout: по ключу и времени начала в thread, начатые не раньше создания
+// файла попытки и не позже последней записи в него; вызов rollout достаётся одному вызову попытки,
+// и с маской секрета, и с открытым текстом. Вызов rollout, начатый до создания файла, —
 // вызов прежней попытки, которого её att*.jsonl не записал, — пропускается. Незаконченный в att
 // вызов (item.started без item.completed) rollout то пишет, то нет (у оборванной попытки и посреди
 // неё бывает и так, и так): он берёт вызов rollout, только если таких вызовов во времени попытки
@@ -610,12 +617,12 @@ func (w *workerScan) lookup(born, mod time.Time) ([]call, []bool) {
 	}
 	for i := range w.items {
 		it := &w.items[i]
-		list, p := w.candidates(it.thread, keys[i], born, mod)
+		r, list := w.candidates(it.thread, keys[i], born, mod)
 		if len(list) == 0 || (!it.done && len(list) <= later[i]) {
 			continue
 		}
-		calls[i], found[i] = list[0], true
-		w.next[it.thread][keys[i]] = p + 1
+		r.used[list[0]] = true
+		calls[i], found[i] = r.calls[list[0]].c, true
 	}
 	return calls, found
 }
@@ -661,34 +668,35 @@ func eventKey(ev Event) string {
 	return "f" + strings.Join(paths, "\n")
 }
 
-// candidates — ещё не сопоставленные вызовы rollout с ключом, начатые во время попытки (lookup),
-// и номер первого из них: att*.jsonl не пишет ни каталога, ни времени вызова. Rollout читается при
-// первой нужде; без времени в rollout — все по порядку.
-func (w *workerScan) candidates(thread, key string, born, mod time.Time) ([]call, int) {
+// candidates — ещё не сопоставленные вызовы rollout с ключом, начатые во время попытки (lookup), —
+// номера в r.calls по времени начала: att*.jsonl не пишет ни каталога, ни времени вызова. Вызов
+// rollout, начатый до создания файла попытки, ей не достаётся, но и не занимается: его ещё может
+// взять попытка без времени создания. Rollout читается при первой нужде; без времени в rollout —
+// все по порядку.
+func (w *workerScan) candidates(thread, key string, born, mod time.Time) (*rollout, []int) {
 	r, ok := w.rollouts[thread]
 	if !ok {
 		var err error
 		r, err = rolloutCalls(filepath.Dir(w.path), thread)
 		w.callErr = errors.Join(w.callErr, err)
 		w.rollouts[thread] = r
-		w.next[thread] = map[string]int{}
 	}
-	list := r.list(key)
-	p := w.next[thread][key]
-	for p < len(list) && !list[p].at.IsZero() && list[p].at.Before(born.Add(-fileSlack)) {
-		p++
+	var list []int
+	for _, i := range r.list(key) {
+		at := r.calls[i].c.at
+		if r.used[i] || (!at.IsZero() && (at.Before(born.Add(-fileSlack)) || at.After(mod.Add(fileSlack)))) {
+			continue
+		}
+		list = append(list, i)
 	}
-	q := p
-	for q < len(list) && !list[q].at.After(mod.Add(fileSlack)) {
-		q++
-	}
-	return list[p:q], p
+	return r, list
 }
 
 // rollout — вызовы rollout codex одного thread.
 type rollout struct {
-	byKey map[string][]call // ключ вызова → вызовы по порядку
-	order []keyedCall       // все вызовы по порядку: для команд с маской секрета
+	calls []keyedCall      // все вызовы по порядку записи
+	byKey map[string][]int // ключ вызова → номера в calls по времени начала
+	used  []bool           // вызов уже достался вызову попытки: учёт общий для всех ключей
 }
 
 type keyedCall struct {
@@ -699,20 +707,30 @@ type keyedCall struct {
 // redactMark — чем codex заменяет в att*.jsonl текст, похожий на секрет; в rollout текст открыт.
 const redactMark = "[REDACTED_SECRET]"
 
-// list — вызовы с ключом; ключ с маской секрета подходит к ключам rollout, где на месте маски
-// любой текст.
-func (r *rollout) list(key string) []call {
+// nulCommand — чем codex заменяет в att*.jsonl всю команду с байтом NUL; в rollout команда как есть.
+const nulCommand = "<command included NUL byte>"
+
+// list — номера вызовов с ключом по времени начала; ключ с маской секрета подходит к ключам rollout,
+// где на месте маски любой текст.
+func (r *rollout) list(key string) []int {
 	if !strings.Contains(key, redactMark) {
 		return r.byKey[key]
 	}
 	parts := strings.Split(key, redactMark)
-	var l []call
-	for _, kc := range r.order {
+	var l []int
+	for i, kc := range r.calls {
 		if maskMatch(parts, kc.key) {
-			l = append(l, kc.c)
+			l = append(l, i)
 		}
 	}
+	r.byStart(l)
 	return l
+}
+
+// byStart — номера вызовов по времени начала: rollout пишет вызов по завершении, att*.jsonl — по
+// началу, у параллельных вызовов порядок записей разный. Равное время — по порядку записи.
+func (r *rollout) byStart(l []int) {
+	slices.SortStableFunc(l, func(a, b int) int { return r.calls[a].c.at.Compare(r.calls[b].c.at) })
 }
 
 // maskMatch — s из частей parts по порядку с любым текстом между ними.
@@ -735,7 +753,7 @@ func maskMatch(parts []string, s string) bool {
 // rolloutCalls — вызовы оболочки и правки файлов из rollout codex по порядку.
 // Нет файла rollout (старые задачи, попытка без thread_id) — пусто, без ошибки.
 func rolloutCalls(taskDir, thread string) (*rollout, error) {
-	r := &rollout{byKey: map[string][]call{}}
+	r := &rollout{byKey: map[string][]int{}}
 	files, err := filepath.Glob(filepath.Join(taskDir, "codex", "sessions", "*", "*", "*", "rollout-*-"+thread+".jsonl"))
 	if err != nil {
 		return r, fmt.Errorf("поиск rollout: %w", err)
@@ -750,10 +768,14 @@ func rolloutCalls(taskDir, thread string) (*rollout, error) {
 			errs = append(errs, fmt.Errorf("строка %d: %w", n, err))
 		}
 		if ok {
-			r.byKey[key] = append(r.byKey[key], c)
-			r.order = append(r.order, keyedCall{key, c})
+			r.byKey[key] = append(r.byKey[key], len(r.calls))
+			r.calls = append(r.calls, keyedCall{key, c})
 		}
 	})
+	r.used = make([]bool, len(r.calls))
+	for _, l := range r.byKey {
+		r.byStart(l)
+	}
 	if err := errors.Join(append(errs, err)...); err != nil {
 		return r, fmt.Errorf("rollout %s: %w", filepath.Base(files[0]), err)
 	}
@@ -793,7 +815,11 @@ func rolloutCall(line []byte) (key string, c call, ok bool, err error) {
 		if dec, err := url.PathUnescape(c.cwd); err == nil {
 			c.cwd = dec
 		}
-		key = eventKey(Event{Tool: codexCommand, Command: strings.Join(it.Command, " ")})
+		cmd := strings.Join(it.Command, " ")
+		if strings.ContainsRune(cmd, 0) {
+			cmd = nulCommand
+		}
+		key = eventKey(Event{Tool: codexCommand, Command: cmd})
 	case "FileChange":
 		key = eventKey(Event{Tool: "file_change", Paths: slices.Collect(maps.Keys(it.Changes))})
 	default:

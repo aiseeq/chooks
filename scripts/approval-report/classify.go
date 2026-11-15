@@ -348,17 +348,43 @@ func (x callCtx) tempConfig(c shellcmd.Call) bool {
 	if i := strings.LastIndexAny(pre, "\n;&|"); i >= 0 {
 		pre = pre[i+1:]
 	}
-	// присваивание перед вызовом: `$(mktemp)` в значении — не граница, как у assignPrefix
+	// присваивание перед вызовом: `$(mktemp)` в значении — не граница, как у assignPrefix;
+	// `env -u XDG_CONFIG_HOME` снимает и его, и export
+	if reEnvUnset.MatchString(pre) {
+		return false
+	}
 	if reTempConfig.MatchString(pre) {
 		return true
 	}
-	// действует последний export или unset; внутри подоболочки он мог не дойти до вызова
+	// действует последний export или unset (shellcmd не отдаёт их вызовами — ищутся по тексту):
+	// из подоболочки и из вложенного скрипта оболочки (в кавычках, а вызов — нет, или наоборот) он мог не
+	// дойти до вызова; простое присваивание после export меняет значение
 	before := x.ev.Command[:c.Offset]
-	ms := reConfigExport.FindAllStringSubmatch(before, -1)
+	ms := reConfigExport.FindAllStringSubmatchIndex(before, -1)
 	if len(ms) == 0 || reSubshell.MatchString(before) {
 		return false
 	}
-	return reTempValue.MatchString(strings.TrimLeft(ms[len(ms)-1][1], `"'`))
+	m := ms[len(ms)-1]
+	if m[2] < 0 || inQuotes(before[:m[0]]) != slices.ContainsFunc(c.Via, shellcmd.IsShell) || reConfigAssign.MatchString(before[m[1]:]) {
+		return false
+	}
+	return reTempValue.MatchString(strings.TrimLeft(before[m[2]:m[3]], `"'`))
+}
+
+// inQuotes — конец текста внутри незакрытых кавычек: одинарных или двойных (с \ вне одинарных).
+func inQuotes(s string) bool {
+	var single, double bool
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\\' && !single:
+			i++
+		case c == '\'' && !double:
+			single = !single
+		case c == '"' && !single:
+			double = !double
+		}
+	}
+	return single || double
 }
 
 // probeDir — проба ли выкатка с временным конфигом по каталогу вызова: только из временного
@@ -411,8 +437,11 @@ func tempDir(p string) bool {
 // reTempConfig — XDG_CONFIG_HOME во временном каталоге: конфиг graft пробы, не живой.
 var (
 	reTempConfig = regexp.MustCompile(`\bXDG_CONFIG_HOME=["']?` + tempValue)
-	// export с значением (группа 1) или unset (группа 1 пуста)
-	reConfigExport = regexp.MustCompile(`\bexport\s[^;&|\n]*\bXDG_CONFIG_HOME=(\S+)|\bunset\s[^;&|\n]*\bXDG_CONFIG_HOME\b`)
+	// export с значением (группа 1) или unset (группы 1 нет)
+	reConfigExport = regexp.MustCompile(`\bexport\s[^;&|\n]*\bXDG_CONFIG_HOME=([^\s;&|]+)|\bunset\s[^;&|\n]*\bXDG_CONFIG_HOME\b`)
+	// reConfigAssign — простое присваивание XDG_CONFIG_HOME отдельной командой (не префикс вызова)
+	reConfigAssign = regexp.MustCompile(`(^|[\n;&|])\s*XDG_CONFIG_HOME=[^\s;&|]*\s*($|[\n;&|])`)
+	reEnvUnset     = regexp.MustCompile(`\benv\s(?:[^;&|\n]*\s)?-u\s*XDG_CONFIG_HOME\b`)
 )
 
 func (x callCtx) dynamic(c shellcmd.Call) {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -427,7 +428,16 @@ func (s *scanner) scanWorker(dir string, atts []string, recent map[string]bool) 
 		errs = append(errs, fmt.Errorf("%s: %w", task, err))
 	}
 	w.a.Keys = keys
-	slices.SortStableFunc(atts, func(a, b string) int { return cmp.Compare(attNum(a), attNum(b)) })
+	num := map[string]int{}
+	for _, a := range atts {
+		n, err := attNum(a)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", task, err))
+			n = math.MaxInt // без номера — в конец: порядок повторов в rollout для неё неизвестен
+		}
+		num[a] = n
+	}
+	slices.SortStableFunc(atts, func(a, b string) int { return cmp.Compare(num[a], num[b]) })
 	for _, att := range atts {
 		if err := w.att(att, !recent[att]); err != nil {
 			errs = append(errs, fmt.Errorf("%s/%s: %w", task, filepath.Base(att), err))
@@ -492,10 +502,13 @@ type workerScan struct {
 	cwdErr error                          // rollout не прочитан
 }
 
-// attNum — номер попытки из имени attN.jsonl; без номера — 0.
-func attNum(path string) int {
-	n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "att"), ".jsonl"))
-	return n
+// attNum — номер попытки из имени attN.jsonl.
+func attNum(path string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "att"), ".jsonl"))
+	if err != nil {
+		return 0, fmt.Errorf("номер попытки %s: %w", filepath.Base(path), err)
+	}
+	return n, nil
 }
 
 func (w *workerScan) att(path string, countOnly bool) error {

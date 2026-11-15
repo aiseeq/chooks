@@ -188,6 +188,9 @@ func TestScanWorkerAttempts(t *testing.T) {
 	}
 	att("att2.jsonl", item("item_1", deploy)+"\n"+item("item_2", `/bin/bash -lc 'echo a > SKILL.md'`))
 	att("att10.jsonl", item("item_1", deploy))
+	// попытка в другом thread: свой счёт повторов
+	writeFile(t, filepath.Join(task, "att11.jsonl"), `{"type":"thread.started","thread_id":"t4"}`+"\n"+item("item_1", deploy)+"\n")
+	writeFile(t, filepath.Join(task, "attX.jsonl"), `{"type":"thread.started","thread_id":"t5"}`+"\n")
 	rec := func(cmd, cwd string) string {
 		return `{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/bash","-lc","` + cmd + `"],"cwd":"file://` + cwd + `"}}}`
 	}
@@ -197,6 +200,7 @@ func TestScanWorkerAttempts(t *testing.T) {
 		rec("echo a > SKILL.md", "/tmp/q"),
 		rec("XDG_CONFIG_HOME=/tmp/c graft deploy test", "/home/aisee/git/proj2"),
 	}, "\n")+"\n")
+	writeFile(t, filepath.Join(task, "codex", "sessions", "2026", "11", "09", "rollout-2026-11-09T20-00-00-t4.jsonl"), rec("XDG_CONFIG_HOME=/tmp/c graft deploy test", "/var/tmp/b")+"\n")
 
 	from, _ := time.Parse(time.RFC3339, "2026-11-08T00:00:00+01:00")
 	sc := scanner{home: "/home/aisee", from: from, to: time.Now().Add(time.Hour), jobs: 1}
@@ -216,8 +220,15 @@ func TestScanWorkerAttempts(t *testing.T) {
 			got[ref] = "запись без класса"
 		}
 	}
-	want := map[string]string{"att2.jsonl:2": "проба: каталог /var/tmp/я", "att10.jsonl:2": "выкатка"}
+	want := map[string]string{"att2.jsonl:2": "проба: каталог /var/tmp/я", "att10.jsonl:2": "выкатка", "att11.jsonl:2": "проба: каталог /var/tmp/b"}
 	if !maps.Equal(got, want) {
 		t.Errorf("записи %v, ждём %v", got, want)
+	}
+	// файлов в окне — попытки в окне (att1 — вне), имя без номера — ошибка чтения
+	if res.files["worker"] != 4 {
+		t.Errorf("файлов %d, ждём 4", res.files["worker"])
+	}
+	if len(res.errs) != 1 || !strings.Contains(res.errs[0], "номер попытки attX.jsonl") {
+		t.Errorf("ошибки %v", res.errs)
 	}
 }

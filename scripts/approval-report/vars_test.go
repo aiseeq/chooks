@@ -205,11 +205,22 @@ func TestProbeCwd(t *testing.T) {
 		{"export снят unset", "Bash", tmp, false, `export XDG_CONFIG_HOME=/tmp/c; unset XDG_CONFIG_HOME; graft deploy prod`, ""},
 		{"export в подоболочке", "Bash", tmp, false, `( export XDG_CONFIG_HOME=/tmp/c ); graft deploy prod`, ""},
 		{"живой export, затем временный", "Bash", tmp, false, `export XDG_CONFIG_HOME=/home/aisee/.config; export XDG_CONFIG_HOME="/tmp/c"; graft deploy test`, "проба: каталог /tmp/p"},
+		{"присваивание после export", "Bash", tmp, false, `export XDG_CONFIG_HOME=/tmp/c; XDG_CONFIG_HOME=/home/aisee/.config; graft deploy prod`, ""},
+		{"export во вложенном скрипте", "Bash", tmp, false, `bash -c 'export XDG_CONFIG_HOME=/tmp/c' && graft deploy prod`, ""},
+		{"export и выкатка во вложенном скрипте", "Bash", tmp, false, `bash -c 'export XDG_CONFIG_HOME=/tmp/c; graft deploy test'`, "проба: каталог /tmp/p"},
+		{"export во вложенном скрипте в двойных кавычках", "Bash", tmp, false, `bash -c "export XDG_CONFIG_HOME=/tmp/c" && graft deploy prod`, ""},
+		{"экранированная кавычка до export", "Bash", tmp, false, `echo \' ; export XDG_CONFIG_HOME=/tmp/c; graft deploy test`, "проба: каталог /tmp/p"},
+		{"export, затем env без -u", "Bash", tmp, false, `export XDG_CONFIG_HOME=/tmp/c; env A=1 graft deploy test`, "проба: каталог /tmp/p"},
+		{"env -u после export", "Bash", tmp, false, `export XDG_CONFIG_HOME=/tmp/c; env -u XDG_CONFIG_HOME graft deploy prod`, ""},
+		{"массив A=( — не подоболочка", "Bash", live, false, "A=(x y); cd " + tmp + " && " + deploy, "проба: каталог /tmp/p"},
 		{"подстановка процесса <( — не подоболочка", "Bash", live, false, "diff <(echo a) /dev/null; cd " + tmp + " && " + deploy, "проба: каталог /tmp/p"},
 		{"подстановка процесса >( — не подоболочка", "Bash", live, false, "echo a > >(cat); cd " + tmp + " && " + deploy, "проба: каталог /tmp/p"},
 	}
 	for _, c := range cases {
 		v := Classify(Event{Tool: c.tool, Command: c.cmd, Cwd: c.cwd, CallCwd: c.callCwd, Home: testHome})
+		if v.Unparsed {
+			t.Errorf("%s: разбор оболочкой сорван, ответ — от регулярок", c.name)
+		}
 		if c.probe == "" {
 			if len(v.Possible) != 0 || !v.HitClass(3) {
 				t.Errorf("%s: ждём выкатку, Possible=%+v Hits=%+v", c.name, v.Possible, v.Hits)

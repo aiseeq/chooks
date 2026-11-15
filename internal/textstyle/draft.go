@@ -65,27 +65,36 @@ type Finding struct {
 	Fragment string
 }
 
+// anyIssueURL адрес задачи для префикса без адреса: чужой адрес в
+// подсказке увёл бы ссылку в другой Jira
+const anyIssueURL = "https://…/browse/"
+
 // DraftKey ключ задачи вне URL в черновике чата или письма: людям ключ —
-// ссылкой, а markdown в черновике запрещён (MarkdownLink), поэтому голым URL.
-// Поиск — тот же, что у UnlinkedKey; issueURL — адрес задачи без ключа,
-// пусто — в подсказке шаблон
-func DraftKey(prefixes []string, issueURL string) Marker {
+// ссылкой, а markdown в черновике запрещён (MarkdownLink), поэтому голым URL
+// с самим ключом. Поиск — тот же, что у UnlinkedKey; issueURLs — адрес
+// задачи без ключа по префиксу, префикс без адреса — шаблон адреса
+func DraftKey(prefixes []string, issueURLs map[string]string) Marker {
 	m := UnlinkedKey(prefixes)
-	if issueURL == "" {
-		issueURL = "https://…/browse/"
+	m.Fix = "голый URL: '" + anyIssueURL + "<ключ>'"
+	m.FixFor = func(key string) string {
+		prefix, _, _ := strings.Cut(key, "-")
+		issueURL := issueURLs[prefix]
+		if issueURL == "" {
+			issueURL = anyIssueURL
+		}
+		return "голый URL: '" + issueURL + key + "'"
 	}
-	m.Fix = "голый URL: '" + issueURL + "<ключ>'"
 	return m
 }
 
 // CheckDraftKeys проверяет черновик маркерами черновика и ключом задачи.
 // prefixes пусто — ключ не ищется: в чате любой «ABC-12» (UTF-8, SHA-256)
 // был бы ложной находкой
-func CheckDraftKeys(text string, prefixes []string, issueURL string) []Finding {
+func CheckDraftKeys(text string, prefixes []string, issueURLs map[string]string) []Finding {
 	if len(prefixes) == 0 {
 		return CheckDraft(text)
 	}
-	return check(text, append(slices.Clip(DraftMarkers), DraftKey(prefixes, issueURL)))
+	return check(text, append(slices.Clip(DraftMarkers), DraftKey(prefixes, issueURLs)))
 }
 
 // CheckDraft проверяет черновик построчно: номер строки ведёт к месту правки,
@@ -99,7 +108,7 @@ func check(text string, markers []Marker) []Finding {
 	var findings []Finding
 	for i, line := range strings.Split(text, "\n") {
 		for _, marker := range markers {
-			if fragment := marker.Find(line); fragment != "" {
+			for _, fragment := range marker.fragments(line) {
 				findings = append(findings, Finding{Line: i + 1, Marker: marker, Fragment: strings.TrimSpace(fragment)})
 			}
 		}

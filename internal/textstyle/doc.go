@@ -2,7 +2,10 @@ package textstyle
 
 import (
 	"regexp"
+	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Маркеры документа markdown (сводка встречи перед импортом в Google Doc):
@@ -30,7 +33,9 @@ const UnlinkedKeyDescription = "ключ задачи без ссылки"
 
 // UnlinkedKey ключ задачи вне ссылки markdown и вне URL: в документе его не
 // открыть. prefixes — ключи проектов («PROJ»); пусто — любой ключ вида
-// ABC-12 (тогда находкой будут и UTF-8, SHA-256)
+// ABC-12 (тогда находкой будут и UTF-8, SHA-256). Каждый ключ строки —
+// своя находка; за номером не буква и не цифра (PROJ-1a не ключ), дефис
+// можно: ветка feature/PROJ-12-fix тоже ведёт к задаче
 func UnlinkedKey(prefixes []string) Marker {
 	project := `[A-Z][A-Z0-9]{1,9}`
 	if len(prefixes) > 0 {
@@ -45,7 +50,13 @@ func UnlinkedKey(prefixes []string) Marker {
 	return Marker{
 		Description: UnlinkedKeyDescription,
 		Fix:         "ссылка markdown: '[KEY-12](https://…/browse/KEY-12)'",
-		Find:        func(line string) string { return findUnlinkedKey(key, line) },
+		Find: func(line string) string {
+			if keys := findUnlinkedKeys(key, line); len(keys) > 0 {
+				return keys[0]
+			}
+			return ""
+		},
+		FindAll: func(line string) []string { return findUnlinkedKeys(key, line) },
 	}
 }
 
@@ -95,16 +106,25 @@ var (
 	linkedPattern = regexp.MustCompile(`\[[^\]\n]*\]\([^)\s]*\)|\[[^\]\n]*\]\[[^\]\n]*\]|^\s*\[[^\]\n]*\]:\s*\S+|https?://\S+`)
 )
 
-// findUnlinkedKey ищет ключ задачи вне ссылок: ссылки и URL заменяются
-// пробелами той же длины, чтобы ключ рядом со ссылкой не склеился с ней
-func findUnlinkedKey(key *regexp.Regexp, line string) string {
+// findUnlinkedKeys ищет ключи задачи вне ссылок: ссылки и URL заменяются
+// пробелами той же длины, чтобы ключ рядом со ссылкой не склеился с ней.
+// Правая граница — проверкой знака после номера: в RE2 нет lookahead, а
+// съеденный знак отнял бы левую границу у ключа сразу за ним. Повтор
+// ключа в строке — одна находка
+func findUnlinkedKeys(key *regexp.Regexp, line string) []string {
 	bare := linkedPattern.ReplaceAllStringFunc(line, func(s string) string {
 		return strings.Repeat(" ", len(s))
 	})
-	if m := key.FindStringSubmatch(bare); m != nil {
-		return m[1]
+	var keys []string
+	for _, m := range key.FindAllStringSubmatchIndex(bare, -1) {
+		next, _ := utf8.DecodeRuneInString(bare[m[3]:])
+		found := bare[m[2]:m[3]]
+		if unicode.IsLetter(next) || unicode.IsNumber(next) || slices.Contains(keys, found) {
+			continue
+		}
+		keys = append(keys, found)
 	}
-	return ""
+	return keys
 }
 
 // Числа и единицы срока: «через 2 недели», «3 дня назад», «ближайшие 2 недели»

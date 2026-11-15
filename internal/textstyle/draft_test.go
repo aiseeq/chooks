@@ -53,6 +53,24 @@ func TestCheckDraftAllowsHisVoice(t *testing.T) {
 	}
 }
 
+// Подсказка ключа — голый URL с самим ключом: адрес своего префикса, без
+// адреса — шаблон; маркеры без своей подсказки — прежний Fix
+func TestDraftKeyHint(t *testing.T) {
+	urls := map[string]string{"PROJ": "https://jira.example/browse/"}
+	var got []string
+	for _, f := range CheckDraftKeys("PROJ-12 и OPS-3 — PROJ-12", []string{"PROJ", "OPS"}, urls) {
+		got = append(got, f.Fragment+": "+f.Marker.Hint(f.Fragment))
+	}
+	want := []string{
+		"OPS-3 — PROJ-12: " + EmDash.Fix,
+		"PROJ-12: голый URL: 'https://jira.example/browse/PROJ-12'",
+		"OPS-3: голый URL: 'https://…/browse/OPS-3'",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("подсказки %v, нужно %v", got, want)
+	}
+}
+
 func TestCheckDraftReportsLineNumbers(t *testing.T) {
 	findings := CheckDraft("Ок\nГотово — выкачено\n\nНашлось три расхождения")
 	var lines []int

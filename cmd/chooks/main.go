@@ -790,6 +790,10 @@ const (
 	exitStyleError      = 2
 )
 
+// checkDraft проверка черновика команды style; тест подменяет её, чтобы
+// увидеть, что документ (--doc) черновиком не проверяется
+var checkDraft = textstyle.CheckDraftKeys
+
 // newStyleCmd создает команду проверки черновика текста от имени пользователя
 func newStyleCmd(exitCode *int) *cobra.Command {
 	var doc bool
@@ -808,8 +812,9 @@ Doc): заголовки, списки, ссылки, таблицы и выде
 вчера, на этой неделе, через неделю, день недели без числа после него).
 
 Ключ задачи: префиксы проектов - --keys PROJ,OPS, без него - style.key_prefixes
-конфига chooks. В черновике ключ вне URL - находка с подсказкой голого URL
-(style.issue_url конфига + ключ); без префиксов ключ в черновике не ищется.
+конфига chooks. В черновике каждый ключ вне URL - находка с подсказкой голого
+URL с ключом: style.issue_url конфига для префиксов style.key_prefixes, для
+остальных шаблон адреса; без префиксов ключ в черновике не ищется.
 В документе без префиксов находка - любой ключ вида ABC-12 (и UTF-8,
 SHA-256 тоже).
 
@@ -831,13 +836,15 @@ SHA-256 тоже).
 				*exitCode = exitStyleError
 				return err
 			}
-			findings := textstyle.CheckDraftKeys(text, prefixes, config.Style.IssueURL)
+			var findings []textstyle.Finding
 			if doc {
 				findings = textstyle.CheckDoc(text, prefixes)
+			} else {
+				findings = checkDraft(text, prefixes, issueURLs(config.Style))
 			}
 			out := cmd.OutOrStdout()
 			for _, f := range findings {
-				fmt.Fprintf(out, "%d: %s: %q, нужно: %s\n", f.Line, f.Marker.Description, f.Fragment, f.Marker.Fix)
+				fmt.Fprintf(out, "%d: %s: %q, нужно: %s\n", f.Line, f.Marker.Description, f.Fragment, f.Marker.Hint(f.Fragment))
 			}
 			if len(findings) > 0 {
 				*exitCode = exitStyleViolations
@@ -860,6 +867,17 @@ func keyPrefixes(keys []string) []string {
 		}
 	}
 	return out
+}
+
+// issueURLs — адрес задачи по префиксу: issue_url конфига ведёт только на
+// задачи префиксов конфига, префикс из --keys вне конфига адреса не
+// получает
+func issueURLs(style core.StyleConfig) map[string]string {
+	urls := map[string]string{}
+	for _, prefix := range keyPrefixes(style.KeyPrefixes) {
+		urls[prefix] = style.IssueURL
+	}
+	return urls
 }
 
 // readDraft читает черновик из файла или stdin ("-")

@@ -17,6 +17,30 @@ type Marker struct {
 	Fix         string
 	// Find возвращает найденный фрагмент или пустую строку
 	Find func(text string) string
+	// FindAll — все фрагменты строки, у маркера, где каждый фрагмент — своя
+	// правка (ключ задачи); nil — строка даёт одну находку от Find
+	FindAll func(text string) []string
+	// FixFor — подсказка с самим фрагментом; nil — Fix
+	FixFor func(fragment string) string
+}
+
+// Hint подсказка к найденному фрагменту
+func (m Marker) Hint(fragment string) string {
+	if m.FixFor != nil {
+		return m.FixFor(fragment)
+	}
+	return m.Fix
+}
+
+// fragments находки маркера в строке
+func (m Marker) fragments(line string) []string {
+	if m.FindAll != nil {
+		return m.FindAll(line)
+	}
+	if fragment := m.Find(line); fragment != "" {
+		return []string{fragment}
+	}
+	return nil
 }
 
 // wordBoundary левая граница слова: \b в RE2 понимает только ASCII

@@ -24,8 +24,8 @@ type Config struct {
 type StyleConfig struct {
 	// KeyPrefixes — префиксы ключей задач («PROJ»); --keys их заменяет
 	KeyPrefixes []string `yaml:"key_prefixes"`
-	// IssueURL — адрес задачи без ключа («https://jira.example/browse/»):
-	// черновик получает голый URL с ключом
+	// IssueURL — адрес задачи без ключа («https://jira.example/browse/»)
+	// для префиксов KeyPrefixes: черновик получает голый URL с ключом
 	IssueURL string `yaml:"issue_url"`
 }
 

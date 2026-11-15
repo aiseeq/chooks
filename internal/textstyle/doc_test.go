@@ -332,6 +332,35 @@ func TestCheckDocReportsLineNumbers(t *testing.T) {
 // projKeys — префиксы ключей проекта в тестах
 var projKeys = []string{"PROJ"}
 
+// Каждый ключ строки — своя находка, повтор ключа — одна; за номером не
+// буква и не цифра, дефис можно: ветка feature/PROJ-12-fix ведёт к задаче
+func TestCheckDocKeysOnLine(t *testing.T) {
+	cases := map[string][]string{
+		"PROJ-1 и PROJ-2":                   {"PROJ-1", "PROJ-2"},
+		"PROJ-1,PROJ-2 и снова PROJ-1":      {"PROJ-1", "PROJ-2"},
+		"PROJ-1a, PROJ-12б и PROJ-3":        {"PROJ-3"},
+		"ветка feature/PROJ-12-fix":         {"PROJ-12"},
+		"PROJ-7_ и PROJ-8.":                 {"PROJ-7", "PROJ-8"},
+		"PROJ-1٣ не ключ":                   nil,
+		"[PROJ-1](https://x/PROJ-1) PROJ-9": {"PROJ-9"},
+	}
+	for line, want := range cases {
+		var got []string
+		for _, f := range CheckDoc(line, projKeys) {
+			got = append(got, f.Fragment)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%q: ключи %v, нужно %v", line, got, want)
+		}
+	}
+	if got := UnlinkedKey(projKeys).Find("PROJ-1a и PROJ-2, PROJ-3"); got != "PROJ-2" {
+		t.Errorf("Find: %q, нужно первый ключ PROJ-2", got)
+	}
+	if got := UnlinkedKey(projKeys).Find("PROJ-1a"); got != "" {
+		t.Errorf("Find без ключа: %q", got)
+	}
+}
+
 // Без префиксов находка — любой ключ вида ABC-12, внутри ссылки — нет
 func TestCheckDocAnyKey(t *testing.T) {
 	findings := CheckDoc("OTHER-5 и [PROJ-1](https://x/PROJ-1)", nil)

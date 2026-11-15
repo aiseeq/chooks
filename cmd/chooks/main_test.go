@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/textstyle"
 	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
 
@@ -296,7 +297,7 @@ func styleConfig(t *testing.T, body string) {
 func TestStyleCmdDraftKey(t *testing.T) {
 	styleConfig(t, "style:\n  key_prefixes: [PROJ]\n  issue_url: https://jira.example/browse/\n")
 	out, code := runStyle(t, "Готово\nсм. PROJ-12\n", "-")
-	want := "2: ключ задачи без ссылки: \"PROJ-12\", нужно: голый URL: 'https://jira.example/browse/<ключ>'\n"
+	want := "2: ключ задачи без ссылки: \"PROJ-12\", нужно: голый URL: 'https://jira.example/browse/PROJ-12'\n"
 	if code != exitStyleViolations || out != want {
 		t.Fatalf("ключ вне URL: код %d, вывод %q", code, out)
 	}
@@ -322,8 +323,38 @@ func TestStyleCmdDraftKeyDefaults(t *testing.T) {
 		t.Errorf("без префиксов: код %d, вывод %q", code, out)
 	}
 	out, code := runStyle(t, "PROJ-1\n", "--keys", "PROJ", "-")
-	if code != exitStyleViolations || !strings.Contains(out, "голый URL: 'https://…/browse/<ключ>'") {
+	if code != exitStyleViolations || !strings.Contains(out, "голый URL: 'https://…/browse/PROJ-1'") {
 		t.Errorf("без адреса: код %d, вывод %q", code, out)
+	}
+}
+
+// Каждый ключ строки — своя находка с адресом своего префикса: issue_url
+// конфига — только для префиксов конфига, префикс из --keys вне конфига
+// получает шаблон адреса
+func TestStyleCmdDraftKeysPerPrefix(t *testing.T) {
+	styleConfig(t, "style:\n  key_prefixes: [proj]\n  issue_url: https://jira.example/browse/\n")
+	out, code := runStyle(t, "OPS-3 и PROJ-4, снова OPS-3\n", "--keys", "ops,proj", "-")
+	want := "1: ключ задачи без ссылки: \"OPS-3\", нужно: голый URL: 'https://…/browse/OPS-3'\n" +
+		"1: ключ задачи без ссылки: \"PROJ-4\", нужно: голый URL: 'https://jira.example/browse/PROJ-4'\n"
+	if code != exitStyleViolations || out != want {
+		t.Fatalf("ключи по префиксам: код %d, вывод\n%s\nнужно\n%s", code, out, want)
+	}
+}
+
+// С --doc черновик не проверяется: результат этой проверки не нужен
+func TestStyleCmdDocSkipsDraftCheck(t *testing.T) {
+	saved := checkDraft
+	t.Cleanup(func() { checkDraft = saved })
+	called := false
+	checkDraft = func(text string, prefixes []string, issueURLs map[string]string) []textstyle.Finding {
+		called = true
+		return saved(text, prefixes, issueURLs)
+	}
+	if _, code := runStyle(t, "Готово — выкачено\n", "--doc", "-"); code != exitStyleViolations || called {
+		t.Errorf("--doc: код %d, черновик проверен: %v", code, called)
+	}
+	if _, code := runStyle(t, "Готово — выкачено\n", "-"); code != exitStyleViolations || !called {
+		t.Errorf("без --doc: код %d, черновик проверен: %v", code, called)
 	}
 }
 

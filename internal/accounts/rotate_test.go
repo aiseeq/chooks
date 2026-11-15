@@ -340,6 +340,9 @@ func TestPending(t *testing.T) {
 	a, _ := s.find(personal.email)
 	a.UsageCheckedAt = time.Time{}
 	check("неделя неактивной неизвестна", "неизвестна")
+	s.AutoOff = true
+	check("неделя неизвестна при выключенном автопереключении", "неизвестна")
+	s.AutoOff = false
 	a.UsageCheckedAt = f.now.Add(-time.Minute)
 	check("расход спрошен недавно", "пуста")
 
@@ -479,5 +482,52 @@ func TestActiveUsageSkipsExpiringToken(t *testing.T) {
 	}
 	if f.refreshes != 0 {
 		t.Errorf("токен активной обновлялся: %d обновлений", f.refreshes)
+	}
+}
+
+// Автопереключение выключено (ручной switch): неделя учётки после /login всё
+// равно спрашивается у API — замер нужен строке статуса, а не только выбору.
+// Переключения нет
+func TestLoginMeasuresActiveWeekAutoOff(t *testing.T) {
+	f := twoAccounts(t)
+	resets := f.now.Add(3 * day).Truncate(time.Minute)
+	f.usage["work"] = weekJSON(99, resets)
+	f.usage["personal"] = weekJSON(100, f.now.Add(5*day).Truncate(time.Minute))
+	f.now = f.now.Add(usageStale)
+	f.save("personal")
+	if u := f.limits.usage[work.email]; u.Week.Used != 99 {
+		t.Fatalf("до сброса рабочая не спрошена: %+v", u.Week)
+	}
+	if err := SetAuto(f.p, false); err != nil {
+		t.Fatal(err)
+	}
+	lastSwitch := f.store().LastSwitch
+
+	f.usage["work"] = weekJSON(0, resets)
+	f.now = f.now.Add(time.Minute)
+	f.save("work")
+	if got := f.store().ActiveEmail(); got != work.email {
+		t.Fatalf("активна %q", got)
+	}
+	if u := f.limits.usage[work.email]; u.Week.Used != 0 {
+		t.Errorf("при выключенном автопереключении неделя рабочей после /login не спрошена: %+v", u.Week)
+	}
+	if got := f.store().LastSwitch; !got.Equal(lastSwitch) {
+		t.Errorf("при выключенном автопереключении было переключение: %v, было %v", got, lastSwitch)
+	}
+
+	// Активная пуста, у второй неделя сброшена: замер есть, переключения нет
+	f.usage["work"] = weekJSON(100, resets)
+	f.usage["personal"] = weekJSON(0, f.now.Add(5*day).Truncate(time.Minute))
+	f.limits.set(work.email, 100, resets)
+	f.now = f.now.Add(usageStale + switchCooldown)
+	if _, err := f.r.Rotate(context.Background(), Options{Force: true, Wait: true}); err != nil {
+		t.Fatal(err)
+	}
+	if u := f.limits.usage[personal.email]; u.Week.Used != 0 {
+		t.Errorf("при выключенном автопереключении неделя второй учётки не спрошена: %+v", u.Week)
+	}
+	if got := f.store().ActiveEmail(); got != work.email {
+		t.Errorf("при выключенном автопереключении активна %q, ждали %q", got, work.email)
 	}
 }

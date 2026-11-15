@@ -79,8 +79,13 @@ func (r *Rotator) Rotate(ctx context.Context, opts Options) (bool, error) {
 	if syncErr != nil {
 		r.Log.Warn("accounts: credentials not synced", "error", syncErr)
 	}
-	if !s.AutoOff && len(s.Accounts) > 1 && syncErr == nil {
-		r.autoSwitch(ctx, s)
+	// Замер недель — и при выключенном автопереключении: после ручного
+	// switch и /login на учётку со сброшенной неделей запись иначе остаётся
+	// на старой доле (13.11)
+	if len(s.Accounts) > 1 && syncErr == nil {
+		if usage, ok := r.measure(ctx, s); ok && !s.AutoOff {
+			r.autoSwitch(ctx, s, usage)
+		}
 	}
 	if err := saveStore(r.Paths, s); err != nil {
 		return true, err
@@ -88,13 +93,15 @@ func (r *Rotator) Rotate(ctx context.Context, opts Options) (bool, error) {
 	return true, syncErr
 }
 
-// autoSwitch спрашивает недостающий расход и переключает по правилу
-func (r *Rotator) autoSwitch(ctx context.Context, s *Store) {
+// measure спрашивает у API недели учёток, которых нет в снимке или они
+// пусты (needsUsage), и возвращает снимок после замера; false — снимок не
+// прочесть
+func (r *Rotator) measure(ctx context.Context, s *Store) (map[string]Usage, bool) {
 	now := r.Now()
 	usage, err := r.Limits.Usage()
 	if err != nil {
 		r.Log.Warn("accounts: limits snapshot unreadable, no switch", "error", err)
-		return
+		return nil, false
 	}
 	if now.After(s.RetryAt) {
 		for _, a := range needsUsage(s, usage, now) {
@@ -104,9 +111,15 @@ func (r *Rotator) autoSwitch(ctx context.Context, s *Store) {
 		}
 		if usage, err = r.Limits.Usage(); err != nil {
 			r.Log.Warn("accounts: limits snapshot unreadable, no switch", "error", err)
-			return
+			return nil, false
 		}
 	}
+	return usage, true
+}
+
+// autoSwitch переключает по правилу выбора по снимку расхода usage
+func (r *Rotator) autoSwitch(ctx context.Context, s *Store, usage map[string]Usage) {
+	now := r.Now()
 	activeAlive := false
 	if active := s.byUUID(s.Active); active != nil {
 		activeAlive = eligible(active, now)
@@ -529,11 +542,14 @@ func pending(p Paths, s *Store, usage map[string]Usage, now time.Time) (string, 
 		}
 		return "", nil
 	}
-	if s.AutoOff || len(s.Accounts) < 2 {
+	if len(s.Accounts) < 2 {
 		return "", nil
 	}
 	if len(needsUsage(s, usage, now)) > 0 {
 		return "неделя учётки неизвестна или пуста", nil
+	}
+	if s.AutoOff {
+		return "", nil
 	}
 	activeAlive := false
 	if active := s.byUUID(s.Active); active != nil {

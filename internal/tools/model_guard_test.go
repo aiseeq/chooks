@@ -86,8 +86,8 @@ func TestModelGuard(t *testing.T) {
 		{"переменная в bash -c", "Bash", "", `bash -c 'ANTHROPIC_MODEL=sonnet claude -p hi'`, true},
 		{"env переменной", "Bash", "", "env ANTHROPIC_MODEL=sonnet claude -p hi", true},
 		{"declare -x", "Bash", "", "declare -x ANTHROPIC_MODEL=sonnet; claude -p hi", true},
-		{"запасной лексер", "Bash", "", `claude --model sonnet -p "hi`, true},
-		{"запасной лексер, переменная", "Bash", "", `ANTHROPIC_MODEL=sonnet claude -p "hi`, true},
+		{"запасной поиск", "Bash", "", `claude --model sonnet -p "hi`, true},
+		{"запасной поиск, переменная", "Bash", "", `ANTHROPIC_MODEL=sonnet claude -p "hi`, true},
 		{"agents inherit", "Bash", "", `claude -p hi --agents '{"r":{"description":"d","prompt":"p","model":"inherit"}}'`, false},
 		{"agents не JSON", "Bash", "", `claude -p hi --agents agents.json`, false},
 		{"settings=", "Bash", "", `claude -p hi --settings='{"model":"sonnet"}'`, true},
@@ -100,6 +100,30 @@ func TestModelGuard(t *testing.T) {
 		{"settings путь из переменной", "Bash", "", `S=/tmp/p; claude -p hi --settings $S/a.json`, false},
 		{"settings json с подстановкой", "Bash", "", `claude -p hi --settings "{\"model\":\"$M\"}"`, true},
 		{"agents json", "Bash", "", `claude -p hi --agents '{"r":{"description":"d","prompt":"p","model":"haiku"}}'`, true},
+		// присваивания по разбору mvdan/sh и вызовам shellcmd (тикет kill-guard-shellcmd)
+		{"переменная перед обёрткой", "Bash", "", "ANTHROPIC_MODEL=sonnet timeout 5 claude -p hi", true},
+		{"переменная перед оболочкой", "Bash", "", "ANTHROPIC_MODEL=sonnet bash -c 'claude -p hi'", true},
+		{"переменная в ssh", "Bash", "", "ssh pc 'ANTHROPIC_MODEL=sonnet claude -p hi'", true},
+		{"env с опцией", "Bash", "", "env -u X ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"переменная в here-doc оболочки", "Bash", "", "bash <<'EOF'\nANTHROPIC_MODEL=sonnet claude -p hi\nEOF", true},
+		{"переменная в here-doc через конвейер", "Bash", "", "cat <<'EOF' | sudo bash\nANTHROPIC_MODEL=sonnet claude -p hi\nEOF", true},
+		{"переменная у команды с claude в $(…)", "Bash", "", `ANTHROPIC_MODEL=sonnet python3 x.py "$(claude --model opus -p hi)"`, false},
+		{"запасной поиск, одобренная", "Bash", "", `claude --model opus -p "hi`, false},
+		{"запасной поиск без агента", "Bash", "", `echo --model sonnet "hi`, false},
+		// env перед оболочкой задаёт модель для claude в её скрипте; пустое
+		// значение — модель по умолчанию; присваивание в промпте за env — не
+		// присваивание
+		{"env перед оболочкой", "Bash", "", `env ANTHROPIC_MODEL=sonnet bash -c 'claude -p hi'`, true},
+		{"env у другой команды", "Bash", "", "env ANTHROPIC_MODEL=sonnet python3 x.py; claude --model opus -p hi", false},
+		{"env в промпте", "Bash", "", "env FOO=1 claude -p ANTHROPIC_MODEL=sonnet", false},
+		{"пустая переменная", "Bash", "", "ANTHROPIC_MODEL= claude -p hi", false},
+		{"пустая переменная в кавычках", "Bash", "", "ANTHROPIC_MODEL='' claude -p hi", false},
+		{"env пустой переменной", "Bash", "", "env ANTHROPIC_MODEL= claude -p hi", false},
+		// незакрытый here-doc: shellcmd его дописывает, mvdan/sh — нет;
+		// присваивание ищется в тексте
+		{"незакрытый here-doc", "Bash", "", "ANTHROPIC_MODEL=sonnet claude -p hi <<EOF\nx", true},
+		{"незакрытый here-doc, одобренная", "Bash", "", "ANTHROPIC_MODEL=opus claude -p hi <<EOF\nx", false},
+		{"незакрытый here-doc, пустая", "Bash", "", "ANTHROPIC_MODEL= claude -p hi <<EOF\nx", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,6 +141,29 @@ func TestModelGuard(t *testing.T) {
 				t.Errorf("подсказка: %q %q", got.Violations[0].Message, got.Suggestions)
 			}
 		})
+	}
+}
+
+// причина отказа: модель из переменной — «задана переменной»; тело here-doc
+// за снятой обёрткой (sudo bash) с теми же перенаправлениями — один раз;
+// у одинаковых вызовов — по разу на вызов
+func TestModelGuardEnvReasons(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	for _, tc := range []struct {
+		command, want string
+		count         int
+	}{
+		{`ANTHROPIC_MODEL="$M" claude -p hi`, "модель задана переменной, назови её литералом", 1},
+		{"sudo bash <<'EOF'\nANTHROPIC_MODEL=sonnet claude -p hi\nEOF", `модель "sonnet" не одобрена`, 1},
+		{"env ANTHROPIC_MODEL=sonnet claude -p hi; env ANTHROPIC_MODEL=sonnet claude -p hi", `модель "sonnet" не одобрена`, 2},
+	} {
+		got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: tc.command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.IsValid || strings.Count(got.Violations[0].Message, tc.want) != tc.count {
+			t.Errorf("%q: %+v, want %d× %q", tc.command, got.Violations, tc.count, tc.want)
+		}
 	}
 }
 

@@ -55,9 +55,6 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 	}
 
 	scan := killScan{tool: t, command: input.Command, signalWord: signalWordRe.MatchString(unquoted(input.Command))}
-	if err := scan.walk(input.Command, 0); err != nil {
-		return nil, err
-	}
 	if err := scan.parsedCalls(); err != nil {
 		return nil, err
 	}
@@ -91,11 +88,10 @@ func unquoted(command string) string {
 	return strings.NewReplacer(`\`, "", `'`, "", `"`, "").Replace(command)
 }
 
-// maxScriptNesting предел вложенности sh -c и eval: глубже разбор не идёт,
-// команда отклоняется
+// maxScriptNesting предел вложенности sh -c и eval: глубже — отказ
 const maxScriptNesting = 4
 
-// killScan обход команды и вложенных в неё скриптов sh -c и eval
+// killScan проверка вызовов команды, найденных разбором оболочки
 type killScan struct {
 	tool *KillGuardTool
 	// command — команда целиком: её текст стоит в cmdline оболочки, и pkill -f
@@ -114,82 +110,87 @@ type killScan struct {
 // signalWordRe отдельное слово kill, pkill, killall, killall5
 var signalWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(p?kill|killall5?)([^[:alnum:]_.-]|$)`)
 
-// walk проверяет простые команды скрипта; скрипт sh -c, eval, watch, trap,
-// su -c и here-string оболочки — тем же разбором на уровень глубже
-func (s *killScan) walk(script string, depth int) error {
-	lexed := lexShell(withoutHereDocBodies(script, true))
-	for i, cmd := range lexed.cmds {
-		if err := s.simple(cmd, lexed.stdin[i], depth); err != nil {
-			return err
-		}
-	}
-	return nil
+// signalNames утилиты, посылающие сигнал
+var signalNames = []string{"kill", "pkill", "killall", "killall5"}
+
+// scriptRunners команды, исполняющие свои аргументы как скрипт оболочки,
+// кроме sh -c и env -S (их видно по опции): eval, watch, trap, su -c и
+// runuser -c. Скрипт с подстановкой shellcmd не разбирает и об этом не
+// сообщает (кроме eval) — признак берётся отсюда
+var scriptRunners = []string{"eval", "watch", "trap", "su", "runuser"}
+
+// shellCommandOption опция оболочки с c в короткой связке: -c, -lc, -ec
+func shellCommandOption(arg string) bool {
+	return strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg[1:], "c")
 }
 
-// simple проверяет одну простую команду: сигнал, вложенный скрипт или
-// команду find -exec
-func (s *killScan) simple(cmd []word, stdin cmdStdin, depth int) error {
-	name, args, via := unwrapCommand(cmd)
-	inner, source := innerScript(name, args)
-	switch {
-	case source == scriptStdin && stdin.hasHereString:
-		inner, source = word{text: stdin.hereString, literal: true}, scriptArg
-	case source == scriptStdin && stdin.piped:
-		s.addReason(scriptInputReason(name))
-		return nil
-	}
-	if source == scriptArg {
-		switch {
-		case !inner.literal && s.signalWord:
-			s.addReason(name + " исполняет скрипт с подстановкой $ или ` (eval \"$(…)\", sh -c \"$X\"): текст станет известен только при запуске, проверить его нельзя")
-			return nil
-		case via != "" && s.signalWord && fedIntoScript(cmd):
-			s.addReason(name + " получает скрипт из ввода через " + via + " (-I, {}): проверить его до запуска нельзя")
-			return nil
-		case depth >= maxScriptNesting:
-			s.reasons = append(s.reasons, fmt.Sprintf("вложенность sh -c и eval глубже %d: проверить сигналы внутри нельзя", maxScriptNesting))
-			return nil
-		}
-		return s.walk(inner.text, depth+1)
-	}
-	if name == "find" {
-		for _, exec := range findExecCommands(args) {
-			if err := s.simple(exec, cmdStdin{}, depth); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	return s.check(name, args, via)
-}
-
-// findExecCommands команды -exec, -execdir, -ok и -okdir у find: слова до ; или +
-func findExecCommands(args []word) [][]word {
-	var out [][]word
+// shellScript скрипт оболочки с -c: первый операнд после опций. Без -c
+// первый операнд — файл скрипта, а слова за ним — его аргументы
+// (bash x.sh -count=1). Связка, кончающаяся на o или O (-o pipefail,
+// -eO extglob), и --rcfile, --init-file берут значение следующим словом;
+// операнд, похожий на опцию (bash -c -- -x), — редкость, он не различается
+func shellScript(args []string) (string, bool) {
+	command := false
 	for i := 0; i < len(args); i++ {
-		switch args[i].text {
-		case "-exec", "-execdir", "-ok", "-okdir":
+		a := args[i]
+		switch {
+		case a == "--rcfile" || a == "--init-file":
+			i++
+		case strings.HasPrefix(a, "--"):
+		case strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+"):
+			command = command || shellCommandOption(a)
+			if strings.HasSuffix(a, "o") || strings.HasSuffix(a, "O") {
+				i++
+			}
 		default:
-			continue
+			return a, command
 		}
-		end := i + 1
-		for end < len(args) && args[end].text != ";" && args[end].text != "+" {
-			end++
-		}
-		out = append(out, args[i+1:end])
-		i = end
 	}
-	return out
+	return "", false
+}
+
+// envSplitOption опция env -S (--split-string): значение исполняется как
+// командная строка; -S бывает в связке после -i, -0, -v (env -iS'…')
+func envSplitOption(arg string) bool {
+	return strings.HasPrefix(arg, "--split-string") ||
+		strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.HasPrefix(strings.TrimLeft(arg[1:], "0iv"), "S")
+}
+
+// scriptArgs слова вызова, которые исполнятся как скрипт: аргументы eval,
+// watch, trap, su, runuser и env с -S, скрипт оболочки с -c; false — вызов
+// скрипт из аргументов не исполняет
+func scriptArgs(c shellcmd.Call) ([]string, bool) {
+	switch {
+	case slices.Contains(scriptRunners, c.Name):
+		return c.Args, true
+	case c.Name == "env" && slices.ContainsFunc(c.Args, envSplitOption):
+		return c.Args, true
+	case shellcmd.IsShell(c.Name):
+		if script, ok := shellScript(c.Args); ok {
+			return []string{script}, true
+		}
+	}
+	return nil, false
+}
+
+// scriptNesting вложенность скриптов вызова: sh -c (в Via — «-c») и
+// eval, watch, trap, su, runuser
+func scriptNesting(via []string) int {
+	n := 0
+	for _, v := range via {
+		if v == "-c" || slices.Contains(scriptRunners, v) {
+			n++
+		}
+	}
+	return n
 }
 
 // parsedCalls проверяет вызовы, найденные полным разбором оболочки
-// (akit/shellcmd): имя из переменной (K=kill; $K), $'kill', тела функций и
-// coproc, склеенные опции обёрток (sudo -iu). Вызов с именем из $(…) — отказ,
-// если в его тексте есть kill. Оболочка, исполняющая текст из ввода или <(…)
-// (ScriptInput: bash <(…), source <(…), … | bash -), — отказ: shellcmd этот
-// текст не читает, kill в нём не виден как вызов. Ошибка разбора — отказ: вызывается только для
-// команд со словом kill, а kill за ошибкой (глубже предела вложенности akit,
-// в неразобранном вложенном скрипте) свой лексер может не увидеть
+// (akit/shellcmd): обёртки с опциями, sh -c, eval, watch, trap, su -c,
+// here-doc и here-string на вход оболочке, find -exec, имя из переменной
+// (K=kill; $K), $'kill', тела функций и coproc. Ошибка разбора — отказ:
+// вызывается только для команд со словом kill, а kill за ошибкой (глубже
+// предела вложенности akit, в неразобранном вложенном скрипте) не виден
 func (s *killScan) parsedCalls() error {
 	calls, err := shellcmd.Calls(s.command)
 	if err != nil {
@@ -197,39 +198,129 @@ func (s *killScan) parsedCalls() error {
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
 	for _, c := range calls {
-		if c.ScriptInput && s.signalWord {
-			s.addReason(scriptInputReason(c.Name))
-		}
-		if c.Name == "" {
-			if strings.Contains(unquoted(c.Raw), "kill") {
-				s.addReason("имя команды вычисляется при запуске ($(…) или `…`) рядом с kill: проверить, что исполнится, нельзя")
-			}
-			continue
-		}
-		via := ""
-		if slices.Contains(c.Via, "xargs") {
-			via = "xargs"
-		}
-		args := make([]word, 0, len(c.Args))
-		for _, a := range c.Args {
-			args = append(args, word{text: a, literal: !strings.ContainsAny(a, "$`")})
-		}
-		if err := s.check(c.Name, args, via); err != nil {
+		if err := s.call(c, calls); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// scriptInputReason причина отказа для оболочки, исполняющей текст из ввода:
-// одна на лексер (… | bash) и полный разбор (ScriptInput), чтобы addReason
-// не дал два отказа на один вызов
+// call проверяет один вызов из разбора оболочки; calls — все вызовы
+// команды: среди них ищется xargs, подающий ввод в скрипт вызова
+func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
+	if scriptNesting(c.Via) > maxScriptNesting {
+		s.addReason(fmt.Sprintf("вложенность sh -c и eval глубже %d: проверить сигналы внутри нельзя", maxScriptNesting))
+		return nil
+	}
+	if !s.signalWord {
+		return s.signal(c)
+	}
+	script, runner := scriptArgs(c)
+	fed := ""
+	if runner {
+		fed = fedIntoScript(c, calls)
+	}
+	switch {
+	case c.ScriptInput:
+		// оболочка исполняет текст из ввода или <(…) (bash <(…), source
+		// <(…), … | bash -): shellcmd его не читает, kill в нём не виден
+		s.addReason(scriptInputReason(c.Name))
+	case slices.ContainsFunc(script, computedArg):
+		s.addReason(c.Name + " исполняет скрипт с подстановкой $ или ` (eval \"$(…)\", sh -c \"$X\"): текст станет известен только при запуске, проверить его нельзя")
+	case fed != "":
+		s.addReason(c.Name + " получает скрипт из ввода через " + fed + " (-I, {}): проверить его до запуска нельзя")
+	case c.Name == "parallel":
+		// цели parallel берёт из списка ::: или ввода, а команду без :::
+		// shellcmd не снимает (pgrep foo | parallel kill): сигнал — слово
+		// среди аргументов parallel
+		for _, a := range c.Args {
+			if err := s.check(filepath.Base(a), nil, "parallel"); err != nil {
+				return err
+			}
+		}
+	}
+	return s.signal(c)
+}
+
+// signal проверяет вызов как сигнал: kill, pkill, killall или имя,
+// вычисляемое при запуске. Такое имя — отказ, если в тексте вызова есть
+// слово kill ($(echo kill) 1, $X kill 1); kill внутри чужого слова
+// (-r raw-process-kill) — не повод. Переменную shellcmd раскрывает только
+// в имени самой команды: K=kill; sudo $K -9 -1 даёт вызов «$K» за sudo без
+// значения, и этот случай здесь не виден (пробел akit)
+func (s *killScan) signal(c shellcmd.Call) error {
+	if c.Name == "" || strings.ContainsAny(c.Name, "$`") {
+		if signalWordRe.MatchString(unquoted(c.Raw)) {
+			s.addReason("имя команды вычисляется при запуске ($(…), `…` или $X) рядом с kill: проверить, что исполнится, нельзя")
+		}
+		return nil
+	}
+	args := make([]word, 0, len(c.Args))
+	for _, a := range c.Args {
+		args = append(args, word{text: a, literal: !strings.ContainsAny(a, "$`")})
+	}
+	via := ""
+	if slices.Contains(c.Via, "xargs") {
+		via = "xargs"
+	}
+	return s.check(c.Name, args, via)
+}
+
+// fedIntoScript обёртка, которая подставляет ввод в скрипт вызова c:
+// parallel всегда ({} или ввод в конце), xargs — с -I, -i или --replace
+func fedIntoScript(c shellcmd.Call, calls []shellcmd.Call) string {
+	if slices.Contains(c.Via, "parallel") {
+		return "parallel"
+	}
+	if slices.ContainsFunc(xargsOptions(c, calls), replaceOption) {
+		return "xargs"
+	}
+	return ""
+}
+
+// replaceOption опция xargs, подставляющая ввод в аргументы команды
+func replaceOption(opt string) bool {
+	return strings.HasPrefix(opt, "-I") || strings.HasPrefix(opt, "-i") || strings.HasPrefix(opt, "--replace")
+}
+
+// xargsOptions опции xargs, за которым исполняется c. Обёртки shellcmd
+// снимает, но отдельным вызовом отдаёт только голову цепочки (sudo xargs
+// nice sh -c: вызовы sudo и sh, а xargs и nice — в Via вызова sh). Опции —
+// слова головы между xargs и следующей за ним командой цепочки (в Via или
+// сам c); голова — вызов с тем же текстом и самым коротким Via
+func xargsOptions(c shellcmd.Call, calls []shellcmd.Call) []string {
+	k := slices.Index(c.Via, "xargs")
+	if k < 0 {
+		return nil
+	}
+	next := c.Name
+	if k+1 < len(c.Via) {
+		next = c.Via[k+1]
+	}
+	head := c
+	for _, x := range calls {
+		if x.Raw == c.Raw && len(x.Via) < len(head.Via) {
+			head = x
+		}
+	}
+	args := head.Args
+	if head.Name != "xargs" {
+		args = args[slices.Index(args, "xargs")+1:]
+	}
+	i := slices.IndexFunc(args, func(a string) bool { return filepath.Base(a) == next })
+	if i < 0 {
+		return nil
+	}
+	return args[:i]
+}
+
+// scriptInputReason причина отказа для оболочки, исполняющей текст из ввода
 func scriptInputReason(name string) string {
 	return name + " читает скрипт из ввода (… | " + name + " или <(…)): проверить его до запуска нельзя"
 }
 
-// addReason добавляет причину отказа без повторов: лексер и полный разбор
-// находят один и тот же вызов
+// addReason добавляет причину отказа без повторов: один сигнал виден и
+// вызовом, и через обёртку (parallel)
 func (s *killScan) addReason(reason string) {
 	if !slices.Contains(s.reasons, reason) {
 		s.reasons = append(s.reasons, reason)
@@ -239,9 +330,7 @@ func (s *killScan) addReason(reason string) {
 // check проверяет одну простую команду, если она шлёт сигнал; via — обёртка,
 // подающая аргументы из ввода (xargs, parallel)
 func (s *killScan) check(name string, args []word, via string) error {
-	switch name {
-	case "kill", "pkill", "killall", "killall5":
-	default:
+	if !slices.Contains(signalNames, name) {
 		return nil
 	}
 	if s.procs == nil {

@@ -201,8 +201,7 @@ func TestKillGuardBlocks(t *testing.T) {
 		`echo 'kill 1' | tee | bash`,
 		`{ echo kill 1; } | bash`,
 		`printf '%s' 'kill 1 #\c' | bash`,
-		// их лексер уже ловил как «… | bash»; process substitution и
-		// «bash -» видит только ScriptInput полного разбора
+		// process substitution и «bash -» — тоже ScriptInput
 		`bash <(echo kill 1)`,
 		`source <(echo kill 1)`,
 		`. <(echo kill 1)`,
@@ -218,6 +217,38 @@ func TestKillGuardBlocks(t *testing.T) {
 		`echo kill 1 | xargs -n 1 -I % sh -c '%'`,
 		`echo kill 1 | xargs -i bash -c {}`,
 		`echo kill 1 | parallel bash -c {}`,
+		// те же признаки на shellcmd без своего лексера (тикет
+		// kill-guard-shellcmd): скрипт с подстановкой у watch, trap, su -c и
+		// у sh -c, который shellcmd разобрал ($X раскроется до запуска
+		// оболочки), ввод в скрипт за обёрткой, parallel без :::, имя из
+		// переменной перед kill
+		`X='; kill -9 -1'; bash -c "echo $X"`,
+		`watch "$X"; kill 455274`,
+		`trap "$X" EXIT; kill 455274`,
+		`su aisee -c "$X"; kill 455274`,
+		`runuser -u aisee -c "$X"; kill 455274`,
+		`eval "echo $X"; kill 455274`,
+		`echo 'x; kill 1' | xargs -I{} sh -c 'echo {}'`,
+		`echo 'x; kill 1' | xargs -I {} nice sh -c 'echo {}'`,
+		`echo 'kill 1' | xargs --replace bash -c {}`,
+		`seq 3 | parallel -j2 kill -9`,
+		`$X kill 1`,
+		"bash -c \"`echo kill 1`\"",
+		`pgrep x | parallel /bin/kill`,
+		// xargs за обёрткой (shellcmd отдаёт вызовами sudo и sh, xargs — в
+		// Via), xargs с путём к оболочке; скрипт оболочки после опций со
+		// значением и после --; env -S с подстановкой
+		`echo 'kill 1' | sudo xargs -I{} sh -c {}`,
+		`echo 'kill 1' | xargs -I{} /bin/sh -c {}`,
+		`bash -eo pipefail -c "$X"; kill 455274`,
+		`bash -O extglob -c "$X"; kill 455274`,
+		`bash +O extglob -c "$X"; kill 455274`,
+		`bash --rcfile /dev/null -c "$X"; kill 455274`,
+		`bash -c -e "$X"; kill 455274`,
+		`bash -c -- "$X"; kill 455274`,
+		`env -S "$X"; kill 455274`,
+		`env --split-string="$X"; kill 455274`,
+		`env -iS"$X"; kill 455274`,
 		// файл скрипта — дескриптор ввода, ввод из <&N и coproc-оболочка:
 		// ScriptInput akit v1.72.2 (shellcmd-script-input-fd-coproc)
 		`echo kill 1 | bash /dev/stdin`,
@@ -245,8 +276,8 @@ func TestKillGuardBlocks(t *testing.T) {
 		`exec {fd}< <(echo kill 1); bash /proc/self/fd/$fd`,
 		`exec {fd}< <(echo kill 1); source /dev/fd/$fd`,
 		// комментарий с \ в конце: mvdan/sh продолжает его на следующую
-		// строку, bash — нет (akit shellcmd-comment-continuation); kill
-		// после него ловит свой лексер
+		// строку, bash — нет; kill после него видит shellcmd (akit
+		// shellcmd-comment-continuation)
 		"echo x #\\\nkill 1",
 		"true # a\\\nkill -9 1",
 		// продолжение комментария съедает fi/done/}: разбор akit падает
@@ -254,16 +285,16 @@ func TestKillGuardBlocks(t *testing.T) {
 		"if true; then zz #\\\nfi; kill 1",
 		"for i in 1; do zz #\\\ndone; kill 1",
 		// строка тела heredoc без кавычек кончается \ + CR LF: mvdan/sh
-		// склеивает её с ограничителем, вызовы после heredoc пропадают без
-		// ошибки (akit shellcmd-carriage-return-words); kill ловит свой лексер
+		// склеивает её с ограничителем, а shellcmd находит вызовы после
+		// heredoc или даёт ошибку разбора (akit shellcmd-carriage-return-words)
 		"cat <<E\nq \\\r\nE\nkill 1",
 		"cat <<E\r\nq \\\r\nE\r\nkill 1",
 		"cat <<E\nq \\\r\nE\r\nkill $P\r\n",
 		"cat <<E\nq \\\r\nE\npkill -f foo",
 		// ограничитель heredoc в кавычках не целиком (<<"E"x): mvdan/sh
 		// разбирает тело как некавыченное, \ + LF склеивает строку с
-		// ограничителем, вызовы после heredoc пропадают без ошибки (akit
-		// shellcmd-heredoc-partly-quoted-delimiter); kill ловит свой лексер
+		// ограничителем; shellcmd находит вызовы после heredoc или даёт
+		// ошибку разбора — отказ (akit v1.75.1, shellcmd-heredoc-partly-quoted-delimiter)
 		"cat <<\"E\"x\nfoo \\\nEx\nkill -9 -1",
 		"cat <<'E'x\n$(\nEx\nkill 1500",
 		"cat <<E\"x\"\nfoo `\nEx\nkill 1500",
@@ -284,11 +315,13 @@ func TestKillGuardKillall5Reason(t *testing.T) {
 	}
 }
 
-// лексер и полный разбор находят один и тот же kill: причина — одна
+// Один сигнал — одна причина: kill за parallel виден и снятым вызовом, и
+// словом в аргументах parallel
 func TestKillGuardReasonOnce(t *testing.T) {
-	r := validateKill(t, `kill 1500`)
-	if len(r.Violations) != 1 {
-		t.Errorf("ждали одну причину, получили %d: %v", len(r.Violations), r.Suggestions)
+	for _, command := range []string{`kill 1500`, `parallel kill ::: 455274`} {
+		if r := validateKill(t, command); len(r.Violations) != 1 {
+			t.Errorf("%s: ждали одну причину, получили %d: %v", command, len(r.Violations), r.Suggestions)
+		}
 	}
 }
 
@@ -389,10 +422,52 @@ func TestKillGuardAllows(t *testing.T) {
 		`killall --version`,
 		`eval eval eval eval kill 455274`,
 		`bash --norc 'kill 1500'`,
+		// ввод xargs без -I — позиционные параметры скрипта, не его текст;
+		// literal-скрипт с $ и подстановка у команды, не исполняющей скрипт
+		`echo 1 | xargs bash -c 'echo $0'; kill 455274`,
+		`echo 1 | xargs bash -c 'echo $0' -i; kill 455274`,
+		`echo 1 | xargs sudo -i sh -c 'echo $0'; kill 455274`,
+		`bash "$HOME/x.sh"; kill 455274`,
+		`bash --norc "$HOME/x.sh"; kill 455274`,
+		`bash -c 'A=$HOME true'; kill 455274`,
+		`$HOME/bin/x; kill 455274`,
+		`echo "$HOME"; kill 455274`,
+		`bash -c 'echo "$1"' _ x; kill 455274`,
+		// слова после скрипта — его позиционные параметры, у файла скрипта —
+		// его аргументы, не опции оболочки; -i до xargs — опция sudo;
+		// xargs -I в другой команде; kill внутри чужого слова у вычисляемого
+		// имени; переменная в имени за обёрткой (G="git …"; timeout 60 $G)
+		`bash -c 'echo "$0"' "$P"; kill 455274`,
+		`bash x.sh -count=1 "$X"; kill 455274`,
+		`bash -o pipefail x.sh -c "$X"; kill 455274`,
+		`bash -- x.sh -c "$X"; kill 455274`,
+		`env -u S "$X"; kill 455274`,
+		`env -uS "$X"; kill 455274`,
+		`echo 1 | sudo -i xargs sh -c 'echo $0'; kill 455274`,
+		`echo a | xargs -I{} echo sh {}; echo 1 | xargs sh -c 'echo $0'; kill 455274`,
+		`for b in /bin/true; do $b check -r raw-process-kill .; done`,
+		`G="git -C /tmp"; timeout 60 $G log -1; kill 455274`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
 		}
+	}
+}
+
+// sh -c в sh -c: глубже maxScriptNesting — отказ даже на безопасный PID, как у eval
+func TestKillGuardShellNesting(t *testing.T) {
+	nested := func(n int) string {
+		script := "kill 455274"
+		for range n {
+			script = "bash -c '" + strings.ReplaceAll(script, "'", `'"'"'`) + "'"
+		}
+		return script
+	}
+	if r := validateKill(t, nested(maxScriptNesting)); !r.IsValid {
+		t.Errorf("вложенность %d: ждали пропуск, получили %v", maxScriptNesting, r.Suggestions)
+	}
+	if validateKill(t, nested(maxScriptNesting+1)).IsValid {
+		t.Errorf("вложенность %d: ждали отказ", maxScriptNesting+1)
 	}
 }
 

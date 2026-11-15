@@ -13,6 +13,7 @@ import (
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/approved"
 	"github.com/aiseeq/chooks/internal/core"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 const defaultApprovedModelsPath = "~/.config/models/approved"
@@ -131,19 +132,23 @@ var modelClients = []string{"claude", "codex", "opencode"}
 
 // bashModelCandidates — модели вызовов агентов в команде оболочки. Вызовы
 // ищет akit shellcmd: он видит и вложенные скрипты (bash -c, ssh, here-doc на
-// вход оболочке). Команду, которую shellcmd не разобрал, проверяет прежний
-// лексер: без вложенных скриптов, но и без пропуска простых вызовов
-// readSettings читает файл --settings по пути из команды, nil — не прочесть;
-// файла нет — текст команды, которая может его написать
+// вход оболочке). Команду, которую shellcmd не разобрал, оболочка не
+// исполнит, если ошибка настоящая: модели ищутся в её тексте (--model, -m,
+// присваивание переменной модели), чтобы ошибка разбора akit не пропустила
+// неодобренную. readSettings читает файл --settings по пути из команды, nil —
+// не прочесть; файла нет — текст команды, которая может его написать
 func bashModelCandidates(command string, readSettings func(string) []byte, logger core.Logger) []modelCandidate {
-	calls, err := shellcmd.Find(command, modelClients...)
+	calls, err := shellcmd.Calls(command)
 	if calls == nil && err != nil {
-		logger.Warn("model_guard: shellcmd не разобрал команду, проверка простых вызовов", "error", err)
-		return lexedModelCandidates(command, readSettings)
+		logger.Warn("model_guard: shellcmd не разобрал команду, модели ищутся в тексте", "error", err)
+		return textModelCandidates(command)
 	}
 	var found []modelCandidate
 	claude := false
 	for _, call := range calls {
+		if !slices.Contains(modelClients, call.Name) {
+			continue
+		}
 		args := make([]word, len(call.Args))
 		for i, a := range call.Args {
 			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`")}
@@ -154,27 +159,40 @@ func bashModelCandidates(command string, readSettings func(string) []byte, logge
 		}
 	}
 	if claude {
-		found = append(found, envModelCandidates(command, 0)...)
+		found = append(found, envModelCandidates(command, calls, logger)...)
 	}
 	return found
 }
 
-// lexedModelCandidates — модели вызовов агентов по прежнему лексеру
-func lexedModelCandidates(command string, readSettings func(string) []byte) []modelCandidate {
+// modelClientWord — отдельное слово claude, codex или opencode (не .claude/ и не claude-hooks)
+var modelClientWord = regexp.MustCompile(`(^|[^[:alnum:]_.-])(claude|codex|opencode)([^[:alnum:]_.-]|$)`)
+
+// envModelMention — присваивание переменной модели в тексте команды
+var envModelMention = regexp.MustCompile(`\b(ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)=["']?([^\s"';&|]*)`)
+
+// textModelCandidates — модели в тексте команды, которую не разобрала
+// оболочка: --model, -m у агента и присваивания переменных модели, если в
+// команде есть агент
+func textModelCandidates(command string) []modelCandidate {
+	if !modelClientWord.MatchString(command) {
+		return nil
+	}
 	var found []modelCandidate
-	claude := false
-	for _, words := range splitSimpleCommands(withoutHereDocBodies(command, false)) {
-		name, args, _ := unwrapCommand(words)
-		if !slices.Contains(modelClients, name) {
-			continue
-		}
-		found = append(found, candidatesFromArgs(name, args, readSettings)...)
-		if name == "claude" {
-			claude = true
+	for _, pattern := range []*regexp.Regexp{longModelMentionPattern, shortModelMentionPattern} {
+		for _, m := range pattern.FindAllStringSubmatch(command, -1) {
+			found = append(found, modelCandidate{value: m[1], dynamic: strings.ContainsAny(m[1], "$`")})
 		}
 	}
-	if claude {
-		found = append(found, envModelCandidates(command, 0)...)
+	return append(found, envTextCandidates(command)...)
+}
+
+// envTextCandidates — присваивания переменных модели в тексте скрипта
+func envTextCandidates(script string) []modelCandidate {
+	var found []modelCandidate
+	for _, m := range envModelMention.FindAllStringSubmatch(script, -1) {
+		if m[2] != "" {
+			found = append(found, modelCandidate{value: m[2], dynamic: strings.ContainsAny(m[2], "$`")})
+		}
 	}
 	return found
 }
@@ -186,94 +204,135 @@ var modelEnvNames = map[string]bool{
 	"ANTHROPIC_DEFAULT_SONNET_MODEL": true, "CLAUDE_CODE_SUBAGENT_MODEL": true,
 }
 
-// maxEnvDepth — предел вложенности скриптов (bash -c 'bash -c …') при поиске
-// присваиваний
-const maxEnvDepth = 4
-
 // envModelCandidates — модели из присваиваний переменных modelEnvNames, что
-// действуют на claude: префиксом вызова (и env), export/declare, префиксом
-// оболочки и внутри её скрипта (bash -c, ssh). Слово с именем переменной в
-// промпте, в теле here-doc для файла или у другой команды — не присваивание
-// для claude (ревью 12.11). shellcmd присваиваний не отдаёт (тикет akit
-// shellcmd-assignments), поэтому — прежний лексер
-func envModelCandidates(script string, depth int) []modelCandidate {
-	if depth > maxEnvDepth {
+// действуют на claude: префиксом вызова, за которым (и за обёртками вроде
+// timeout) claude или оболочка, присваиванием env перед claude,
+// export/declare и внутри скриптов оболочки (bash -c, ssh, here-doc,
+// исполняемый оболочкой). Слово с именем переменной в промпте, в теле
+// here-doc для файла или у другой команды — не присваивание для claude
+// (ревью 12.11). shellcmd присваиваний не отдаёт (тикет akit
+// shellcmd-assignments): их читает разбор mvdan/sh, а что исполнится за
+// присваиванием — вызовы shellcmd calls того же скрипта. Вложенный скрипт —
+// часть внешнего, рекурсия кончается
+func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger) []modelCandidate {
+	file, err := syntax.NewParser().Parse(strings.NewReader(script), "")
+	if err != nil {
+		// shellcmd скрипт разобрал, mvdan/sh — нет: присваиваний по разбору
+		// не видно, они ищутся в тексте
+		logger.Warn("model_guard: mvdan/sh не разобрал скрипт, присваивания модели ищутся в тексте", "error", err)
+		return envTextCandidates(script)
+	}
+	var found []modelCandidate
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.DeclClause:
+			// export, declare и родня: присваивания уходят в окружение следующих команд
+			found = append(found, assignedModels(script, n.Args)...)
+		case *syntax.CallExpr:
+			if len(n.Args) > 0 {
+				found = append(found, callEnvModels(script, n, calls, logger)...)
+			}
+		}
+		return true
+	})
+	// тело here-doc, в котором shellcmd нашёл claude, исполняет оболочка;
+	// снятая обёртка несёт те же перенаправления — тело читается один раз
+	bodies := map[int]bool{}
+	for _, c := range calls {
+		for _, r := range c.Redirs {
+			if r.BodyStart < 0 || bodies[r.BodyStart] || !slices.ContainsFunc(calls, func(cl shellcmd.Call) bool {
+				return cl.Name == "claude" && r.BodyStart <= cl.Offset && cl.Offset < r.BodyEnd
+			}) {
+				continue
+			}
+			bodies[r.BodyStart] = true
+			found = append(found, nestedEnvModels(r.Body, logger)...)
+		}
+	}
+	return found
+}
+
+// callEnvModels — модели из присваиваний простого вызова n: префикс и
+// присваивания env, если за ними исполнится claude или оболочка, и
+// присваивания в скриптах оболочек этого вызова. Что исполнится — вызовы
+// shellcmd с тем же исходным текстом в границах n: сам вызов и снятые с него
+// обёртки
+func callEnvModels(script string, n *syntax.CallExpr, calls []shellcmd.Call, logger core.Logger) []modelCandidate {
+	start, end := int(n.Args[0].Pos().Offset()), int(n.End().Offset())
+	head := slices.IndexFunc(calls, func(c shellcmd.Call) bool { return c.Offset == start })
+	if head < 0 {
 		return nil
 	}
+	var chain []shellcmd.Call
+	for _, c := range calls {
+		if c.Raw == calls[head].Raw && start <= c.Offset && c.Offset < end {
+			chain = append(chain, c)
+		}
+	}
 	var found []modelCandidate
-	for _, cmd := range splitSimpleCommands(withoutHereDocBodies(script, true)) {
-		name, args, _ := unwrapCommand(cmd)
-		prefix := cmd[:len(cmd)-len(args)]
+	runs := slices.ContainsFunc(chain, func(c shellcmd.Call) bool { return c.Name == "claude" || isShellName(c.Name) })
+	if runs {
+		found = append(found, assignedModels(script, n.Assigns)...)
+	}
+	for i, c := range chain {
 		switch {
-		case name == "claude":
-			found = append(found, assignedModels(prefix)...)
-		case declarers[name]:
-			// export, declare и родня: присваивания уходят в окружение следующих команд
-			found = append(found, assignedModels(args)...)
-		case shellNames[name]:
-			found = append(found, assignedModels(prefix)...)
-			for _, a := range args {
-				found = append(found, envModelCandidates(a.text, depth+1)...)
+		case c.Name == "env" && runs && i+1 < len(chain):
+			// env A=x claude, env A=x bash -c …: слова env до снятой
+			// команды — опции и присваивания
+			opts := c.Args[:max(0, len(c.Args)-len(chain[i+1].Args)-1)]
+			for _, a := range opts {
+				found = append(found, assignedModelWord(a)...)
+			}
+		case isShellName(c.Name):
+			for _, a := range c.Args {
+				found = append(found, nestedEnvModels(a, logger)...)
 			}
 		}
 	}
 	return found
 }
 
-// assignedModels — значения присваиваний modelEnvNames среди слов
-func assignedModels(words []word) []modelCandidate {
+// nestedEnvModels — модели из присваиваний во вложенном скрипте
+func nestedEnvModels(script string, logger core.Logger) []modelCandidate {
+	calls, err := shellcmd.Calls(script)
+	if calls == nil && err != nil {
+		return nil
+	}
+	return envModelCandidates(script, calls, logger)
+}
+
+// isShellName — программа исполняет свои аргументы или вход как команды
+// оболочки: оболочка по shellcmd или ssh
+func isShellName(name string) bool {
+	return shellcmd.IsShell(name) || name == "ssh"
+}
+
+// assignedModels — значения присваиваний modelEnvNames
+func assignedModels(script string, assigns []*syntax.Assign) []modelCandidate {
 	var found []modelCandidate
-	for _, w := range words {
-		name, value, ok := strings.Cut(w.text, "=")
-		if !ok || !modelEnvNames[name] || value == "" {
+	for _, a := range assigns {
+		if a.Name == nil || !modelEnvNames[a.Name.Value] || a.Value == nil {
 			continue
 		}
-		found = append(found, modelCandidate{value: value, dynamic: !w.literal})
+		value, literal := literalValue(a.Value)
+		if !literal {
+			value = script[a.Value.Pos().Offset():a.Value.End().Offset()]
+		}
+		if value != "" {
+			found = append(found, modelCandidate{value: value, dynamic: !literal})
+		}
 	}
 	return found
 }
 
-// withoutHereDocBodies вырезает тела here-doc: это текст для файла или
-// утилиты, не команды. keepShellFed оставляет тело, если в строке с его
-// началом есть оболочка (bash <<EOF, cat <<EOF | sh, ssh host <<EOF): его
-// строки она исполнит
-func withoutHereDocBodies(command string, keepShellFed bool) string {
-	var output strings.Builder
-	var delimiters []hereDoc
-	keep := false
-	for _, line := range strings.SplitAfter(command, "\n") {
-		plain := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-		if len(delimiters) > 0 {
-			bodyLine := plain
-			if delimiters[0].stripTab {
-				bodyLine = strings.TrimLeft(bodyLine, "\t")
-			}
-			switch {
-			case bodyLine == delimiters[0].name:
-				delimiters = delimiters[1:]
-			case keep:
-				output.WriteString(line)
-			}
-			continue
-		}
-		output.WriteString(line)
-		lexed := lexShell(plain)
-		delimiters = append(delimiters, lexed.hereDocs...)
-		keep = keepShellFed && feedsShell(lexed.cmds)
+// assignedModelWord — значение присваивания modelEnvNames в слове из
+// аргументов shellcmd (env A=x)
+func assignedModelWord(w string) []modelCandidate {
+	name, value, ok := strings.Cut(w, "=")
+	if !ok || !modelEnvNames[name] || value == "" {
+		return nil
 	}
-	return output.String()
-}
-
-// shellNames утилиты, которые исполняют свой вход как команды оболочки
-var shellNames = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": true, "ksh": true, "fish": true, "ssh": true}
-
-func feedsShell(cmds [][]word) bool {
-	for _, cmd := range cmds {
-		if name, _, _ := unwrapCommand(cmd); shellNames[name] {
-			return true
-		}
-	}
-	return false
+	return []modelCandidate{{value: value, dynamic: strings.ContainsAny(value, "$`")}}
 }
 
 // valueFlags — флаги claude со значением, которые пишутся и через «=»

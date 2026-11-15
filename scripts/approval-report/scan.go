@@ -3,13 +3,17 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,14 +77,14 @@ func (s *scanner) workerTasks(worker string) ([]func(), error) {
 		if err != nil {
 			return nil, fmt.Errorf("поиск попыток %s: %w", d.Name(), err)
 		}
-		var recent []string
+		recent := map[string]bool{}
 		for _, a := range atts {
 			if s.recent(a) {
-				recent = append(recent, a)
+				recent[a] = true
 			}
 		}
 		if len(recent) > 0 {
-			tasks = append(tasks, func() { s.scanWorker(dir, recent) })
+			tasks = append(tasks, func() { s.scanWorker(dir, atts, recent) })
 		}
 	}
 	return tasks, nil
@@ -400,7 +404,9 @@ type job struct {
 	} `json:"owner"`
 }
 
-func (s *scanner) scanWorker(dir string, atts []string) {
+// scanWorker — задача бойца: попытки по номеру (att2 раньше att10); попытки вне окна только
+// считают повторы команд — все попытки пишут в один rollout codex.
+func (s *scanner) scanWorker(dir string, atts []string, recent map[string]bool) {
 	task := filepath.Base(dir)
 	j, ok, err := s.loadJob(dir)
 	if err != nil {
@@ -421,16 +427,16 @@ func (s *scanner) scanWorker(dir string, atts []string) {
 		errs = append(errs, fmt.Errorf("%s: %w", task, err))
 	}
 	w.a.Keys = keys
-	sort.Strings(atts)
+	slices.SortStableFunc(atts, func(a, b string) int { return cmp.Compare(attNum(a), attNum(b)) })
 	for _, att := range atts {
-		if err := w.att(att); err != nil {
+		if err := w.att(att, !recent[att]); err != nil {
 			errs = append(errs, fmt.Errorf("%s/%s: %w", task, filepath.Base(att), err))
 		}
 	}
 	if err := s.specFiles(w.recs); err != nil {
 		errs = append(errs, fmt.Errorf("%s: %w", task, err))
 	}
-	s.add(w.a, w.recs, "worker", len(atts), errors.Join(errs...))
+	s.add(w.a, w.recs, "worker", len(recent), errors.Join(errs...))
 }
 
 // loadJob — job.json задачи; ok=false — задачи нет (нет job.json) или она создана после окна.
@@ -469,40 +475,67 @@ func briefKeys(dir string) (map[string]bool, error) {
 
 // workerScan — разбор попыток бойца; записи копятся по всем попыткам задачи.
 type workerScan struct {
-	s       *scanner
-	a       *Agent
-	dir     string
-	created time.Time
-	recs    []Record
-	file    string
-	seen    map[string]bool
-	pending map[string]int // id `sub -F файл` → индекс в recs: цели — в выводе item.completed
-	path    string         // att*.jsonl
-	thread  string         // thread_id попытки: имя её rollout codex
-	occ     map[string]int // сколько раз команда с этим ключом уже встретилась в попытке
-	cwds    map[string][]string
-	cwdErr  error // rollout не прочитан
+	s         *scanner
+	a         *Agent
+	dir       string
+	created   time.Time
+	recs      []Record
+	file      string
+	seen      map[string]bool
+	pending   map[string]int // id `sub -F файл` → индекс в recs: цели — в выводе item.completed
+	path      string         // att*.jsonl
+	countOnly bool           // попытка вне окна: только счёт повторов команд
+	thread    string         // thread_id попытки: имя её rollout codex
+	// occ — по thread: сколько раз команда с ключом уже встретилась во всех его попытках
+	occ    map[string]map[string]int
+	cwds   map[string]map[string][]string // по thread: ключ команды → каталоги вызовов из rollout
+	cwdErr error                          // rollout не прочитан
 }
 
-func (w *workerScan) att(path string) error {
+// attNum — номер попытки из имени attN.jsonl; без номера — 0.
+func attNum(path string) int {
+	n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "att"), ".jsonl"))
+	return n
+}
+
+func (w *workerScan) att(path string, countOnly bool) error {
 	w.file = filepath.Base(path)
 	w.path = path
+	w.countOnly = countOnly
 	w.seen = map[string]bool{}
 	w.pending = map[string]int{}
-	w.thread, w.occ, w.cwds, w.cwdErr = "", map[string]int{}, nil, nil
+	w.thread, w.cwdErr = "", nil
+	if w.occ == nil {
+		w.occ, w.cwds = map[string]map[string]int{}, map[string]map[string][]string{}
+	}
 	return errors.Join(eachLine(path, w.line), w.cwdErr)
+}
+
+// count — номер повтора команды бойца в её thread (с 0) и ключ для поиска в rollout.
+func (w *workerScan) count(ev Event) (string, int) {
+	if ev.Tool != codexCommand {
+		return "", 0
+	}
+	m := w.occ[w.thread]
+	if m == nil {
+		m = map[string]int{}
+		w.occ[w.thread] = m
+	}
+	key := commandKey(ev.Command)
+	occ := m[key]
+	m[key]++
+	return key, occ
 }
 
 // callCwd — каталог вызова из rollout codex попытки: att*.jsonl его не пишет. Вызов в rollout
 // находится по тексту команды и номеру её повтора; rollout читается при первой нужде.
 func (w *workerScan) callCwd(key string, occ int) (string, bool) {
-	if w.cwds == nil && w.cwdErr == nil {
-		w.cwds, w.cwdErr = rolloutCwds(filepath.Dir(w.path), w.thread)
-		if w.cwds == nil {
-			w.cwds = map[string][]string{}
-		}
+	cwds, ok := w.cwds[w.thread]
+	if !ok {
+		cwds, w.cwdErr = rolloutCwds(filepath.Dir(w.path), w.thread)
+		w.cwds[w.thread] = cwds
 	}
-	if list := w.cwds[key]; occ < len(list) {
+	if list := cwds[key]; occ < len(list) {
 		return list[occ], true
 	}
 	return "", false
@@ -537,7 +570,11 @@ func rolloutCwds(taskDir, thread string) (map[string][]string, error) {
 			return
 		}
 		key := commandKey(strings.Join(r.Payload.Item.Command, " "))
-		out[key] = append(out[key], strings.TrimPrefix(r.Payload.Item.Cwd, "file://"))
+		cwd := strings.TrimPrefix(r.Payload.Item.Cwd, "file://")
+		if dec, err := url.PathUnescape(cwd); err == nil {
+			cwd = dec
+		}
+		out[key] = append(out[key], cwd)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("rollout %s: %w", filepath.Base(files[0]), err)
@@ -585,13 +622,11 @@ func (w *workerScan) line(n int, line []byte) {
 	if !ok {
 		return
 	}
-	w.a.Events++
-	key, occ := "", 0
-	if ev.Tool == codexCommand {
-		key = commandKey(ev.Command)
-		occ = w.occ[key]
-		w.occ[key]++
+	key, occ := w.count(ev)
+	if w.countOnly {
+		return
 	}
+	w.a.Events++
 	v := Classify(ev)
 	if !interesting(v) {
 		return

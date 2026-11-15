@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +158,65 @@ func TestScanWorkerCallCwd(t *testing.T) {
 		}
 	}
 	want := map[int]string{2: "проба: каталог /var/tmp/w/project", 3: "выкатка", 4: "выкатка", 5: "проба: каталог /tmp/e"}
+	if !maps.Equal(got, want) {
+		t.Errorf("записи %v, ждём %v", got, want)
+	}
+}
+
+// Все попытки задачи пишут в один rollout: номер повтора команды считается по thread через
+// попытки по номеру (att2 раньше att10), и попытка вне окна тоже считается. Каталог в rollout —
+// в URL-кодировке. Каталог из rollout может сделать событие неинтересным: тогда записи нет.
+func TestScanWorkerAttempts(t *testing.T) {
+	root := t.TempDir()
+	worker := filepath.Join(root, "worker")
+	if err := os.MkdirAll(filepath.Join(root, "projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	task := filepath.Join(worker, "1109-1933-z")
+	writeFile(t, filepath.Join(task, "job.json"), `{"master":"m","dir":"/home/aisee/.claude/skills/x","created":"2026-11-09T19:33:00+01:00"}`)
+	deploy := `/bin/bash -lc 'XDG_CONFIG_HOME=/tmp/c graft deploy test'`
+	att := func(name, body string) {
+		writeFile(t, filepath.Join(task, name), `{"type":"thread.started","thread_id":"t3"}`+"\n"+body+"\n")
+	}
+	item := func(id, cmd string) string {
+		return `{"type":"item.completed","item":{"id":"` + id + `","type":"command_execution","command":"` + cmd + `","exit_code":0}}`
+	}
+	att("att1.jsonl", item("item_1", deploy))
+	old := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(task, "att1.jsonl"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	att("att2.jsonl", item("item_1", deploy)+"\n"+item("item_2", `/bin/bash -lc 'echo a > SKILL.md'`))
+	att("att10.jsonl", item("item_1", deploy))
+	rec := func(cmd, cwd string) string {
+		return `{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/bash","-lc","` + cmd + `"],"cwd":"file://` + cwd + `"}}}`
+	}
+	writeFile(t, filepath.Join(task, "codex", "sessions", "2026", "11", "09", "rollout-2026-11-09T19-33-00-t3.jsonl"), strings.Join([]string{
+		rec("XDG_CONFIG_HOME=/tmp/c graft deploy test", "/home/aisee/git/proj"),
+		rec("XDG_CONFIG_HOME=/tmp/c graft deploy test", "/var/tmp/%D1%8F"),
+		rec("echo a > SKILL.md", "/tmp/q"),
+		rec("XDG_CONFIG_HOME=/tmp/c graft deploy test", "/home/aisee/git/proj2"),
+	}, "\n")+"\n")
+
+	from, _ := time.Parse(time.RFC3339, "2026-11-08T00:00:00+01:00")
+	sc := scanner{home: "/home/aisee", from: from, to: time.Now().Add(time.Hour), jobs: 1}
+	res, err := sc.run(filepath.Join(root, "projects"), worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range res.records {
+		ref := r.File + ":" + strconv.Itoa(r.Line)
+		switch {
+		case r.V.HitClass(3):
+			got[ref] = "выкатка"
+		case len(r.V.Possible) > 0:
+			got[ref] = r.V.Possible[0].Prod
+		default:
+			got[ref] = "запись без класса"
+		}
+	}
+	want := map[string]string{"att2.jsonl:2": "проба: каталог /var/tmp/я", "att10.jsonl:2": "выкатка"}
 	if !maps.Equal(got, want) {
 		t.Errorf("записи %v, ждём %v", got, want)
 	}

@@ -200,6 +200,13 @@ func TestProbeCwd(t *testing.T) {
 		{"env с временным конфигом", "Bash", tmp, false, `env XDG_CONFIG_HOME=/tmp/c graft deploy test`, "проба: каталог /tmp/p"},
 		{"graft -C в живой проект", "Bash", tmp, false, `XDG_CONFIG_HOME=/tmp/c graft -C ` + live + ` deploy test`, ""},
 		{"graft -C во временный", "Bash", live, false, `XDG_CONFIG_HOME=/tmp/c graft -C /tmp/q deploy test`, "проба: каталог /tmp/q"},
+		{"graft -C в $TMPDIR", "Bash", live, false, `XDG_CONFIG_HOME=/tmp/c graft -C "$TMPDIR/p" deploy test`, "проба: каталог из mktemp или $TMPDIR"},
+		{"export переопределён живым", "Bash", tmp, false, `export XDG_CONFIG_HOME=/tmp/c; export XDG_CONFIG_HOME=/home/aisee/.config; graft deploy prod`, ""},
+		{"export снят unset", "Bash", tmp, false, `export XDG_CONFIG_HOME=/tmp/c; unset XDG_CONFIG_HOME; graft deploy prod`, ""},
+		{"export в подоболочке", "Bash", tmp, false, `( export XDG_CONFIG_HOME=/tmp/c ); graft deploy prod`, ""},
+		{"живой export, затем временный", "Bash", tmp, false, `export XDG_CONFIG_HOME=/home/aisee/.config; export XDG_CONFIG_HOME="/tmp/c"; graft deploy test`, "проба: каталог /tmp/p"},
+		{"подстановка процесса <( — не подоболочка", "Bash", live, false, "diff <(echo a) /dev/null; cd " + tmp + " && " + deploy, "проба: каталог /tmp/p"},
+		{"подстановка процесса >( — не подоболочка", "Bash", live, false, "echo a > >(cat); cd " + tmp + " && " + deploy, "проба: каталог /tmp/p"},
 	}
 	for _, c := range cases {
 		v := Classify(Event{Tool: c.tool, Command: c.cmd, Cwd: c.cwd, CallCwd: c.callCwd, Home: testHome})

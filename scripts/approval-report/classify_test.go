@@ -154,6 +154,11 @@ func TestUnparsedFallback(t *testing.T) {
 	if !v.Unparsed || !v.HitClass(2) {
 		t.Fatalf("ждём разбор регулярками и класс 2: %+v", v)
 	}
+	// graft -C перед deploy — та же выкатка
+	v = Classify(Event{Tool: "Bash", Command: `echo "x; graft -C /home/aisee/git/proj deploy prod`, Home: testHome})
+	if !v.Unparsed || !v.HitClass(3) {
+		t.Fatalf("graft -C в запасном разборе: %+v", v)
+	}
 }
 
 func TestResolveSpec(t *testing.T) {

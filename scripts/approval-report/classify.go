@@ -349,7 +349,16 @@ func (x callCtx) tempConfig(c shellcmd.Call) bool {
 		pre = pre[i+1:]
 	}
 	// присваивание перед вызовом: `$(mktemp)` в значении — не граница, как у assignPrefix
-	return reTempConfig.MatchString(pre) || reTempExport.MatchString(x.ev.Command[:c.Offset])
+	if reTempConfig.MatchString(pre) {
+		return true
+	}
+	// действует последний export или unset; внутри подоболочки он мог не дойти до вызова
+	before := x.ev.Command[:c.Offset]
+	ms := reConfigExport.FindAllStringSubmatch(before, -1)
+	if len(ms) == 0 || reSubshell.MatchString(before) {
+		return false
+	}
+	return reTempValue.MatchString(strings.TrimLeft(ms[len(ms)-1][1], `"'`))
 }
 
 // probeDir — проба ли выкатка с временным конфигом по каталогу вызова: только из временного
@@ -402,7 +411,8 @@ func tempDir(p string) bool {
 // reTempConfig — XDG_CONFIG_HOME во временном каталоге: конфиг graft пробы, не живой.
 var (
 	reTempConfig = regexp.MustCompile(`\bXDG_CONFIG_HOME=["']?` + tempValue)
-	reTempExport = regexp.MustCompile(`\bexport\s[^;&|\n]*\bXDG_CONFIG_HOME=["']?` + tempValue)
+	// export с значением (группа 1) или unset (группа 1 пуста)
+	reConfigExport = regexp.MustCompile(`\bexport\s[^;&|\n]*\bXDG_CONFIG_HOME=(\S+)|\bunset\s[^;&|\n]*\bXDG_CONFIG_HOME\b`)
 )
 
 func (x callCtx) dynamic(c shellcmd.Call) {

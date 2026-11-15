@@ -130,29 +130,62 @@ func findUnlinkedKeys(key *regexp.Regexp, line string) []string {
 // blank — пробелы на месте s той же длины
 func blank(s string) string { return strings.Repeat(" ", len(s)) }
 
-// blankURLs заменяет голые URL пробелами. URL, открытый внутри скобки,
-// кончается перед закрывающей «)»: в «(https://x/PROJ-2)PROJ-3» ключ за
-// скобкой — не часть адреса
+// blankURLs заменяет голые URL пробелами. Скобки считаются стеком слева
+// направо, «)» без открытой не в счёт. URL, открытый внутри скобки,
+// кончается на «)», которая закрывает её: в «(https://x/PROJ-2)PROJ-3» ключ за
+// скобкой — не часть адреса, а в «(https://x/a(b)PROJ-12)» скобка «(b)» —
+// часть адреса
 func blankURLs(line string) string {
 	var b strings.Builder
-	end := 0
+	depth, end := 0, 0
 	for {
 		m := urlPattern.FindStringIndex(line[end:])
 		if m == nil {
 			break
 		}
-		start, stop := end+m[0], end+m[1]
-		if strings.Count(line[:start], "(") > strings.Count(line[:start], ")") {
-			if i := strings.IndexByte(line[start:stop], ')'); i >= 0 {
-				stop = start + i
-			}
-		}
+		start := end + m[0]
+		depth = parenDepth(depth, line[end:start])
+		stop := start + urlEnd(line[start:end+m[1]], depth > 0)
 		b.WriteString(line[end:start])
 		b.WriteString(blank(line[start:stop]))
 		end = stop
 	}
 	b.WriteString(line[end:])
 	return b.String()
+}
+
+// parenDepth — число открытых скобок после s: «)» без открытой не в счёт
+func parenDepth(depth int, s string) int {
+	for i := range len(s) {
+		switch {
+		case s[i] == '(':
+			depth++
+		case s[i] == ')' && depth > 0:
+			depth--
+		}
+	}
+	return depth
+}
+
+// urlEnd — длина URL. Внутри скобки (enclosed) он кончается на «)», которая
+// закрывает скобку, открытую до него; скобки самого адреса парные
+func urlEnd(url string, enclosed bool) int {
+	if !enclosed {
+		return len(url)
+	}
+	inner := 0
+	for i := range len(url) {
+		switch url[i] {
+		case '(':
+			inner++
+		case ')':
+			if inner == 0 {
+				return i
+			}
+			inner--
+		}
+	}
+	return len(url)
 }
 
 // Числа и единицы срока: «через 2 недели», «3 дня назад», «ближайшие 2 недели»
@@ -210,27 +243,38 @@ var (
 	weekendPattern = regexp.MustCompile(`(?i)` + wordBoundary + `(к\s+выходным|до\s+выходных)(?:[^\p{L}\p{N}]|$)`)
 	// outputAfter — «выходным», «выходных» перед существительным из
 	// короткого списка — прилагательное, не дни: «к выходным данным», «до
-	// выходных полей». Список закрытый, как у genitiveAfter: другое слово
-	// после оборота («к выходным клиентам отдадим», «к выходным дням», «к
-	// выходным нам») оборот не оправдывает, это срок
+	// выходных полей». Список закрытый: другое слово после оборота («к
+	// выходным клиентам отдадим», «к выходным дням», «к выходным нам») оборот
+	// не оправдывает, это срок
 	outputAfter = regexp.MustCompile(`(?i)^\s+(?:данн(?:ым|ых)|параметр(?:ам|ов)|пол(?:ям|ей)|файл(?:ам|ов)|` +
-		`ос(?:ям|ей)|значени(?:ям|й)|сигнал(?:ам|ов))(?:[^\p{L}\p{N}]|$)`)
-	// genitiveAfter — после «среду», «год» существительное в родительном из
-	// короткого списка: «в среду окружения», «на среду разработки» — среда
-	// как окружение, «ближайший год выпуска» — год как признак, не срок.
+		`ос(?:ям|ей)|значени(?:ям|й)|сигнал(?:ам|ов)|порт(?:ам|ов)|поток(?:ам|ов)|код(?:ам|ов)|канал(?:ам|ов))(?:[^\p{L}\p{N}]|$)`)
+	// genitiveWord — существительное в родительном после «среду», «год»:
+	// «среда окружения» — окружение, «ближайший год выпуска» — признак, не
+	// срок. Те же слова — именительный множественного («в среду сборки
+	// падали»), поэтому у среды слово оправдывает оборот только в конце фразы
+	// (genitiveEnd), а у года — только после «ближайший год» без предлога.
 	// Остальные слова в родительном («на неделе моды») оборот не оправдывают:
 	// лишняя находка смотрится глазами, а пропуск оставит дату в сводке
-	genitiveAfter = regexp.MustCompile(`(?i)^\s+(?:окружения|разработки|исполнения|выполнения|тестирования|сборки|` +
-		`выпуска|рождения|основания)(?:[^\p{L}\p{N}]|$)`)
-	// negationAfter — «в этом году выпуска не будет», «в среду сборки нет»:
-	// родительный при отрицании, оборот остаётся сроком
-	negationAfter = regexp.MustCompile(`(?i)^\s+\p{L}+\s+(?:не|нет)(?:[^\p{L}\p{N}]|$)`)
-	// nextElided «на следующей» без «неделе» после уже названной недели:
-	// «на этой неделе тесты, на следующей релиз». Слово на «е», «и» после
-	// него — своё существительное («на следующей встрече», «строке»)
-	nextElided = regexp.MustCompile(`(?i)` + wordBoundary + `(на\s+следующей)(?:[^\p{L}\p{N}]|$)`)
-	weekNamed  = regexp.MustCompile(`(?i)недел`)
-	nounNext   = regexp.MustCompile(`(?i)^\s+\p{L}*[еи](?:[^\p{L}\p{N}]|$)`)
+	genitiveWord = `(?:окружения|разработки|исполнения|выполнения|тестирования|сборки|выпуска|рождения|основания)`
+	genitiveYear = regexp.MustCompile(`(?i)^\s+` + genitiveWord + `(?:[^\p{L}\p{N}]|$)`)
+	// genitiveEnd — за словом конец фразы: конец строки, знак препинания,
+	// закрывающая скобка или кавычка
+	genitiveEnd = regexp.MustCompile(`(?i)^\s+` + genitiveWord + `\s*(?:\p{P}|$)`)
+	// nearestYear — «ближайший год» в именительном без предлога
+	nearestYear = regexp.MustCompile(`(?i)^ближайший\s+год$`)
+	// elidedWeek «на следующей», «на прошлой» без «неделе» после уже
+	// названной недели: «на этой неделе тесты, на следующей релиз»
+	elidedWeek = regexp.MustCompile(`(?i)` + wordBoundary + `(на\s+(?:следующей|прошлой))(?:[^\p{L}\p{N}]|$)`)
+	// weekWord — «неделя» с начала слова: «понедельник» не неделя
+	weekWord = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])недел`)
+	// everyWeek — «раз в неделю» перед словом недели: повтор, не неделя
+	everyWeek = regexp.MustCompile(`(?i)раз\s+в\s*$`)
+	// ownNoun — своё существительное после «на следующей», «на прошлой»
+	ownNoun = regexp.MustCompile(`(?i)^\s+(?:неделе|встрече|итерации|строке|странице|версии|планёрке|планерке|задаче|` +
+		`стадии|фазе|ступени)(?:[^\p{L}\p{N}]|$)`)
+	// unitAfter — за числом с точкой единица: «1.5 часа», «2.5%», «1.10 ч» —
+	// не дата
+	unitAfter = regexp.MustCompile(`(?i)^[ \t,(]*(?:с\s+)?\d{1,2}\.\d{1,2}\s*(?:%|(?:час(?:а|ов)?|ч|мин|раза?)(?:[^\p{L}\p{N}]|$))`)
 	// weekdayPattern день недели с предлогом, полным именем или сокращением
 	// (пн, вт). Без предлога день в сводке — расписание («понедельник и
 	// четверг, 15:00»), «по четвергам» — повтор: не находки. «Среда» — только
@@ -261,10 +305,10 @@ var (
 	periodDated = regexp.MustCompile(`^\s+(?:с\s+)?` + dateHead)
 )
 
-// dateHead — начало даты: «14.11», «16 - 20.11», «9 декабря», «2026-11-20».
-// После точки — месяц двумя цифрами, за ним не цифра и не «%»: «1.5 часа»,
-// «2.5%», «1.25» — не дата
-const dateHead = `(?:\d{4}-\d{2}-\d{2}|(?:\d{1,2}\s*[-–]\s*)?\d{1,2}(?:\.(?:0[1-9]|1[0-2])(?:[^\p{N}%]|$)|` +
+// dateHead — начало даты: «14.11», «14.1», «16 - 20.11», «9 декабря»,
+// «2026-11-20». После точки — месяц 1–12, за ним не цифра: время «13.00»,
+// «10.30» — не дата. Число с единицей («1.5 часа») отсекает unitAfter
+const dateHead = `(?:\d{4}-\d{2}-\d{2}|(?:\d{1,2}\s*[-–]\s*)?\d{1,2}(?:\.(?:0?[1-9]|1[0-2])(?:[^\p{N}]|$)|` +
 	`\s+(?:январ|феврал|март|апрел|ма|июн|июл|август|сентябр|октябр|ноябр|декабр)[яа](?:[^\p{L}\p{N}]|$)))`
 
 // weekdayWhich — «этот», «следующий» перед днём недели во всех нужных формах
@@ -283,16 +327,16 @@ func findRelativeDate(line string) string {
 		excused        func(before, turn, rest string) bool
 	}{
 		{relativeWordPattern, periodDated, line, func(_, turn, rest string) bool {
-			return lastWordIs(turn, "год") && genitiveTerm(rest)
+			return nearestYear.MatchString(turn) && genitiveYear.MatchString(rest)
 		}},
 		{spanPattern, periodDated, line, func(_, _, rest string) bool { return eventAfter.MatchString(rest) }},
 		{weekendPattern, periodDated, line, func(_, _, rest string) bool { return outputAfter.MatchString(rest) }},
-		{nextElided, periodDated, line, func(before, _, rest string) bool {
-			return !weekNamed.MatchString(before) || nounNext.MatchString(rest)
+		{elidedWeek, periodDated, line, func(before, _, rest string) bool {
+			return !weekNamed(before) || ownNoun.MatchString(rest)
 		}},
 		{weekdayPattern, weekdayDated, days, func(_, day, rest string) bool {
 			return strings.HasSuffix(day, "ам") || strings.HasSuffix(day, "ям") ||
-				lastWordIs(day, "сред") && genitiveTerm(rest)
+				lastWordIs(day, "сред") && genitiveEnd.MatchString(rest)
 		}},
 	} {
 		if found, start := firstUndated(c.pattern, c.dated, c.text, c.excused); start < at {
@@ -302,9 +346,15 @@ func findRelativeDate(line string) string {
 	return turn
 }
 
-// genitiveTerm — после оборота слово из genitiveAfter не при отрицании
-func genitiveTerm(rest string) bool {
-	return genitiveAfter.MatchString(rest) && !negationAfter.MatchString(rest)
+// weekNamed — в тексте до оборота названа неделя: слово с «недел» не после
+// «раз в»
+func weekNamed(before string) bool {
+	for _, m := range weekWord.FindAllStringIndex(before, -1) {
+		if !everyWeek.MatchString(before[:m[0]]) {
+			return true
+		}
+	}
+	return false
 }
 
 // lastWordIs — последнее слово оборота начинается со stem: «ближайший год»,
@@ -320,7 +370,7 @@ func lastWordIs(turn, stem string) bool {
 func firstUndated(pattern, dated *regexp.Regexp, line string, excused func(before, turn, rest string) bool) (string, int) {
 	for _, loc := range pattern.FindAllStringSubmatchIndex(line, -1) {
 		before, turn, rest := line[:loc[2]], line[loc[2]:loc[3]], line[loc[3]:]
-		if !dated.MatchString(rest) && !excused(before, turn, rest) {
+		if !(dated.MatchString(rest) && !unitAfter.MatchString(rest)) && !excused(before, turn, rest) {
 			return turn, loc[2]
 		}
 	}

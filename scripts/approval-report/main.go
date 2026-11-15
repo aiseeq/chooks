@@ -63,12 +63,13 @@ func main() {
 
 // Agent — суб-агент или боец.
 type Agent struct {
-	Pop    string // sub, worker
-	ID     string // полный id агента или задача бойца
-	Short  string // id в ссылке tl
-	Master string
-	Keys   map[string]bool
-	Events int // вызовов инструментов в окне
+	Pop     string // sub, worker
+	ID      string // полный id агента или задача бойца
+	Short   string // id в ссылке tl
+	Master  string
+	Keys    map[string]bool
+	Events  int // вызовов инструментов в окне
+	Untimed int // из них у бойца без времени в rollout codex: в окне по прежнему правилу
 }
 
 // Record — событие с признаком хотя бы одного класса.
@@ -76,7 +77,7 @@ type Record struct {
 	Agent *Agent
 	File  string // attN.jsonl у бойца
 	Line  int
-	Time  time.Time
+	Time  time.Time // у бойца без времени вызова в rollout codex — нулевое
 	V     Verdict
 }
 
@@ -91,6 +92,6 @@ func (r Record) Ref() string {
 type result struct {
 	agents  []*Agent
 	records []Record
-	files   map[string]int // прочитано файлов по популяции
+	files   map[string]int // файлов с событиями в окне по популяции
 	errs    []string
 }

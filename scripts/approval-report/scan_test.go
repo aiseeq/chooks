@@ -232,3 +232,141 @@ func TestScanWorkerAttempts(t *testing.T) {
 		t.Errorf("ошибки %v", res.errs)
 	}
 }
+
+// Задача бойца через границу окна: время вызова — из rollout codex (время записи минус
+// длительность), вызовы до и после окна не считаются, правка файлов находится по путям. Вызов без
+// записи в rollout — по прежнему правилу, отдельной строкой отчёта. Попытка после окна не меняет
+// чисел: второй прогон того же окна даёт тот же отчёт. Суб-агент без записей в окне в «файлов» не входит.
+func TestScanWindowBoundary(t *testing.T) {
+	root := t.TempDir()
+	projects := filepath.Join(root, "projects")
+	worker := filepath.Join(root, "worker")
+	sess := filepath.Join(projects, "-home-u", "8729f497-f8fa-4cce-96c9-9958d41a7c85", "subagents")
+	use := func(ts string) string {
+		return `{"type":"assistant","timestamp":"` + ts + `","cwd":"/home/aisee","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`
+	}
+	writeFile(t, filepath.Join(sess, "agent-a1.jsonl"), use("2026-11-07T22:00:00Z")+"\n"+use("2026-11-10T10:00:00Z")+"\n")
+	writeFile(t, filepath.Join(sess, "agent-a2.jsonl"), `{"type":"user","timestamp":"2026-11-15T13:00:00Z","message":{"content":"x"}}`+"\n"+use("2026-11-15T13:00:01Z")+"\n")
+	writeFile(t, filepath.Join(sess, "agent-a3.jsonl"), `{"type":"user","timestamp":"2026-11-07T22:00:00Z","message":{"content":"x"}}`+"\n")
+
+	task := filepath.Join(worker, "1107-2300-w")
+	writeFile(t, filepath.Join(task, "job.json"), `{"master":"m","dir":"/var/tmp/w","created":"2026-11-07T23:00:00+01:00"}`)
+	cmdX := `/bin/bash -lc 'echo a > /home/aisee/.claude/CLAUDE.md'`
+	cmdY := `/bin/bash -lc 'echo b > /home/aisee/.claude/skills/s/SKILL.md'`
+	item := func(id, cmd string) string {
+		return `{"type":"item.completed","item":{"id":"` + id + `","type":"command_execution","command":"` + cmd + `","exit_code":0}}`
+	}
+	change := func(id string, paths ...string) string {
+		var cs []string
+		for _, p := range paths {
+			cs = append(cs, `{"path":"`+p+`","kind":"update"}`)
+		}
+		return `{"type":"item.completed","item":{"id":"` + id + `","type":"file_change","changes":[` + strings.Join(cs, ",") + `]}}`
+	}
+	ra, rb := "/home/aisee/.claude/rules/a.md", "/home/aisee/.claude/rules/b.md"
+	writeFile(t, filepath.Join(task, "att1.jsonl"), strings.Join([]string{
+		`{"type":"thread.started","thread_id":"t6"}`,
+		item("item_1", cmdX),     // начат до окна, закончен в нём
+		item("item_2", cmdX),     // в окне
+		change("item_3", rb, ra), // после окна
+		change("item_4", ra, rb), // в окне
+		item("item_5", cmdY),     // в rollout нет — без времени
+		`{"type":"turn.completed"}`,
+	}, "\n")+"\n")
+	writeFile(t, filepath.Join(task, "att2.jsonl"), `{"type":"thread.started","thread_id":"t6"}`+"\n"+item("item_1", cmdX)+"\n")
+	cmd := func(ts string, secs int) string {
+		return `{"timestamp":"` + ts + `","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/bash","-lc","echo a > /home/aisee/.claude/CLAUDE.md"],"cwd":"file:///home/aisee","duration":{"secs":` + strconv.Itoa(secs) + `,"nanos":0}}}}`
+	}
+	fc := func(ts string) string {
+		return `{"timestamp":"` + ts + `","type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","changes":{"` + ra + `":{"type":"update"},"` + rb + `":{"type":"update"}}}}}`
+	}
+	rollout := filepath.Join(task, "codex", "sessions", "2026", "11", "07", "rollout-2026-11-07T23-00-00-t6.jsonl")
+	lines := []string{
+		cmd("2026-11-07T23:00:30Z", 60),
+		cmd("2026-11-10T10:00:00Z", 0),
+		fc("2026-11-15T12:30:00Z"),
+		fc("2026-11-15T12:20:00Z"),
+		cmd("2026-11-15T13:00:00Z", 0),
+	}
+	writeFile(t, rollout, strings.Join(lines, "\n")+"\n")
+
+	from, _ := time.Parse(time.RFC3339, "2026-11-08T00:00:00+01:00")
+	to, _ := time.Parse(time.RFC3339, "2026-11-15T13:24:00+01:00")
+	scan := func() (result, string) {
+		t.Helper()
+		sc := scanner{home: "/home/aisee", from: from, to: to, jobs: 2}
+		res, err := sc.run(projects, worker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		report(&out, res, from, to)
+		return res, out.String()
+	}
+	res, first := scan()
+	var got []string
+	for _, r := range res.records {
+		if r.Agent.Pop == "worker" {
+			got = append(got, r.Ref()+" "+r.Time.UTC().Format(time.RFC3339))
+		}
+	}
+	want := []string{
+		"1107-2300-w/att1.jsonl:6 0001-01-01T00:00:00Z",
+		"1107-2300-w/att1.jsonl:3 2026-11-10T10:00:00Z",
+		"1107-2300-w/att1.jsonl:5 2026-11-15T12:20:00Z",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("записи бойца:\n%s\nждём:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	for _, s := range []string{
+		"== Бойцы worker: 1 агентов с вызовами в окне, файлов 1, вызовов инструментов 3",
+		"без него 1 вызовов у 1 бойцов",
+		"== Суб-агенты Claude (и форки), основная сессия не входит: 1 агентов с вызовами в окне, файлов 1, вызовов инструментов 1",
+		"1107-2300-w/att1.jsonl:3 — 10.11 11:00, мастер m:",
+		"1107-2300-w/att1.jsonl:6 — мастер m:",
+	} {
+		if !strings.Contains(first, s) {
+			t.Errorf("в отчёте нет %q:\n%s", s, first)
+		}
+	}
+
+	// после окна: новая попытка, её вызов в rollout и новая запись суб-агента
+	writeFile(t, filepath.Join(task, "att3.jsonl"), `{"type":"thread.started","thread_id":"t6"}`+"\n"+item("item_1", cmdX)+"\n"+change("item_2", ra)+"\n")
+	writeFile(t, rollout, strings.Join(append(lines, cmd("2026-11-15T14:00:00Z", 0), `{"timestamp":"2026-11-15T14:00:01Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","changes":{"`+ra+`":{}}}}}`), "\n")+"\n")
+	writeFile(t, filepath.Join(sess, "agent-a1.jsonl"), use("2026-11-07T22:00:00Z")+"\n"+use("2026-11-10T10:00:00Z")+"\n"+use("2026-11-15T14:00:00Z")+"\n")
+	if _, second := scan(); second != first {
+		t.Errorf("второй прогон окна дал другой отчёт:\n%s\nпервый:\n%s", second, first)
+	}
+}
+
+// Время в строке rollout: без поля — нулевое без ошибки (старый формат), не разобрано — нулевое и
+// ошибка; правка файлов — ключ по путям в любом порядке.
+func TestRolloutCall(t *testing.T) {
+	fc := `"payload":{"type":"item_completed","item":{"type":"FileChange","changes":{"/b":{},"/a":{}}}}}`
+	for _, tc := range []struct {
+		line, at string
+		err      bool
+	}{
+		{`{` + fc, "", false},
+		{`{"timestamp":"вчера",` + fc, "", true},
+		{`{"timestamp":"2026-11-10T10:00:00Z",` + fc, "2026-11-10T10:00:00Z", false},
+	} {
+		key, c, ok, err := rolloutCall([]byte(tc.line))
+		at := ""
+		if !c.at.IsZero() {
+			at = c.at.UTC().Format(time.RFC3339)
+		}
+		if !ok || key != eventKey(Event{Tool: "file_change", Paths: []string{"/a", "/b"}}) || at != tc.at || (err != nil) != tc.err {
+			t.Errorf("%s: ключ %q, время %q, ok %v, ошибка %v", tc.line, key, at, ok, err)
+		}
+	}
+	// команда и правка файлов со схожим текстом — разные ключи: номера повторов не путаются
+	if eventKey(Event{Tool: codexCommand, Command: "f/a"}) == eventKey(Event{Tool: "file_change", Paths: []string{"/a"}}) {
+		t.Error("ключ команды совпал с ключом правки файлов")
+	}
+	task := t.TempDir()
+	writeFile(t, filepath.Join(task, "codex", "sessions", "2026", "11", "10", "rollout-x-t7.jsonl"), `{"timestamp":"вчера",`+fc+"\n")
+	if calls, err := rolloutCalls(task, "t7"); err == nil || !strings.Contains(err.Error(), "строка 1") || len(calls) != 1 {
+		t.Errorf("вызовы %v, ошибка %v", calls, err)
+	}
+}

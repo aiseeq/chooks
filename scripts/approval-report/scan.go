@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/url"
 	"os"
@@ -46,7 +47,7 @@ func (s *scanner) run(projects, worker string) (result, error) {
 	return s.collect(), nil
 }
 
-// subTasks — суб-агенты, чей файл менялся с начала окна.
+// subTasks — суб-агенты, чей файл менялся с начала окна: в окне ли сами записи, решает их время.
 func (s *scanner) subTasks(projects string, short map[string]string) ([]func(), error) {
 	subs, err := filepath.Glob(filepath.Join(projects, "*", "*", "subagents", "agent-*.jsonl"))
 	if err != nil {
@@ -255,23 +256,45 @@ func (s *scanner) scanSub(path string, short map[string]string, names *parentNam
 	if err != nil {
 		err = fmt.Errorf("%s: %w", path, err)
 	}
-	s.add(a, x.recs, "sub", 1, err)
+	files := 0
+	if x.inWindow {
+		files = 1
+	}
+	s.add(a, x.recs, "sub", files, err)
 }
 
 // subScan — разбор одного транскрипта суб-агента.
 type subScan struct {
-	s       *scanner
-	a       *Agent
-	recs    []Record
-	pending map[string]int // id вызова `sub -F файл` → индекс в recs: цели ждут вывода
-	prompt  bool
-	errs    []error
+	s        *scanner
+	a        *Agent
+	recs     []Record
+	pending  map[string]int // id вызова `sub -F файл` → индекс в recs: цели ждут вывода
+	prompt   bool
+	inWindow bool // есть запись со временем в окне: файл входит в число «файлов»
+	errs     []error
 }
 
 func (x *subScan) line(n int, line []byte) {
+	x.readTime(line)
 	x.readPrompt(n, line)
 	x.readResult(n, line)
 	x.readToolUse(n, line)
+}
+
+// readTime — время записи, пока в окне не нашлось ни одной: файл, менявшийся после окна,
+// без записей в нём в «файлов» не входит.
+func (x *subScan) readTime(line []byte) {
+	if x.inWindow || !bytes.Contains(line, []byte(`"timestamp"`)) {
+		return
+	}
+	var l struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if json.Unmarshal(line, &l) != nil {
+		return
+	}
+	ts, err := time.Parse(time.RFC3339Nano, l.Timestamp)
+	x.inWindow = err == nil && !ts.Before(x.s.from) && !ts.After(x.s.to)
 }
 
 // readPrompt — ключи задач из первого сообщения user (задание суб-агенту).
@@ -421,7 +444,8 @@ func (s *scanner) scanWorker(dir string, atts []string, recent map[string]bool) 
 	if master == "" {
 		master = j.Owner.Name
 	}
-	w := &workerScan{s: s, a: &Agent{Pop: "worker", ID: task, Short: task, Master: master}, dir: j.Dir, created: j.Created}
+	w := &workerScan{s: s, a: &Agent{Pop: "worker", ID: task, Short: task, Master: master}, dir: j.Dir,
+		occ: map[string]map[string]int{}, calls: map[string]map[string][]call{}}
 	keys, err := briefKeys(dir)
 	var errs []error
 	if err != nil {
@@ -446,10 +470,11 @@ func (s *scanner) scanWorker(dir string, atts []string, recent map[string]bool) 
 	if err := s.specFiles(w.recs); err != nil {
 		errs = append(errs, fmt.Errorf("%s: %w", task, err))
 	}
-	s.add(w.a, w.recs, "worker", len(recent), errors.Join(errs...))
+	s.add(w.a, w.recs, "worker", w.files, errors.Join(errs...))
 }
 
 // loadJob — job.json задачи; ok=false — задачи нет (нет job.json) или она создана после окна.
+// Задача, созданная после окна, вызовов в нём не имеет: время вызова не нужно.
 func (s *scanner) loadJob(dir string) (j job, ok bool, err error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "job.json"))
 	if os.IsNotExist(err) {
@@ -488,18 +513,26 @@ type workerScan struct {
 	s         *scanner
 	a         *Agent
 	dir       string
-	created   time.Time
 	recs      []Record
+	files     int // попыток с вызовами в окне; попытка без вызовов — по времени файла
 	file      string
 	seen      map[string]bool
 	pending   map[string]int // id `sub -F файл` → индекс в recs: цели — в выводе item.completed
 	path      string         // att*.jsonl
-	countOnly bool           // попытка вне окна: только счёт повторов команд
+	countOnly bool           // попытка вне окна: только счёт повторов вызовов
 	thread    string         // thread_id попытки: имя её rollout codex
-	// occ — по thread: сколько раз команда с ключом уже встретилась во всех его попытках
-	occ    map[string]map[string]int
-	cwds   map[string]map[string][]string // по thread: ключ команды → каталоги вызовов из rollout
-	cwdErr error                          // rollout не прочитан
+	hadCalls  bool           // в попытке были вызовы
+	inWindow  bool           // в попытке был вызов в окне
+	// occ — по thread: сколько раз вызов с ключом уже встретился во всех его попытках
+	occ     map[string]map[string]int
+	calls   map[string]map[string][]call // по thread: ключ вызова → вызовы из rollout по порядку
+	callErr error                        // rollout не прочитан
+}
+
+// call — вызов из rollout codex: каталог (у команды) и время начала; нет времени — нулевое.
+type call struct {
+	cwd string
+	at  time.Time
 }
 
 // attNum — номер попытки из имени attN.jsonl.
@@ -517,46 +550,55 @@ func (w *workerScan) att(path string, countOnly bool) error {
 	w.countOnly = countOnly
 	w.seen = map[string]bool{}
 	w.pending = map[string]int{}
-	w.thread, w.cwdErr = "", nil
-	if w.occ == nil {
-		w.occ, w.cwds = map[string]map[string]int{}, map[string]map[string][]string{}
+	w.thread, w.callErr = "", nil
+	w.hadCalls, w.inWindow = false, false
+	err := errors.Join(eachLine(path, w.line), w.callErr)
+	// попытка без вызовов времени не имеет: в окне, если менялась с его начала (прежнее правило)
+	if !countOnly && (w.inWindow || !w.hadCalls) {
+		w.files++
 	}
-	return errors.Join(eachLine(path, w.line), w.cwdErr)
+	return err
 }
 
-// count — номер повтора команды бойца в её thread (с 0) и ключ для поиска в rollout.
+// count — номер повтора вызова бойца в его thread (с 0) и ключ для поиска в rollout.
 func (w *workerScan) count(ev Event) (string, int) {
-	if ev.Tool != codexCommand {
-		return "", 0
-	}
 	m := w.occ[w.thread]
 	if m == nil {
 		m = map[string]int{}
 		w.occ[w.thread] = m
 	}
-	key := commandKey(ev.Command)
+	key := eventKey(ev)
 	occ := m[key]
 	m[key]++
 	return key, occ
 }
 
-// callCwd — каталог вызова из rollout codex попытки: att*.jsonl его не пишет. Вызов в rollout
-// находится по тексту команды и номеру её повтора; rollout читается при первой нужде.
-func (w *workerScan) callCwd(key string, occ int) (string, bool) {
-	cwds, ok := w.cwds[w.thread]
-	if !ok {
-		cwds, w.cwdErr = rolloutCwds(filepath.Dir(w.path), w.thread)
-		w.cwds[w.thread] = cwds
+// eventKey — ключ вызова: текст команды или пути правки файлов.
+func eventKey(ev Event) string {
+	if ev.Tool == codexCommand {
+		return "c" + commandKey(ev.Command)
 	}
-	if list := cwds[key]; occ < len(list) {
-		return list[occ], true
-	}
-	return "", false
+	paths := slices.Sorted(slices.Values(ev.Paths))
+	return "f" + strings.Join(paths, "\n")
 }
 
-// rolloutCwds — каталоги вызовов оболочки из rollout codex: ключ команды → каталоги по порядку.
+// call — вызов в rollout codex попытки: att*.jsonl не пишет ни каталога, ни времени. Вызов
+// находится по ключу и номеру его повтора; rollout читается при первой нужде.
+func (w *workerScan) call(key string, occ int) (call, bool) {
+	calls, ok := w.calls[w.thread]
+	if !ok {
+		calls, w.callErr = rolloutCalls(filepath.Dir(w.path), w.thread)
+		w.calls[w.thread] = calls
+	}
+	if list := calls[key]; occ < len(list) {
+		return list[occ], true
+	}
+	return call{}, false
+}
+
+// rolloutCalls — вызовы оболочки и правки файлов из rollout codex: ключ вызова → вызовы по порядку.
 // Нет thread_id или файла rollout (старые задачи) — пусто, без ошибки.
-func rolloutCwds(taskDir, thread string) (map[string][]string, error) {
+func rolloutCalls(taskDir, thread string) (map[string][]call, error) {
 	if thread == "" {
 		return nil, nil
 	}
@@ -564,35 +606,71 @@ func rolloutCwds(taskDir, thread string) (map[string][]string, error) {
 	if err != nil || len(files) == 0 {
 		return nil, err
 	}
-	out := map[string][]string{}
-	err = eachLine(files[0], func(_ int, line []byte) {
-		if !bytes.Contains(line, []byte(`"CommandExecution"`)) {
-			return
+	out := map[string][]call{}
+	var errs []error
+	err = eachLine(files[0], func(n int, line []byte) {
+		key, c, ok, err := rolloutCall(line)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("строка %d: %w", n, err))
 		}
-		var r struct {
-			Payload struct {
-				Type string `json:"type"`
-				Item struct {
-					Type    string   `json:"type"`
-					Command []string `json:"command"`
-					Cwd     string   `json:"cwd"`
-				} `json:"item"`
-			} `json:"payload"`
+		if ok {
+			out[key] = append(out[key], c)
 		}
-		if json.Unmarshal(line, &r) != nil || r.Payload.Type != "item_completed" || r.Payload.Item.Type != "CommandExecution" {
-			return
-		}
-		key := commandKey(strings.Join(r.Payload.Item.Command, " "))
-		cwd := strings.TrimPrefix(r.Payload.Item.Cwd, "file://")
-		if dec, err := url.PathUnescape(cwd); err == nil {
-			cwd = dec
-		}
-		out[key] = append(out[key], cwd)
 	})
-	if err != nil {
-		return nil, fmt.Errorf("rollout %s: %w", filepath.Base(files[0]), err)
+	if err := errors.Join(append(errs, err)...); err != nil {
+		return out, fmt.Errorf("rollout %s: %w", filepath.Base(files[0]), err)
 	}
 	return out, nil
+}
+
+// rolloutCall — вызов из строки rollout. Время начала — время записи о завершении минус
+// длительность команды; у записи без времени (старый формат) — нулевое, время не разобрано —
+// нулевое и ошибка.
+func rolloutCall(line []byte) (key string, c call, ok bool, err error) {
+	if !bytes.Contains(line, []byte(`"CommandExecution"`)) && !bytes.Contains(line, []byte(`"FileChange"`)) {
+		return "", call{}, false, nil
+	}
+	var r struct {
+		Timestamp string `json:"timestamp"`
+		Payload   struct {
+			Type string `json:"type"`
+			Item struct {
+				Type     string                     `json:"type"`
+				Command  []string                   `json:"command"`
+				Cwd      string                     `json:"cwd"`
+				Changes  map[string]json.RawMessage `json:"changes"`
+				Duration struct {
+					Secs  int64 `json:"secs"`
+					Nanos int64 `json:"nanos"`
+				} `json:"duration"`
+			} `json:"item"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(line, &r) != nil || r.Payload.Type != "item_completed" {
+		return "", call{}, false, nil
+	}
+	it := &r.Payload.Item
+	switch it.Type {
+	case "CommandExecution":
+		c.cwd = strings.TrimPrefix(it.Cwd, "file://")
+		if dec, err := url.PathUnescape(c.cwd); err == nil {
+			c.cwd = dec
+		}
+		key = eventKey(Event{Tool: codexCommand, Command: strings.Join(it.Command, " ")})
+	case "FileChange":
+		key = eventKey(Event{Tool: "file_change", Paths: slices.Collect(maps.Keys(it.Changes))})
+	default:
+		return "", call{}, false, nil
+	}
+	if r.Timestamp == "" {
+		return key, c, true, nil
+	}
+	ts, err := time.Parse(time.RFC3339Nano, r.Timestamp)
+	if err != nil {
+		return key, c, true, fmt.Errorf("время вызова: %w", err)
+	}
+	c.at = ts.Add(-time.Duration(it.Duration.Secs)*time.Second - time.Duration(it.Duration.Nanos))
+	return key, c, true, nil
 }
 
 // commandKey — текст команды без кавычек, обратных косых и пробелов: att*.jsonl хранит argv
@@ -606,32 +684,16 @@ func commandKey(s string) string {
 	}, s)
 }
 
+// line — событие попытки: вызов в окне с признаком класса — запись.
 func (w *workerScan) line(n int, line []byte) {
-	if bytes.HasPrefix(line, []byte(`{"type":"thread.started"`)) {
-		var t struct {
-			ID string `json:"thread_id"`
-		}
-		if json.Unmarshal(line, &t) == nil {
-			w.thread = t.ID
-		}
+	if w.readThread(line) {
 		return
 	}
-	if !bytes.Contains(line, []byte(`"command_execution"`)) && !bytes.Contains(line, []byte(`"file_change"`)) {
+	l, ok := w.item(line)
+	if !ok {
 		return
 	}
-	var l cxLine
-	if json.Unmarshal(line, &l) != nil || (l.Type != "item.started" && l.Type != "item.completed") {
-		return
-	}
-	if w.seen[l.Item.ID] {
-		if i, ok := w.pending[l.Item.ID]; ok && l.Type == "item.completed" {
-			w.recs[i].V.ResolveSpec(l.Item.Output, w.s.home, w.dir)
-			delete(w.pending, l.Item.ID)
-		}
-		return
-	}
-	w.seen[l.Item.ID] = true
-	ev, ok := w.event(&l)
+	ev, ok := w.event(l)
 	if !ok {
 		return
 	}
@@ -639,18 +701,19 @@ func (w *workerScan) line(n int, line []byte) {
 	if w.countOnly {
 		return
 	}
-	w.a.Events++
+	c, found, ok := w.inWindowCall(key, occ)
+	if !ok {
+		return
+	}
 	v := Classify(ev)
 	if !interesting(v) {
 		return
 	}
-	if ev.Tool == codexCommand {
-		if cwd, ok := w.callCwd(key, occ); ok {
-			ev.Cwd, ev.CallCwd = cwd, true
-			v = Classify(ev)
-			if !interesting(v) {
-				return
-			}
+	if ev.Tool == codexCommand && found {
+		ev.Cwd, ev.CallCwd = c.cwd, true
+		v = Classify(ev)
+		if !interesting(v) {
+			return
 		}
 	}
 	switch {
@@ -659,7 +722,59 @@ func (w *workerScan) line(n int, line []byte) {
 	case v.SpecFile:
 		w.pending[l.Item.ID] = len(w.recs)
 	}
-	w.recs = append(w.recs, Record{Agent: w.a, File: w.file, Line: n, Time: w.created, V: v})
+	w.recs = append(w.recs, Record{Agent: w.a, File: w.file, Line: n, Time: c.at, V: v})
+}
+
+// readThread — thread_id попытки из thread.started; true — строка разобрана.
+func (w *workerScan) readThread(line []byte) bool {
+	if !bytes.HasPrefix(line, []byte(`{"type":"thread.started"`)) {
+		return false
+	}
+	var t struct {
+		ID string `json:"thread_id"`
+	}
+	if json.Unmarshal(line, &t) == nil {
+		w.thread = t.ID
+	}
+	return true
+}
+
+// item — первая запись о команде или правке файлов; повтор того же item дописывает цели
+// `sub -F файл` из вывода.
+func (w *workerScan) item(line []byte) (*cxLine, bool) {
+	if !bytes.Contains(line, []byte(`"command_execution"`)) && !bytes.Contains(line, []byte(`"file_change"`)) {
+		return nil, false
+	}
+	var l cxLine
+	if json.Unmarshal(line, &l) != nil || (l.Type != "item.started" && l.Type != "item.completed") {
+		return nil, false
+	}
+	if w.seen[l.Item.ID] {
+		if i, ok := w.pending[l.Item.ID]; ok && l.Type == "item.completed" {
+			w.recs[i].V.ResolveSpec(l.Item.Output, w.s.home, w.dir)
+			delete(w.pending, l.Item.ID)
+		}
+		return nil, false
+	}
+	w.seen[l.Item.ID] = true
+	return &l, true
+}
+
+// inWindowCall — вызов из rollout и в окне ли он. Вызов с временем вне окна не считается; без
+// времени (в rollout нет записи или в ней нет времени) — считается по прежнему правилу: задача
+// создана до конца окна, попытка менялась с его начала; время у него нулевое.
+func (w *workerScan) inWindowCall(key string, occ int) (c call, found, ok bool) {
+	w.hadCalls = true
+	c, found = w.call(key, occ)
+	switch {
+	case c.at.IsZero():
+		w.a.Untimed++
+	case c.at.Before(w.s.from) || c.at.After(w.s.to):
+		return c, found, false
+	}
+	w.inWindow = true
+	w.a.Events++
+	return c, found, true
 }
 
 // event — команда или правка файлов; прочие item не считаются вызовами.

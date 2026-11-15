@@ -39,6 +39,9 @@ func report(w io.Writer, res result, from, to time.Time) {
 			title = "Бойцы worker"
 		}
 		fmt.Fprintf(w, "\n== %s: %d агентов с вызовами в окне, файлов %d, вызовов инструментов %d\n", title, len(agents), res.files[pop], events)
+		if pop == "worker" {
+			untimedNote(w, agents)
+		}
 		popReport(w, recs)
 	}
 	if len(res.errs) > 0 {
@@ -47,6 +50,18 @@ func report(w io.Writer, res result, from, to time.Time) {
 			fmt.Fprintln(w, "  ", e)
 		}
 	}
+}
+
+// untimedNote — вызовы бойцов без времени в rollout codex: att*.jsonl времени не пишет.
+func untimedNote(w io.Writer, agents []*Agent) {
+	calls, n := 0, 0
+	for _, a := range agents {
+		if a.Untimed > 0 {
+			calls += a.Untimed
+			n++
+		}
+	}
+	fmt.Fprintf(w, "Время вызова — из rollout codex; без него %d вызовов у %d бойцов — в окне по прежнему правилу: задача создана до конца окна, попытка менялась с его начала\n", calls, n)
 }
 
 func popReport(w io.Writer, recs []Record) {
@@ -287,7 +302,7 @@ func describe(r Record, c int) string {
 		}
 	}
 	when := ""
-	if r.Agent.Pop == "sub" {
+	if !r.Time.IsZero() {
 		when = r.Time.In(berlin()).Format("02.01 15:04") + ", "
 	}
 	return when + "мастер " + r.Agent.Master + ": " + strings.Join(parts, "; ")

@@ -1,6 +1,9 @@
 package accounts
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Прогноз пула (пользователь 22.10: «с 3-мя подписками можно пересчитать
 // темп?»): нынешний темп расхода прогоняется вперёд по правилу ротации —
@@ -213,18 +216,48 @@ func extend(plan []Spell, email string, t time.Time) []Spell {
 	return append(plan, Spell{Email: email, From: t, To: t.Add(poolStep)})
 }
 
-// MixedTiers — у живых учёток разные тарифы
+// MixedTiers — у живых учёток разные тарифы (среди тех, чей тариф известен)
 func (s *Store) MixedTiers() bool {
-	tier := ""
+	return len(s.liveTiers().known) > 1
+}
+
+// Tier — общий тариф живых учёток (rateLimitTier). Пусто, когда тарифы
+// разные или тариф хоть одной живой учётки не известен (токены не
+// разобрать, тарифа в них нет): подтвердить им цену плана нельзя
+func (s *Store) Tier() string {
+	if t := s.liveTiers(); len(t.known) == 1 && !t.unknown {
+		return t.known[0]
+	}
+	return ""
+}
+
+// tierSet — разные известные тарифы живых учёток в порядке учёток; unknown —
+// у какой-то живой учётки тариф не известен
+type tierSet struct {
+	known   []string
+	unknown bool
+}
+
+// liveTiers — тарифы живых учёток
+func (s *Store) liveTiers() tierSet {
+	var t tierSet
+	if s == nil {
+		return t
+	}
 	for i := range s.Accounts {
-		o, err := s.Accounts[i].oauth()
-		if err != nil || o.RateLimitTier == "" || s.Accounts[i].Dead != "" {
+		if s.Accounts[i].Dead != "" {
 			continue
 		}
-		if tier != "" && o.RateLimitTier != tier {
-			return true
+		o, err := s.Accounts[i].oauth()
+		switch {
+		case err != nil:
+			// токены не разобрать — причина при сверке хранилища (store.go)
+			t.unknown = true
+		case o.RateLimitTier == "":
+			t.unknown = true
+		case !slices.Contains(t.known, o.RateLimitTier):
+			t.known = append(t.known, o.RateLimitTier)
 		}
-		tier = o.RateLimitTier
 	}
-	return false
+	return t
 }

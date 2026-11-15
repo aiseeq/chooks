@@ -72,8 +72,10 @@ func RatesFile() (string, error) {
 
 // PlanUnit — перевод для учёток хранилища: цена плана — из действующей
 // строки поставщика в файле курсов. Тарифы учёток разные — одной цены у них
-// нет, перевода нет. Тариф учётки с ценой строки не сверяется: в курсах
-// план назван иначе, чем rateLimitTier
+// нет, перевода нет. Колонка tier в курсах — rateLimitTier учёток, на
+// которых мерили строку: тариф учёток не известен или не совпал — цена не
+// подтверждена, перевода нет. Колонки нет — тариф не сверяется (план в
+// курсах назван иначе)
 func (s *Store) PlanUnit(now time.Time) Unit {
 	if s != nil && s.MixedTiers() {
 		return Unit{Why: "тарифы учёток разные, а цена плана в курсах одна"}
@@ -82,27 +84,43 @@ func (s *Store) PlanUnit(now time.Time) Unit {
 	if err != nil {
 		return Unit{Why: err.Error()}
 	}
-	price, err := planPrice(path, ratesProvider, now)
+	plan, err := planPrice(path, ratesProvider, now)
 	if err != nil {
 		return Unit{Why: err.Error()}
 	}
-	return Unit{Scale: price / UnitPlanUSD}
+	if tier := s.Tier(); plan.tierKnown && plan.tier != tier {
+		if tier == "" {
+			tier = "не известен"
+		}
+		return Unit{Why: fmt.Sprintf("тариф учёток %s, а цена плана в курсах — для %s", tier, plan.tier)}
+	}
+	return Unit{Scale: plan.usd / UnitPlanUSD}
 }
 
-// planPrice — plan_usd_month поставщика по файлу курсов: действует строка с
-// наибольшим valid_from не позже now, при равных — нижняя (шапка файла).
-// Испорченная строка мешает, только если она и есть действующая: строки
-// задним числом не правятся, и старая порча не должна ломать перевод навсегда
-func planPrice(path, provider string, now time.Time) (float64, error) {
+// ratePlan — цена плана из действующей строки курсов и тариф учёток, на
+// которых её мерили (tierKnown — в шапке есть колонка tier)
+type ratePlan struct {
+	usd       float64
+	tier      string
+	tierKnown bool
+}
+
+// planPrice — plan_usd_month и tier поставщика по файлу курсов: действует
+// строка с наибольшим valid_from не позже now, при равных — нижняя (шапка
+// файла). Испорченная строка мешает, только если она и есть действующая:
+// строки задним числом не правятся, и старая порча не должна ломать перевод
+// навсегда
+func planPrice(path, provider string, now time.Time) (ratePlan, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, fmt.Errorf("цены плана нет: %w", err)
+		return ratePlan{}, fmt.Errorf("цены плана нет: %w", err)
 	}
 	defer f.Close()
 	var head []string
 	var since time.Time
 	found := false
-	price, priceErr := 0.0, error(nil)
+	var plan ratePlan
+	priceErr := error(nil)
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -115,7 +133,7 @@ func planPrice(path, provider string, now time.Time) (float64, error) {
 			head = cols
 			for _, need := range []string{"valid_from", "provider", "plan_usd_month"} {
 				if !slices.Contains(head, need) {
-					return 0, fmt.Errorf("цены плана нет: в шапке %s нет %s", path, need)
+					return ratePlan{}, fmt.Errorf("цены плана нет: в шапке %s нет %s", path, need)
 				}
 			}
 			continue
@@ -131,29 +149,30 @@ func planPrice(path, provider string, now time.Time) (float64, error) {
 		}
 		from, err := validFrom(row["valid_from"])
 		if err != nil {
-			return 0, fmt.Errorf("цены плана нет: %s: %w", path, err)
+			return ratePlan{}, fmt.Errorf("цены плана нет: %s: %w", path, err)
 		}
 		if from.After(now) || (found && from.Before(since)) {
 			continue
 		}
 		found, since = true, from
-		price, priceErr = rowPrice(row)
+		plan.tier, plan.tierKnown = row["tier"], slices.Contains(head, "tier")
+		plan.usd, priceErr = rowPrice(row)
 		if priceErr != nil {
 			priceErr = fmt.Errorf("цены плана нет: %s: %w", path, priceErr)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return 0, fmt.Errorf("цены плана нет: %s: %w", path, err)
+		return ratePlan{}, fmt.Errorf("цены плана нет: %s: %w", path, err)
 	}
 	switch {
 	case head == nil:
-		return 0, errors.New("цены плана нет: в " + path + " нет шапки")
+		return ratePlan{}, errors.New("цены плана нет: в " + path + " нет шапки")
 	case !found:
-		return 0, errors.New("цены плана нет: в " + path + " нет действующей строки " + provider)
+		return ratePlan{}, errors.New("цены плана нет: в " + path + " нет действующей строки " + provider)
 	case priceErr != nil:
-		return 0, priceErr
+		return ratePlan{}, priceErr
 	}
-	return price, nil
+	return plan, nil
 }
 
 // validFrom — начало действия строки курсов: дата (местная полночь) или

@@ -64,12 +64,12 @@ func TestPlanPrice(t *testing.T) {
 			got, err := planPrice(homeRates(t, tt.body), ratesProvider, now)
 			if tt.want == 0 {
 				if err == nil {
-					t.Errorf("ожидалась ошибка, цена %v", got)
+					t.Errorf("ожидалась ошибка, цена %v", got.usd)
 				}
 				return
 			}
-			if err != nil || got != tt.want {
-				t.Errorf("цена %v, ошибка %v; ожидалось %v", got, err, tt.want)
+			if err != nil || got.usd != tt.want {
+				t.Errorf("цена %v, ошибка %v; ожидалось %v", got.usd, err, tt.want)
 			}
 		})
 	}
@@ -125,5 +125,52 @@ func TestChooseReasonUnit(t *testing.T) {
 	_, reason := choose(s, usage, now)
 	if !strings.Contains(reason, "пуста (неделя 198%)") || !strings.Contains(reason, "неделя 80%") {
 		t.Errorf("причина %q", reason)
+	}
+}
+
+// ratesTierHead — шапка курсов с колонкой tier: rateLimitTier учёток, на
+// которых мерили строку
+const ratesTierHead = "valid_from\tprovider\tplan\tplan_usd_month\tapi_usd_week\ttier\n"
+
+// Тариф учёток сверяется с tier действующей строки: учётки max_5x при
+// строке $200 для max_20x — не удвоенные доли, а пометка «уч»; tier строки
+// «-» тоже не подтверждает цену; без колонки tier — как прежде
+func TestPlanUnitTier(t *testing.T) {
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.Local)
+	five := &Store{Accounts: []Account{tiered(t, "a", "default_claude_max_5x", now), tiered(t, "b", "default_claude_max_5x", now)}}
+	twenty := &Store{Accounts: []Account{tiered(t, "a", "default_claude_max_20x", now)}}
+	tests := []struct {
+		name, body string
+		store      *Store
+		want       string
+	}{
+		{"max_5x при строке $200 для max_20x", ratesTierHead +
+			"2026-03-01\tanthropic\tultra\t200\t1600\tdefault_claude_max_20x\n", five, "73%" + OtherUnitMark},
+		{"тариф совпал", ratesTierHead +
+			"2026-01-01\tanthropic\tmax-5x\t100\t800\tdefault_claude_max_5x\n" +
+			"2026-03-01\tanthropic\tultra\t200\t1600\tdefault_claude_max_20x\n", twenty, "146%"},
+		{"совпал тариф старой, а действует другая", ratesTierHead +
+			"2026-01-01\tanthropic\tmax-5x\t100\t800\tdefault_claude_max_5x\n" +
+			"2026-03-01\tanthropic\tultra\t200\t1600\tdefault_claude_max_20x\n", five, "73%" + OtherUnitMark},
+		{"tier строки не указан", ratesTierHead +
+			"2026-03-01\tanthropic\tultra\t200\t1600\t-\n", twenty, "73%" + OtherUnitMark},
+		{"колонки tier нет", ratesHead + "2026-03-01\tanthropic\tultra\t200\t1600\n", five, "146%"},
+		{"хранилища нет — тариф не известен", ratesTierHead +
+			"2026-03-01\tanthropic\tultra\t200\t1600\tdefault_claude_max_20x\n", nil, "73%" + OtherUnitMark},
+		{"у живой учётки тарифа нет", ratesTierHead +
+			"2026-03-01\tanthropic\tultra\t200\t1600\tdefault_claude_max_20x\n",
+			&Store{Accounts: []Account{tiered(t, "a", "default_claude_max_20x", now), tiered(t, "b", "", now)}}, "73%" + OtherUnitMark},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			homeRates(t, tt.body)
+			u := tt.store.PlanUnit(now)
+			if got := u.Percent(73); got != tt.want {
+				t.Errorf("73: %q, ожидалось %q (%s)", got, tt.want, u.Why)
+			}
+			if !u.OK() && !strings.Contains(u.Why, "тариф учёток") {
+				t.Errorf("причина без тарифа: %q", u.Why)
+			}
+		})
 	}
 }

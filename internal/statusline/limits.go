@@ -89,6 +89,10 @@ type weekRecord struct {
 	Session  string             `json:"session,omitempty"`
 	Account  string             `json:"account,omitempty"`
 	Sessions map[string]float64 `json:"sessions,omitempty"`
+	// Peak — наибольшая прежняя доля недели. Выше нынешней она после
+	// частичного сброса: первая доля сессии до этого уровня может быть
+	// ответом API, полученным до сброса (12.11 12:40, /clear принёс 100% при 58%)
+	Peak float64 `json:"peak,omitempty"`
 }
 
 // limitStep — строка журнала: доля недели изменилась или началась новая неделя
@@ -263,14 +267,24 @@ func (s *limitsSnapshot) mergeWeek(week weeklyUsage, smp sample, stamp time.Time
 	case week.used == rec.SevenDay:
 		rec.SeenAt = stamp
 		verdict = weekConfirmed
-	case week.used > rec.SevenDay && news != shareRepeat,
+	case week.used > rec.SevenDay && news != shareRepeat && !rec.staleAfterReset(week.used, news),
 		news == shareFresh && (smp.exact || rec.SevenDay-week.used >= resetDropMin):
+		rec.Peak = max(rec.Peak, rec.SevenDay)
 		rec.SevenDay, rec.At, rec.SeenAt, rec.Session = week.used, stamp, stamp, smp.session
 	default:
 		merged.used = rec.SevenDay
 		verdict = weekStale
 	}
 	return merged, verdict, rec.Account
+}
+
+// staleAfterReset — первая доля сессии после частичного сброса похожа на
+// ответ API до сброса: выше записи на resetDropMin и больше, но не выше
+// прежнего пика недели. Без сброса пик не выше записи, и проверка молчит.
+// Настоящий рост такого размера между отрисовками — редкость, а если он был,
+// запись поднимет следующая, уже свежая доля той же сессии
+func (rec *weekRecord) staleAfterReset(used float64, news shareNews) bool {
+	return news == shareFirst && used <= rec.Peak && used-rec.SevenDay >= resetDropMin
 }
 
 // resetDropMin — снижение доли сессии на столько процентных пунктов и больше —

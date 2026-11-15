@@ -413,3 +413,55 @@ func TestMergeWeeklyLimitSessionJitter(t *testing.T) {
 		t.Errorf("журнал: %v, ожидалось [53 54 60 61]", shares)
 	}
 }
+
+// 12.11 12:40: после частичного сброса 100 → 58 сессия, рождённая /clear,
+// первой отрисовкой принесла старый ответ API процесса — 100% до сброса.
+// Первая доля сессии, выше записи на resetDropMin и больше, но не выше
+// уровня до сброса, — старый ответ: запись и журнал её не берут. Небольшой
+// рост первой долей и свежая доля сессии запись поднимают
+func TestMergeWeeklyLimitStaleFirstAfterReset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "limits.json")
+	base := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	merge(t, path, 100, workResets, "a", base)
+	merge(t, path, 58, workResets, "a", base.Add(time.Hour))
+	if merged, verdict := merge(t, path, 100, workResets, "cleared", base.Add(time.Hour+time.Minute)); verdict != weekStale || merged.used != 58 {
+		t.Errorf("старый ответ новой сессии после сброса: %v, полоса %v, ожидалось 58", verdict, merged.used)
+	}
+	if merged, verdict := merge(t, path, 59, workResets, "new", base.Add(time.Hour+2*time.Minute)); verdict != weekChanged || merged.used != 59 {
+		t.Errorf("небольшой рост первой долей: %v, полоса %v, ожидалось 59", verdict, merged.used)
+	}
+	if merged, verdict := merge(t, path, 70, workResets, "a", base.Add(2*time.Hour)); verdict != weekChanged || merged.used != 70 {
+		t.Errorf("свежая доля сессии: %v, полоса %v, ожидалось 70", verdict, merged.used)
+	}
+	_, _, steps, err := readLimitsAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shares []float64
+	for _, st := range steps {
+		shares = append(shares, st.SevenDay)
+	}
+	if fmt.Sprint(shares) != "[100 58 59 70]" {
+		t.Errorf("журнал: %v, ожидалось [100 58 59 70]", shares)
+	}
+}
+
+// Два частичных сброса: старый ответ может быть и с первого, выше второго
+// пика; доля выше прежнего пика недели — уже не старый ответ
+func TestMergeWeeklyLimitStaleFirstTwoResets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "limits.json")
+	base := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	merge(t, path, 90, workResets, "a", base)
+	merge(t, path, 50, workResets, "a", base.Add(time.Hour))
+	merge(t, path, 70, workResets, "a", base.Add(2*time.Hour))
+	merge(t, path, 30, workResets, "a", base.Add(3*time.Hour))
+	if merged, verdict := merge(t, path, 30+resetDropMin, workResets, "edge", base.Add(3*time.Hour+30*time.Second)); verdict != weekStale || merged.used != 30 {
+		t.Errorf("скачок ровно на resetDropMin: %v, полоса %v, ожидалось 30", verdict, merged.used)
+	}
+	if merged, verdict := merge(t, path, 85, workResets, "old", base.Add(3*time.Hour+time.Minute)); verdict != weekStale || merged.used != 30 {
+		t.Errorf("ответ до первого сброса: %v, полоса %v, ожидалось 30", verdict, merged.used)
+	}
+	if merged, verdict := merge(t, path, 95, workResets, "new", base.Add(3*time.Hour+2*time.Minute)); verdict != weekChanged || merged.used != 95 {
+		t.Errorf("доля выше прежнего пика: %v, полоса %v, ожидалось 95", verdict, merged.used)
+	}
+}

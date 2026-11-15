@@ -28,6 +28,16 @@ type scanner struct {
 	jobs     int
 	mu       sync.Mutex
 	res      result
+	// times — создание и последняя запись файла попытки; nil — fileTimes (тесты подменяют:
+	// время создания файла не задать)
+	times func(path string) (born, mod time.Time, err error)
+}
+
+func (s *scanner) fileTimes(path string) (born, mod time.Time, err error) {
+	if s.times != nil {
+		return s.times(path)
+	}
+	return fileTimes(path)
 }
 
 func (s *scanner) run(projects, worker string) (result, error) {
@@ -445,7 +455,7 @@ func (s *scanner) scanWorker(dir string, atts []string, recent map[string]bool) 
 		master = j.Owner.Name
 	}
 	w := &workerScan{s: s, a: &Agent{Pop: "worker", ID: task, Short: task, Master: master}, dir: j.Dir,
-		occ: map[string]map[string]int{}, calls: map[string]map[string][]call{}}
+		next: map[string]map[string]int{}, rollouts: map[string]*rollout{}}
 	keys, err := briefKeys(dir)
 	var errs []error
 	if err != nil {
@@ -510,23 +520,29 @@ func briefKeys(dir string) (map[string]bool, error) {
 
 // workerScan — разбор попыток бойца; записи копятся по всем попыткам задачи.
 type workerScan struct {
-	s         *scanner
-	a         *Agent
-	dir       string
-	recs      []Record
-	files     int // попыток с вызовами в окне; попытка без вызовов — по времени файла
-	file      string
-	seen      map[string]bool
-	pending   map[string]int // id `sub -F файл` → индекс в recs: цели — в выводе item.completed
-	path      string         // att*.jsonl
-	countOnly bool           // попытка вне окна: только счёт повторов вызовов
-	thread    string         // thread_id попытки: имя её rollout codex
-	hadCalls  bool           // в попытке были вызовы
-	inWindow  bool           // в попытке был вызов в окне
-	// occ — по thread: сколько раз вызов с ключом уже встретился во всех его попытках
-	occ     map[string]map[string]int
-	calls   map[string]map[string][]call // по thread: ключ вызова → вызовы из rollout по порядку
-	callErr error                        // rollout не прочитан
+	s      *scanner
+	a      *Agent
+	dir    string
+	recs   []Record
+	files  int // попыток с вызовами в окне; попытка без вызовов — по времени файла
+	file   string
+	path   string         // att*.jsonl
+	items  []attItem      // вызовы попытки по порядку
+	seen   map[string]int // id item → индекс в items
+	thread string         // thread_id попытки: имя её rollout codex
+	// next — по thread: ключ вызова → первый ещё не сопоставленный вызов rollout с этим ключом
+	next     map[string]map[string]int
+	rollouts map[string]*rollout // по thread
+	callErr  error               // rollout не прочитан
+}
+
+// attItem — вызов попытки: первая строка о нём и вывод из item.completed.
+type attItem struct {
+	n      int
+	ev     Event
+	done   bool // есть item.completed: только такой вызов есть в rollout
+	output string
+	thread string
 }
 
 // call — вызов из rollout codex: каталог (у команды) и время начала; нет времени — нулевое.
@@ -544,33 +560,96 @@ func attNum(path string) (int, error) {
 	return n, nil
 }
 
+// att — попытка: сначала все её вызовы, потом время каждого — вызову без времени нужны соседи.
 func (w *workerScan) att(path string, countOnly bool) error {
 	w.file = filepath.Base(path)
 	w.path = path
-	w.countOnly = countOnly
-	w.seen = map[string]bool{}
-	w.pending = map[string]int{}
+	w.items, w.seen = nil, map[string]int{}
 	w.thread, w.callErr = "", nil
-	w.hadCalls, w.inWindow = false, false
-	err := errors.Join(eachLine(path, w.line), w.callErr)
+	err := eachLine(path, w.line)
+	born, mod, terr := w.s.fileTimes(path)
+	calls, found := w.lookup(born, mod)
+	if countOnly {
+		return errors.Join(err, w.callErr, terr)
+	}
+	in := w.inWindow(calls, born, mod)
 	// попытка без вызовов времени не имеет: в окне, если менялась с его начала (прежнее правило)
-	if !countOnly && (w.inWindow || !w.hadCalls) {
+	if slices.Contains(in, true) || len(w.items) == 0 {
 		w.files++
 	}
-	return err
+	for i := range w.items {
+		if in[i] {
+			w.record(&w.items[i], calls[i], found[i])
+		}
+	}
+	return errors.Join(err, w.callErr, terr)
 }
 
-// count — номер повтора вызова бойца в его thread (с 0) и ключ для поиска в rollout.
-func (w *workerScan) count(ev Event) (string, int) {
-	m := w.occ[w.thread]
-	if m == nil {
-		m = map[string]int{}
-		w.occ[w.thread] = m
+// fileSlack — запас на то, что время файла попытки и время записи rollout пишутся не разом.
+const fileSlack = 5 * time.Second
+
+// lookup — вызовы попытки в rollout: по ключу и порядку в thread, начатые не раньше создания файла
+// попытки и не позже последней записи в него. Вызов rollout, начатый до создания файла, —
+// вызов прежней попытки, которого её att*.jsonl не записал, — пропускается. Незаконченный в att
+// вызов (item.started без item.completed) rollout то пишет, то нет (у оборванной попытки и посреди
+// неё бывает и так, и так): он берёт вызов rollout, только если таких вызовов во времени попытки
+// больше, чем законченных вызовов с тем же ключом после него, — иначе вызов достаётся им.
+func (w *workerScan) lookup(born, mod time.Time) ([]call, []bool) {
+	n := len(w.items)
+	calls, found := make([]call, n), make([]bool, n)
+	keys, later := make([]string, n), make([]int, n)
+	done := map[[2]string]int{} // thread и ключ → законченных вызовов попытки дальше по файлу
+	for i := n - 1; i >= 0; i-- {
+		it := &w.items[i]
+		keys[i] = eventKey(it.ev)
+		k := [2]string{it.thread, keys[i]}
+		later[i] = done[k]
+		if it.done {
+			done[k]++
+		}
 	}
-	key := eventKey(ev)
-	occ := m[key]
-	m[key]++
-	return key, occ
+	for i := range w.items {
+		it := &w.items[i]
+		list, p := w.candidates(it.thread, keys[i], born, mod)
+		if len(list) == 0 || (!it.done && len(list) <= later[i]) {
+			continue
+		}
+		calls[i], found[i] = list[0], true
+		w.next[it.thread][keys[i]] = p + 1
+	}
+	return calls, found
+}
+
+// inWindow — в окне ли вызовы попытки. Вызов со временем из rollout — по нему. Вызов без времени
+// ограничивают соседи по попытке: начат не раньше предыдущего вызова со временем и создания файла
+// попытки, не позже следующего вызова со временем, а без него — последней записи в файл. Границы не
+// решают — в окне по прежнему правилу (задача создана до конца окна, попытка менялась с его начала).
+func (w *workerScan) inWindow(calls []call, born, mod time.Time) []bool {
+	from, to := w.s.from, w.s.to
+	in := make([]bool, len(calls))
+	next := make([]time.Time, len(calls))
+	hi := mod
+	for i := len(calls) - 1; i >= 0; i-- {
+		next[i] = hi
+		if !calls[i].at.IsZero() {
+			hi = calls[i].at
+		}
+	}
+	lo := born
+	for i, c := range calls {
+		if !c.at.IsZero() {
+			in[i] = !c.at.Before(from) && !c.at.After(to)
+			if c.at.After(lo) {
+				lo = c.at
+			}
+			continue
+		}
+		in[i] = !lo.After(to) && !next[i].Before(from)
+		if in[i] {
+			w.a.Untimed++
+		}
+	}
+	return in
 }
 
 // eventKey — ключ вызова: текст команды или пути правки файлов.
@@ -582,31 +661,88 @@ func eventKey(ev Event) string {
 	return "f" + strings.Join(paths, "\n")
 }
 
-// call — вызов в rollout codex попытки: att*.jsonl не пишет ни каталога, ни времени. Вызов
-// находится по ключу и номеру его повтора; rollout читается при первой нужде.
-func (w *workerScan) call(key string, occ int) (call, bool) {
-	calls, ok := w.calls[w.thread]
+// candidates — ещё не сопоставленные вызовы rollout с ключом, начатые во время попытки (lookup),
+// и номер первого из них: att*.jsonl не пишет ни каталога, ни времени вызова. Rollout читается при
+// первой нужде; без времени в rollout — все по порядку.
+func (w *workerScan) candidates(thread, key string, born, mod time.Time) ([]call, int) {
+	r, ok := w.rollouts[thread]
 	if !ok {
-		calls, w.callErr = rolloutCalls(filepath.Dir(w.path), w.thread)
-		w.calls[w.thread] = calls
+		var err error
+		r, err = rolloutCalls(filepath.Dir(w.path), thread)
+		w.callErr = errors.Join(w.callErr, err)
+		w.rollouts[thread] = r
+		w.next[thread] = map[string]int{}
 	}
-	if list := calls[key]; occ < len(list) {
-		return list[occ], true
+	list := r.list(key)
+	p := w.next[thread][key]
+	for p < len(list) && !list[p].at.IsZero() && list[p].at.Before(born.Add(-fileSlack)) {
+		p++
 	}
-	return call{}, false
+	q := p
+	for q < len(list) && !list[q].at.After(mod.Add(fileSlack)) {
+		q++
+	}
+	return list[p:q], p
 }
 
-// rolloutCalls — вызовы оболочки и правки файлов из rollout codex: ключ вызова → вызовы по порядку.
-// Нет thread_id или файла rollout (старые задачи) — пусто, без ошибки.
-func rolloutCalls(taskDir, thread string) (map[string][]call, error) {
-	if thread == "" {
-		return nil, nil
+// rollout — вызовы rollout codex одного thread.
+type rollout struct {
+	byKey map[string][]call // ключ вызова → вызовы по порядку
+	order []keyedCall       // все вызовы по порядку: для команд с маской секрета
+}
+
+type keyedCall struct {
+	key string
+	c   call
+}
+
+// redactMark — чем codex заменяет в att*.jsonl текст, похожий на секрет; в rollout текст открыт.
+const redactMark = "[REDACTED_SECRET]"
+
+// list — вызовы с ключом; ключ с маской секрета подходит к ключам rollout, где на месте маски
+// любой текст.
+func (r *rollout) list(key string) []call {
+	if !strings.Contains(key, redactMark) {
+		return r.byKey[key]
 	}
+	parts := strings.Split(key, redactMark)
+	var l []call
+	for _, kc := range r.order {
+		if maskMatch(parts, kc.key) {
+			l = append(l, kc.c)
+		}
+	}
+	return l
+}
+
+// maskMatch — s из частей parts по порядку с любым текстом между ними.
+func maskMatch(parts []string, s string) bool {
+	first, last := parts[0], parts[len(parts)-1]
+	if len(s) < len(first)+len(last) || !strings.HasPrefix(s, first) || !strings.HasSuffix(s, last) {
+		return false
+	}
+	s = s[len(first) : len(s)-len(last)]
+	for _, p := range parts[1 : len(parts)-1] {
+		i := strings.Index(s, p)
+		if i < 0 {
+			return false
+		}
+		s = s[i+len(p):]
+	}
+	return true
+}
+
+// rolloutCalls — вызовы оболочки и правки файлов из rollout codex по порядку.
+// Нет файла rollout (старые задачи, попытка без thread_id) — пусто, без ошибки.
+func rolloutCalls(taskDir, thread string) (*rollout, error) {
+	r := &rollout{byKey: map[string][]call{}}
 	files, err := filepath.Glob(filepath.Join(taskDir, "codex", "sessions", "*", "*", "*", "rollout-*-"+thread+".jsonl"))
-	if err != nil || len(files) == 0 {
-		return nil, err
+	if err != nil {
+		return r, fmt.Errorf("поиск rollout: %w", err)
 	}
-	out := map[string][]call{}
+	if len(files) == 0 {
+		return r, nil
+	}
 	var errs []error
 	err = eachLine(files[0], func(n int, line []byte) {
 		key, c, ok, err := rolloutCall(line)
@@ -614,13 +750,14 @@ func rolloutCalls(taskDir, thread string) (map[string][]call, error) {
 			errs = append(errs, fmt.Errorf("строка %d: %w", n, err))
 		}
 		if ok {
-			out[key] = append(out[key], c)
+			r.byKey[key] = append(r.byKey[key], c)
+			r.order = append(r.order, keyedCall{key, c})
 		}
 	})
 	if err := errors.Join(append(errs, err)...); err != nil {
-		return out, fmt.Errorf("rollout %s: %w", filepath.Base(files[0]), err)
+		return r, fmt.Errorf("rollout %s: %w", filepath.Base(files[0]), err)
 	}
-	return out, nil
+	return r, nil
 }
 
 // rolloutCall — вызов из строки rollout. Время начала — время записи о завершении минус
@@ -684,45 +821,31 @@ func commandKey(s string) string {
 	}, s)
 }
 
-// line — событие попытки: вызов в окне с признаком класса — запись.
+// line — строка попытки: thread_id или вызов; повтор того же item отмечает завершение и вывод.
 func (w *workerScan) line(n int, line []byte) {
 	if w.readThread(line) {
 		return
 	}
-	l, ok := w.item(line)
-	if !ok {
+	if !bytes.Contains(line, []byte(`"command_execution"`)) && !bytes.Contains(line, []byte(`"file_change"`)) {
 		return
 	}
-	ev, ok := w.event(l)
-	if !ok {
+	var l cxLine
+	if json.Unmarshal(line, &l) != nil || (l.Type != "item.started" && l.Type != "item.completed") {
 		return
 	}
-	key, occ := w.count(ev)
-	if w.countOnly {
-		return
-	}
-	c, found, ok := w.inWindowCall(key, occ)
-	if !ok {
-		return
-	}
-	v := Classify(ev)
-	if !interesting(v) {
-		return
-	}
-	if ev.Tool == codexCommand && found {
-		ev.Cwd, ev.CallCwd = c.cwd, true
-		v = Classify(ev)
-		if !interesting(v) {
-			return
+	done := l.Type == "item.completed"
+	if i, ok := w.seen[l.Item.ID]; ok {
+		if done {
+			w.items[i].done, w.items[i].output = true, l.Item.Output
 		}
+		return
 	}
-	switch {
-	case v.SpecFile && l.Type == "item.completed":
-		v.ResolveSpec(l.Item.Output, w.s.home, w.dir)
-	case v.SpecFile:
-		w.pending[l.Item.ID] = len(w.recs)
+	ev, ok := w.event(&l)
+	if !ok {
+		return
 	}
-	w.recs = append(w.recs, Record{Agent: w.a, File: w.file, Line: n, Time: c.at, V: v})
+	w.seen[l.Item.ID] = len(w.items)
+	w.items = append(w.items, attItem{n: n, ev: ev, done: done, output: l.Item.Output, thread: w.thread})
 }
 
 // readThread — thread_id попытки из thread.started; true — строка разобрана.
@@ -739,42 +862,24 @@ func (w *workerScan) readThread(line []byte) bool {
 	return true
 }
 
-// item — первая запись о команде или правке файлов; повтор того же item дописывает цели
-// `sub -F файл` из вывода.
-func (w *workerScan) item(line []byte) (*cxLine, bool) {
-	if !bytes.Contains(line, []byte(`"command_execution"`)) && !bytes.Contains(line, []byte(`"file_change"`)) {
-		return nil, false
-	}
-	var l cxLine
-	if json.Unmarshal(line, &l) != nil || (l.Type != "item.started" && l.Type != "item.completed") {
-		return nil, false
-	}
-	if w.seen[l.Item.ID] {
-		if i, ok := w.pending[l.Item.ID]; ok && l.Type == "item.completed" {
-			w.recs[i].V.ResolveSpec(l.Item.Output, w.s.home, w.dir)
-			delete(w.pending, l.Item.ID)
-		}
-		return nil, false
-	}
-	w.seen[l.Item.ID] = true
-	return &l, true
-}
-
-// inWindowCall — вызов из rollout и в окне ли он. Вызов с временем вне окна не считается; без
-// времени (в rollout нет записи или в ней нет времени) — считается по прежнему правилу: задача
-// создана до конца окна, попытка менялась с его начала; время у него нулевое.
-func (w *workerScan) inWindowCall(key string, occ int) (c call, found, ok bool) {
-	w.hadCalls = true
-	c, found = w.call(key, occ)
-	switch {
-	case c.at.IsZero():
-		w.a.Untimed++
-	case c.at.Before(w.s.from) || c.at.After(w.s.to):
-		return c, found, false
-	}
-	w.inWindow = true
+// record — вызов в окне: в счёт вызовов, с признаком класса — запись. Каталог вызова — из
+// rollout; цели `sub -F файл` — из вывода item.completed.
+func (w *workerScan) record(it *attItem, c call, found bool) {
 	w.a.Events++
-	return c, found, true
+	ev := it.ev
+	v := Classify(ev)
+	if !interesting(v) {
+		return
+	}
+	if ev.Tool == codexCommand && found {
+		ev.Cwd, ev.CallCwd = c.cwd, true
+		v = Classify(ev)
+		if !interesting(v) {
+			return
+		}
+	}
+	v.ResolveSpec(it.output, w.s.home, w.dir)
+	w.recs = append(w.recs, Record{Agent: w.a, File: w.file, Line: it.n, Time: c.at, V: v})
 }
 
 // event — команда или правка файлов; прочие item не считаются вызовами.

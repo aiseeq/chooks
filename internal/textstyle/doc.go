@@ -257,9 +257,13 @@ var (
 	// лишняя находка смотрится глазами, а пропуск оставит дату в сводке
 	genitiveWord = `(?:окружения|разработки|исполнения|выполнения|тестирования|сборки|выпуска|рождения|основания)`
 	genitiveYear = regexp.MustCompile(`(?i)^\s+` + genitiveWord + `(?:[^\p{L}\p{N}]|$)`)
-	// genitiveEnd — за словом конец фразы: конец строки, знак препинания,
-	// закрывающая скобка или кавычка
-	genitiveEnd = regexp.MustCompile(`(?i)^\s+` + genitiveWord + `\s*(?:\p{P}|$)`)
+	// genitiveEnd — за словом конец фразы: конец строки или знак препинания,
+	// кроме дефиса («в среду сборки-релиза», «в среду сборки - упали» —
+	// фраза идёт дальше)
+	genitiveEnd = regexp.MustCompile(`(?i)^\s+` + genitiveWord + `\s*(?:[^\P{P}-]|$)`)
+	// verbBefore — перед оборотом глагол: «Упали в среду сборки.», «Обновим в
+	// среду окружения, потом релиз» — порядок слов обратный, оборот — срок
+	verbBefore = regexp.MustCompile(`(?i)\p{L}+(?:ли|ем|им|ут|ют|ит|ет|ла|ло)\s+$`)
 	// nearestYear — «ближайший год» в именительном без предлога
 	nearestYear = regexp.MustCompile(`(?i)^ближайший\s+год$`)
 	// elidedWeek «на следующей», «на прошлой» без «неделе» после уже
@@ -267,14 +271,16 @@ var (
 	elidedWeek = regexp.MustCompile(`(?i)` + wordBoundary + `(на\s+(?:следующей|прошлой))(?:[^\p{L}\p{N}]|$)`)
 	// weekWord — «неделя» с начала слова: «понедельник» не неделя
 	weekWord = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])недел`)
-	// everyWeek — «раз в неделю» перед словом недели: повтор, не неделя
-	everyWeek = regexp.MustCompile(`(?i)раз\s+в\s*$`)
+	// everyWeek — «раз в неделю», «раз в две недели», «каждую неделю» перед
+	// словом недели: повтор, не неделя
+	everyWeek = regexp.MustCompile(`(?i)(?:раз\s+в(?:\s+(?:две|три|четыре|пару|\d+))?|кажд\p{L}*)\s*$`)
 	// ownNoun — своё существительное после «на следующей», «на прошлой»
 	ownNoun = regexp.MustCompile(`(?i)^\s+(?:неделе|встрече|итерации|строке|странице|версии|планёрке|планерке|задаче|` +
-		`стадии|фазе|ступени)(?:[^\p{L}\p{N}]|$)`)
-	// unitAfter — за числом с точкой единица: «1.5 часа», «2.5%», «1.10 ч» —
-	// не дата
-	unitAfter = regexp.MustCompile(`(?i)^[ \t,(]*(?:с\s+)?\d{1,2}\.\d{1,2}\s*(?:%|(?:час(?:а|ов)?|ч|мин|раза?)(?:[^\p{L}\p{N}]|$))`)
+		`стадии|фазе|ступени|сессии|синхронизации|проверке|ретроспективе|демонстрации|ретро)(?:[^\p{L}\p{N}]|$)`)
+	// unitAfter — за числом с точкой или диапазоном от него единица в любой
+	// форме: «1.5 часа», «2.5%», «1.5-2 часа», «3.5 человека» — не дата.
+	// Формы перечислены: «час\p{L}*» взял бы «часть», «раз\p{L}*» — «разбор»
+	unitAfter = regexp.MustCompile(`(?i)^[ \t,(]*(?:с\s+)?\d{1,2}\.\d{1,2}(?:\s*[-–]\s*\d+(?:\.\d+)?)?\s*(?:%|` + unitWord + `(?:[^\p{L}\p{N}]|$))`)
 	// weekdayPattern день недели с предлогом, полным именем или сокращением
 	// (пн, вт). Без предлога день в сводке — расписание («понедельник и
 	// четверг, 15:00»), «по четвергам» — повтор: не находки. «Среда» — только
@@ -305,6 +311,10 @@ var (
 	periodDated = regexp.MustCompile(`^\s+(?:с\s+)?` + dateHead)
 )
 
+// unitWord — единица после числа: время, деньги, объём, люди, разы
+const unitWord = `(?:час(?:а|ов|ам|ами|ах|ик|ика|иков)?|ч|день|дня|дней|дням|дн|недел(?:я|и|ь|ю|е|ям)|` +
+	`мин(?:ута|уты|уту|ут)?|сек(?:унда|унды|унду|унд)?|млн|млрд|тыс(?:яча|ячи|яч)?|[гмк]б|человек(?:а)?|раза?)`
+
 // dateHead — начало даты: «14.11», «14.1», «16 - 20.11», «9 декабря»,
 // «2026-11-20». После точки — месяц 1–12, за ним не цифра: время «13.00»,
 // «10.30» — не дата. Число с единицей («1.5 часа») отсекает unitAfter
@@ -334,9 +344,9 @@ func findRelativeDate(line string) string {
 		{elidedWeek, periodDated, line, func(before, _, rest string) bool {
 			return !weekNamed(before) || ownNoun.MatchString(rest)
 		}},
-		{weekdayPattern, weekdayDated, days, func(_, day, rest string) bool {
+		{weekdayPattern, weekdayDated, days, func(before, day, rest string) bool {
 			return strings.HasSuffix(day, "ам") || strings.HasSuffix(day, "ям") ||
-				lastWordIs(day, "сред") && genitiveEnd.MatchString(rest)
+				lastWordIs(day, "сред") && genitiveEnd.MatchString(rest) && !verbBefore.MatchString(before)
 		}},
 	} {
 		if found, start := firstUndated(c.pattern, c.dated, c.text, c.excused); start < at {

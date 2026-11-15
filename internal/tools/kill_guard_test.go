@@ -401,6 +401,7 @@ func TestKillGuardAllows(t *testing.T) {
 func TestKillGuardGroupReasons(t *testing.T) {
 	for _, tc := range []struct{ command, want, not string }{
 		{`kill -TERM -- -1447549`, "группе процессов 1447549", "все процессы"},
+		{`kill -- -2`, "группе процессов 2", "init"},
 		{`kill -9 -1`, "всем процессам пользователя", "группе процессов"},
 		{`kill -TERM 0`, "своей группе процессов", "всем процессам"},
 		{`kill 1`, "init", "группе процессов"},

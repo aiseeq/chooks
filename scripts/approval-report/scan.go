@@ -480,6 +480,9 @@ func (s *scanner) scanWorker(dir string, atts []string, recent map[string]bool) 
 	}
 	slices.SortStableFunc(atts, func(a, b string) int { return cmp.Compare(num[a], num[b]) })
 	for _, att := range atts {
+		if num[att] == math.MaxInt {
+			w.prevMod = time.Time{} // попытка без номера: какая была перед ней, неизвестно
+		}
 		if err := w.att(att, !recent[att]); err != nil {
 			errs = append(errs, fmt.Errorf("%s/%s: %w", task, filepath.Base(att), err))
 		}
@@ -539,6 +542,7 @@ type workerScan struct {
 	thread   string              // thread_id попытки: имя её rollout codex
 	rollouts map[string]*rollout // по thread
 	callErr  error               // rollout не прочитан
+	prevMod  time.Time           // последняя запись предыдущей по номеру попытки; нулевое — её нет
 }
 
 // attItem — вызов попытки: первая строка о нём и вывод из item.completed.
@@ -566,6 +570,8 @@ func attNum(path string) (int, error) {
 }
 
 // att — попытка: сначала все её вызовы, потом время каждого — вызову без времени нужны соседи.
+// Попытка без времени создания начата не раньше последней записи предыдущей по номеру попытки,
+// если та не позже её собственной последней записи.
 func (w *workerScan) att(path string, countOnly bool) error {
 	w.file = filepath.Base(path)
 	w.path = path
@@ -573,6 +579,10 @@ func (w *workerScan) att(path string, countOnly bool) error {
 	w.thread, w.callErr = "", nil
 	err := eachLine(path, w.line)
 	born, mod, terr := w.s.fileTimes(path)
+	if born.IsZero() && !w.prevMod.After(mod) {
+		born = w.prevMod
+	}
+	w.prevMod = mod
 	calls, found := w.lookup(born, mod)
 	if countOnly {
 		return errors.Join(err, w.callErr, terr)

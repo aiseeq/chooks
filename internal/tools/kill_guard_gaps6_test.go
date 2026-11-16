@@ -81,8 +81,8 @@ func TestSudoAssignmentSeveral(t *testing.T) {
 }
 
 // Подсказка к systemctl без юнита (выход менеджера, выключение, смена цели)
-// — по смыслу команды, без подсказки про юнит: машину гасят выключение и
-// перезагрузка системного менеджера, остальное — менеджер
+// — по смыслу команды, без подсказки про юнит. Текст каждой команды —
+// TestKillGuardEndTexts
 func TestKillGuardGaps6EndHint(t *testing.T) {
 	for _, tc := range []struct{ command, hint string }{
 		{`systemctl --user exit`, systemctlEndHint("systemctl --user", "exit")},
@@ -95,19 +95,6 @@ func TestKillGuardGaps6EndHint(t *testing.T) {
 		got := validateKill(t, tc.command).Suggestions
 		if !slices.Contains(got, tc.hint) || strings.Contains(strings.Join(got, "\n"), "status юнит") {
 			t.Errorf("%s: ждали только подсказку %q, получили %q", tc.command, tc.hint, got)
-		}
-	}
-	for _, verb := range systemctlEndVerbs {
-		user := systemctlEndHint("systemctl --user", verb)
-		if !strings.Contains(user, "менеджер systemctl --user") || strings.Contains(user, "машину") {
-			t.Errorf("systemctl --user %s: ждали «менеджер systemctl --user», получили %q", verb, user)
-		}
-		want := "менеджер systemctl вместе"
-		if slices.Contains([]string{"poweroff", "reboot", "halt", "kexec", "soft-reboot", "switch-root"}, verb) {
-			want = "машину"
-		}
-		if got := systemctlEndHint("systemctl", verb); !strings.Contains(got, want) || !strings.Contains(got, "systemctl stop юнит") {
-			t.Errorf("systemctl %s: ждали «%s» и «systemctl stop юнит», получили %q", verb, want, got)
 		}
 	}
 }

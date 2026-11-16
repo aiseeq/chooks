@@ -77,7 +77,7 @@ var toolHints = map[string]string{
 // или systemctl --user): юнит из переменной, шаблона или ввода — назвать
 // литералом; юнит назван, но задевает сессию, — остановить юнит без
 // процессов сессии или лишний процесс по PID. Команде без юнита, гасящей
-// весь менеджер или машину, — systemctlEndHint
+// сессию целиком (systemctlEndVerbs), — systemctlEndHint
 func systemctlHint(scope string, named bool) string {
 	if !named {
 		return "Назови юнит литералом и проверь, что он не держит сессию: " + scope + " status юнит"
@@ -85,16 +85,29 @@ func systemctlHint(scope string, named bool) string {
 	return "Останавливай юнит, где нет процессов сессии: посмотри их (" + scope + " status юнит) и убей лишний процесс литералом: kill 12345"
 }
 
-// systemctlEndHint подсказка к отказу на команду, гасящую весь менеджер
-// или машину (systemctl --user exit, systemctl poweroff): юнита в ней нет,
-// и подсказка про юнит не к месту. Машину гасят команды systemctlMachineVerbs
-// системного менеджера, остальные — менеджер scope
-func systemctlEndHint(scope, verb string) string {
-	what := "менеджер " + scope
-	if scope == "systemctl" && slices.Contains(systemctlMachineVerbs, verb) {
-		what = "машину"
+// systemctlEndEffect что делает команда из systemctlEndVerbs по man
+// systemctl: смена цели (isolate, default, rescue, emergency) — у любого
+// менеджера; у системного менеджера — то, что пишет systemctlSystemEffects;
+// прочее у менеджера --user гасит сам менеджер. Одна фраза на отказ и
+// подсказку, чтобы они не расходились
+func systemctlEndEffect(scope, verb string) string {
+	if slices.Contains(systemctlTargetVerbs, verb) {
+		if scope == "systemctl" {
+			return "переключает цель системы и гасит юниты вне неё"
+		}
+		return "переключает цель менеджера " + scope + " и гасит юниты вне неё"
 	}
-	return "Команда гасит " + what + " вместе с сессией: такое запускает пользователь сам. Остановить один юнит без процессов сессии — назови его литералом: " + scope + " stop юнит"
+	if effect := systemctlSystemEffects[verb]; scope == "systemctl" && effect != "" {
+		return effect
+	}
+	return "гасит менеджер " + scope
+}
+
+// systemctlEndHint подсказка к отказу на команду без юнита, гасящую сессию
+// целиком (systemctl --user exit, systemctl poweroff, systemctl isolate):
+// подсказка про юнит из status тут не к месту
+func systemctlEndHint(scope, verb string) string {
+	return "Команда " + systemctlEndEffect(scope, verb) + ": такое запускает пользователь сам. Остановить один юнит без процессов сессии — назови его литералом: " + scope + " stop юнит"
 }
 
 // optionValue значение опции со значением: из слова (--signal=9, -s9) или
@@ -159,13 +172,25 @@ var systemctlValues = []string{
 	"boot-loader-entry", "reboot-argument", "drop-in", "check-inhibitors", "preset-mode",
 }
 
-// systemctlEndVerbs команды systemctl, которые гасят все процессы
-// менеджера или системы: переключение цели, выход менеджера, выключение
+// systemctlEndVerbs команды systemctl без юнита, которые гасят сессию
+// целиком: переключение цели, выход менеджера, выключение, смена корня
 var systemctlEndVerbs = []string{"isolate", "exit", "poweroff", "reboot", "halt", "kexec", "soft-reboot", "emergency", "rescue", "default", "switch-root"}
 
-// systemctlMachineVerbs команды из systemctlEndVerbs, которые у системного
-// менеджера выключают или перезапускают машину, а не переключают цель
-var systemctlMachineVerbs = []string{"poweroff", "reboot", "halt", "kexec", "soft-reboot", "switch-root"}
+// systemctlTargetVerbs команды из systemctlEndVerbs, которые переключают
+// цель менеджера и останавливают юниты вне её (default, rescue и emergency
+// — isolate своей цели)
+var systemctlTargetVerbs = []string{"isolate", "default", "rescue", "emergency"}
+
+// systemctlSystemEffects что делают у системного менеджера прочие команды
+// из systemctlEndVerbs (man systemctl): exit вне контейнера — то же, что
+// poweroff; soft-reboot перезапускает систему, оставляя ядро; switch-root
+// машину не гасит, а меняет корень и запускает на нём новый системный менеджер
+var systemctlSystemEffects = map[string]string{
+	"poweroff": "выключает машину", "exit": "выключает машину", "halt": "останавливает машину",
+	"reboot": "перезагружает машину", "kexec": "перезагружает машину",
+	"soft-reboot": "перезапускает систему без перезагрузки ядра",
+	"switch-root": "меняет корень системы и запускает на нём новый системный менеджер",
+}
 
 // systemctlStopVerbs команды systemctl, которые останавливают, перезапускают
 // или замораживают процессы юнитов (disable и mask — с --now)
@@ -217,7 +242,7 @@ func (t *KillGuardTool) systemctlReason(args []word, via string, procs []procInf
 	}
 	switch {
 	case slices.Contains(systemctlEndVerbs, verb):
-		return scope + " " + verb + " гасит все юниты менеджера: сессии Claude, терминал и графическую оболочку", systemctlEndHint(scope, verb)
+		return scope + " " + verb + " " + systemctlEndEffect(scope, verb) + ": гаснут сессии Claude, терминал и графическая оболочка", systemctlEndHint(scope, verb)
 	case verb == "kill" && zero:
 		return "", ""
 	case slices.Contains(systemctlStopVerbs, verb) || now && (verb == "disable" || verb == "mask"):

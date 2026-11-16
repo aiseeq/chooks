@@ -220,6 +220,8 @@ func (w *shellWalk) cd(c shellcmd.Call, args []string) {
 	case args[0] == "-":
 		// OLDPWD — прошлый каталог: модель повторяет его точно
 		w.dirs.move(w.dirs.prev)
+	case w.cdpath(c) && !reNoCdpath.MatchString(args[0]):
+		w.dirs.move(dirMark{}) // CDPATH: каталог ищется и в его списке
 	default:
 		np, ok := normPath(args[0], w.home, w.cwd)
 		if !ok {
@@ -230,6 +232,16 @@ func (w *shellWalk) cd(c shellcmd.Call, args []string) {
 	}
 	w.cwd = w.dirs.cur.path
 }
+
+// cdpath — у cd присвоен CDPATH (переменная оболочки, export или префикс; неясный — тоже).
+func (w *shellWalk) cdpath(c shellcmd.Call) bool {
+	env, _ := w.vars.callEnv(c.Offset)
+	v, _ := env.get("CDPATH")
+	return v.set || v.unclear
+}
+
+// reNoCdpath — путь cd, который CDPATH не ищет: абсолютный, от ~, от . и ..
+var reNoCdpath = regexp.MustCompile(`^(/|~|\.\.?(/|$))`)
 
 // dirMark — каталог, в котором может идти вызов: path "" — неизвестен; temp — временный.
 type dirMark struct {

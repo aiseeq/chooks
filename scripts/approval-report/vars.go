@@ -27,10 +27,10 @@ import (
 // export, declare -x/+x, export -n, unset, local действуют в той же оболочке и во вложенных после
 // них; `( … )`, `$( … )`, `<( … )`, элемент конвейера, `&`, coproc — отдельный процесс; `bash -c`
 // получает только экспортированное; env (-i, -u, -C, присваивания), sudo -E/-D/--chdir, builtin,
-// command — на программу за ними. Функция исполняется при вызове по литеральному имени (local и
-// префиксы — до конца вызова; объявленная на одном пути — с телом и без). Ветки if, case, `&&`,
-// `||` сливаются: где пути расходятся, переменная неясна. `set -e` не моделируется и не нужен:
-// выход посреди скрипта отменяет и команды после него.
+// command — на программу за ними. Функция исполняется при вызове по имени без подстановок (кавычки
+// и `\` сняты; local и префиксы — до конца вызова; объявленная на одном пути — с телом и без).
+// Ветки if, case, `&&`, `||` сливаются: где пути расходятся, переменная неясна. `set -e` не
+// моделируется и не нужен: выход посреди скрипта отменяет и команды после него.
 //
 // Делает неясным. Цикл (for, while, until, select): тело дважды, второй проход — со слитым
 // окружением, и всё, что тело присваивает, экспортирует или снимает, после первого и второго
@@ -40,11 +40,18 @@ import (
 // исполняются не по литеральному имени — `$g`, `${a[0]}`, coproc, `export -f`/`declare -f` во
 // вложенный скрипт, trap (действие — перед каждой командой дальше), command_not_found_handle:
 // всё, что присваивают их тела (по тексту, touchedBy). read, mapfile, getopts, `printf -v`,
-// `wait -p`, арифметика (`(( ))`, `$(( ))`, let, `for ((…))`), переменная цикла for, присваивание
-// readonly-переменной, ветка после `;&`/`;;&` — их переменные. eval, source, alias, `set -o
-// posix`, ссылки `declare -n`, функция с именем export, рекурсия, имя переменной из подстановки
-// — всё. Вложенный скрипт с BASH_ENV не обходится: окружение его команд неизвестно. Вызов имени,
-// которое объявлено функцией, — окружение программы с этим именем неясно.
+// `wait -p`, арифметика (`(( ))`, `$(( ))`, let, `for ((…))`, операнды `[[ -eq ]]` и других
+// сравнений чисел, `${x:i:n}`, индекс массива, присваивание `declare -i`), переменная цикла for,
+// присваивание readonly-переменной, массив (`X=(…)`, `X[0]=`, `declare -a`/`-A`), ветка после
+// `;&`/`;;&` — их переменные. eval, source, alias, `set -o posix`, `set -k`, `set -o keyword`,
+// ссылки `declare -n`, функция с именем export, рекурсия, имя переменной из подстановки и
+// подстановка без кавычек, которая делится на слова (`unset $V`, `env -u "$V"`), — всё. После eval,
+// source и `.` функцией может быть любое имя без «/»: его вызов — всё, и окружение программы с
+// ним неясно. posix (POSIXLY_CORRECT, `sh -c`, `bash --posix`): префиксы вызова имени без «/»
+// после него неясны. Вложенный скрипт с BASH_ENV, `--rcfile`, `--init-file` не обходится:
+// окружение его команд неизвестно. Вызов имени, которое объявлено функцией, — окружение программы
+// с этим именем неясно; за `exec -c`, systemd-run, `graft exec` без --local — неясно окружение и
+// каталог. CDPATH, присвоенный в команде, — каталог относительного cd неизвестен (classify).
 
 // assign — присваивание: смещение в исходной команде, имя и значение; ok=false — значение не литерал.
 type assign struct {
@@ -82,6 +89,8 @@ type shellEnv struct {
 	funcs map[string][]*syntax.Stmt
 	// chdir — каталоги `env -C`, `sudo -D` перед программой по порядку; слово без значения — каталог неизвестен
 	chdir []wordRec
+	// anyFunc — после eval, source или `.` функцией может быть любое имя
+	anyFunc bool
 }
 
 func newEnv() shellEnv {
@@ -89,7 +98,7 @@ func newEnv() shellEnv {
 }
 
 func (e shellEnv) clone() shellEnv {
-	return shellEnv{vars: maps.Clone(e.vars), funcs: maps.Clone(e.funcs), chdir: slices.Clip(e.chdir)}
+	return shellEnv{vars: maps.Clone(e.vars), funcs: maps.Clone(e.funcs), chdir: slices.Clip(e.chdir), anyFunc: e.anyFunc}
 }
 
 // get — переменная; false — команда её не трогала.
@@ -150,7 +159,7 @@ func (e shellEnv) tempText(raw string) bool {
 // Неясной переменной остаётся значение пути, где она присвоена и экспортирована (GIT_DIR
 // конфиг-репо в одной ветке — запас в сторону попадания).
 func mergeEnv(a, b shellEnv) shellEnv {
-	out := shellEnv{vars: mergeVars(a.vars, b.vars), funcs: mergeFuncs(a.funcs, b.funcs), chdir: a.chdir}
+	out := shellEnv{vars: mergeVars(a.vars, b.vars), funcs: mergeFuncs(a.funcs, b.funcs), chdir: a.chdir, anyFunc: a.anyFunc || b.anyFunc}
 	if !slices.Equal(a.chdir, b.chdir) {
 		out.chdir = []wordRec{{}}
 	}
@@ -248,7 +257,7 @@ func collectVars(cmd, home string, calls []shellcmd.Call) (shellVars, error) {
 			shells[c.Offset] = true
 		}
 	}
-	w := &walker{sv: &sv, home: home, shells: shells, ro: map[string]bool{}}
+	w := &walker{sv: &sv, home: home, shells: shells, ro: map[string]bool{}, ints: map[string]bool{}}
 	w.script(cmd, nil, newEnv())
 	sort.SliceStable(sv.list, func(i, j int) bool { return sv.list[i].off < sv.list[j].off })
 	return sv, errors.Join(sv.errs...)
@@ -306,7 +315,8 @@ func (sv shellVars) find(off int, env func(r callRec, k int) shellEnv) (shellEnv
 	return out, found
 }
 
-// wrapEnv — окружение программы за обёртками words: env меняет его, sudo без -E, ssh, su — сбрасывают.
+// wrapEnv — окружение программы за обёртками words: env меняет его, sudo без -E, ssh, su,
+// systemd-run, `exec -c`, `graft exec` без --local (на другой хост уходит только --env) — сбрасывают.
 func wrapEnv(env shellEnv, words []wordRec) shellEnv {
 	e := env.clone()
 	for i := 0; i < len(words); i++ {
@@ -318,13 +328,31 @@ func wrapEnv(env shellEnv, words []wordRec) shellEnv {
 			i = e.envArgs(words, i+1) - 1
 		case "sudo":
 			i = e.sudoArgs(words, i+1) - 1
-		case "ssh", "su", "runuser", "doas", "tmux":
-			e.blur(nil)
-			e.chdir = append(e.chdir, wordRec{})
+		case "exec":
+			for _, wd := range words[i+1:] {
+				if strings.HasPrefix(wd.val, "-") && strings.Contains(wd.val, "c") {
+					e.blur(nil)
+				}
+			}
+		case "graft": // `graft exec` — единственная обёртка graft; слова до программы — его опции
+			if !slices.ContainsFunc(words[i+1:], isLocal) {
+				e.reset()
+			}
+			i = len(words)
+		case "ssh", "su", "runuser", "doas", "tmux", "systemd-run":
+			e.reset()
 		}
 	}
 	return e
 }
+
+// reset — программа идёт в окружении и каталоге, которых разбор не знает.
+func (e *shellEnv) reset() {
+	e.blur(nil)
+	e.chdir = append(e.chdir, wordRec{})
+}
+
+func isLocal(wd wordRec) bool { return wd.val == "--local" }
 
 // envArgs — опции и присваивания `env` с words[i]; возвращает индекс программы. GNU env кончает
 // опции на первом не-опционном слове: `env A=1 -u X` запускает программу «-u».
@@ -379,7 +407,7 @@ func (e *shellEnv) envOption(words []wordRec, i int) int {
 		case name == "unset" && hasVal:
 			e.vars[val] = envVar{}
 		case name == "unset":
-			e.vars[next().val] = envVar{}
+			e.unsetVar(next())
 		case name == "chdir" && hasVal:
 			e.chdir = append(e.chdir, wordRec{val: val, ok: true})
 		case name == "chdir":
@@ -400,11 +428,11 @@ func (e *shellEnv) envOption(words []wordRec, i int) int {
 			*e = newEnv()
 		case '0', 'v':
 		case 'u':
-			name := a[j+1:]
-			if name == "" {
-				name = next().val
+			name := wordRec{val: a[j+1:], ok: true}
+			if name.val == "" {
+				name = next()
 			}
-			e.vars[name] = envVar{}
+			e.unsetVar(name)
 			return i
 		case 'C':
 			dir := wordRec{val: a[j+1:], ok: true}
@@ -419,6 +447,14 @@ func (e *shellEnv) envOption(words []wordRec, i int) int {
 		}
 	}
 	return i
+}
+
+// unsetVar — `env -u`: имя из подстановки (`env -u "$V"`, `-u $V` с делением) неизвестно.
+func (e *shellEnv) unsetVar(name wordRec) {
+	if !name.ok {
+		e.blur(nil)
+	}
+	e.vars[name.val] = envVar{}
 }
 
 // sudoValued — короткие опции sudo со значением (как в shellcmd).
@@ -525,7 +561,9 @@ type walker struct {
 	// функции скрипта по тексту: что трогают их тела (fnTouch; fnAll — неизвестно что)
 	fnAll        bool
 	fnTouch      map[string]bool
-	pipesUnclear bool // shopt или `set -o` с ключом, который может оставить элемент конвейера в оболочке
+	pipesUnclear bool            // shopt или `set -o` с ключом, который может оставить элемент конвейера в оболочке
+	posix        bool            // POSIXLY_CORRECT, `sh -c`, `bash --posix`: префиксы вызовов остаются в оболочке
+	ints         map[string]bool // `declare -i`: присваивание вычисляется арифметикой
 }
 
 // prior — значение переменной до local: ok=false — команда её не трогала.
@@ -596,6 +634,9 @@ func (w *walker) subs(n syntax.Node, env *shellEnv) {
 			w.arith(m, env)
 			return true
 		default:
+			for _, x := range arithParts(m) {
+				w.arith(x, env)
+			}
 			return true
 		}
 		e := env.clone()
@@ -783,18 +824,24 @@ func (w *walker) call(c *syntax.CallExpr, env *shellEnv) {
 	words := make([]wordRec, len(c.Args))
 	for i, a := range c.Args {
 		val, ok := wordValue(a, w.home, lits)
-		words[i] = wordRec{off: w.pos(a.Pos()), val: val, ok: ok, raw: w.text(a)}
+		words[i] = wordRec{off: w.pos(a.Pos()), val: val, ok: ok && !splits(a, val), raw: w.text(a)}
 	}
 	bodies, isFunc := env.funcs[words[0].val]
 	rec := callRec{words: words, env: pe, sh: env.clone()}
 	isFunc = isFunc && words[0].ok
-	if isFunc {
+	// после eval, source и `.` функцией может быть любое имя без «/»: что сделает её тело, неизвестно
+	maybeFunc := env.anyFunc && !pathWord(c.Args[0])
+	if isFunc || maybeFunc {
 		// имя — функция скрипта (`graft() { …; }; graft deploy prod`): программа с этим именем,
 		// если её запустит тело, получит окружение тела, а не вызова
 		rec.env = pe.clone()
 		rec.env.blur(nil)
 	}
 	w.sv.calls = append(w.sv.calls, rec)
+	if w.posix && !pathWord(c.Args[0]) {
+		// posix: префикс специальной встроенной (`X=1 :`) и функции остаётся в оболочке
+		defer w.obscure(env, nameSet(prefix))
+	}
 	if isFunc {
 		w.callFunc(bodies, env, pe, prefix)
 		return
@@ -803,7 +850,10 @@ func (w *walker) call(c *syntax.CallExpr, env *shellEnv) {
 	if s < len(words) {
 		w.builtin(c, words, s, env)
 	}
-	w.nested(c, words, pe, *env)
+	w.nested(c, words, rec.env, *env)
+	if maybeFunc {
+		env.blur(nil)
+	}
 }
 
 // builtin — встроенные команды, меняющие переменные оболочки; слово s — имя команды.
@@ -821,6 +871,7 @@ func (w *walker) builtin(c *syntax.CallExpr, words []wordRec, s int, env *shellE
 		w.declWords(c, s, env)
 	case "eval", "source", ".":
 		env.blur(nil)
+		env.anyFunc = true
 	case "trap":
 		w.trap(words[s+1:])
 	case "alias": // действует с команды после него: fuzzy — перед каждой командой
@@ -971,10 +1022,16 @@ func (w *walker) value(a *syntax.Assign, env shellEnv) (envVar, bool) {
 // assign — присваивание переменной оболочки; export: 1 — экспортировать, -1 — снять экспорт.
 func (w *walker) assign(a *syntax.Assign, env *shellEnv, export int) {
 	v, ok := w.value(a, *env)
+	if a.Index != nil || a.Array != nil { // массив: не экспортируется, значение — не строка
+		w.obscure(env, map[string]bool{a.Name.Value: true})
+	}
 	if !ok {
 		return
 	}
 	name := a.Name.Value
+	if w.ints[name] && !reInt.MatchString(v.val) { // `declare -i n; n=i`: значение — выражение
+		env.blur(nil)
+	}
 	if !w.quiet {
 		w.sv.list = append(w.sv.list, assign{off: w.pos(a.Pos()), name: name, val: v.val, ok: v.lit})
 	}
@@ -1027,18 +1084,24 @@ func (w *walker) decl(d *syntax.DeclClause, env *shellEnv) {
 		if o.local {
 			w.local(a.Name.Value, *env)
 		}
+		if o.integer {
+			w.ints[a.Name.Value] = true
+		}
 		w.declName(a, env, o.export)
+		if o.array {
+			w.obscure(env, map[string]bool{a.Name.Value: true})
+		}
 		if o.readonly { // присвоена до пометки: дальше присваивания не удаются
 			w.ro[a.Name.Value] = true
 		}
 	}
 }
 
-// declOpts — флаги объявления: export (1 — экспорт, -1 — снять), local, readonly.
+// declOpts — флаги объявления: export (1 — экспорт, -1 — снять), local, readonly, массив (-a, -A), целое (-i).
 type declOpts struct {
-	variant         string
-	export          int
-	local, readonly bool
+	variant                         string
+	export                          int
+	local, readonly, array, integer bool
 }
 
 func (o *declOpts) flag(f string) {
@@ -1050,6 +1113,12 @@ func (o *declOpts) flag(f string) {
 	}
 	o.local = o.local && !strings.Contains(f, "g")
 	o.readonly = o.readonly || strings.Contains(f, "r") // +r не снимает readonly
+	if strings.ContainsAny(f, "aA") {
+		o.array = true
+	}
+	if strings.Contains(f, "i") {
+		o.integer = true
+	}
 }
 
 func (w *walker) declName(a *syntax.Assign, env *shellEnv, export int) {
@@ -1121,8 +1190,13 @@ func (w *walker) nested(c *syntax.CallExpr, words []wordRec, env, sh shellEnv) {
 	if si < 0 {
 		return
 	}
+	posix := filepath.Base(words[si].val) != "bash" // sh, dash: префиксы специальных встроенных остаются
 	for i := si + 1; i+1 < len(c.Args); i++ {
 		flag, ok := wordValue(c.Args[i], "", nil)
+		if strings.HasPrefix(flag, "--rcfile") || strings.HasPrefix(flag, "--init-file") {
+			return // оболочка сначала исполнит файл запуска: окружение её команд неизвестно
+		}
+		posix = posix || flag == "--posix"
 		if !ok || !strings.HasPrefix(flag, "-") || strings.HasPrefix(flag, "--") || !strings.Contains(flag, "c") {
 			continue
 		}
@@ -1134,7 +1208,8 @@ func (w *walker) nested(c *syntax.CallExpr, words []wordRec, env, sh shellEnv) {
 		if _, ok := start.vars["BASH_ENV"]; ok {
 			return // оболочка сначала исполнит файл BASH_ENV: окружение её команд неизвестно
 		}
-		nw := &walker{sv: w.sv, home: w.home, shells: w.shells, depth: w.depth + 1, quiet: w.quiet, ro: map[string]bool{}}
+		_, pc := start.vars["POSIXLY_CORRECT"]
+		nw := &walker{sv: w.sv, home: w.home, shells: w.shells, depth: w.depth + 1, quiet: w.quiet, ro: map[string]bool{}, ints: map[string]bool{}, posix: posix || pc}
 		nw.fuzzy.add(w.childFuzzy.names, w.childFuzzy.all) // trap родителя ребёнку не переходит
 		nw.script(script, offs, start)
 		return
@@ -1246,10 +1321,13 @@ func wordValue(w *syntax.Word, home string, cur map[string]string) (string, bool
 
 var dqUnescape = strings.NewReplacer(`\"`, `"`, `\\`, `\`, `\$`, `$`, "\\`", "`")
 
+// reEscape — экранирование без кавычек: `\x` — x (перевод строки за `\` парсер уже снял).
+var reEscape = regexp.MustCompile(`\\(.)`)
+
 func partValue(b *strings.Builder, p syntax.WordPart, home string, cur map[string]string) bool {
 	switch p := p.(type) {
 	case *syntax.Lit:
-		b.WriteString(p.Value)
+		b.WriteString(reEscape.ReplaceAllString(p.Value, "${1}"))
 	case *syntax.SglQuoted:
 		if p.Dollar {
 			return false

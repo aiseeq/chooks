@@ -81,6 +81,8 @@ func (w *walker) scanScript(f *syntax.File) {
 			w.fnAll = w.fnAll || all
 		case *syntax.CallExpr:
 			w.scanOptions(n)
+		case *syntax.Assign:
+			w.posix = w.posix || n.Name != nil && n.Name.Value == "POSIXLY_CORRECT"
 		}
 		return true
 	})
@@ -104,18 +106,22 @@ func (w *walker) scanOptions(c *syntax.CallExpr) {
 		}
 	case "set":
 		for i, a := range words[1:] {
+			w.fuzzy.all = w.fuzzy.all || reSetK.MatchString(a) // присваивания в словах команды — в её окружение
 			if !reSetO.MatchString(a) || i+2 >= len(words) {
 				continue
 			}
 			key := words[i+2]
 			w.pipesUnclear = w.pipesUnclear || !safeSetO[key]
-			w.fuzzy.all = w.fuzzy.all || key == "posix" || key == "<?>"
+			w.fuzzy.all = w.fuzzy.all || key == "posix" || key == "keyword" || key == "<?>"
 		}
 	}
 }
 
-// reSetO — флаги set с ключом -o в конце: `-o`, `+o`, `-euo`.
-var reSetO = regexp.MustCompile(`^[-+][a-zA-Z]*o$`)
+// reSetO — флаги set с ключом -o в конце: `-o`, `+o`, `-euo`; reSetK — флаги с -k.
+var (
+	reSetO = regexp.MustCompile(`^[-+][a-zA-Z]*o$`)
+	reSetK = regexp.MustCompile(`^-[a-zA-Z]*k`)
+)
 
 // litWords — значения слов; слово не литерал — "<?>".
 func litWords(args []*syntax.Word) []string {
@@ -207,21 +213,72 @@ func (w *walker) arith(n syntax.Node, env *shellEnv) {
 
 var reInt = regexp.MustCompile(`^-?[0-9]+$`)
 
-// arithNames — имена в арифметике: литералы-имена и подстановки `$X`.
+// arithNames — имена в арифметике: имена в литералах (`i+1` в `[[ 1 -lt i+1 ]]`) и подстановки
+// `$X`; `$?`, `$#`, `$$`, `$!` — всегда целые.
 func arithNames(n syntax.Node) map[string]bool {
 	names := map[string]bool{}
 	syntax.Walk(n, func(m syntax.Node) bool {
 		switch m := m.(type) {
-		case *syntax.Word:
-			if v := m.Lit(); validName(v) {
+		case *syntax.Lit:
+			for _, v := range reArithName.FindAllString(m.Value, -1) {
 				names[v] = true
 			}
 		case *syntax.ParamExp:
-			names[paramName(m)] = true
+			if p := paramName(m); !strings.Contains("?#$!", p) {
+				names[p] = true
+			}
 		}
 		return true
 	})
 	return names
+}
+
+var reArithName = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*`)
+
+// arithParts — части узла, которые оболочка вычисляет арифметикой: операнды `[[ -eq ]]` и других
+// сравнений чисел, смещение и длина `${x:i:n}`, индекс `${a[i]}`, `a[i]=`, `a=([i]=…)`.
+func arithParts(n syntax.Node) []syntax.Node {
+	var out []syntax.Node
+	add := func(xs ...syntax.ArithmExpr) {
+		for _, x := range xs {
+			if x != nil {
+				out = append(out, x)
+			}
+		}
+	}
+	switch n := n.(type) {
+	case *syntax.BinaryTest:
+		if n.Op >= syntax.TsEql { // у сравнений чисел (-eq … -gt) наибольшие коды операторов mvdan
+			out = append(out, n)
+		}
+	case *syntax.ParamExp:
+		add(n.Index)
+		if n.Slice != nil {
+			add(n.Slice.Offset, n.Slice.Length)
+		}
+	case *syntax.Assign:
+		add(n.Index)
+	case *syntax.ArrayElem:
+		add(n.Index)
+	}
+	return out
+}
+
+// splits — в слове подстановка без кавычек, значение которой делится на слова (`unset $V`, V="A B").
+func splits(word *syntax.Word, val string) bool {
+	unquoted := slices.ContainsFunc(word.Parts, func(p syntax.WordPart) bool {
+		_, ok := p.(*syntax.ParamExp)
+		return ok
+	})
+	return unquoted && strings.ContainsAny(val, " \t\n")
+}
+
+func nameSet(names []string) map[string]bool {
+	m := map[string]bool{}
+	for _, n := range names {
+		m[n] = true
+	}
+	return m
 }
 
 // declNameref — объявление ссылки (`declare -n`, `local -n`): присваивания через неё не видны.

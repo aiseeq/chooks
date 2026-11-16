@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/accounts"
 )
 
 // Темп — сумма шагов за окно на часы истории. Неделя, начатая до журнала,
@@ -65,5 +67,49 @@ func TestPoolRateAfterPartialReset(t *testing.T) {
 	}
 	if span != 10*time.Hour || rate != 1 {
 		t.Errorf("темп %v%%/ч за %v, ожидалось 1%%/ч за 10 ч", rate, span)
+	}
+}
+
+// Пустота пула словами: расход — когда и до какого сброса; вход — чьи входы
+// истекают с остатком недели; сброс без входа не выдаётся за возврат
+func TestDryText(t *testing.T) {
+	now := time.Date(2026, 11, 15, 22, 47, 0, 0, time.UTC)
+	store := &accounts.Store{Accounts: []accounts.Account{{Email: "x@work.example"}, {Email: "y@protonmail.com"}, {Email: "z@gmail.com"}}}
+	unit := accounts.Unit{Scale: 2}
+	dry, refill, ends, resets := now.Add(90*time.Hour), now.Add(190*time.Hour), now.Add(91*time.Hour), now.Add(130*time.Hour)
+	st := accounts.ShortTime
+	spend := accounts.Forecast{DryAt: dry, DryCause: accounts.DrySpend, RefillAt: refill, RefillEmail: "x@work.example"}
+	if got, want := dryText(store, spend, unit), "пул кончится "+st(dry)+", до сброса work.example 100 ч"; got != want {
+		t.Errorf("расход:\n%s\nожидалось\n%s", got, want)
+	}
+	spend.LostResets = []accounts.LostReset{{Email: "z@gmail.com", ResetsAt: resets, LoginEnds: dry.Add(time.Hour)}}
+	want := "пул кончится " + st(dry) + "; сброс gmail.com " + st(resets) + " без нового входа не вернёт Claude (вход до " + st(dry.Add(time.Hour)) + "); до сброса work.example 100 ч"
+	if got := dryText(store, spend, unit); got != want {
+		t.Errorf("расход, сброс без входа:\n%s\nожидалось\n%s", got, want)
+	}
+	login := accounts.Forecast{
+		DryAt: dry, DryCause: accounts.DryLogin, RefillAt: refill, RefillEmail: "x@work.example",
+		ExpiredLogins: []accounts.ExpiredLogin{{Email: "y@protonmail.com", LoginEnds: ends, Used: 81}},
+		LostResets:    []accounts.LostReset{{Email: "z@gmail.com", ResetsAt: resets, LoginEnds: dry.Add(time.Hour)}},
+	}
+	want = "пул кончится " + st(dry) + ": истекает вход protonmail.com (до " + st(ends) + ", остаток недели 36%)" +
+		"; сброс gmail.com " + st(resets) + " без нового входа не вернёт Claude (вход до " + st(dry.Add(time.Hour)) + ")" +
+		"; до сброса work.example 100 ч"
+	if got := dryText(store, login, unit); got != want {
+		t.Errorf("вход:\n%s\nожидалось\n%s", got, want)
+	}
+	login.LostResets = nil
+	want = "пул кончится " + st(dry) + ": истекает вход protonmail.com (до " + st(ends) + ", остаток недели 36%); до сброса work.example 100 ч"
+	if got := dryText(store, login, unit); got != want {
+		t.Errorf("вход без сбросов без входа:\n%s\nожидалось\n%s", got, want)
+	}
+	login.LostResets = []accounts.LostReset{{Email: "z@gmail.com", ResetsAt: resets, LoginEnds: dry.Add(time.Hour)}}
+	login.ExpiredLogins = append(login.ExpiredLogins, accounts.ExpiredLogin{Email: "x@work.example", LoginEnds: ends, Used: 0})
+	login.RefillAt, login.RefillEmail = time.Time{}, ""
+	want = "пул кончится " + st(dry) + ": истекают входы protonmail.com (до " + st(ends) + ", остаток недели 36%), work.example (до " + st(ends) + ", остаток недели 198%)" +
+		"; сброс gmail.com " + st(resets) + " без нового входа не вернёт Claude (вход до " + st(dry.Add(time.Hour)) + ")" +
+		"; без нового входа сброса нет"
+	if got := dryText(store, login, unit); got != want {
+		t.Errorf("два входа, возврата нет:\n%s\nожидалось\n%s", got, want)
 	}
 }

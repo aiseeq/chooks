@@ -27,6 +27,9 @@ func TestForecastPoolRunsDry(t *testing.T) {
 	if f.RefillEmail != "a@example.com" || !f.RefillAt.Equal(now.Add(4*day)) {
 		t.Errorf("первый сброс: %s %v", f.RefillEmail, f.RefillAt)
 	}
+	if f.DryCause != DrySpend || len(f.ExpiredLogins) > 0 || len(f.LostResets) > 0 {
+		t.Errorf("причина %q, входы %v, сбросы без входа %v, ожидался расход", f.DryCause, f.ExpiredLogins, f.LostResets)
+	}
 	var order []string
 	for _, sp := range f.Plan {
 		order = append(order, sp.Email)
@@ -88,5 +91,77 @@ func TestForecastTracks(t *testing.T) {
 	}
 	if b := f.Tracks[1]; len(b.Resets) == 0 || b.Points[0].Used != 0 {
 		t.Errorf("b начинает неделю, когда a пуста: %+v", b)
+	}
+}
+
+// Запас есть, вход кончается раньше: a пуста за час, b берётся с нуля и
+// через 9 ч (вход 10 ч минус час запаса) брать её нельзя, при доле около 24.
+// Причина — вход b; возврат — сброс a, вход которой годится. Вход c негоден
+// уже в начале прогона — не истёк за прогон, ни в причине, ни в сбросах; d
+// пуста — её истёкший вход пустоты не делает
+func TestForecastPoolLoginExpires(t *testing.T) {
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	s := &Store{Active: "a", Accounts: []Account{account("c", 30*time.Minute, now), account("d", 5*time.Hour, now), account("a", 20*day, now), account("b", 10*time.Hour, now)}}
+	usage := map[string]Usage{
+		"a@example.com": {Week: Window{Used: 96, ResetsAt: now.Add(4 * day)}},
+		"b@example.com": {Week: Window{Used: 0, ResetsAt: now.Add(6 * day)}},
+		"c@example.com": {Week: Window{Used: 0, ResetsAt: now.Add(day)}},
+		"d@example.com": {Week: Window{Used: WeekEmptyPercent, ResetsAt: now.Add(5 * day)}},
+	}
+	f := s.Forecast(usage, 3, now)
+	if f.Pace != PaceOver || f.DryCause != DryLogin {
+		t.Fatalf("прогноз %v, причина %q, ожидались over и вход", f.Pace, f.DryCause)
+	}
+	if want := now.Add(9 * time.Hour); f.DryAt.Sub(want).Abs() > 20*time.Minute {
+		t.Errorf("пул пуст %v, ожидалось около %v", f.DryAt, want)
+	}
+	if len(f.ExpiredLogins) != 1 {
+		t.Fatalf("истёкшие входы: %+v", f.ExpiredLogins)
+	}
+	e := f.ExpiredLogins[0]
+	if e.Email != "b@example.com" || !e.LoginEnds.Equal(now.Add(10*time.Hour)) || e.Used < 20 || e.Used > 28 {
+		t.Errorf("истёкший вход: %+v, ожидался b, вход до %v, доля около 24", e, now.Add(10*time.Hour))
+	}
+	if f.RefillEmail != "a@example.com" || !f.RefillAt.Equal(now.Add(4*day)) || len(f.LostResets) > 0 {
+		t.Errorf("возврат %s %v, сбросы без входа %+v", f.RefillEmail, f.RefillAt, f.LostResets)
+	}
+}
+
+// Сброс после истечения входа — не возврат: у a вход кончается за сутки до
+// её сброса, у b вход живой, сброс позже. Пул пуст расходом за 20 минут (b
+// почти пуста, a пуста), возврат — b, сброс a — без нового входа. Сброс g
+// без входа — в один момент с возвратом b: его не называют
+func TestForecastPoolResetAfterLogin(t *testing.T) {
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	s := &Store{Active: "b", Accounts: []Account{account("a", day, now), account("g", day, now), account("b", 20*day, now)}}
+	usage := map[string]Usage{
+		"a@example.com": {Week: Window{Used: 99, ResetsAt: now.Add(2 * day)}},
+		"b@example.com": {Week: Window{Used: 98, ResetsAt: now.Add(3 * day)}},
+		"g@example.com": {Week: Window{Used: 99, ResetsAt: now.Add(3 * day)}},
+	}
+	f := s.Forecast(usage, 3, now)
+	if f.DryCause != DrySpend || len(f.ExpiredLogins) > 0 {
+		t.Errorf("причина %q, входы %+v, ожидался расход", f.DryCause, f.ExpiredLogins)
+	}
+	if f.RefillEmail != "b@example.com" || !f.RefillAt.Equal(now.Add(3*day)) {
+		t.Errorf("возврат %s %v, ожидался сброс b", f.RefillEmail, f.RefillAt)
+	}
+	want := []LostReset{{Email: "a@example.com", ResetsAt: now.Add(2 * day), LoginEnds: now.Add(day)}}
+	if !slices.EqualFunc(f.LostResets, want, func(x, y LostReset) bool {
+		return x.Email == y.Email && x.ResetsAt.Equal(y.ResetsAt) && x.LoginEnds.Equal(y.LoginEnds)
+	}) {
+		t.Errorf("сбросы без входа %+v, ожидалось %+v", f.LostResets, want)
+	}
+	// Без b сброса с живым входом нет: возврата нет, сбросы a и e — без
+	// входа, по времени сброса
+	s = &Store{Active: "a", Accounts: []Account{account("e", day, now), account("a", day, now)}}
+	usage["e@example.com"] = Usage{Week: Window{Used: 99, ResetsAt: now.Add(60 * time.Hour)}}
+	f = s.Forecast(usage, 3, now)
+	var lost []string
+	for _, r := range f.LostResets {
+		lost = append(lost, r.Email)
+	}
+	if !f.RefillAt.IsZero() || f.RefillEmail != "" || !slices.Equal(lost, []string{"a@example.com", "e@example.com"}) {
+		t.Errorf("a и e: возврат %s %v, сбросы без входа %+v", f.RefillEmail, f.RefillAt, f.LostResets)
 	}
 }

@@ -441,7 +441,8 @@ func TestRenderColorsByPool(t *testing.T) {
 	if err := WriteLimits(&out, false); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "Пул учёток: темп 96% в сутки") || !strings.Contains(out.String(), "пул кончится") {
+	if !strings.Contains(out.String(), "Пул учёток: темп 96% в сутки") || !strings.Contains(out.String(), "пул кончится") ||
+		!strings.Contains(out.String(), ", до сброса work@example.com") {
 		t.Errorf("сводка без прогноза пула:\n%s", out.String())
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/aiseeq/akit/shellcmd"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // curlDataOptions опции curl с телом запроса. --data-urlencode несёт
@@ -433,7 +432,7 @@ func describeSend(send *commentSend) string {
 // export D="$S/sub". Подстановка, которую видно только при запуске, остаётся
 // в значении текстом ($JIRA_BASE_URL, $(pwd))
 type shellVar struct {
-	offset int
+	assign shellcmd.Assign
 	name   string
 	value  string
 }
@@ -441,54 +440,36 @@ type shellVar struct {
 // shellVarRef ссылка на переменную в пути: $NAME или ${NAME}
 var shellVarRef = regexp.MustCompile(`\$(\w+)|\$\{(\w+)\}`)
 
-// commandVars присваивания команды по порядку текста. Присваивание перед
+// commandVars присваивания команды по порядку текста, каждое со своей областью
+// видимости (подоболочка, звено конвейера, тело функции). Присваивание перед
 // командой (S=x cmd) в её аргументы не попадает и не берётся
 func commandVars(command, home string) ([]shellVar, error) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	assigns, err := shellcmd.Assigns(command)
 	if err != nil {
 		return nil, fmt.Errorf("разбор присваиваний: %w", err)
 	}
 	var vars []shellVar
-	add := func(assigns []*syntax.Assign) {
-		for _, a := range assigns {
-			if a.Name == nil || a.Value == nil {
-				continue
-			}
-			start, end := int(a.Value.Pos().Offset()), int(a.Value.End().Offset())
-			if start < 0 || end > len(command) || start > end {
-				continue
-			}
-			offset := int(a.Pos().Offset())
-			value := expandVars(vars, normalizeShellPath(command[start:end]), offset)
-			if (value == "~" || strings.HasPrefix(value, "~/")) && home != "" {
-				value = home + value[1:]
-			}
-			vars = append(vars, shellVar{offset: offset, name: a.Name.Value, value: value})
+	for _, a := range assigns {
+		value := expandVars(vars, normalizeShellPath(a.Value), a.Offset)
+		if (value == "~" || strings.HasPrefix(value, "~/")) && home != "" {
+			value = home + value[1:]
 		}
+		if a.Append {
+			value = expandVars(vars, "${"+a.Name+"}", a.Offset) + value
+		}
+		vars = append(vars, shellVar{assign: a, name: a.Name, value: value})
 	}
-	syntax.Walk(file, func(node syntax.Node) bool {
-		switch n := node.(type) {
-		case *syntax.CallExpr:
-			if len(n.Args) == 0 {
-				add(n.Assigns)
-			}
-		case *syntax.DeclClause:
-			add(n.Args)
-		}
-		return true
-	})
-	slices.SortStableFunc(vars, func(a, b shellVar) int { return a.offset - b.offset })
 	return vars, nil
 }
 
 // expandVars подставляет в путь значения переменных, присвоенных в команде
-// до смещения at. Ссылка на переменную без присваивания остаётся текстом
+// и видимых на смещении at. Ссылка на переменную без присваивания остаётся текстом
 func expandVars(vars []shellVar, path string, at int) string {
 	return shellVarRef.ReplaceAllStringFunc(path, func(ref string) string {
 		m := shellVarRef.FindStringSubmatch(ref)
 		name := m[1] + m[2]
 		for i := len(vars) - 1; i >= 0; i-- {
-			if v := vars[i]; v.name == name && v.offset < at && at >= 0 {
+			if v := vars[i]; v.name == name && at >= 0 && v.assign.VisibleAt(at) {
 				return v.value
 			}
 		}

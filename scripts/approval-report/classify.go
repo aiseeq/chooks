@@ -223,7 +223,7 @@ func (w *shellWalk) cd(c shellcmd.Call, args []string) {
 	default:
 		np, ok := normPath(args[0], w.home, w.cwd)
 		if !ok {
-			w.dirs.move(dirMark{temp: tempArg(args[0], w.vars, c.Offset)})
+			w.dirs.move(dirMark{temp: tempArg(args[0], w.vars.shellAt(c.Offset))})
 			break
 		}
 		w.dirs.move(dirMark{path: np, temp: tempDir(np)})
@@ -313,12 +313,19 @@ func (x callCtx) cfg(args []string) {
 
 func (x callCtx) graft(c shellcmd.Call, args []string) {
 	dirs := x.dirs
+	if env, ok := x.sv.callEnv(c.Offset); ok {
+		// `env -C dir graft …`: каталог программы; без значения — неизвестен
+		for _, d := range env.chdir {
+			np, _ := normPath(d.val, x.home, dirs.cur.path)
+			dirs.move(dirMark{path: np, temp: tempDir(np)})
+		}
+	}
 	for len(args) > 1 && args[0] == "-C" {
 		np, ok := normPath(args[1], x.home, dirs.cur.path)
 		if ok {
 			dirs.move(dirMark{path: np, temp: tempDir(np)})
 		} else {
-			dirs.move(dirMark{temp: tempArg(args[1], *x.sv, c.Offset)})
+			dirs.move(dirMark{temp: tempArg(args[1], x.sv.shellAt(c.Offset))})
 		}
 		args = args[2:]
 	}
@@ -348,7 +355,7 @@ func (x callCtx) tempConfig(c shellcmd.Call) bool {
 		return false
 	}
 	v, _ := env.get("XDG_CONFIG_HOME")
-	return v.exported && v.temp && !v.unclear
+	return v.exported && v.temp && !v.loose
 }
 
 // probeDir — проба ли выкатка с временным конфигом по каталогу вызова: только из временного
@@ -371,15 +378,8 @@ func probeDir(d dirState, cmd string, off int) (string, bool) {
 var reSubshell = regexp.MustCompile(`(^|[^$<>=])\(`)
 
 // tempArg — неразобранный путь cd во временном каталоге: `$(mktemp …)`, `$TMPDIR/…` или
-// переменная, последнее присваивание которой перед вызовом (off) — из них.
-func tempArg(arg string, sv shellVars, off int) bool {
-	arg = unquote(arg)
-	if reTempValue.MatchString(arg) {
-		return true
-	}
-	m := reLeadVar.FindStringSubmatch(arg)
-	return m != nil && sv.tempVar(m[1], off)
-}
+// переменная, присвоенная так в оболочке вызова (env — shellAt).
+func tempArg(arg string, env shellEnv) bool { return env.tempText(unquote(arg)) }
 
 // tempValue — начало значения во временном каталоге.
 const tempValue = `(\$\{?TMPDIR\b|\$\(mktemp|/tmp/|/var/tmp/|[^\s;&|]*(claude-tmp|scratchpad)/)`
@@ -784,11 +784,16 @@ func parseLex(args []string) lexOpts {
 }
 
 func (x callCtx) git(args []string, gitDir string) {
-	sub := ""
+	sub, cwd, dirC := "", x.cwd, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
-		case a == "--git-dir" || a == "-C":
+		case a == "-C" && i+1 < len(args):
+			// -C — каталог git; репозиторий в нём ищется, только если GIT_DIR и --git-dir не заданы
+			cwd, _ = normPath(args[i+1], x.home, cwd)
+			dirC = true
+			i++
+		case a == "--git-dir":
 			if i+1 < len(args) {
 				gitDir = args[i+1]
 				i++
@@ -806,7 +811,10 @@ func (x callCtx) git(args []string, gitDir string) {
 	if sub != "commit" && sub != "push" {
 		return
 	}
-	np, ok := normPath(gitDir, x.home, x.cwd)
+	if gitDir == "" && dirC {
+		gitDir = cwd
+	}
+	np, ok := normPath(gitDir, x.home, cwd)
 	if !ok || np != x.ev.Home+"/.claude-config.git" {
 		return
 	}

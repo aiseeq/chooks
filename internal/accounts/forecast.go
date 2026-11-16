@@ -9,7 +9,10 @@ import (
 // темп?»): нынешний темп расхода прогоняется вперёд по правилу ротации —
 // тратится учётка, которую выбрал бы pick, пустая сменяется следующей, у
 // каждой учётки в её сброс доля обнуляется, неначатая неделя начинается с
-// первым расходом
+// первым расходом. Вход учёток прогноз не учитывает — ни срок, ни нынешнюю
+// негодность: вход пользователь продлевает сам, когда он кончится
+// (пользователь 16.11: «Кончится логин - залогинюсь»), и пустоту пула даёт
+// только расход
 const (
 	// PoolHorizon — горизонт прогноза: за неделю каждая учётка сбросится
 	// хотя бы раз, дальше прогноз повторяет себя
@@ -31,8 +34,7 @@ const (
 	PaceSafe Pace = iota
 	// PaceNear — при нынешнем темпе хватит, при темпе с запасом — нет
 	PaceNear
-	// PaceOver — будет момент, когда взять нечего: недели пусты или входы
-	// негодны (Forecast.DryCause)
+	// PaceOver — будет момент, когда все учётки пусты
 	PaceOver
 )
 
@@ -70,61 +72,18 @@ type Track struct {
 	Resets []time.Time `json:"resets"`
 }
 
-// DryCause — почему пул пуст в DryAt
-type DryCause string
-
-const (
-	// DrySpend — недели всех учёток с годным входом потрачены
-	DrySpend DryCause = "spend"
-	// DryLogin — у учётки запас недели есть, но её вход негоден
-	// (ExpiredLogins), или годного входа нет ни у одной учётки
-	DryLogin DryCause = "login"
-)
-
-// ExpiredLogin — учётка с запасом недели, которую прогон не берёт: вход
-// истёк за прогон или негоден уже в начале
-type ExpiredLogin struct {
-	Email string `json:"email"`
-	// LoginEnds — конец цепочки токенов (может быть уже в прошлом); прогон
-	// не берёт учётку за loginMargin до него. Ноль — вход негоден без срока:
-	// токены стёрты или не разбираются, учётка помечена мёртвой
-	LoginEnds time.Time `json:"loginEnds,omitzero"`
-	// Used — доля недели учётки в DryAt: остаток сгорит без нового входа
-	Used float64 `json:"used"`
-}
-
-// LostReset — сброс недели, который без нового входа Claude не вернёт:
-// вход учётки истекает раньше
-type LostReset struct {
-	Email    string    `json:"email"`
-	ResetsAt time.Time `json:"resetsAt"`
-	// LoginEnds — как у ExpiredLogin; ноль — вход негоден без срока
-	LoginEnds time.Time `json:"loginEnds,omitzero"`
-}
-
 // Forecast — прогноз пула при темпе Rate (% недели одной учётки в час)
 type Forecast struct {
 	Rate float64 `json:"ratePerHour"`
 	Pace Pace    `json:"-"`
-	// DryAt — первый момент, когда ни одну учётку взять нельзя: недели
-	// пусты или входы истекли (DryCause); ноль — за горизонт нет
+	// DryAt — первый момент, когда все учётки пусты; ноль — за горизонт нет
 	DryAt time.Time `json:"dryAt,omitzero"`
-	// DryCause — причина пустоты в DryAt; пусто, когда DryAt нет
-	DryCause DryCause `json:"dryCause,omitempty"`
-	// ExpiredLogins — учётки с заметным запасом недели в DryAt (больше, чем
-	// тратится за шаг прогона), чей вход к DryAt негоден, в порядке хранилища;
-	// при DryLogin без них — годного входа нет ни у одной учётки
-	ExpiredLogins []ExpiredLogin `json:"expiredLogins,omitempty"`
-	// RefillAt и RefillEmail — ближайший после DryAt сброс недели, который
-	// вернёт Claude: вход учётки годится на первом шаге прогона после сброса
-	// (тогда же учётку берёт план); ноль — такого сброса нет
+	// RefillAt и RefillEmail — ближайший после DryAt сброс недели и его
+	// учётка; ноль — учёток нет
 	RefillAt    time.Time `json:"refillAt,omitzero"`
 	RefillEmail string    `json:"refillEmail,omitempty"`
-	// LostResets — сбросы после DryAt и раньше RefillAt (нет RefillAt — все),
-	// которые без нового входа Claude не вернут, по времени сброса
-	LostResets []LostReset `json:"lostResets,omitempty"`
-	Plan       []Spell     `json:"plan"`
-	Tracks     []Track     `json:"tracks"`
+	Plan        []Spell   `json:"plan"`
+	Tracks      []Track   `json:"tracks"`
 	// MixedTiers — тарифы учёток разные (Max 5x и 20x): доли недели
 	// несопоставимы, а прогноз считает их равными (22.10 у всех трёх 20x)
 	MixedTiers bool `json:"mixedTiers"`
@@ -135,13 +94,6 @@ func (s *Store) Forecast(usage map[string]Usage, rate float64, now time.Time) Fo
 	f := Forecast{Rate: rate, MixedTiers: s.MixedTiers()}
 	run := s.simulate(usage, rate, now)
 	f.DryAt, f.RefillAt, f.RefillEmail, f.Plan, f.Tracks = run.dryAt, run.refillAt, run.refillEmail, run.plan, run.tracks
-	f.ExpiredLogins, f.LostResets = run.expired, run.lost
-	switch {
-	case len(f.ExpiredLogins) > 0 || run.noLogin:
-		f.DryCause = DryLogin
-	case !f.DryAt.IsZero():
-		f.DryCause = DrySpend
-	}
 	switch {
 	case !f.DryAt.IsZero():
 		f.Pace = PaceOver
@@ -155,22 +107,14 @@ func (s *Store) Forecast(usage map[string]Usage, rate float64, now time.Time) Fo
 type poolRun struct {
 	dryAt, refillAt time.Time
 	refillEmail     string
-	expired         []ExpiredLogin
-	// noLogin — в момент опустения годного входа нет ни у одной учётки
-	noLogin bool
-	lost    []LostReset
-	plan    []Spell
-	tracks  []Track
+	plan            []Spell
+	tracks          []Track
 }
 
 // simulate — один прогон пула шагами poolStep
 func (s *Store) simulate(usage map[string]Usage, rate float64, now time.Time) poolRun {
 	// Копия: прогон меняет активную, хранилище — нет
 	sim := &Store{Active: s.Active, Accounts: s.Accounts}
-	logins := make(map[string]login, len(s.Accounts))
-	for i := range s.Accounts {
-		logins[s.Accounts[i].UUID] = loginOf(&s.Accounts[i])
-	}
 	weeks := map[string]Window{}
 	for email, u := range usage {
 		if u.Week.ResetsAt.After(now) {
@@ -181,9 +125,6 @@ func (s *Store) simulate(usage map[string]Usage, rate float64, now time.Time) po
 	tracks := make(map[string]*Track, len(s.Accounts))
 	for i := range s.Accounts {
 		a := &s.Accounts[i]
-		if !logins[a.UUID].usableAt(now) {
-			continue
-		}
 		tr := &Track{Email: a.Email, Points: []Point{{At: now, Used: weeks[a.Email].Used}}}
 		if w, ok := weeks[a.Email]; ok {
 			tr.Resets = append(tr.Resets, w.ResetsAt)
@@ -208,8 +149,8 @@ func (s *Store) simulate(usage map[string]Usage, rate float64, now time.Time) po
 			}
 			cur[email] = Usage{Email: email, Week: w}
 		}
-		at := t
-		best, all := pickFrom(sim, statesWith(sim, cur, t, func(a *Account) bool { return logins[a.UUID].usableAt(at) }))
+		// Вход годен у всех учёток: его продлевает пользователь
+		best, all := pickFrom(sim, statesWith(sim, cur, t, func(*Account) bool { return true }))
 		if best == nil {
 			if spender != "" {
 				mark(spender, t, weeks[spender].Used)
@@ -217,9 +158,7 @@ func (s *Store) simulate(usage map[string]Usage, rate float64, now time.Time) po
 			}
 			if run.dryAt.IsZero() {
 				run.dryAt = t
-				run.expired = s.expiredLogins(logins, weeks, rate)
-				run.noLogin = len(all) == 0
-				run.refillAt, run.refillEmail, run.lost = s.refill(logins, weeks, now)
+				run.refillAt, run.refillEmail = nextReset(all)
 			}
 			run.plan = extend(run.plan, "", t)
 			continue
@@ -253,55 +192,16 @@ func (s *Store) simulate(usage map[string]Usage, rate float64, now time.Time) po
 	return run
 }
 
-// expiredLogins — учётки, чья неделя в момент опустения не пуста: остаток до
-// WeekEmptyPercent больше, чем прогон тратит за шаг при темпе rate (меньший
-// остаток сдвинул бы DryAt не больше, чем его ошибка — шаг). Учётку с годным
-// входом и запасом прогон бы взял, так что вход каждой из них негоден: истёк
-// за прогон или ещё до него. weeks — недели в момент опустения, учётки без
-// недели в weeks начинают её с нуля
-func (s *Store) expiredLogins(logins map[string]login, weeks map[string]Window, rate float64) []ExpiredLogin {
-	var out []ExpiredLogin
-	for i := range s.Accounts {
-		a := &s.Accounts[i]
-		if used := weeks[a.Email].Used; WeekEmptyPercent-used > rate*poolStep.Hours() {
-			out = append(out, ExpiredLogin{Email: a.Email, LoginEnds: logins[a.UUID].ends, Used: used})
-		}
-	}
-	return out
-}
-
-// refill — ближайший сброс недели, после которого учётку можно взять: её
-// вход годится на первом шаге прогона от now после сброса — по тому же
-// правилу, по которому учётку берёт план. Сбросы раньше него у учёток с
-// негодным к тому шагу входом — в lost. weeks — недели в момент опустения,
-// все сбросы в них позже него
-func (s *Store) refill(logins map[string]login, weeks map[string]Window, now time.Time) (time.Time, string, []LostReset) {
+// nextReset — ближайший сброс недели среди учёток
+func nextReset(all []state) (time.Time, string) {
 	var at time.Time
 	email := ""
-	var lost []LostReset
-	for i := range s.Accounts {
-		a := &s.Accounts[i]
-		l := logins[a.UUID]
-		w, ok := weeks[a.Email]
-		if !ok {
-			continue
-		}
-		switch {
-		case !l.usableAt(stepAfter(now, w.ResetsAt)):
-			lost = append(lost, LostReset{Email: a.Email, ResetsAt: w.ResetsAt, LoginEnds: l.ends})
-		case at.IsZero() || w.ResetsAt.Before(at):
-			at, email = w.ResetsAt, a.Email
+	for _, st := range all {
+		if st.weekKnown && (at.IsZero() || st.resets.Before(at)) {
+			at, email = st.resets, st.account.Email
 		}
 	}
-	lost = slices.DeleteFunc(lost, func(r LostReset) bool { return !at.IsZero() && !r.ResetsAt.Before(at) })
-	slices.SortStableFunc(lost, func(x, y LostReset) int { return x.ResetsAt.Compare(y.ResetsAt) })
-	return at, email, lost
-}
-
-// stepAfter — первый шаг прогона от now не раньше at: на нём прогон видит
-// сброс в at
-func stepAfter(now, at time.Time) time.Time {
-	return now.Add((at.Sub(now) + poolStep - 1) / poolStep * poolStep)
+	return at, email
 }
 
 // extend продлевает последний отрезок плана или начинает новый

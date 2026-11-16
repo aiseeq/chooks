@@ -44,8 +44,7 @@ func eligible(a *Account, now time.Time) bool {
 	return loginOf(a).usableAt(now)
 }
 
-// login — что о входе учётки нужно правилу выбора: прогноз пула разбирает
-// токены один раз, а не на каждом шаге
+// login — что о входе учётки нужно правилу выбора
 type login struct {
 	alive bool
 	// broken — токены учётки не разобрать

@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/aiseeq/chooks/internal/accounts"
@@ -146,7 +145,7 @@ func poolText(store *accounts.Store, f PoolForecast, unit accounts.Unit, now tim
 	var text string
 	switch f.Forecast.Pace {
 	case accounts.PaceOver:
-		text = dryText(store, f.Forecast, unit)
+		text = fmt.Sprintf("пул кончится %s, до сброса %s %.0f ч", accounts.ShortTime(f.DryAt), store.ShortName(f.RefillEmail), f.RefillAt.Sub(f.DryAt).Hours())
 	case accounts.PaceNear:
 		text = fmt.Sprintf("до %s хватит впритык: при темпе на четверть выше пул кончится", accounts.ShortTime(now.Add(accounts.PoolHorizon)))
 	default:
@@ -156,45 +155,6 @@ func poolText(store *accounts.Store, f PoolForecast, unit accounts.Unit, now tim
 		text += "; тарифы учёток разные, а доли недели прогноз считает равными"
 	}
 	return head + text
-}
-
-// dryText — пустота пула словами: когда и почему, сбросы без входа и
-// ближайший возврат Claude
-func dryText(store *accounts.Store, f accounts.Forecast, unit accounts.Unit) string {
-	// Имя учётки — по почтам хранилища в памяти, без чтения с диска
-	name := store.ShortName
-	parts := []string{"пул кончится " + accounts.ShortTime(f.DryAt)}
-	if f.DryCause == accounts.DryLogin {
-		var ends []string
-		for _, e := range f.ExpiredLogins {
-			ends = append(ends, fmt.Sprintf("%s (%s, остаток недели %s)", name(e.Email), loginText(e.LoginEnds), unit.Percent(accounts.WeekEmptyPercent-e.Used)))
-		}
-		if len(ends) == 0 {
-			parts[0] += ": годного входа нет ни у одной учётки"
-		} else {
-			parts[0] += ": без нового входа не взять " + strings.Join(ends, ", ")
-		}
-	}
-	for _, r := range f.LostResets {
-		parts = append(parts, fmt.Sprintf("сброс %s %s без нового входа не вернёт Claude (%s)", name(r.Email), accounts.ShortTime(r.ResetsAt), loginText(r.LoginEnds)))
-	}
-	refill := "без нового входа сброса нет"
-	if !f.RefillAt.IsZero() {
-		refill = fmt.Sprintf("до сброса %s %.0f ч", name(f.RefillEmail), f.RefillAt.Sub(f.DryAt).Hours())
-	}
-	if f.DryCause != accounts.DryLogin && len(parts) == 1 {
-		// Пуст расходом, сбросов без входа нет — прежняя строка
-		return parts[0] + ", " + refill
-	}
-	return strings.Join(append(parts, refill), "; ")
-}
-
-// loginText — срок входа учётки; ноль — вход негоден без срока
-func loginText(ends time.Time) string {
-	if ends.IsZero() {
-		return "вход негоден"
-	}
-	return "вход до " + accounts.ShortTime(ends)
 }
 
 // WritePoolJSON печатает прогноз пула JSON для страницы Сна

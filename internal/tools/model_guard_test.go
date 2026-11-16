@@ -145,6 +145,8 @@ func TestModelGuard(t *testing.T) {
 		{"fish set без ключа", "Bash", "", "fish -c 'set ANTHROPIC_MODEL sonnet; claude -p hi'", true},
 		{"fish set -gx одобренной", "Bash", "", "fish -c 'set -gx ANTHROPIC_MODEL opus; claude -p hi'", false},
 		{"fish and одобренная", "Bash", "", "fish -c 'claude --model opus -p hi; and true'", false},
+		{"fish and codex -m", "Bash", "", "fish -c 'codex exec -m gpt-5 hi; and true'", true},
+		{"fish and codex -m одобренная", "Bash", "", "fish -c 'codex exec -m gpt-6-luna hi; and true'", false},
 		// текст ищется только в неразобранном скрипте: set -x внутри fish -c
 		// не задаёт модель claude за ним; модель из разобранной части
 		// команды проверяется и при ошибке в другой
@@ -188,6 +190,8 @@ func TestModelGuardEnvReasons(t *testing.T) {
 		count         int
 	}{
 		{`ANTHROPIC_MODEL="$M" claude -p hi`, "модель задана переменной, назови её литералом", 1},
+		// fish вне подмножества akit: присваивание из переменной найдено в тексте
+		{"fish -c 'set -x ANTHROPIC_MODEL $M; claude -p hi; and true'", "модель задана переменной, назови её литералом", 1},
 		{"sudo bash <<'EOF'\nANTHROPIC_MODEL=sonnet claude -p hi\nEOF", `модель "sonnet" не одобрена`, 1},
 		{"env ANTHROPIC_MODEL=sonnet claude -p hi; env ANTHROPIC_MODEL=sonnet claude -p hi", `модель "sonnet" не одобрена`, 2},
 	} {

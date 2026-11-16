@@ -384,6 +384,33 @@ func TestKillGuardBlocks(t *testing.T) {
 		`echo ${X/<(kill 1)/a}`,
 		`bash -c 'echo ${X:-<(kill 1)}'`,
 		"bash <<'E'\necho ${X:-<(kill 1)}\nE",
+		// <(…) в операнде ${…} вне аргументов вызова: присваивание,
+		// перенаправление, [[ ]], for, select, case, вложенный скрипт
+		`X=${Y:-<(kill -9 -1)}`,
+		`local X=${Y:-<(kill -9 -1)}`,
+		`export X=${Y:-<(kill -9 -1)}`,
+		`X=${Y:-<(kill -9 -1)} true`,
+		`echo hi > ${X:-<(kill -9 -1)}`,
+		`cat < ${X:-<(kill -9 -1)}`,
+		`[[ ${X:-<(kill -9 -1)} ]]`,
+		`if [[ -n ${X:-<(kill -9 -1)} ]]; then :; fi`,
+		`while [[ ${X:-<(kill -9 -1)} ]]; do break; done`,
+		`for i in ${X:-<(kill -9 -1)}; do :; done`,
+		`select i in ${X:-<(kill -9 -1)}; do break; done`,
+		`case ${X:-<(kill -9 -1)} in *) ;; esac`,
+		`bash -c '[[ ${X:-<(kill -9 -1)} ]]'`,
+		`bash -c '[[ ${X:->(kill 1)} ]]'`,
+		`X=${Y:-${Z}<(kill 1)}`,
+		// } в кавычках не закрывает операнд: виден разбором команды и вызова
+		`X=${Y:-"}"<(kill 1)}`,
+		`bash -c 'echo ${X:-"}"<(kill 1)}'`,
+		// ${…<(…)} ищется по всему тексту: в кавычках и в теле heredoc для
+		// файла — ложный отказ, допустимый рядом со словом kill
+		`printf '%s' '${X:-<(kill 1)}'`,
+		"cat > f <<'X'\necho ${X:-<(kill 1)}\nX",
+		`echo ${X:-'<(kill 1)'}`,
+		// за sudo -- слово kill ищется в тексте без \ и кавычек
+		`sudo -- X=1 k\ill -9 -1`,
 		// второй -s или -n перекрывает сигнал 0
 		`kill -0 -s 9 -- -1`,
 		`kill -s 0 -s 9 -- -1`,
@@ -427,6 +454,18 @@ func TestKillGuardParseErrorReason(t *testing.T) {
 		if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), "разбор оболочки не прошёл") {
 			t.Errorf("%s: ждали отказ «разбор оболочки не прошёл», получили %v %v", command, r.IsValid, r.Suggestions)
 		}
+	}
+}
+
+// Текст вызова из heredoc на вход оболочке shellcmd отдаёт куском исходника:
+// с подставленной переменной скрипт разбирается, а кусок без неё — нет
+// (X="a'": echo $X' в теле). Проверить в нём <(…) внутри ${…} нельзя — отказ
+// и рядом с безопасным kill -l
+func TestKillGuardCallParseErrorReason(t *testing.T) {
+	command := "X=\"a'\"; bash <<E\necho $X'; kill -l\nE"
+	r := validateKill(t, command)
+	if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), "разбор вызова не прошёл") {
+		t.Errorf("%q: ждали отказ «разбор вызова не прошёл», получили %v %v", command, r.IsValid, r.Suggestions)
 	}
 }
 
@@ -609,11 +648,21 @@ func TestKillGuardAllows(t *testing.T) {
 		`kill -L`,
 		`bash +c 'echo hi'; kill 455274`,
 		`echo ${X:-<(ls skills)}`,
-		// <(…) в кавычках, в теле heredoc не для оболочки — текст
-		`printf '%s' '${X:-<(kill 1)}'`,
-		"cat > f <<'X'\necho ${X:-<(kill 1)}\nX",
-		`echo ${X:-'<(kill 1)'}`,
 		`echo ${X/a}; kill 455274`,
+		// ( без < и > в операнде ${…}; <(…) после ${…}, а не внутри
+		`echo ${X:-(a)}; kill 455274`,
+		`echo ${X:-a}<(kill 455274)`,
+		`echo "${NAME:-<unset>}"; kill 455274`,
+		// незакрытый heredoc: shellcmd его закрывает, разбор всей команды —
+		// нет; остаётся поиск по тексту
+		"cat <<E\nkill -l",
+		// = в имени команды за sudo -- — не присваивание
+		`sudo -- ./job=1.sh --mode kill`,
+		// -L и --table печатают сигналы, -s без значения — ошибка kill
+		`kill -L 1`,
+		`kill --table 1`,
+		`kill -s`,
+		`kill -9 -s`,
 		`kill -l 1`,
 		`kill -9 -- 455274`,
 		`kill --signal=0 1`,

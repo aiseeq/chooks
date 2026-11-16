@@ -87,9 +87,10 @@ func systemctlHint(scope string, named bool) string {
 
 // systemctlEndEffect что делает команда из systemctlEndVerbs по man
 // systemctl: смена цели (isolate, default, rescue, emergency) — у любого
-// менеджера; у системного менеджера — то, что пишет systemctlSystemEffects;
-// прочее у менеджера --user гасит сам менеджер. Одна фраза на отказ и
-// подсказку, чтобы они не расходились
+// менеджера; exit у менеджера --user гасит сам менеджер; прочее — то, что
+// пишет systemctlSystemEffects, и с --user тоже: эти действия поддерживает
+// только системный менеджер, и systemctl может уйти в logind и погасить
+// машину. Одна фраза на отказ и подсказку, чтобы они не расходились
 func systemctlEndEffect(scope, verb string) string {
 	if slices.Contains(systemctlTargetVerbs, verb) {
 		if scope == "systemctl" {
@@ -97,10 +98,10 @@ func systemctlEndEffect(scope, verb string) string {
 		}
 		return "переключает цель менеджера " + scope + " и гасит юниты вне неё"
 	}
-	if effect := systemctlSystemEffects[verb]; scope == "systemctl" && effect != "" {
-		return effect
+	if verb == "exit" && scope != "systemctl" {
+		return "гасит менеджер " + scope
 	}
-	return "гасит менеджер " + scope
+	return systemctlSystemEffects[verb]
 }
 
 // systemctlEndHint подсказка к отказу на команду без юнита, гасящую сессию
@@ -181,8 +182,9 @@ var systemctlEndVerbs = []string{"isolate", "exit", "poweroff", "reboot", "halt"
 // — isolate своей цели)
 var systemctlTargetVerbs = []string{"isolate", "default", "rescue", "emergency"}
 
-// systemctlSystemEffects что делают у системного менеджера прочие команды
-// из systemctlEndVerbs (man systemctl): exit вне контейнера — то же, что
+// systemctlSystemEffects что делают прочие команды из systemctlEndVerbs
+// (man systemctl; их выполняет только системный менеджер, и с --user тоже
+// — кроме exit у --user, который гасит свой менеджер): exit вне контейнера — то же, что
 // poweroff; soft-reboot перезапускает систему, оставляя ядро; switch-root
 // машину не гасит, а меняет корень и запускает на нём новый системный менеджер
 var systemctlSystemEffects = map[string]string{

@@ -52,11 +52,25 @@ func (s *killScan) sessionTool(c shellcmd.Call, args []word, via string) error {
 	}
 	if reason != "" {
 		s.addReason(reason)
+		if hint := toolHints[c.Name]; hint != "" {
+			if s.toolHints == nil {
+				s.toolHints = map[string]string{}
+			}
+			s.toolHints[reason] = hint
+		}
 	}
 	if group && !slices.Contains(s.groupReasons, reason) {
 		s.groupReasons = append(s.groupReasons, reason)
 	}
 	return nil
+}
+
+// toolHints подсказка к отказу на средство, где узкая цель — не PID: юнит,
+// сессия tmux, порт
+var toolHints = map[string]string{
+	"systemctl": "Назови юнит литералом и проверь, что он не держит сессию: systemctl --user status юнит",
+	"tmux":      "Назови цель литералом: tmux kill-session -t имя",
+	"fuser":     "Укажи порт вместо файла: fuser -k 8080/tcp",
 }
 
 // optionValue значение опции со значением: из слова (--signal=9, -s9) или
@@ -129,6 +143,15 @@ var systemctlEndVerbs = []string{"isolate", "exit", "poweroff", "reboot", "halt"
 // или замораживают процессы юнитов (disable и mask — с --now)
 var systemctlStopVerbs = []string{"stop", "kill", "restart", "try-restart", "reload-or-restart", "try-reload-or-restart", "condrestart", "force-reload", "freeze"}
 
+// systemctlRestartVerbs команды systemctl из systemctlStopVerbs, которые
+// запускают юнит снова
+var systemctlRestartVerbs = []string{"restart", "try-restart", "reload-or-restart", "try-reload-or-restart", "condrestart", "force-reload"}
+
+// restartableUnit юнит, рестарт которого сессию не гасит: plasmashell
+// (панель, рабочий стол) поднимается заново, окна и терминалы живут — в
+// отличие от kwin. Стоп и kill — отказ, как у прочих
+const restartableUnit, restartableComm = "plasma-plasmashell.service", "plasmashell"
+
 // unitSuffixes типы юнитов: имя без них systemctl дополняет .service
 var unitSuffixes = []string{".service", ".socket", ".target", ".scope", ".slice", ".timer", ".mount", ".automount", ".path", ".device", ".swap"}
 
@@ -161,9 +184,13 @@ func (t *KillGuardTool) systemctlReason(args []word, via string, procs []procInf
 	if via != "" {
 		return scope + " " + verb + " через " + via + ": юниты приходят из ввода, проверить их до запуска нельзя"
 	}
-	hosts := t.sessionUnits(procs, user)
+	hosts := t.sessionUnits(procs, user, "")
 	for _, u := range ops[1:] {
-		if reason := unitReason(u, hosts); reason != "" {
+		h := hosts
+		if u.literal && slices.Contains(systemctlRestartVerbs, verb) && unitName(u.text) == restartableUnit {
+			h = t.sessionUnits(procs, user, restartableComm)
+		}
+		if reason := unitReason(u, h); reason != "" {
 			return fmt.Sprintf("%s %s %s: %s", scope, verb, u.text, reason)
 		}
 	}
@@ -189,23 +216,63 @@ func systemctlFlags(args []word) (user, now, zero bool) {
 	return user, now, zero
 }
 
-// unitReason почему юнит u останавливать нельзя: вычисляется, шаблон, цель
-// или корневой срез, юнит сессии из hosts; "" — можно. Имя без типа
-// systemctl дополняет .service
-func unitReason(u word, hosts map[string]string) string {
-	name := u.text
-	if !slices.ContainsFunc(unitSuffixes, func(s string) bool { return strings.HasSuffix(name, s) }) {
-		name += ".service"
+// unitName имя юнита с типом: имя без типа systemctl дополняет .service
+func unitName(text string) string {
+	if !slices.ContainsFunc(unitSuffixes, func(s string) bool { return strings.HasSuffix(text, s) }) {
+		return text + ".service"
 	}
+	return text
+}
+
+// sessionScopeRe юнит сеанса logind: session-3.scope, session-c2.scope
+var sessionScopeRe = regexp.MustCompile(`^session-[^.]+\.scope$`)
+
+// unitAliases алиасы юнитов, за которыми идёт процесс сессии: в cgroup
+// стоит имя настоящего юнита (dbus.service → dbus-broker.service)
+var unitAliases = map[string][]string{
+	"display-manager.service": {"sddm.service", "gdm.service", "lightdm.service"},
+	"dbus.service":            {"dbus-broker.service", "dbus-daemon.service"},
+}
+
+// unitHosts юниты, чьи процессы гаснут со стопом юнита name: он сам, за
+// сокетом — служба того же имени (dbus.socket → dbus.service: служба
+// требует свой сокет и останавливается с ним), за алиасом — настоящий юнит
+func unitHosts(name string) []string {
+	out := []string{name}
+	if base, ok := strings.CutSuffix(name, ".socket"); ok {
+		out = append(out, base+".service")
+	}
+	for _, n := range out {
+		out = append(out, unitAliases[n]...)
+	}
+	return out
+}
+
+// unitReason почему юнит u останавливать нельзя: вычисляется, шаблон или
+// {…}, цель или корневой срез, сеанс logind, юнит сессии из hosts (и за
+// сокетом или алиасом); "" — можно
+func unitReason(u word, hosts map[string]string) string {
+	name := unitName(u.text)
 	switch {
 	case !u.literal:
 		return "юнит вычисляется при запуске, проверить его заранее нельзя"
-	case strings.ContainsAny(name, "*?["):
-		return "шаблон выбирает юниты при запуске, среди них может быть юнит этой сессии"
+	case strings.ContainsAny(name, "*?[{"):
+		return "шаблон или {…} выбирает юниты при запуске, среди них может быть юнит этой сессии"
 	case strings.HasSuffix(name, ".target") || name == "-.slice":
 		return "с целью или корневым срезом остановятся связанные юниты, проверка их не сверяет"
+	case sessionScopeRe.MatchString(name):
+		return "сеанс logind: с ним завершатся процессы сеанса, как от loginctl terminate-session"
 	}
-	return hosts[name]
+	for _, n := range unitHosts(name) {
+		switch {
+		case hosts[n] == "":
+		case n == name:
+			return hosts[n]
+		default:
+			return "за ним " + n + ": " + hosts[n]
+		}
+	}
+	return ""
 }
 
 // userManagerRe юнит менеджера пользователя в пути cgroup: user@1000.service
@@ -213,13 +280,15 @@ var userManagerRe = regexp.MustCompile(`^user@[0-9]+\.service$`)
 
 // sessionUnits юниты, в cgroup которых идут предки этой сессии и процессы,
 // без которых падает сессия пользователя, — с причиной. user — юниты
-// менеджера пользователя (после user@UID.service в пути), иначе системного
-func (t *KillGuardTool) sessionUnits(procs []procInfo, user bool) map[string]string {
+// менеджера пользователя (после user@UID.service в пути), иначе системного.
+// spare — имя процесса, которому рестарт не страшен: он не держит юнит,
+// если не предок сессии
+func (t *KillGuardTool) sessionUnits(procs []procInfo, user bool, spare string) map[string]string {
 	ancestors := t.ancestors(procs)
 	out := map[string]string{}
 	for _, p := range procs {
 		why := t.dangerous(p.pid, procs, ancestors)
-		if why == "" || p.pid <= 1 {
+		if why == "" || p.pid <= 1 || p.comm == spare && !ancestors[p.pid] {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(t.procRoot, fmt.Sprint(p.pid), "cgroup"))
@@ -374,17 +443,41 @@ func tmuxReason(args []word) string {
 	return ""
 }
 
+// tmuxKillCommands команды tmux, гасящие сервер, сессию, окно или панель
+var tmuxKillCommands = []string{"kill-server", "kill-session", "kill-window", "kill-pane"}
+
+// tmuxCommand полное имя команды tmux kill-*: tmux принимает и алиас
+// (killw, killp), и однозначное начало имени (kill-ser, kill-ses, kill-p).
+// Других команд на kill у tmux нет; прочее — как есть
+func tmuxCommand(name string) string {
+	switch name {
+	case "killw":
+		return "kill-window"
+	case "killp":
+		return "kill-pane"
+	}
+	var found []string
+	for _, c := range tmuxKillCommands {
+		if strings.HasPrefix(c, name) {
+			found = append(found, c)
+		}
+	}
+	if len(found) == 1 {
+		return found[0]
+	}
+	return name
+}
+
 // tmuxCommandReason одна команда tmux из цепочки через ;
 func tmuxCommandReason(cmd []word) string {
 	if len(cmd) == 0 {
 		return ""
 	}
-	name := cmd[0].text
-	switch name {
-	case "kill-server":
+	name := tmuxCommand(cmd[0].text)
+	switch {
+	case name == "kill-server":
 		return "tmux kill-server гасит все сессии tmux, в том числе ту, где может идти Claude; свой сервер — tmux -L имя"
-	case "kill-session", "kill-window", "killw", "kill-pane", "killp":
-	default:
+	case !slices.Contains(tmuxKillCommands, name):
 		return ""
 	}
 	target := false

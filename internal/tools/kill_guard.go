@@ -76,15 +76,22 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 	return core.NewValidationResult(false, violations, append(scan.reasons, scan.hints()...)), nil
 }
 
-// hints подсказки к отказу: про группу — если есть отказ на сигнал группе,
-// обычная про литеральный PID — если есть другие отказы
+// hints подсказки к отказам без повторов, по порядку отказов: про группу —
+// к отказу на сигнал группе, своя у средства (systemctl, tmux, fuser) — к
+// его отказу, обычная про литеральный PID — к прочим
 func (s *killScan) hints() []string {
 	var out []string
-	if len(s.groupReasons) > 0 {
-		out = append(out, killGroupHint)
-	}
-	if len(s.reasons) > len(s.groupReasons) {
-		out = append(out, killGuardHint)
+	for _, r := range s.reasons {
+		hint := killGuardHint
+		switch {
+		case slices.Contains(s.groupReasons, r):
+			hint = killGroupHint
+		case s.toolHints[r] != "":
+			hint = s.toolHints[r]
+		}
+		if !slices.Contains(out, hint) {
+			out = append(out, hint)
+		}
 	}
 	return out
 }
@@ -107,6 +114,9 @@ type killScan struct {
 	reasons []string
 	// groupReasons — те из reasons, что про сигнал группе процессов (kill -N)
 	groupReasons []string
+	// toolHints — подсказка к отказу на средство с узкой целью не PID
+	// (systemctl, tmux, fuser): причина → подсказка
+	toolHints map[string]string
 	// signalWord — в команде без кавычек есть отдельное слово kill, pkill
 	// или killall: скрипт, который станет известен только при запуске, рядом
 	// с ним — отказ. Подстрока kill (skills) — не повод
@@ -648,7 +658,8 @@ var assignmentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 // опции. zero — сигнал задан и равен 0. -l, -L, --list и --table печатают
 // список сигналов: целей нет. computed — значение -s, -n или --signal,
 // вычисляемое при запуске (kill -s $S): без кавычек оно несёт и цели
-// (S='9 -1'), как kill -$S
+// (S='9 -1'), как kill -$S. Значение в двойных кавычках ("$SIG") — одно
+// слово: только сигнал, не 0 заранее
 func killOptions(args []word) (targets []word, zero bool, computed string) {
 	targets = args
 	sawSignal := false
@@ -669,7 +680,7 @@ options:
 			if len(targets) < 2 {
 				return nil, false, ""
 			}
-			if !targets[1].literal {
+			if !targets[1].literal && !oneWord(targets[1].text) {
 				return targets[2:], false, opt + " " + targets[1].text
 			}
 			record(targets[1].text == "0")
@@ -685,4 +696,28 @@ options:
 		}
 	}
 	return targets, zero, ""
+}
+
+// oneWord — слово оболочки останется одним словом при запуске: раскрытия
+// ($, `) только в двойных кавычках ("$SIG", x"${S}"). "$@" и "${a[@]}"
+// дают несколько слов, $'…' и прочее вне кавычек — неизвестно: false.
+// Текст — исходник слова из разбора: кавычки в нём закрыты
+func oneWord(text string) bool {
+	if strings.Contains(text, "@") {
+		return false
+	}
+	double := false
+	for i := 0; i < len(text); i++ {
+		switch c := text[i]; {
+		case c == '\\':
+			i++
+		case c == '"':
+			double = !double
+		case c == '\'' && !double:
+			i += strings.IndexByte(text[i+1:], '\'') + 1
+		case (c == '$' || c == '`') && !double:
+			return false
+		}
+	}
+	return true
 }

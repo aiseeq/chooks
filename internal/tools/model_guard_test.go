@@ -168,6 +168,7 @@ func TestModelGuard(t *testing.T) {
 		{"переменная модели с / за sudo --", "Bash", "", "sudo -- ANTHROPIC_MODEL=a/sonnet claude -p hi", true},
 		{"переменная одобренной за sudo --", "Bash", "", "sudo -- ANTHROPIC_MODEL=opus claude -p hi", false},
 		{"--model за sudo -- X=1", "Bash", "", "sudo -- X=1 claude --model sonnet -p hi", true},
+		{"--model за sudo -- X=1 и путём к claude", "Bash", "", "sudo -- X=1 /usr/local/bin/claude --model sonnet -p hi", true},
 		{"--model одобренной за sudo -- X=1", "Bash", "", "sudo -- X=1 claude --model opus -p hi", false},
 		{"переменная модели за timeout и sudo --", "Bash", "", "timeout 5 sudo -u aisee -- ANTHROPIC_MODEL=sonnet claude -p hi", true},
 		{"оболочка за sudo --", "Bash", "", "sudo -- ANTHROPIC_MODEL=sonnet bash -c 'claude -p hi'", true},

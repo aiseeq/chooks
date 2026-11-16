@@ -20,6 +20,8 @@ type patternArgs struct {
 	signals []string
 	// group — killall -g: сигнал всей группе процессов каждого найденного
 	group bool
+	// inverse — pkill --inverse: сигнал всем, кроме совпавших
+	inverse bool
 	// pids — PID из pkill -p (--pid): цели названы прямо
 	pids     []string
 	patterns []string
@@ -44,6 +46,7 @@ func setIgnoreCase(pa *patternArgs, _ string) { pa.ignoreCase = true }
 func setRegex(pa *patternArgs, _ string)      { pa.isRegex = true }
 func setInfo(pa *patternArgs, _ string)       { pa.info = true }
 func setGroup(pa *patternArgs, _ string)      { pa.group = true }
+func setInverse(pa *patternArgs, _ string)    { pa.inverse = true }
 func addSignal(pa *patternArgs, v string)     { pa.signals = append(pa.signals, v) }
 func addPids(pa *patternArgs, v string)       { pa.pids = append(pa.pids, strings.Split(v, ",")...) }
 
@@ -54,9 +57,11 @@ var (
 
 // pkillOptions опции pkill (procps-ng 4.0.6, pkill --help): короткие —
 // одной буквой, длинные — с --. -e у pkill — echo (печать убитых), а не
-// точное совпадение; -r — состояния процессов со значением, не regexp
+// точное совпадение; -r — состояния процессов со значением, не regexp;
+// --inverse (у pkill только длинная, -v — у pgrep) обращает выбор
 var pkillOptions = map[string]patternOption{
-	"f": {apply: setFull}, "full": {apply: setFull},
+	"inverse": {apply: setInverse},
+	"f":       {apply: setFull}, "full": {apply: setFull},
 	"x": {apply: setExact}, "exact": {apply: setExact},
 	"i": {apply: setIgnoreCase}, "ignore-case": {apply: setIgnoreCase},
 	"p": {value: true, apply: addPids}, "pid": {value: true, apply: addPids},
@@ -186,6 +191,9 @@ func (t *KillGuardTool) checkPattern(name string, args []word, command string, p
 	}
 	if pa.group {
 		return name + " -g шлёт сигнал всей группе процессов каждого найденного: кто ещё в группе, проверка не сверяет", true
+	}
+	if pa.inverse {
+		return name + " --inverse шлёт сигнал всем процессам, кроме совпавших: сессиям Claude, терминалу и оболочке тоже", false
 	}
 	ancestors := t.ancestors(procs)
 	for _, p := range pa.pids {

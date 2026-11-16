@@ -31,6 +31,10 @@ var killGuardTree = []fakeProc{
 	{600, 1500, "sleep", []string{"sleep", "1000"}},
 	{3000, 1500, "plasmashell", []string{"/usr/bin/plasmashell"}},
 	{3100, 1, "sddm", []string{"/usr/bin/sddm"}},
+	{3200, 1500, "dbus-broker", []string{"/usr/bin/dbus-broker", "--scope", "user"}},
+	{3300, 1500, "pipewire", []string{"/usr/bin/pipewire"}},
+	{3400, 1, "dbus-broker", []string{"/usr/bin/dbus-broker", "--scope", "system"}},
+	{3500, 1500, "kwin_wayland", []string{"/usr/bin/kwin_wayland"}},
 }
 
 // killGuardCgroups cgroup процессов дерева, как в сессии KDE: юниты предков
@@ -45,6 +49,10 @@ var killGuardCgroups = map[int]string{
 	600:    "0::/user.slice/user-1000.slice/user@1000.service/background.slice/run-sleep.scope",
 	3000:   "0::/user.slice/user-1000.slice/user@1000.service/session.slice/plasma-plasmashell.service",
 	3100:   "0::/system.slice/sddm.service",
+	3200:   "0::/user.slice/user-1000.slice/user@1000.service/session.slice/dbus-broker.service",
+	3300:   "0::/user.slice/user-1000.slice/user@1000.service/session.slice/pipewire.service",
+	3400:   "0::/system.slice/dbus-broker.service",
+	3500:   "0::/user.slice/user-1000.slice/user@1000.service/session.slice/plasma-kwin_wayland.service",
 }
 
 func newKillGuard(t *testing.T) *KillGuardTool {

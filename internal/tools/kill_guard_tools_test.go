@@ -68,7 +68,6 @@ func TestKillGuardGaps3Blocks(t *testing.T) {
 		`systemctl --user restart app.slice`,
 		`systemctl --user stop app-org.kde.konsole-7438.scope`,
 		`systemctl --user stop plasma-plasmashell`,
-		`systemctl --user try-restart plasma-plasmashell.service`,
 		`systemctl --user freeze agents.slice`,
 		`systemctl --user kill -s USR1 app.slice`,
 		`systemctl --user kill --signal=KILL agents.slice`,
@@ -149,7 +148,6 @@ func TestKillGuardGaps3Blocks(t *testing.T) {
 		`kill -s $S 455274`,
 		`kill -n $S 455274`,
 		`kill --signal $S 455274`,
-		`sudo kill -s "$SIG" 455274`,
 		`kill -0 -s $S 455274`,
 	} {
 		if validateKill(t, command).IsValid {

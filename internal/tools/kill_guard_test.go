@@ -401,14 +401,56 @@ func TestKillGuardBlocks(t *testing.T) {
 		`bash -c '[[ ${X:-<(kill -9 -1)} ]]'`,
 		`bash -c '[[ ${X:->(kill 1)} ]]'`,
 		`X=${Y:-${Z}<(kill 1)}`,
-		// } в кавычках не закрывает операнд: виден разбором команды и вызова
 		`X=${Y:-"}"<(kill 1)}`,
 		`bash -c 'echo ${X:-"}"<(kill 1)}'`,
-		// ${…<(…)} ищется по всему тексту: в кавычках и в теле heredoc для
-		// файла — ложный отказ, допустимый рядом со словом kill
+		// } в операнде перед <(…) (${Z}, "}", '}', \}) во вложенном скрипте
+		// вне аргументов вызова и на верхнем уровне при незакрытом heredoc
+		"bash -c '[[ ${X:-${Z}<(kill -9 -1)} ]]'",
+		"bash -c 'for i in ${X:-${Z}<(kill -9 -1)}; do :; done'",
+		"bash -c 'case ${X:-${Z}<(kill -9 -1)} in *) ;; esac'",
+		"bash -c 'echo hi > ${X:-${Z}<(kill -9 -1)}'",
+		"bash -c 'local X=${Y:-${Z}<(kill -9 -1)}'",
+		"bash <<'E'\nX=${Y:-${Z}<(kill -9 -1)}\nE",
+		"bash <<'E'\n[[ ${X:-${Z}<(kill -9 -1)} ]]\nE",
+		"bash <<<'X=${Y:-${Z}<(kill -9 -1)}'",
+		"X=${Y:-${Z}<(kill -9 -1)}; cat <<E\nfoo",
+		"X=${Y:-\"}\"<(kill -9 -1)}; cat <<E\nfoo",
+		"[[ ${X:-${Z}<(kill -9 -1)} ]]; cat <<E\nfoo",
+		"for i in ${X:-${Z}<(kill -9 -1)}; do :; done; cat <<E\nfoo",
+		"bash -c '[[ ${X:-\"}\"<(kill -9 -1)} ]]'",
+		"bash -c '[[ ${X:-\\}<(kill -9 -1)} ]]'",
+		"bash -c \"[[ \\${X:-'}'<(kill -9 -1)} ]]\"",
+		"bash -c 'Y=1 X=${Y:-${Z}<(kill -9 -1)} true'",
+		"bash -c 'export X=${Y:-${Z}<(kill -9 -1)}'",
+		"bash -c 'select i in ${X:-${Z}<(kill -9 -1)}; do break; done'",
+		"bash -c 'while [[ ${X:-${Z}<(kill -9 -1)} ]]; do break; done'",
+		"bash -c 'cat < ${X:-${Z}<(kill -9 -1)}'",
+		"bash -c 'X=${Y:-${Z}<(kill -9 -1)}; true'",
+		"bash -c 'true; X=${Y:-${Z}<(kill -9 -1)}'",
+		"eval '[[ ${X:-${Z}<(kill -9 -1)} ]]'",
+		"eval 'local X=${Y:-${Z}<(kill -9 -1)}'",
+		"sh -c '[[ ${X:-${Z}<(kill -9 -1)} ]]'",
+		"bash <<'E'\nlocal X=${Y:-\"}\"<(kill -9 -1)}\nE",
+		"bash <<<'[[ ${X:-${Z}<(kill -9 -1)} ]]'",
+		"X=${Y:-'}'<(kill -9 -1)}; cat <<E\nfoo",
+		"echo hi > ${X:-${Z}<(kill -9 -1)}; cat <<E\nfoo",
+		"cat <<E; X=${Y:-${Z}<(kill -9 -1)}\nfoo",
+		"[[ ${X:-${Z}<(kill -9 -1)} ]] <<E\nfoo",
+		"bash -c \"[[ \\${X:-\\${Z}<(kill -9 -1)} ]]\"",
+		"bash -lc '[[ ${X:-${Z}<(kill -9 -1)} ]]'",
+		"nohup bash -c '[[ ${X:-${Z}<(kill -9 -1)} ]]'",
+		"su -c '[[ ${X:-${Z}<(kill -9 -1)} ]]'",
+		"watch '[[ ${X:-${Z}<(kill -9 -1)} ]]'",
+		"trap '[[ ${X:-${Z}<(kill -9 -1)} ]]' EXIT",
+		// временное правило: <(…) где-либо после ${ в команде со словом kill —
+		// отказ, и ложный (в кавычках, в теле heredoc для файла, <(…) после
+		// ${…}, а не внутри)
 		`printf '%s' '${X:-<(kill 1)}'`,
 		"cat > f <<'X'\necho ${X:-<(kill 1)}\nX",
 		`echo ${X:-'<(kill 1)'}`,
+		`echo ${X:-a}<(kill 455274)`,
+		"X=${Y:-a\n<(kill -9 -1)}",
+		`echo ${X}; diff <(a) <(b); kill 455274`,
 		// за sudo -- слово kill ищется в тексте без \ и кавычек
 		`sudo -- X=1 k\ill -9 -1`,
 		// второй -s или -n перекрывает сигнал 0
@@ -454,18 +496,6 @@ func TestKillGuardParseErrorReason(t *testing.T) {
 		if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), "разбор оболочки не прошёл") {
 			t.Errorf("%s: ждали отказ «разбор оболочки не прошёл», получили %v %v", command, r.IsValid, r.Suggestions)
 		}
-	}
-}
-
-// Текст вызова из heredoc на вход оболочке shellcmd отдаёт куском исходника:
-// с подставленной переменной скрипт разбирается, а кусок без неё — нет
-// (X="a'": echo $X' в теле). Проверить в нём <(…) внутри ${…} нельзя — отказ
-// и рядом с безопасным kill -l
-func TestKillGuardCallParseErrorReason(t *testing.T) {
-	command := "X=\"a'\"; bash <<E\necho $X'; kill -l\nE"
-	r := validateKill(t, command)
-	if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), "разбор вызова не прошёл") {
-		t.Errorf("%q: ждали отказ «разбор вызова не прошёл», получили %v %v", command, r.IsValid, r.Suggestions)
 	}
 }
 
@@ -649,12 +679,11 @@ func TestKillGuardAllows(t *testing.T) {
 		`bash +c 'echo hi'; kill 455274`,
 		`echo ${X:-<(ls skills)}`,
 		`echo ${X/a}; kill 455274`,
-		// ( без < и > в операнде ${…}; <(…) после ${…}, а не внутри
+		// ${ без <( и >( после него; <(…) до ${
 		`echo ${X:-(a)}; kill 455274`,
-		`echo ${X:-a}<(kill 455274)`,
 		`echo "${NAME:-<unset>}"; kill 455274`,
-		// незакрытый heredoc: shellcmd его закрывает, разбор всей команды —
-		// нет; остаётся поиск по тексту
+		`kill 455274; echo ${X}`,
+		`diff <(a) <(b); kill 455274; echo ${X}`,
 		"cat <<E\nkill -l",
 		// = в имени команды за sudo -- — не присваивание
 		`sudo -- ./job=1.sh --mode kill`,

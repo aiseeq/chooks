@@ -12,7 +12,6 @@ import (
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // protectedComms процессы, без которых падает сессия пользователя целиком:
@@ -200,13 +199,10 @@ func (s *killScan) parsedCalls() error {
 		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду со словом kill, отказ", "error", err)
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
-	if s.signalWord && s.commandParamProcSubst() {
-		s.addReason(paramProcSubstReason)
+	if s.signalWord && procSubstAfterParamRe.MatchString(s.command) {
+		s.addReason(procSubstAfterParamReason)
 	}
 	for _, c := range calls {
-		if s.signalWord {
-			s.paramProcSubst(c.Raw)
-		}
 		if err := s.call(c, calls); err != nil {
 			return err
 		}
@@ -214,48 +210,18 @@ func (s *killScan) parsedCalls() error {
 	return nil
 }
 
-// paramProcSubstReason отказ на <(…) или >(…) в операнде ${…}; снимается,
-// когда akit найдёт вызовы в операнде ${…}
-const paramProcSubstReason = "<(…) или >(…) внутри ${…} (echo ${X:-<(kill …)}): разбор оболочки вызовы там не видит, проверить сигналы нельзя"
+// procSubstAfterParamRe <( или >( где-либо после ${ в тексте команды.
+// Временное правило до akit shellcmd-param-operand-procsubst: разбор
+// оболочки держит операнд ${…} литералом и вызовы в нём (${X:-<(kill …)})
+// не находит — ни на верхнем уровне, ни во вложенном скрипте (bash -c,
+// eval, heredoc на вход оболочке). Точные проверки операнда пропускали
+// } перед <( (${X:-${Z}<(…)}, "}", '}', \}), поэтому ищется текст целиком:
+// ложный отказ на команде со словом kill, где <( просто стоит после ${,
+// допустим. Снять после akit shellcmd-param-operand-procsubst
+var procSubstAfterParamRe = regexp.MustCompile(`(?s)\$\{.*[<>]\(`)
 
-// paramProcSubst отказ на <(…) или >(…) в операнде ${…} вызова: текст
-// вызова из вложенного скрипта разбирается точнее текста команды
-// (${X:-"}"<(…)} в bash -c '…')
-func (s *killScan) paramProcSubst(raw string) {
-	found, err := paramProcSubst(raw)
-	if err != nil {
-		s.tool.Logger().Warn("kill_guard: текст вызова не разобрался, отказ", "error", err)
-		s.addReason("разбор вызова не прошёл (" + err.Error() + "): проверить <(…) внутри ${…} нельзя")
-	}
-	if found {
-		s.addReason(paramProcSubstReason)
-	}
-}
-
-// paramProcSubstRe ${, за которым до первой } стоит <( или >(: ${X:-<(…)},
-// ${X:-${Y:-<(…)}}
-var paramProcSubstRe = regexp.MustCompile(`\$\{[^}]*[<>]\(`)
-
-// commandParamProcSubst — в команде есть <(…) или >(…) в операнде ${…} вне
-// аргументов вызова: в присваивании (X=${Y:-<(…)}, local, export), в
-// перенаправлении, в [[ ]], в словах for, select и case, во вложенном
-// скрипте (bash -c '[[ ${X:-<(…)} ]]'). Текст команды ищется целиком: так
-// видны и вложенные скрипты, а ложный отказ на ${…<(…)} в кавычках или в
-// теле heredoc для файла рядом со словом kill допустим. Разбор всей команды
-// добавляет операнды с } в кавычках (X=${Y:-"}"<(…)}); ошибку разбора
-// shellcmd уже назвал отказом или обошёл (незакрытый heredoc), и тогда
-// остаётся поиск по тексту
-func (s *killScan) commandParamProcSubst() bool {
-	if paramProcSubstRe.MatchString(s.command) {
-		return true
-	}
-	found, err := paramProcSubst(s.command)
-	if err != nil {
-		s.tool.Logger().Debug("kill_guard: разбор всей команды не прошёл, <(…) внутри ${…} искали по тексту", "error", err)
-		return false
-	}
-	return found
-}
+// procSubstAfterParamReason причина временного отказа на <(…) после ${
+const procSubstAfterParamReason = "в команде со словом kill после ${ стоит <(…) или >(…): если они внутри ${…} (echo ${X:-<(kill …)}), разбор оболочки вызовы там не видит, проверить сигналы нельзя. Временное правило до починки разбора (akit shellcmd-param-operand-procsubst): вынеси <(…) из команды с kill или раздели команду"
 
 // call проверяет один вызов из разбора оболочки; calls — все вызовы
 // команды: среди них ищется xargs, подающий ввод в скрипт вызова
@@ -712,45 +678,6 @@ func sudoDashAssignment(args []string) bool {
 }
 
 var assignmentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
-
-// paramProcSubst — в операнде ${…} вызова стоит <(…) или >(…): ${X:-<(…)},
-// ${X#<(…)}, ${X/a/<(…)}. mvdan/sh держит операнд литералом, и shellcmd
-// вызовы в нём не находит (akit shellcmd-param-operand-procsubst). raw —
-// текст вызова или всей команды
-func paramProcSubst(raw string) (bool, error) {
-	file, err := syntax.NewParser().Parse(strings.NewReader(raw), "")
-	if err != nil {
-		return false, fmt.Errorf("разбор текста вызова: %w", err)
-	}
-	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if param, ok := node.(*syntax.ParamExp); ok && slices.ContainsFunc(paramOperands(param), literalProcSubst) {
-			found = true
-		}
-		return true
-	})
-	return found, nil
-}
-
-// paramOperands слова-операнды раскрытия: ${X:-слово}, ${X/образец/замена}
-func paramOperands(param *syntax.ParamExp) []*syntax.Word {
-	var operands []*syntax.Word
-	if param.Exp != nil {
-		operands = append(operands, param.Exp.Word)
-	}
-	if param.Repl != nil {
-		operands = append(operands, param.Repl.Orig, param.Repl.With)
-	}
-	return operands
-}
-
-// literalProcSubst — в литерале слова есть <( или >(
-func literalProcSubst(w *syntax.Word) bool {
-	return w != nil && slices.ContainsFunc(w.Parts, func(p syntax.WordPart) bool {
-		lit, ok := p.(*syntax.Lit)
-		return ok && (strings.Contains(lit.Value, "<(") || strings.Contains(lit.Value, ">("))
-	})
-}
 
 // killOptions отделяет опции kill от целей так же, как встроенный kill
 // bash: -s и -n со значением повторяются, и сигнал задаёт последний

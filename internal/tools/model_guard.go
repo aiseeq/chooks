@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -146,6 +147,12 @@ func bashModelCandidates(command string, readSettings func(string) []byte, logge
 	var found []modelCandidate
 	claude := false
 	for _, call := range calls {
+		call, assigns := withoutSudoAssigns(call, calls)
+		if call.Name == "claude" || isShellName(call.Name) {
+			for _, a := range assigns {
+				found = append(found, assignedModelWord(a)...)
+			}
+		}
 		if !slices.Contains(modelClients, call.Name) {
 			continue
 		}
@@ -176,6 +183,41 @@ func bashModelCandidates(command string, readSettings func(string) []byte, logge
 	return found
 }
 
+// withoutSudoAssigns снимает присваивания за sudo -- в вызове c: shellcmd
+// (akit v1.76.5) их не снимает и отдаёт sudo -- A=x claude, timeout 5 sudo
+// -- A=x claude вызовом с именем A=x (A=x/y — именем y), а claude —
+// аргументом. Ищется в словах головы цепочки (вызов без sudo в Via, у
+// которого среди calls есть снятый вызов за sudo с тем же текстом): sudo,
+// за ним --, за ним присваивания и настоящая команда. Возвращает её вызов
+// и слова присваиваний; без них — c как есть. Снимается, когда akit снимет
+// присваивание за sudo --
+func withoutSudoAssigns(c shellcmd.Call, calls []shellcmd.Call) (shellcmd.Call, []string) {
+	if slices.Contains(c.Via, "sudo") || !slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
+		return x.Raw == c.Raw && slices.Contains(x.Via, "sudo")
+	}) {
+		return c, nil
+	}
+	words := append([]string{c.Name}, c.Args...)
+	j := slices.Index(words, "sudo")
+	if j < 0 {
+		return c, nil
+	}
+	k := slices.Index(words[j:], "--")
+	if k < 0 || !sudoDashAssignment(words[j+1:]) {
+		return c, nil
+	}
+	rest := words[j+k+1:]
+	var assigns []string
+	for len(rest) > 0 && assignmentRe.MatchString(rest[0]) {
+		assigns, rest = append(assigns, rest[0]), rest[1:]
+	}
+	if len(rest) == 0 {
+		return c, nil
+	}
+	c.Name, c.Args = filepath.Base(rest[0]), rest[1:]
+	return c, assigns
+}
+
 // modelClientWord — отдельное слово claude, codex или opencode (не .claude/ и не claude-hooks)
 var modelClientWord = regexp.MustCompile(`(^|[^[:alnum:]_.-])(claude|codex|opencode)([^[:alnum:]_.-]|$)`)
 
@@ -192,11 +234,35 @@ func textModelCandidates(command string) []modelCandidate {
 	}
 	var found []modelCandidate
 	for _, pattern := range []*regexp.Regexp{longModelMentionPattern, shortModelMentionPattern} {
-		for _, m := range pattern.FindAllStringSubmatch(command, -1) {
-			found = append(found, modelCandidate{value: m[1], dynamic: strings.ContainsAny(m[1], "$`")})
+		for _, m := range pattern.FindAllStringSubmatchIndex(command, -1) {
+			if printedMention(command, m[0]) {
+				continue
+			}
+			v := command[m[2]:m[3]]
+			found = append(found, modelCandidate{value: v, dynamic: strings.ContainsAny(v, "$`")})
 		}
 	}
 	return append(found, envTextCandidates(command)...)
+}
+
+// textKeywords слова перед командой в простой команде: and, or, not у fish,
+// ключевые слова условий и циклов
+var textKeywords = []string{"and", "or", "not", "begin", "if", "while", "then", "do", "else", "!", "{"}
+
+// textPrinters команды, которые печатают свои слова, а не запускают их
+var textPrinters = []string{"echo", "printf", "print"}
+
+// printedMention — упоминание модели с позиции at стоит в простой команде,
+// которая его печатает (echo claude --model x): текст, а не запуск. Простая
+// команда — от последнего ; & | ( ` или перевода строки до at, без
+// ключевых слов в начале
+func printedMention(text string, at int) bool {
+	segment := text[strings.LastIndexAny(text[:at], ";&|(`\n")+1 : at]
+	words := strings.Fields(segment)
+	for len(words) > 0 && slices.Contains(textKeywords, words[0]) {
+		words = words[1:]
+	}
+	return len(words) > 0 && slices.Contains(textPrinters, words[0])
 }
 
 // envTextCandidates — присваивания переменных модели в тексте скрипта
@@ -289,16 +355,18 @@ func callEnvModels(script string, n *syntax.CallExpr, calls []shellcmd.Call, log
 	}
 	for i, c := range chain {
 		switch {
-		case (c.Name == "env" || c.Name == "sudo") && runs && i+1 < len(chain):
-			// env A=x claude, env A=x bash -c …, sudo A=x claude: слова
-			// env и sudo до снятой команды — опции и присваивания
-			opts := c.Args[:max(0, len(c.Args)-len(chain[i+1].Args)-1)]
-			for _, a := range opts {
-				found = append(found, assignedModelWord(a)...)
-			}
 		case isShellName(c.Name):
 			for _, a := range c.Args {
 				found = append(found, nestedEnvModels(a, logger)...)
+			}
+		case runs && i+1 < len(chain):
+			// env A=x claude, sudo A=x claude, timeout 5 sudo A=x claude:
+			// слова снятых обёрток до следующей команды цепочки — их опции и
+			// присваивания (shellcmd отдаёт голову цепочки и снятую команду,
+			// промежуточные обёртки — словами головы)
+			opts := c.Args[:max(0, len(c.Args)-len(chain[i+1].Args)-1)]
+			for _, a := range opts {
+				found = append(found, assignedModelWord(a)...)
 			}
 		}
 	}

@@ -160,6 +160,27 @@ func TestModelGuard(t *testing.T) {
 		{"sudo -u с присваиванием", "Bash", "", "sudo -u aisee X=1 claude --model sonnet -p hi", true},
 		{"переменная модели после sudo", "Bash", "", "sudo ANTHROPIC_MODEL=sonnet claude -p hi", true},
 		{"переменная одобренной после sudo", "Bash", "", "sudo ANTHROPIC_MODEL=opus claude -p hi", false},
+		// присваивание за промежуточной обёрткой и за sudo -- (тикет kill-guard-gaps-3)
+		{"переменная модели за timeout и sudo", "Bash", "", "timeout 5 sudo ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"переменная одобренной за timeout и sudo", "Bash", "", "timeout 5 sudo ANTHROPIC_MODEL=opus claude -p hi", false},
+		{"переменная модели за nice env", "Bash", "", "nice -n 5 env ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"переменная модели за sudo --", "Bash", "", "sudo -- ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"переменная модели с / за sudo --", "Bash", "", "sudo -- ANTHROPIC_MODEL=a/sonnet claude -p hi", true},
+		{"переменная одобренной за sudo --", "Bash", "", "sudo -- ANTHROPIC_MODEL=opus claude -p hi", false},
+		{"--model за sudo -- X=1", "Bash", "", "sudo -- X=1 claude --model sonnet -p hi", true},
+		{"--model одобренной за sudo -- X=1", "Bash", "", "sudo -- X=1 claude --model opus -p hi", false},
+		{"переменная модели за timeout и sudo --", "Bash", "", "timeout 5 sudo -u aisee -- ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"оболочка за sudo --", "Bash", "", "sudo -- ANTHROPIC_MODEL=sonnet bash -c 'claude -p hi'", true},
+		{"sudo -- в тексте echo", "Bash", "", "echo sudo -- ANTHROPIC_MODEL=sonnet claude --model sonnet", false},
+		{"sudo -- без claude", "Bash", "", "sudo -- ANTHROPIC_MODEL=sonnet make test", false},
+		// codex -m сразу за именем в неразобранном fish
+		{"fish and codex -m сразу", "Bash", "", "fish -c 'true; and codex -m gpt-5 exec hi'", true},
+		{"fish and codex -m одобренной сразу", "Bash", "", "fish -c 'true; and codex -m gpt-6-luna exec hi'", false},
+		// echo печатает текст, а не запускает агента
+		{"fish echo с --model", "Bash", "", "fish -c 'echo x; and echo claude --model sonnet'", false},
+		{"fish printf с -m", "Bash", "", "fish -c 'true; and printf \"%s\" codex -m gpt-5'", false},
+		{"fish запуск после echo", "Bash", "", "fish -c 'echo x; and claude --model sonnet'", true},
+		{"fish запуск после not", "Bash", "", "fish -c 'not claude --model sonnet; and true'", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

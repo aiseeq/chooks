@@ -29,6 +29,22 @@ var killGuardTree = []fakeProc{
 	{2200, 2100, "chooks", []string{"chooks", "pre-tool-use"}},
 	{455274, 1500, "opencode", []string{"opencode", "run", "--dir", "/home/u/.cache/worktrees/sc2demu/farm-reflect-longcat"}},
 	{600, 1500, "sleep", []string{"sleep", "1000"}},
+	{3000, 1500, "plasmashell", []string{"/usr/bin/plasmashell"}},
+	{3100, 1, "sddm", []string{"/usr/bin/sddm"}},
+}
+
+// killGuardCgroups cgroup процессов дерева, как в сессии KDE: юниты предков
+// и plasmashell systemctl трогать нельзя, юнит opencode и sleep — можно
+var killGuardCgroups = map[int]string{
+	1:      "0::/init.scope",
+	1500:   "0::/user.slice/user-1000.slice/user@1000.service/init.scope",
+	2000:   "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.kde.konsole-7438.scope/main.scope",
+	2100:   "0::/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-x-1.scope",
+	2200:   "0::/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-x-1.scope",
+	455274: "0::/user.slice/user-1000.slice/user@1000.service/opencode.service",
+	600:    "0::/user.slice/user-1000.slice/user@1000.service/background.slice/run-sleep.scope",
+	3000:   "0::/user.slice/user-1000.slice/user@1000.service/session.slice/plasma-plasmashell.service",
+	3100:   "0::/system.slice/sddm.service",
 }
 
 func newKillGuard(t *testing.T) *KillGuardTool {
@@ -44,6 +60,9 @@ func newKillGuard(t *testing.T) *KillGuardTool {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(strings.Join(p.args, "\x00")+"\x00"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(killGuardCgroups[p.pid]+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

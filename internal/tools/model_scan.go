@@ -40,8 +40,9 @@ type ModelScanResult struct {
 }
 
 var (
-	longModelMentionPattern  = regexp.MustCompile(`(?i)--model(?:\s*=\s*|\s+)["']?([^\s"';&|]+)`)
-	shortModelMentionPattern = regexp.MustCompile(`(?i)(?:^|[\s;&|(])(?:claude|codex|opencode)\s[^\n;&|]{0,160}?\s-m\s+["']?([^\s"';&|]+)`)
+	longModelMentionPattern = regexp.MustCompile(`(?i)--model(?:\s*=\s*|\s+)["']?([^\s"';&|]+)`)
+	// -m сразу за именем (codex -m x) или через слова (codex exec -m x)
+	shortModelMentionPattern = regexp.MustCompile(`(?i)(?:^|[\s;&|(])(?:claude|codex|opencode)(?:\s[^\n;&|]{0,160}?)?\s-m\s+["']?([^\s"';&|]+)`)
 )
 
 // ScanModelTranscripts потоково проверяет вызовы инструментов в jsonl-транскриптах.

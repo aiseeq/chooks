@@ -50,12 +50,17 @@ const killGroupHint = "Сигнал отдельным PID — не то же, �
 
 // ValidateTool проверяет команды, посылающие сигналы процессам
 func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
-	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(unquoted(input.Command), "kill") {
+	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) {
+		return &core.ValidationResult{IsValid: true}, nil
+	}
+	text := unquoted(input.Command)
+	killText := strings.Contains(text, "kill")
+	if !killText && !sessionToolWordRe.MatchString(text) {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
-	scan := killScan{tool: t, command: input.Command, signalWord: signalWordRe.MatchString(unquoted(input.Command)),
-		zsh: zshWordRe.MatchString(unquoted(input.Command))}
+	scan := killScan{tool: t, command: input.Command, killText: killText,
+		signalWord: signalWordRe.MatchString(text), zsh: zshWordRe.MatchString(text)}
 	if err := scan.parsedCalls(); err != nil {
 		return nil, err
 	}
@@ -108,6 +113,9 @@ type killScan struct {
 	signalWord bool
 	// zsh — в команде есть слово zsh: подстановка процесса бывает и =(…)
 	zsh bool
+	// killText — в команде без кавычек есть подстрока kill. Без неё сторож
+	// смотрит только loginctl, systemctl и fuser, и ошибка разбора — не отказ
+	killText bool
 }
 
 // signalWordRe отдельное слово kill, pkill, killall, killall5
@@ -198,7 +206,7 @@ func scriptNesting(via []string) int {
 // предела вложенности akit, в неразобранном вложенном скрипте) не виден
 func (s *killScan) parsedCalls() error {
 	calls, err := shellcmd.Calls(s.command)
-	if err != nil {
+	if err != nil && s.killText {
 		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду со словом kill, отказ", "error", err)
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
@@ -258,7 +266,7 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		return nil
 	}
 	if !s.signalWord {
-		return s.signal(c)
+		return s.signal(c, calls)
 	}
 	script, runner := scriptArgs(c)
 	fed := ""
@@ -284,7 +292,7 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 			}
 		}
 	}
-	return s.signal(c)
+	return s.signal(c, calls)
 }
 
 // signal проверяет вызов как сигнал: kill, pkill, killall или имя,
@@ -295,18 +303,25 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 // $, без значения (K=kill; sudo $K -9 -1 даёт вызов «$K» за sudo). Имя из
 // раскрытия переменной или массива ($K, "${a[@]}") — отказ, если в
 // команде им присвоено слово сигнала (a=(kill -9 -1)): слово kill стоит в
-// присваивании, а не в тексте вызова
-func (s *killScan) signal(c shellcmd.Call) error {
+// присваивании, а не в тексте вызова. Значение по умолчанию в имени
+// (${X:-kill}) — то же слово kill. Имя из позиционных параметров ("$@",
+// $1) исполняет слова, переданные в другом месте команды (set -- kill -9
+// -1, f kill -9 -1, bash -c '"$@"' _ kill …): слово сигнала среди
+// аргументов любого вызова проверяется как сигнал с аргументами за ним
+func (s *killScan) signal(c shellcmd.Call, calls []shellcmd.Call) error {
 	if c.Name == "sudo" && sudoDashAssignment(c.Args) && signalWordRe.MatchString(unquoted(c.Raw)) {
 		// снимается, когда akit снимет присваивание за sudo --
 		s.addReason("присваивание за sudo -- (sudo -- X=1 kill …): разбор оболочки принял его за имя команды, проверить сигналы нельзя")
 	}
-	if c.Name == "" || strings.Contains(c.Name, "$") {
+	// имя без каталога от ${X-/bin/kill} — «kill}»: скобка — тоже раскрытие
+	if c.Name == "" || strings.ContainsAny(c.Name, "${}") {
 		switch {
-		case signalWordRe.MatchString(unquoted(c.Raw)):
+		case signalWordRe.MatchString(withoutParamOperators(unquoted(c.Raw))):
 			s.addReason("имя команды вычисляется при запуске ($(…), `…` или $X) рядом с kill: проверить, что исполнится, нельзя")
 		case arraySignal(c.Name, s.command):
 			s.addReason("имя команды — раскрытие переменной или массива, которым в команде присвоено слово kill (a=(kill …); \"${a[@]}\"): проверить, что исполнится, нельзя")
+		case positionalRe.MatchString(unquoted(c.Name)):
+			return s.positionalSignal(calls)
 		}
 		return nil
 	}
@@ -318,7 +333,42 @@ func (s *killScan) signal(c shellcmd.Call) error {
 	if slices.Contains(c.Via, "xargs") {
 		via = "xargs"
 	}
+	if err := s.sessionTool(c, args, via); err != nil {
+		return err
+	}
 	return s.check(c.Name, args, via)
+}
+
+// paramOperatorRe начало раскрытия с операндом: ${X:-, ${X-, ${X:=, ${X+, ${X?
+var paramOperatorRe = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]`)
+
+// withoutParamOperators текст, где начало раскрытия с операндом заменено
+// пробелом: слово kill в ${X:-kill} становится отдельным словом
+func withoutParamOperators(text string) string {
+	return paramOperatorRe.ReplaceAllString(text, " ")
+}
+
+// positionalRe имя из позиционных параметров: $@, "$@", $*, ${@}, $1, ${1}
+var positionalRe = regexp.MustCompile(`^\$\{?[@*0-9]`)
+
+// positionalSignal проверяет как сигнал слова за словом kill, pkill или
+// killall в аргументах вызовов команды: их исполнит имя из позиционных
+// параметров
+func (s *killScan) positionalSignal(calls []shellcmd.Call) error {
+	for _, x := range calls {
+		i := slices.IndexFunc(x.Args, func(a string) bool { return slices.Contains(signalNames, filepath.Base(a)) })
+		if i < 0 {
+			continue
+		}
+		args := make([]word, 0, len(x.Args)-i-1)
+		for _, a := range x.Args[i+1:] {
+			args = append(args, word{text: a, literal: !strings.ContainsAny(a, "$`")})
+		}
+		if err := s.check(filepath.Base(x.Args[i]), args, ""); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // fedIntoScript обёртка, которая подставляет ввод в скрипт вызова c:
@@ -382,18 +432,27 @@ func (s *killScan) addReason(reason string) {
 	}
 }
 
+// loadProcs читает процессы один раз на команду
+func (s *killScan) loadProcs() error {
+	if s.procs != nil {
+		return nil
+	}
+	procs, err := s.tool.listProcs()
+	if err != nil {
+		return err
+	}
+	s.procs = procs
+	return nil
+}
+
 // check проверяет одну простую команду, если она шлёт сигнал; via — обёртка,
 // подающая аргументы из ввода (xargs, parallel)
 func (s *killScan) check(name string, args []word, via string) error {
 	if !slices.Contains(signalNames, name) {
 		return nil
 	}
-	if s.procs == nil {
-		procs, err := s.tool.listProcs()
-		if err != nil {
-			return err
-		}
-		s.procs = procs
+	if err := s.loadProcs(); err != nil {
+		return err
 	}
 	var reason string
 	group := false
@@ -405,7 +464,7 @@ func (s *killScan) check(name string, args []word, via string) error {
 	case name == "kill":
 		reason, group = s.tool.checkKill(args, s.procs)
 	default:
-		reason = s.tool.checkPattern(name, args, s.command, s.procs)
+		reason, group = s.tool.checkPattern(name, args, s.command, s.procs)
 	}
 	if reason != "" {
 		s.addReason(reason)
@@ -422,7 +481,10 @@ func (s *killScan) check(name string, args []word, via string) error {
 func (t *KillGuardTool) checkKill(args []word, procs []procInfo) (reason string, group bool) {
 	// сигнал 0 пропускается без отрицательных целей: kill -s 0 -9 -1
 	// встроенный kill bash шлёт 0, а /bin/kill может прочесть -9 сигналом
-	targets, zero := killOptions(args)
+	targets, zero, computed := killOptions(args)
+	if computed != "" {
+		return fmt.Sprintf("kill %s: сигнал вычисляется при запуске, а без кавычек значение несёт и цели (S='9 -1' даст kill -s 9 -1), проверить его заранее нельзя", computed), false
+	}
 	if zero && !slices.ContainsFunc(targets, func(w word) bool { return strings.HasPrefix(w.text, "-") }) {
 		return "", false
 	}
@@ -451,116 +513,6 @@ func (t *KillGuardTool) checkKill(args []word, procs []procInfo) (reason string,
 		}
 	}
 	return "", false
-}
-
-// patternArgs разобранные аргументы pkill или killall
-type patternArgs struct {
-	full, exact, isRegex bool
-	// noSignal — справка, версия, список сигналов или сигнал 0: никто не
-	// будет завершён
-	noSignal bool
-	patterns []string
-}
-
-// parsePatternArgs разбирает флаги и шаблоны; непустая строка — причина отказа
-func parsePatternArgs(name string, args []word) (patternArgs, string) {
-	pa := patternArgs{isRegex: name == "pkill"}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if !a.literal {
-			return pa, fmt.Sprintf("%s %s: шаблон вычисляется при запуске, проверить его заранее нельзя", name, a.text)
-		}
-		switch {
-		case a.text == "-f" || a.text == "--full":
-			pa.full = true
-		case a.text == "-x" || a.text == "--exact" || a.text == "-e":
-			pa.exact = true
-		case a.text == "-r" || a.text == "--regexp":
-			pa.isRegex = true
-		case noSignalOption(name, a.text):
-			pa.noSignal = true
-		case optionTakesValue(name, a.text):
-			i++
-			pa.noSignal = pa.noSignal || signalZero(name, a.text, args, i)
-		case strings.HasPrefix(a.text, "-"):
-			// сигнал или флаг без значения
-		default:
-			pa.patterns = append(pa.patterns, a.text)
-		}
-	}
-	if name == "pkill" && len(pa.patterns) > 1 {
-		pa.patterns = pa.patterns[len(pa.patterns)-1:]
-	}
-	if len(pa.patterns) == 0 && !pa.noSignal {
-		return pa, name + " без шаблона выбирает процессы только по фильтру (-u, -P, -t, -g, -s): pkill -u $USER гасит все сессии разом"
-	}
-	return pa, ""
-}
-
-// signalZero — опция сигнала opt со значением args[i] задаёт сигнал 0 (у
-// pkill -s — сессия, не сигнал)
-func signalZero(name, opt string, args []word, i int) bool {
-	isSignal := opt == "--signal" || name == "killall" && opt == "-s"
-	return isSignal && i < len(args) && args[i].text == "0"
-}
-
-// noSignalOption флаг справки, версии, списка сигналов или сигнала 0:
-// утилита ничего не завершит
-func noSignalOption(name, opt string) bool {
-	switch opt {
-	case "--help", "-V", "--version", "-0", "--signal=0":
-		return true
-	case "-l", "--list":
-		return name == "killall"
-	}
-	return false
-}
-
-// regexp шаблон в том виде, как его сопоставляет утилита: killall без -r
-// сравнивает имя целиком, pkill -x — тоже
-func (pa patternArgs) regexp(p string) (*regexp.Regexp, error) {
-	expr, exact := p, pa.exact
-	if !pa.isRegex {
-		expr, exact = regexp.QuoteMeta(p), true
-	}
-	if exact {
-		expr = "^(?:" + expr + ")$"
-	}
-	return regexp.Compile(expr)
-}
-
-// checkPattern прикидывает, что заденет pkill или killall сейчас: шаблон
-// сверяется с теми же полями процессов, что у самой утилиты
-func (t *KillGuardTool) checkPattern(name string, args []word, command string, procs []procInfo) string {
-	pa, reason := parsePatternArgs(name, args)
-	if reason != "" || pa.noSignal {
-		return reason
-	}
-	ancestors := t.ancestors(procs)
-	for _, p := range pa.patterns {
-		re, err := pa.regexp(p)
-		if err != nil {
-			// утилита сама откажется от такого шаблона
-			t.Logger().Debug("kill pattern does not compile", "pattern", p, "error", err)
-			continue
-		}
-		if pa.full && re.MatchString(command) {
-			return fmt.Sprintf("%s -f %q совпадает с текстом самой команды и убьёт оболочку, которая её исполняет; шаблон вида '[x]yz' себя не ловит", name, p)
-		}
-		for _, pr := range procs {
-			subject := pr.comm
-			if pa.full {
-				subject = pr.cmdline
-			}
-			if !re.MatchString(subject) {
-				continue
-			}
-			if reason := t.dangerous(pr.pid, procs, ancestors); reason != "" {
-				return fmt.Sprintf("%s %q задевает PID %d: %s", name, p, pr.pid, reason)
-			}
-		}
-	}
-	return ""
 }
 
 // dangerous возвращает причину, по которой процесс трогать нельзя
@@ -657,23 +609,6 @@ func (t *KillGuardTool) ancestors(procs []procInfo) map[int]bool {
 	return out
 }
 
-// optionTakesValue флаги pkill и killall, за которыми идёт отдельное значение
-func optionTakesValue(name, opt string) bool {
-	if name == "pkill" {
-		switch opt {
-		case "-u", "-U", "-g", "-G", "-P", "-s", "-t", "--signal", "--euid", "--uid",
-			"--pgroup", "--group", "--parent", "--session", "--terminal", "--ns", "--nslist":
-			return true
-		}
-		return false
-	}
-	switch opt {
-	case "-u", "--user", "-s", "--signal", "-o", "--older-than", "-y", "--younger-than", "-n", "--ns":
-		return true
-	}
-	return false
-}
-
 // nameVarRe переменная, которую раскрывает имя вызова: ${a[@]}, ${a[0]},
 // $a, ${a}, $P$a
 var nameVarRe = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
@@ -711,8 +646,10 @@ var assignmentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 // (kill -0 -s 9 -- -1 шлёт 9, не 0); -SIG (-9, -KILL) — сигнал только
 // первым таким словом, дальше -N — цель (группа процессов); -- кончает
 // опции. zero — сигнал задан и равен 0. -l, -L, --list и --table печатают
-// список сигналов: целей нет
-func killOptions(args []word) (targets []word, zero bool) {
+// список сигналов: целей нет. computed — значение -s, -n или --signal,
+// вычисляемое при запуске (kill -s $S): без кавычек оно несёт и цели
+// (S='9 -1'), как kill -$S
+func killOptions(args []word) (targets []word, zero bool, computed string) {
 	targets = args
 	sawSignal := false
 	record := func(isZero bool) {
@@ -724,13 +661,16 @@ options:
 		opt := targets[0].text
 		switch {
 		case opt == "-l" || opt == "-L" || opt == "--list" || opt == "--table":
-			return nil, false
+			return nil, false, ""
 		case opt == "--":
 			targets = targets[1:]
 			break options
 		case opt == "-s" || opt == "-n" || opt == "--signal":
 			if len(targets) < 2 {
-				return nil, false
+				return nil, false, ""
+			}
+			if !targets[1].literal {
+				return targets[2:], false, opt + " " + targets[1].text
 			}
 			record(targets[1].text == "0")
 			targets = targets[2:]
@@ -744,5 +684,5 @@ options:
 			break options
 		}
 	}
-	return targets, zero
+	return targets, zero, ""
 }

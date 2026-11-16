@@ -44,7 +44,7 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 	var probe bool
 	cmd := &cobra.Command{
 		Use:   hookNightHint,
-		Short: "Ночью при заблокированном экране подсказать сессии: пользователь спит, вопрос — блоком в Сон (SessionStart, UserPromptSubmit, PreToolUse AskUserQuestion, Stop с ❓)",
+		Short: "Ночью при заблокированном экране подсказать сессии: пользователь спит, вопрос — тикетом админу пространства (SessionStart, UserPromptSubmit, PreToolUse AskUserQuestion, Stop с ❓)",
 		Long: "Подсказка в additionalContext, не отказ. Признак «спит» — экран заблокирован (LockedHint сессии seat0 в logind) и местное время 22:00–09:00. " +
 			"SessionStart и UserPromptSubmit — раз за ночь на сессию, PreToolUse AskUserQuestion — на каждый вызов, Stop — если в последнем ответе есть строка с ❓, раз за ход. " +
 			"--probe печатает признак блокировки и время его получения.",

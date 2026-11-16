@@ -430,3 +430,20 @@ func TestDamagedRecord(t *testing.T) {
 		})
 	}
 }
+
+// Адрес ночного вопроса — админ пространства (autonomous-work п.3 с 16.11,
+// тикет night-hint-question-to-admin), не прежний «блоком в Сон»
+func TestTextAddressesSpaceAdmin(t *testing.T) {
+	text := Text(time.Date(2026, 11, 15, 23, 5, 0, 0, time.Local))
+	if !strings.Contains(text, "админу пространства") {
+		t.Errorf("в подсказке нет адреса «админу пространства»: %q", text)
+	}
+	for _, old := range []string{"блоком в Сон", "проект Сна"} {
+		if strings.Contains(text, old) {
+			t.Errorf("в подсказке прежний адрес %q: %q", old, text)
+		}
+	}
+	if !strings.Contains(text, "23:05") {
+		t.Errorf("в подсказке нет времени: %q", text)
+	}
+}

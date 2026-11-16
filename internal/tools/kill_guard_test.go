@@ -371,6 +371,7 @@ func TestKillGuardBlocks(t *testing.T) {
 		`sudo -- X=1 Y=2 kill 1500`,
 		`timeout 5 sudo -- X=1 kill 2100`,
 		`nice sudo -u aisee -- X=1 Y=2 kill 1500`,
+		//nolint:signal-implicit-target // строка — случай теста kill_guard для ValidateTool: файл её не запускает, а kill во вложенной оболочке glint не прослеживает до помощника
 		`sudo -- X=1 bash <<< 'kill -9 -1'`,
 		`sudo -- X=1 bash -c 'kill -9 2100'`,
 		`sudo -E X=1 kill 1`,

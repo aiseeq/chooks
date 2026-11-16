@@ -58,7 +58,10 @@ var (
 // pkillOptions опции pkill (procps-ng 4.0.6, pkill --help): короткие —
 // одной буквой, длинные — с --. -e у pkill — echo (печать убитых), а не
 // точное совпадение; -r — состояния процессов со значением, не regexp;
-// --inverse (у pkill только длинная, -v — у pgrep) обращает выбор
+// --inverse (у pkill только длинная, -v — у pgrep) обращает выбор. Таблица
+// длинных опций у pkill и pgrep общая: опции pgrep (--delimiter, --list-name,
+// --list-full, --lightweight, --quiet) делают начало неоднозначным так же,
+// как у pgrep (pgrep --li: list-name, list-full, lightweight)
 var pkillOptions = map[string]patternOption{
 	"inverse": {apply: setInverse},
 	"f":       {apply: setFull}, "full": {apply: setFull},
@@ -75,6 +78,7 @@ var pkillOptions = map[string]patternOption{
 	"t": withValue, "terminal": withValue, "u": withValue, "euid": withValue, "U": withValue, "uid": withValue,
 	"F": withValue, "pidfile": withValue, "r": withValue, "runstates": withValue, "cgroup": withValue,
 	"ns": withValue, "nslist": withValue, "env": withValue,
+	"delimiter": withValue, "list-name": flag, "list-full": flag, "lightweight": flag, "quiet": flag,
 }
 
 // killallOptions опции killall (psmisc 23.7, killall --help): -e — точное
@@ -135,7 +139,7 @@ func (pa *patternArgs) option(options map[string]patternOption, args []word, i *
 	a := args[*i].text
 	if strings.HasPrefix(a, "--") {
 		long, v, hasValue := strings.Cut(a[2:], "=")
-		opt := options[long]
+		opt := options[longOption(options, long)]
 		if opt.value && !hasValue {
 			v = optionValue(args, i, "").text
 		}
@@ -155,6 +159,28 @@ func (pa *patternArgs) option(options map[string]patternOption, args []word, i *
 		opt.run(pa, optionValue(args, i, a[k+1:]).text)
 		return
 	}
+}
+
+// longOption имя длинной опции, как его находит getopt_long: точное, иначе
+// единственное, которое начинается с name (--inv — inverse, --sig —
+// signal). Неоднозначное начало (--i: inverse, ignore-case,
+// ignore-ancestors) и незнакомое имя утилита не исполнит: "", как у
+// незнакомой опции
+func longOption(options map[string]patternOption, name string) string {
+	if _, ok := options[name]; ok && len(name) > 1 {
+		return name
+	}
+	found := ""
+	for n := range options {
+		switch {
+		case len(n) < 2 || !strings.HasPrefix(n, name):
+		case found != "":
+			return ""
+		default:
+			found = n
+		}
+	}
+	return found
 }
 
 // run применяет опцию к разбору, если она что-то в нём меняет

@@ -275,6 +275,9 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		s.addReason(fmt.Sprintf("вложенность sh -c и eval глубже %d: проверить сигналы внутри нельзя", maxScriptNesting))
 		return nil
 	}
+	if sudoAssignment(c, calls) {
+		return nil
+	}
 	if !s.signalWord {
 		return s.signal(c, calls)
 	}
@@ -303,6 +306,21 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		}
 	}
 	return s.signal(c, calls)
+}
+
+// sudoAssignment — c не программа, а присваивание после sudo -- (sudo --
+// PATH=$PATH kill 1): shellcmd отдаёт его вызовом с присваиванием вместо
+// имени (PATH=$PATH, у X=a/b — b, у X=$(…) — пустым), а программу за ним —
+// следующим вызовом с теми же текстом и Via. Программу проверяет её вызов;
+// присваивание с $ — не имя, вычисляемое при запуске, а у оболочки за ним
+// (… | sudo -- X=1 bash) ввод читает она, а не X=1
+func sudoAssignment(c shellcmd.Call, calls []shellcmd.Call) bool {
+	if len(c.Args) == 0 || !slices.Contains(c.Via, "sudo") {
+		return false
+	}
+	return slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
+		return x.Raw == c.Raw && slices.Equal(x.Via, c.Via) && x.Name == filepath.Base(c.Args[0]) && slices.Equal(x.Args, c.Args[1:])
+	})
 }
 
 // signal проверяет вызов как сигнал: kill, pkill, killall или имя,

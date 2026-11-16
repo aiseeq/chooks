@@ -30,6 +30,7 @@ func (s *killScan) sessionTool(c shellcmd.Call, args []word, via string) error {
 	}
 	var reason string
 	group := false
+	hint := toolHints[c.Name]
 	switch {
 	case c.Name == "loginctl":
 		reason = loginctlReason(args)
@@ -37,7 +38,7 @@ func (s *killScan) sessionTool(c shellcmd.Call, args []word, via string) error {
 		if err := s.loadProcs(); err != nil {
 			return err
 		}
-		reason = s.tool.systemctlReason(args, via, s.procs)
+		reason, hint = s.tool.systemctlReason(args, via, s.procs)
 	case c.Name == "fuser":
 		reason = fuserReason(args, via)
 	case c.Name == "skill":
@@ -52,7 +53,7 @@ func (s *killScan) sessionTool(c shellcmd.Call, args []word, via string) error {
 	}
 	if reason != "" {
 		s.addReason(reason)
-		if hint := toolHints[c.Name]; hint != "" {
+		if hint != "" {
 			if s.toolHints == nil {
 				s.toolHints = map[string]string{}
 			}
@@ -65,12 +66,22 @@ func (s *killScan) sessionTool(c shellcmd.Call, args []word, via string) error {
 	return nil
 }
 
-// toolHints подсказка к отказу на средство, где узкая цель — не PID: юнит,
-// сессия tmux, порт
+// toolHints подсказка к отказу на средство, где узкая цель — не PID: сессия
+// tmux, порт. У systemctl она своя по отказу (systemctlHint)
 var toolHints = map[string]string{
-	"systemctl": "Назови юнит литералом и проверь, что он не держит сессию: systemctl --user status юнит",
-	"tmux":      "Назови цель литералом: tmux kill-session -t имя",
-	"fuser":     "Укажи порт вместо файла: fuser -k 8080/tcp",
+	"tmux":  "Назови цель литералом: tmux kill-session -t имя",
+	"fuser": "Укажи порт вместо файла: fuser -k 8080/tcp",
+}
+
+// systemctlHint подсказка к отказу systemctl с менеджером scope (systemctl
+// или systemctl --user): юнит из переменной, шаблона или ввода — назвать
+// литералом; юнит назван, но задевает сессию (или команда гасит весь
+// менеджер), — остановить юнит без процессов сессии или лишний процесс по PID
+func systemctlHint(scope string, named bool) string {
+	if !named {
+		return "Назови юнит литералом и проверь, что он не держит сессию: " + scope + " status юнит"
+	}
+	return "Останавливай юнит, где нет процессов сессии: посмотри их (" + scope + " status юнит) и убей лишний процесс литералом: kill 12345"
 }
 
 // optionValue значение опции со значением: из слова (--signal=9, -s9) или
@@ -147,10 +158,25 @@ var systemctlStopVerbs = []string{"stop", "kill", "restart", "try-restart", "rel
 // запускают юнит снова
 var systemctlRestartVerbs = []string{"restart", "try-restart", "reload-or-restart", "try-reload-or-restart", "condrestart", "force-reload"}
 
-// restartableUnit юнит, рестарт которого сессию не гасит: plasmashell
-// (панель, рабочий стол) поднимается заново, окна и терминалы живут — в
-// отличие от kwin. Стоп и kill — отказ, как у прочих
-const restartableUnit, restartableComm = "plasma-plasmashell.service", "plasmashell"
+// restartableComms юниты (имя без .service и .socket), рестарт которых
+// сессию не гасит, и процесс в них: plasmashell (панель, рабочий стол)
+// поднимается заново, окна и терминалы живут — в отличие от kwin; звук
+// (pipewire, wireplumber) перезапускают, когда он пропал. pipewire-pulse
+// сессию не держит (нет в protectedComms): его юнит можно и так. Стоп и
+// kill — отказ, как у прочих
+var restartableComms = map[string]string{
+	"plasma-plasmashell": "plasmashell", "pipewire": "pipewire", "wireplumber": "wireplumber",
+}
+
+// restartableComm процесс, которому рестарт юнита name (с типом) не
+// страшен; "" — такого нет
+func restartableComm(name string) string {
+	base, ok := strings.CutSuffix(name, ".service")
+	if !ok {
+		base, _ = strings.CutSuffix(name, ".socket")
+	}
+	return restartableComms[base]
+}
 
 // unitSuffixes типы юнитов: имя без них systemctl дополняет .service
 var unitSuffixes = []string{".service", ".socket", ".target", ".scope", ".slice", ".timer", ".mount", ".automount", ".path", ".device", ".swap"}
@@ -160,12 +186,12 @@ var unitSuffixes = []string{".service", ".socket", ".target", ".scope", ".slice"
 // cgroup процесса: user.slice/…/user@1000.service/app.slice/app-…scope),
 // а также на юнит из переменной, шаблон юнитов, цель (.target: что
 // остановится с ней, не видно) и команды, гасящие весь менеджер. Юниты,
-// пришедшие из ввода (xargs), — тоже отказ
-func (t *KillGuardTool) systemctlReason(args []word, via string, procs []procInfo) string {
+// пришедшие из ввода (xargs), — тоже отказ. hint — подсказка к отказу
+func (t *KillGuardTool) systemctlReason(args []word, via string, procs []procInfo) (reason, hint string) {
 	user, now, zero := systemctlFlags(args)
 	ops := optionOperands(args, systemctlValues)
 	if len(ops) == 0 {
-		return ""
+		return "", ""
 	}
 	verb := ops[0].text
 	scope := "systemctl"
@@ -174,27 +200,28 @@ func (t *KillGuardTool) systemctlReason(args []word, via string, procs []procInf
 	}
 	switch {
 	case slices.Contains(systemctlEndVerbs, verb):
-		return scope + " " + verb + " гасит все юниты менеджера: сессии Claude, терминал и графическую оболочку"
+		return scope + " " + verb + " гасит все юниты менеджера: сессии Claude, терминал и графическую оболочку", systemctlHint(scope, true)
 	case verb == "kill" && zero:
-		return ""
+		return "", ""
 	case slices.Contains(systemctlStopVerbs, verb) || now && (verb == "disable" || verb == "mask"):
 	default:
-		return ""
+		return "", ""
 	}
 	if via != "" {
-		return scope + " " + verb + " через " + via + ": юниты приходят из ввода, проверить их до запуска нельзя"
+		return scope + " " + verb + " через " + via + ": юниты приходят из ввода, проверить их до запуска нельзя", systemctlHint(scope, false)
 	}
 	hosts := t.sessionUnits(procs, user, "")
 	for _, u := range ops[1:] {
 		h := hosts
-		if u.literal && slices.Contains(systemctlRestartVerbs, verb) && unitName(u.text) == restartableUnit {
-			h = t.sessionUnits(procs, user, restartableComm)
+		if spare := restartableComm(unitName(u.text)); spare != "" && slices.Contains(systemctlRestartVerbs, verb) {
+			h = t.sessionUnits(procs, user, spare)
 		}
 		if reason := unitReason(u, h); reason != "" {
-			return fmt.Sprintf("%s %s %s: %s", scope, verb, u.text, reason)
+			named := u.literal && !strings.ContainsAny(u.text, "*?[{")
+			return fmt.Sprintf("%s %s %s: %s", scope, verb, u.text, reason), systemctlHint(scope, named)
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // systemctlFlags опции systemctl, от которых зависит отказ: --user (юниты
@@ -413,24 +440,15 @@ func skillReason(args []word) string {
 // tmuxReason tmux kill-server гасит все сессии tmux на сокете, kill-session,
 // kill-window и kill-pane без -t — текущую (вне tmux — последнюю), с -a —
 // все, кроме неё: сессия Claude может быть среди них. Свой сервер (-L, -S
-// в глобальных опциях) и цель литералом (-t name) — можно
+// в глобальных опциях, кроме сервера по умолчанию) и цель литералом (-t
+// name) — можно
 func tmuxReason(args []word) string {
-	i := 0
-	for ; i < len(args) && strings.HasPrefix(args[i].text, "-"); i++ {
-		a := args[i].text
-		if a == "--" {
-			i++
-			break
-		}
-		if strings.ContainsAny(a, "LS") {
-			return ""
-		}
-		if strings.ContainsAny(a[len(a)-1:], "fcTLS") {
-			i++
-		}
+	i, own := tmuxGlobalOptions(args)
+	if own {
+		return ""
 	}
 	var segment []word
-	for _, a := range append(slices.Clone(args[min(i, len(args)):]), word{text: ";", literal: true}) {
+	for _, a := range append(tmuxWords(args[i:]), word{text: ";", literal: true}) {
 		if a.text != ";" {
 			segment = append(segment, a)
 			continue
@@ -441,6 +459,63 @@ func tmuxReason(args []word) string {
 		segment = nil
 	}
 	return ""
+}
+
+// tmuxGlobalOptions разбирает опции tmux до команды: i — первое слово
+// команды, own — сервер не тот, где по умолчанию идут сессии. -c, -f, -L,
+// -S, -T берут значение (остаток связки или следующее слово), прочие буквы
+// и -- значения не берут; -S задаёт сокет и перекрывает -L, из нескольких
+// -L действует последний. Сервер по
+// умолчанию — -L default и сокет default в каталоге tmux-UID
+// (/tmp/tmux-1000/default, "$TMUX_TMPDIR/tmux-$UID/default": у слова с $
+// текст — исходник с кавычками)
+func tmuxGlobalOptions(args []word) (int, bool) {
+	label, path := "default", ""
+	i := 0
+	for ; i < len(args) && strings.HasPrefix(args[i].text, "-"); i++ {
+		a := args[i].text
+		k := strings.IndexAny(a, "cfLST")
+		if k < 0 {
+			continue
+		}
+		switch v := optionValue(args, &i, a[k+1:]).text; a[k] {
+		case 'L':
+			label = v
+		case 'S':
+			path = v
+		}
+	}
+	if path != "" {
+		return min(i, len(args)), !defaultTmuxSocket(unquoted(path))
+	}
+	return min(i, len(args)), label != "default"
+}
+
+// defaultTmuxSocket сокет сервера tmux по умолчанию: default в каталоге
+// tmux-UID
+func defaultTmuxSocket(path string) bool {
+	p := filepath.Clean(path)
+	return filepath.Base(p) == "default" && strings.HasPrefix(filepath.Base(filepath.Dir(p)), "tmux-")
+}
+
+// tmuxWords слова команд tmux с разделителями: слово, кончающееся на ;
+// (kill-server\; в оболочке), tmux делит на слово без ; и разделитель
+// команд, а \; на конце слова — литерал ;. Отдельное ; даёт пустое слово
+// и разделитель: пустое слово цели не задаёт и команды не называет
+func tmuxWords(args []word) []word {
+	var out []word
+	for _, a := range args {
+		body, ok := strings.CutSuffix(a.text, ";")
+		switch {
+		case !ok:
+			out = append(out, a)
+		case strings.HasSuffix(body, `\`):
+			out = append(out, word{text: strings.TrimSuffix(body, `\`) + ";", literal: a.literal})
+		default:
+			out = append(out, word{text: body, literal: a.literal}, word{text: ";", literal: true})
+		}
+	}
+	return out
 }
 
 // tmuxKillCommands команды tmux, гасящие сервер, сессию, окно или панель
@@ -489,7 +564,8 @@ func tmuxCommandReason(cmd []word) string {
 			if !v.literal {
 				return fmt.Sprintf("tmux %s -t %s: цель вычисляется при запуске, проверить её заранее нельзя", name, v.text)
 			}
-			target = true
+			// пустая цель (-t '') у tmux — текущая
+			target = v.text != ""
 		case strings.HasPrefix(a, "-t"):
 			target = cmd[i].literal
 		case len(a) > 1 && a[0] == '-' && strings.Contains(a, "a"):

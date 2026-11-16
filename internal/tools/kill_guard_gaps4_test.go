@@ -179,8 +179,8 @@ func TestKillGuardGaps4Reasons(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct{ command, hint string }{
-		{`systemctl --user stop agents.slice`, toolHints["systemctl"]},
-		{`sudo systemctl stop session-3.scope`, toolHints["systemctl"]},
+		{`systemctl --user stop agents.slice`, systemctlHint("systemctl --user", true)},
+		{`sudo systemctl stop session-3.scope`, systemctlHint("systemctl", true)},
 		{`tmux kill-server`, toolHints["tmux"]},
 		{`fuser -k .`, toolHints["fuser"]},
 	} {

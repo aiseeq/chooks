@@ -92,24 +92,44 @@ func TestDryText(t *testing.T) {
 		ExpiredLogins: []accounts.ExpiredLogin{{Email: "y@protonmail.com", LoginEnds: ends, Used: 81}},
 		LostResets:    []accounts.LostReset{{Email: "z@gmail.com", ResetsAt: resets, LoginEnds: dry.Add(time.Hour)}},
 	}
-	want = "пул кончится " + st(dry) + ": истекает вход protonmail.com (до " + st(ends) + ", остаток недели 36%)" +
+	want = "пул кончится " + st(dry) + ": без нового входа не взять protonmail.com (вход до " + st(ends) + ", остаток недели 36%)" +
 		"; сброс gmail.com " + st(resets) + " без нового входа не вернёт Claude (вход до " + st(dry.Add(time.Hour)) + ")" +
 		"; до сброса work.example 100 ч"
 	if got := dryText(store, login, unit); got != want {
 		t.Errorf("вход:\n%s\nожидалось\n%s", got, want)
 	}
 	login.LostResets = nil
-	want = "пул кончится " + st(dry) + ": истекает вход protonmail.com (до " + st(ends) + ", остаток недели 36%); до сброса work.example 100 ч"
+	want = "пул кончится " + st(dry) + ": без нового входа не взять protonmail.com (вход до " + st(ends) + ", остаток недели 36%); до сброса work.example 100 ч"
 	if got := dryText(store, login, unit); got != want {
 		t.Errorf("вход без сбросов без входа:\n%s\nожидалось\n%s", got, want)
 	}
 	login.LostResets = []accounts.LostReset{{Email: "z@gmail.com", ResetsAt: resets, LoginEnds: dry.Add(time.Hour)}}
-	login.ExpiredLogins = append(login.ExpiredLogins, accounts.ExpiredLogin{Email: "x@work.example", LoginEnds: ends, Used: 0})
+	login.ExpiredLogins = append(login.ExpiredLogins, accounts.ExpiredLogin{Email: "x@work.example", Used: 0})
 	login.RefillAt, login.RefillEmail = time.Time{}, ""
-	want = "пул кончится " + st(dry) + ": истекают входы protonmail.com (до " + st(ends) + ", остаток недели 36%), work.example (до " + st(ends) + ", остаток недели 198%)" +
+	want = "пул кончится " + st(dry) + ": без нового входа не взять protonmail.com (вход до " + st(ends) + ", остаток недели 36%), work.example (вход негоден, остаток недели 198%)" +
 		"; сброс gmail.com " + st(resets) + " без нового входа не вернёт Claude (вход до " + st(dry.Add(time.Hour)) + ")" +
 		"; без нового входа сброса нет"
 	if got := dryText(store, login, unit); got != want {
 		t.Errorf("два входа, возврата нет:\n%s\nожидалось\n%s", got, want)
+	}
+	none := accounts.Forecast{DryAt: dry, DryCause: accounts.DryLogin, LostResets: []accounts.LostReset{{Email: "z@gmail.com", ResetsAt: resets}}}
+	want = "пул кончится " + st(dry) + ": годного входа нет ни у одной учётки; сброс gmail.com " + st(resets) + " без нового входа не вернёт Claude (вход негоден); без нового входа сброса нет"
+	if got := dryText(store, none, unit); got != want {
+		t.Errorf("годных входов нет:\n%s\nожидалось\n%s", got, want)
+	}
+}
+
+// Строка «Пул учёток» при пустоте из-за входа называет вход, а не только
+// момент и сброс
+func TestPoolTextLogin(t *testing.T) {
+	now := time.Date(2026, 11, 15, 22, 47, 0, 0, time.UTC)
+	store := &accounts.Store{Accounts: []accounts.Account{{Email: "y@protonmail.com"}}}
+	f := PoolForecast{Forecast: accounts.Forecast{
+		Rate: 1, Pace: accounts.PaceOver, DryAt: now.Add(time.Hour), DryCause: accounts.DryLogin,
+		ExpiredLogins: []accounts.ExpiredLogin{{Email: "y@protonmail.com", LoginEnds: now.Add(2 * time.Hour), Used: 50}},
+	}, RateSpanHours: 72}
+	got := poolText(store, f, accounts.Unit{Scale: 2}, now)
+	if want := "Пул учёток: темп 48% в сутки (за 72 ч); пул кончится " + accounts.ShortTime(now.Add(time.Hour)) + ": без нового входа не взять protonmail.com"; !strings.HasPrefix(got, want) {
+		t.Errorf("строка пула:\n%s\nожидалось начало\n%s", got, want)
 	}
 }

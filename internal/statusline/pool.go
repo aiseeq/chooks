@@ -167,16 +167,16 @@ func dryText(store *accounts.Store, f accounts.Forecast, unit accounts.Unit) str
 	if f.DryCause == accounts.DryLogin {
 		var ends []string
 		for _, e := range f.ExpiredLogins {
-			ends = append(ends, fmt.Sprintf("%s (до %s, остаток недели %s)", name(e.Email), accounts.ShortTime(e.LoginEnds), unit.Percent(accounts.WeekEmptyPercent-e.Used)))
+			ends = append(ends, fmt.Sprintf("%s (%s, остаток недели %s)", name(e.Email), loginText(e.LoginEnds), unit.Percent(accounts.WeekEmptyPercent-e.Used)))
 		}
-		head := ": истекает вход "
-		if len(ends) > 1 {
-			head = ": истекают входы "
+		if len(ends) == 0 {
+			parts[0] += ": годного входа нет ни у одной учётки"
+		} else {
+			parts[0] += ": без нового входа не взять " + strings.Join(ends, ", ")
 		}
-		parts[0] += head + strings.Join(ends, ", ")
 	}
 	for _, r := range f.LostResets {
-		parts = append(parts, fmt.Sprintf("сброс %s %s без нового входа не вернёт Claude (вход до %s)", name(r.Email), accounts.ShortTime(r.ResetsAt), accounts.ShortTime(r.LoginEnds)))
+		parts = append(parts, fmt.Sprintf("сброс %s %s без нового входа не вернёт Claude (%s)", name(r.Email), accounts.ShortTime(r.ResetsAt), loginText(r.LoginEnds)))
 	}
 	refill := "без нового входа сброса нет"
 	if !f.RefillAt.IsZero() {
@@ -187,6 +187,14 @@ func dryText(store *accounts.Store, f accounts.Forecast, unit accounts.Unit) str
 		return parts[0] + ", " + refill
 	}
 	return strings.Join(append(parts, refill), "; ")
+}
+
+// loginText — срок входа учётки; ноль — вход негоден без срока
+func loginText(ends time.Time) string {
+	if ends.IsZero() {
+		return "вход негоден"
+	}
+	return "вход до " + accounts.ShortTime(ends)
 }
 
 // WritePoolJSON печатает прогноз пула JSON для страницы Сна

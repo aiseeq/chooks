@@ -199,10 +199,13 @@ func (s *killScan) parsedCalls() error {
 		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду со словом kill, отказ", "error", err)
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
-	if s.signalWord && procSubstAfterParamRe.MatchString(s.command) {
+	if s.signalWord && procSubstAfterParam(s.command) {
 		s.addReason(procSubstAfterParamReason)
 	}
 	for _, c := range calls {
+		if s.signalWord && procSubstAfterParam(c.Raw) {
+			s.addReason(procSubstAfterParamReason)
+		}
 		if err := s.call(c, calls); err != nil {
 			return err
 		}
@@ -219,6 +222,15 @@ func (s *killScan) parsedCalls() error {
 // ложный отказ на команде со словом kill, где <( просто стоит после ${,
 // допустим. Снять после akit shellcmd-param-operand-procsubst
 var procSubstAfterParamRe = regexp.MustCompile(`(?s)\$\{.*[<>]\(`)
+
+// procSubstAfterParam — в тексте без кавычек и \ после ${ стоит <( или >(.
+// Текст без кавычек ловит ${ и <(, собранные кавычками во вложенном скрипте
+// ($ и { в соседних кавычках в bash -c '…', "\${X:-<(…)}"), и всё, что ловит исходный
+// текст: кавычки и \ из него только убираются. Текст вызова (c.Raw) —
+// вложенный скрипт после раскрытия $'…' (bash -c $'echo ${X:-\x3c(…)}')
+func procSubstAfterParam(text string) bool {
+	return procSubstAfterParamRe.MatchString(unquoted(text))
+}
 
 // procSubstAfterParamReason причина временного отказа на <(…) после ${
 const procSubstAfterParamReason = "в команде со словом kill после ${ стоит <(…) или >(…): если они внутри ${…} (echo ${X:-<(kill …)}), разбор оболочки вызовы там не видит, проверить сигналы нельзя. Временное правило до починки разбора (akit shellcmd-param-operand-procsubst): вынеси <(…) из команды с kill или раздели команду"

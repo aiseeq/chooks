@@ -442,6 +442,27 @@ func TestKillGuardBlocks(t *testing.T) {
 		"su -c '[[ ${X:-${Z}<(kill -9 -1)} ]]'",
 		"watch '[[ ${X:-${Z}<(kill -9 -1)} ]]'",
 		"trap '[[ ${X:-${Z}<(kill -9 -1)} ]]' EXIT",
+		// ${ или <( собраны кавычками или \ во вложенном скрипте, <( из $'\x3c('
+		"eval 'echo $''{X:-<(kill -9 -1)}'",
+		"bash -c 'echo $''{X:-<(kill -9 -1)}'",
+		"bash -c $'echo \\x24{X:-<(kill -9 -1)}'",
+		"bash -c $'echo ${X:-\\x3c(kill -9 -1)}'",
+		"bash -c $'echo ${X:-\\x3e(kill -9 -1)}'",
+		"eval 'echo ${X:-<''(kill -9 -1)}'",
+		"eval echo \\${X:-\\<\\(kill -9 -1\\)}",
+		"bash -c \"echo \\$\"\"{X:-<(kill -9 -1)}\"",
+		"eval 'echo $'{X:-'<(kill -9 -1)}'",
+		"sh -c 'echo $''{X:-<(kill -9 -1)}'",
+		"su -c 'echo $''{X:-<(kill -9 -1)}'",
+		"watch 'echo $''{X:-<(kill -9 -1)}'",
+		"trap 'echo $''{X:-<(kill -9 -1)}' EXIT",
+		"bash -c 'X=$''{Y:-<(kill -9 -1)}; true'",
+		"bash -c '[[ $''{X:-<(kill -9 -1)} ]]'",
+		"bash <<< 'echo $''{X:-<(kill -9 -1)}'",
+		"bash -c 'echo $''{X:->(kill -9 -1)}'",
+		"bash <<< $'echo \\x24{X:-<(kill -9 -1)}'",
+		"bash <<< $'echo ${X:-\\x3c(kill -9 -1)}'",
+		"bash <<< 'X=$''{Y:-<(kill -9 -1)}'",
 		// временное правило: <(…) где-либо после ${ в команде со словом kill —
 		// отказ, и ложный (в кавычках, в теле heredoc для файла, <(…) после
 		// ${…}, а не внутри)
@@ -684,6 +705,9 @@ func TestKillGuardAllows(t *testing.T) {
 		`echo "${NAME:-<unset>}"; kill 455274`,
 		`kill 455274; echo ${X}`,
 		`diff <(a) <(b); kill 455274; echo ${X}`,
+		// $ без { и { без $ перед <(…)
+		`echo $X; diff <(a) <(b); kill 455274`,
+		`{ diff <(a) <(b); }; kill 455274`,
 		"cat <<E\nkill -l",
 		// = в имени команды за sudo -- — не присваивание
 		`sudo -- ./job=1.sh --mode kill`,

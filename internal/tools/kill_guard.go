@@ -54,7 +54,8 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
-	scan := killScan{tool: t, command: input.Command, signalWord: signalWordRe.MatchString(unquoted(input.Command))}
+	scan := killScan{tool: t, command: input.Command, signalWord: signalWordRe.MatchString(unquoted(input.Command)),
+		zsh: zshWordRe.MatchString(unquoted(input.Command))}
 	if err := scan.parsedCalls(); err != nil {
 		return nil, err
 	}
@@ -105,6 +106,8 @@ type killScan struct {
 	// или killall: скрипт, который станет известен только при запуске, рядом
 	// с ним — отказ. Подстрока kill (skills) — не повод
 	signalWord bool
+	// zsh — в команде есть слово zsh: подстановка процесса бывает и =(…)
+	zsh bool
 }
 
 // signalWordRe отдельное слово kill, pkill, killall, killall5
@@ -199,11 +202,11 @@ func (s *killScan) parsedCalls() error {
 		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду со словом kill, отказ", "error", err)
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
-	if s.signalWord && procSubstAfterParam(s.command) {
+	if s.signalWord && s.procSubstAfterParam(s.command) {
 		s.addReason(procSubstAfterParamReason)
 	}
 	for _, c := range calls {
-		if s.signalWord && procSubstAfterParam(c.Raw) {
+		if s.signalWord && s.procSubstAfterParam(c.Raw) {
 			s.addReason(procSubstAfterParamReason)
 		}
 		if err := s.call(c, calls); err != nil {
@@ -223,17 +226,29 @@ func (s *killScan) parsedCalls() error {
 // допустим. Снять после akit shellcmd-param-operand-procsubst
 var procSubstAfterParamRe = regexp.MustCompile(`(?s)\$\{.*[<>]\(`)
 
+// zshProcSubstAfterParamRe то же для команды со словом zsh: у zsh
+// подстановка процесса — и =(…) (zsh -c 'echo ${X:-=(kill …)}'). Без zsh
+// =( не ищется: a=(…) после ${ — частый массив bash
+var zshProcSubstAfterParamRe = regexp.MustCompile(`(?s)\$\{.*[<>=]\(`)
+
+// zshWordRe отдельное слово zsh (не .zshrc)
+var zshWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])zsh([^[:alnum:]_.-]|$)`)
+
 // procSubstAfterParam — в тексте без кавычек и \ после ${ стоит <( или >(.
 // Текст без кавычек ловит ${ и <(, собранные кавычками во вложенном скрипте
 // ($ и { в соседних кавычках в bash -c '…', "\${X:-<(…)}"), и всё, что ловит исходный
 // текст: кавычки и \ из него только убираются. Текст вызова (c.Raw) —
 // вложенный скрипт после раскрытия $'…' (bash -c $'echo ${X:-\x3c(…)}')
-func procSubstAfterParam(text string) bool {
-	return procSubstAfterParamRe.MatchString(unquoted(text))
+func (s *killScan) procSubstAfterParam(text string) bool {
+	re := procSubstAfterParamRe
+	if s.zsh {
+		re = zshProcSubstAfterParamRe
+	}
+	return re.MatchString(unquoted(text))
 }
 
 // procSubstAfterParamReason причина временного отказа на <(…) после ${
-const procSubstAfterParamReason = "в команде со словом kill после ${ стоит <(…) или >(…): если они внутри ${…} (echo ${X:-<(kill …)}), разбор оболочки вызовы там не видит, проверить сигналы нельзя. Временное правило до починки разбора (akit shellcmd-param-operand-procsubst): вынеси <(…) из команды с kill или раздели команду"
+const procSubstAfterParamReason = "в команде со словом kill после ${ стоит <(…) или >(…) (в zsh и =(…)): если они внутри ${…} (echo ${X:-<(kill …)}), разбор оболочки вызовы там не видит, проверить сигналы нельзя. Временное правило до починки разбора (akit shellcmd-param-operand-procsubst): вынеси <(…) из команды с kill или раздели команду"
 
 // call проверяет один вызов из разбора оболочки; calls — все вызовы
 // команды: среди них ищется xargs, подающий ввод в скрипт вызова

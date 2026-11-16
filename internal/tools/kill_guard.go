@@ -120,9 +120,11 @@ var signalNames = []string{"kill", "pkill", "killall", "killall5"}
 // сообщает (кроме eval) — признак берётся отсюда
 var scriptRunners = []string{"eval", "watch", "trap", "su", "runuser"}
 
-// shellCommandOption опция оболочки с c в короткой связке: -c, -lc, -ec
+// shellCommandOption короткая связка опций оболочки (после - или +) с c:
+// -c, -lc, -ec; bash исполняет скрипт и с +c (+xc). Длинные опции (--…)
+// shellScript разбирает раньше
 func shellCommandOption(arg string) bool {
-	return strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg[1:], "c")
+	return strings.Contains(arg[1:], "c")
 }
 
 // shellScript скрипт оболочки с -c: первый операнд после опций. Без -c
@@ -198,16 +200,9 @@ func (s *killScan) parsedCalls() error {
 		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду со словом kill, отказ", "error", err)
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
-	for i := 0; i < len(calls); i++ {
-		c := calls[i]
-		if assignmentWord(c.Name) {
-			after, err := afterAssignments(c)
-			if err != nil {
-				s.tool.Logger().Warn("kill_guard: команда за присваиванием не разобрана, отказ", "error", err)
-				s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
-			}
-			calls = append(calls, after...)
-			continue
+	for _, c := range calls {
+		if s.signalWord {
+			s.paramProcSubst(c.Raw)
 		}
 		if err := s.call(c, calls); err != nil {
 			return err
@@ -216,35 +211,17 @@ func (s *killScan) parsedCalls() error {
 	return nil
 }
 
-// assignmentWord — имя вызова оказалось присваиванием: обёртка (sudo X=1
-// kill …, sudo -u root X=1 kill …) ставит окружение перед программой, а
-// shellcmd v1.76.1 отдаёт присваивание именем вызова, программу — первым
-// аргументом. sudo считает переменной не только имя по правилам оболочки
-// (1X=2 тоже), а имя программы с = — редкость: снимается любое слово с =
-func assignmentWord(name string) bool {
-	return strings.Contains(name, "=")
-}
-
-// afterAssignments вызовы команды, которая исполнится за присваиванием
-// вызова c: его аргументы разбираются заново (там бывают ещё присваивания,
-// обёртки и оболочки), Via вызовов начинается с Via вызова c. Слова —
-// значения shellcmd, слово с подстановкой — исходный текст: в кавычках он
-// остаётся словом с $ и проверяется как вычисляемое (kill '$P' — PID при
-// запуске, setsid '$K' — ошибка разбора)
-func afterAssignments(c shellcmd.Call) ([]shellcmd.Call, error) {
-	quoted := make([]string, 0, len(c.Args))
-	for _, w := range c.Args {
-		q, err := syntax.Quote(w, syntax.LangBash)
-		if err != nil {
-			return nil, fmt.Errorf("слово %q за присваиванием: %w", w, err)
-		}
-		quoted = append(quoted, q)
+// paramProcSubst отказ на <(…) или >(…) в операнде ${…} вызова; снимается,
+// когда akit найдёт вызовы в операнде ${…}
+func (s *killScan) paramProcSubst(raw string) {
+	found, err := paramProcSubst(raw)
+	if err != nil {
+		s.tool.Logger().Warn("kill_guard: текст вызова не разобрался, отказ", "error", err)
+		s.addReason("разбор вызова не прошёл (" + err.Error() + "): проверить <(…) внутри ${…} нельзя")
 	}
-	calls, err := shellcmd.Calls(strings.Join(quoted, " "))
-	for k := range calls {
-		calls[k].Via = append(slices.Clone(c.Via), calls[k].Via...)
+	if found {
+		s.addReason("<(…) или >(…) внутри ${…} (echo ${X:-<(kill …)}): разбор оболочки вызовы там не видит, проверить сигналы нельзя")
 	}
-	return calls, err
 }
 
 // call проверяет один вызов из разбора оболочки; calls — все вызовы
@@ -287,13 +264,23 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 // signal проверяет вызов как сигнал: kill, pkill, killall или имя,
 // вычисляемое при запуске. Такое имя — отказ, если в тексте вызова есть
 // слово kill ($(echo kill) 1, $X kill 1); kill внутри чужого слова
-// (-r raw-process-kill) — не повод. Переменную shellcmd раскрывает только
-// в имени самой команды: K=kill; sudo $K -9 -1 даёт вызов «$K» за sudo без
-// значения, и этот случай здесь не виден (пробел akit)
+// (-r raw-process-kill) — не повод. Подстановку команды в имени ($(…),
+// `…`) shellcmd отдаёт пустым именем, раскрытие параметра — его текстом с
+// $, без значения (K=kill; sudo $K -9 -1 даёт вызов «$K» за sudo). Имя из
+// раскрытия переменной или массива ($K, "${a[@]}") — отказ, если в
+// команде им присвоено слово сигнала (a=(kill -9 -1)): слово kill стоит в
+// присваивании, а не в тексте вызова
 func (s *killScan) signal(c shellcmd.Call) error {
-	if c.Name == "" || strings.ContainsAny(c.Name, "$`") {
-		if signalWordRe.MatchString(unquoted(c.Raw)) {
+	if c.Name == "sudo" && sudoDashAssignment(c.Args) && signalWordRe.MatchString(unquoted(c.Raw)) {
+		// снимается, когда akit снимет присваивание за sudo --
+		s.addReason("присваивание за sudo -- (sudo -- X=1 kill …): разбор оболочки принял его за имя команды, проверить сигналы нельзя")
+	}
+	if c.Name == "" || strings.Contains(c.Name, "$") {
+		switch {
+		case signalWordRe.MatchString(unquoted(c.Raw)):
 			s.addReason("имя команды вычисляется при запуске ($(…), `…` или $X) рядом с kill: проверить, что исполнится, нельзя")
+		case arraySignal(c.Name, s.command):
+			s.addReason("имя команды — раскрытие переменной или массива, которым в команде присвоено слово kill (a=(kill …); \"${a[@]}\"): проверить, что исполнится, нельзя")
 		}
 		return nil
 	}
@@ -407,22 +394,11 @@ func (s *killScan) check(name string, args []word, via string) error {
 // не задевает сессию. Сигнал 0 лишь проверяет, жив ли процесс, — цели любые.
 // group — отказ из-за сигнала группе процессов (PID меньше -1)
 func (t *KillGuardTool) checkKill(args []word, procs []procInfo) (reason string, group bool) {
-	targets := args
-	if len(targets) > 0 && strings.HasPrefix(targets[0].text, "-") && targets[0].literal {
-		switch targets[0].text {
-		case "-l", "-L", "--list", "--table", "-0", "--signal=0":
-			return "", false
-		case "-s", "-n", "--signal":
-			if len(targets) > 1 && targets[1].literal && targets[1].text == "0" {
-				return "", false
-			}
-			targets = targets[min(2, len(targets)):]
-		default:
-			targets = targets[1:]
-		}
-	}
-	if len(targets) > 0 && targets[0].text == "--" {
-		targets = targets[1:]
+	// сигнал 0 пропускается без отрицательных целей: kill -s 0 -9 -1
+	// встроенный kill bash шлёт 0, а /bin/kill может прочесть -9 сигналом
+	targets, zero := killOptions(args)
+	if zero && !slices.ContainsFunc(targets, func(w word) bool { return strings.HasPrefix(w.text, "-") }) {
+		return "", false
 	}
 	ancestors := t.ancestors(procs)
 	for _, w := range targets {
@@ -670,4 +646,117 @@ func optionTakesValue(name, opt string) bool {
 		return true
 	}
 	return false
+}
+
+// nameVarRe переменная, которую раскрывает имя вызова: ${a[@]}, ${a[0]},
+// $a, ${a}, $P$a
+var nameVarRe = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
+
+// arraySignal — имя вызова раскрывает переменную или массив, а в команде
+// им присвоено значение со словом сигнала: a=(kill -9 -1), a+=(…),
+// a[0]=kill, declare -a a=(…); a=(kill); $a -9 -1 и K=kill; $P$K 1
+// исполнят kill. shellcmd значение массива в имя не подставляет.
+// Присваивание ищется в тексте всей команды: оно бывает и в теле heredoc
+// для оболочки
+func arraySignal(name, command string) bool {
+	for _, m := range nameVarRe.FindAllStringSubmatch(name, -1) {
+		assign := regexp.MustCompile(`(^|[^A-Za-z0-9_])` + m[1] + `(\[[^\]]*\])?\+?=(\([^)]*\)|\S*)`)
+		for _, a := range assign.FindAllStringSubmatch(command, -1) {
+			if signalWordRe.MatchString(unquoted(a[3])) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sudoDashAssignment — за -- в аргументах sudo стоит присваивание (sudo --
+// X=1 kill): shellcmd (akit v1.76.2) его не снимает и отдаёт именем вызова
+// X=1 (X=a/b — именем b), а kill — аргументом
+func sudoDashAssignment(args []string) bool {
+	i := slices.Index(args, "--")
+	return i >= 0 && i+1 < len(args) && assignmentRe.MatchString(args[i+1])
+}
+
+var assignmentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// paramProcSubst — в операнде ${…} вызова стоит <(…) или >(…): ${X:-<(…)},
+// ${X#<(…)}, ${X/a/<(…)}. mvdan/sh держит операнд литералом, и shellcmd
+// вызовы в нём не находит (akit shellcmd-param-operand-procsubst). Разбирается
+// текст вызова, а не всей команды: тело heredoc в него не входит, а вызовы
+// из sh -c и heredoc на вход оболочке shellcmd отдаёт отдельно
+func paramProcSubst(raw string) (bool, error) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(raw), "")
+	if err != nil {
+		return false, fmt.Errorf("разбор текста вызова: %w", err)
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok && slices.ContainsFunc(paramOperands(param), literalProcSubst) {
+			found = true
+		}
+		return true
+	})
+	return found, nil
+}
+
+// paramOperands слова-операнды раскрытия: ${X:-слово}, ${X/образец/замена}
+func paramOperands(param *syntax.ParamExp) []*syntax.Word {
+	var operands []*syntax.Word
+	if param.Exp != nil {
+		operands = append(operands, param.Exp.Word)
+	}
+	if param.Repl != nil {
+		operands = append(operands, param.Repl.Orig, param.Repl.With)
+	}
+	return operands
+}
+
+// literalProcSubst — в литерале слова есть <( или >(
+func literalProcSubst(w *syntax.Word) bool {
+	return w != nil && slices.ContainsFunc(w.Parts, func(p syntax.WordPart) bool {
+		lit, ok := p.(*syntax.Lit)
+		return ok && (strings.Contains(lit.Value, "<(") || strings.Contains(lit.Value, ">("))
+	})
+}
+
+// killOptions отделяет опции kill от целей так же, как встроенный kill
+// bash: -s и -n со значением повторяются, и сигнал задаёт последний
+// (kill -0 -s 9 -- -1 шлёт 9, не 0); -SIG (-9, -KILL) — сигнал только
+// первым таким словом, дальше -N — цель (группа процессов); -- кончает
+// опции. zero — сигнал задан и равен 0. -l, -L, --list и --table печатают
+// список сигналов: целей нет
+func killOptions(args []word) (targets []word, zero bool) {
+	targets = args
+	sawSignal := false
+	record := func(isZero bool) {
+		sawSignal = true
+		zero = isZero
+	}
+options:
+	for len(targets) > 0 && targets[0].literal && strings.HasPrefix(targets[0].text, "-") {
+		opt := targets[0].text
+		switch {
+		case opt == "-l" || opt == "-L" || opt == "--list" || opt == "--table":
+			return nil, false
+		case opt == "--":
+			targets = targets[1:]
+			break options
+		case opt == "-s" || opt == "-n" || opt == "--signal":
+			if len(targets) < 2 {
+				return nil, false
+			}
+			record(targets[1].text == "0")
+			targets = targets[2:]
+		case strings.HasPrefix(opt, "--signal="):
+			record(opt == "--signal=0")
+			targets = targets[1:]
+		case !sawSignal:
+			record(opt == "-0")
+			targets = targets[1:]
+		default:
+			break options
+		}
+	}
+	return targets, zero
 }

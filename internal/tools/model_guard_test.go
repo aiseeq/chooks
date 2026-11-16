@@ -145,6 +145,19 @@ func TestModelGuard(t *testing.T) {
 		{"fish set без ключа", "Bash", "", "fish -c 'set ANTHROPIC_MODEL sonnet; claude -p hi'", true},
 		{"fish set -gx одобренной", "Bash", "", "fish -c 'set -gx ANTHROPIC_MODEL opus; claude -p hi'", false},
 		{"fish and одобренная", "Bash", "", "fish -c 'claude --model opus -p hi; and true'", false},
+		// текст ищется только в неразобранном скрипте: set -x внутри fish -c
+		// не задаёт модель claude за ним; модель из разобранной части
+		// команды проверяется и при ошибке в другой
+		{"fish set -x до claude снаружи", "Bash", "", "fish -c 'set -x ANTHROPIC_MODEL sonnet' ; claude -p hi", false},
+		{"settings рядом с неразобранным fish", "Bash", "", `claude -p hi --settings '{"model":"sonnet"}'; fish -c 'a; and b'`, true},
+		{"переменная в bash -c с неразобранным fish", "Bash", "", `bash -c 'ANTHROPIC_MODEL=sonnet claude -p hi; fish -c "a; and b"'`, true},
+		// --model у программы не из modelClients — не модель агента
+		{"--model у другой программы", "Bash", "", "python3 bench.py --model sonnet", false},
+		// присваивание после опций sudo (akit v1.76.2, shellcmd-sudo-assign)
+		{"sudo с присваиванием", "Bash", "", "sudo X=1 claude --model sonnet -p hi", true},
+		{"sudo -u с присваиванием", "Bash", "", "sudo -u aisee X=1 claude --model sonnet -p hi", true},
+		{"переменная модели после sudo", "Bash", "", "sudo ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"переменная одобренной после sudo", "Bash", "", "sudo ANTHROPIC_MODEL=opus claude -p hi", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

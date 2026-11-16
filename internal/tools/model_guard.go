@@ -164,9 +164,14 @@ func bashModelCandidates(command string, readSettings func(string) []byte, logge
 	if err != nil {
 		// вызовы найдены не все: вложенный скрипт, который akit не разобрал
 		// (fish вне простого подмножества: and, set -x, подстановка), отдаёт
-		// только вызов оболочки — модели в нём ищутся в тексте
+		// только вызов оболочки — модели ищутся в тексте этого скрипта (set
+		// -x в fish -c не задаёт модель claude за ним), без него — команды
+		text := command
+		if nested, ok := errors.AsType[*shellcmd.NestedError](err); ok {
+			text = nested.Script
+		}
 		logger.Warn("model_guard: shellcmd разобрал команду не целиком, модели ищутся и в тексте", "error", err)
-		found = append(found, textModelCandidates(command)...)
+		found = append(found, textModelCandidates(text)...)
 	}
 	return found
 }
@@ -284,9 +289,9 @@ func callEnvModels(script string, n *syntax.CallExpr, calls []shellcmd.Call, log
 	}
 	for i, c := range chain {
 		switch {
-		case c.Name == "env" && runs && i+1 < len(chain):
-			// env A=x claude, env A=x bash -c …: слова env до снятой
-			// команды — опции и присваивания
+		case (c.Name == "env" || c.Name == "sudo") && runs && i+1 < len(chain):
+			// env A=x claude, env A=x bash -c …, sudo A=x claude: слова
+			// env и sudo до снятой команды — опции и присваивания
 			opts := c.Args[:max(0, len(c.Args)-len(chain[i+1].Args)-1)]
 			for _, a := range opts {
 				found = append(found, assignedModelWord(a)...)

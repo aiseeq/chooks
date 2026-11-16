@@ -361,12 +361,18 @@ func TestKillGuardBlocks(t *testing.T) {
 		// shellcmd-sudo-assign), и за ним — оболочки, ввод скрипта, ssh
 		`sudo X=1 kill -9 1500`,
 		`sudo -u root X=1 kill -9 1500`,
-		// за sudo -- akit v1.76.2 присваивание не снимает: отказ по слову kill
+		// за sudo -- присваивание снимается (akit v1.77.1): kill — вызов
+		// за sudo, и за обёртками перед sudo тоже
 		`sudo -- X=1 kill -9 -1`,
 		`sudo -u root -- X=1 kill -9 -1`,
 		`sudo -- X=1 timeout 5 kill 2100`,
 		`sudo -- X=a/b kill 1`,
+		`sudo -u root -- X=a/b kill 1`,
 		`sudo -- X=1 Y=2 kill 1500`,
+		`timeout 5 sudo -- X=1 kill 2100`,
+		`nice sudo -u aisee -- X=1 Y=2 kill 1500`,
+		`sudo -- X=1 bash <<< 'kill -9 -1'`,
+		`sudo -- X=1 bash -c 'kill -9 2100'`,
 		`sudo -E X=1 kill 1`,
 		`sudo X=1 Y=2 kill 1500`,
 		`sudo X=1 timeout 5 kill 2100`,
@@ -511,7 +517,7 @@ func TestKillGuardBlocks(t *testing.T) {
 		`echo ${X:-a}<(kill 455274)`,
 		"X=${Y:-a\n<(kill -9 -1)}",
 		`echo ${X}; diff <(a) <(b); kill 455274`,
-		// за sudo -- слово kill ищется в тексте без \ и кавычек
+		// k\ill за sudo -- — тот же kill
 		`sudo -- X=1 k\ill -9 -1`,
 		// второй -s или -n перекрывает сигнал 0
 		`kill -0 -s 9 -- -1`,
@@ -773,8 +779,11 @@ func TestKillGuardAllows(t *testing.T) {
 		// без -c первый операнд — файл скрипта, не текст
 		`bash -x 'kill 1'`,
 		`bash -x "$X"; kill 455274`,
-		// присваивание за sudo -- без слова kill и kill за sudo без него
+		// присваивание за sudo -- без слова kill и kill за sudo без него;
+		// за sudo -- X=1 — kill чужого PID литералом
 		`sudo -- X=1 make test; kill 455274`,
+		`sudo -- X=1 kill 455274`,
+		`timeout 5 sudo -u root -- X=a/b kill -TERM 455274`,
 		`sudo -- kill 455274`,
 		`echo -- X=1 kill`,
 		`sudo --; kill 455274`,

@@ -319,10 +319,6 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 // -1, f kill -9 -1, bash -c '"$@"' _ kill …): слово сигнала среди
 // аргументов любого вызова проверяется как сигнал с аргументами за ним
 func (s *killScan) signal(c shellcmd.Call, calls []shellcmd.Call) error {
-	if c.Name == "sudo" && sudoDashAssignment(c.Args) && signalWordRe.MatchString(unquoted(c.Raw)) {
-		// снимается, когда akit снимет присваивание за sudo --
-		s.addReason("присваивание за sudo -- (sudo -- X=1 kill …): разбор оболочки принял его за имя команды, проверить сигналы нельзя")
-	}
 	// имя без каталога от ${X-/bin/kill} — «kill}»: скобка — тоже раскрытие
 	if c.Name == "" || strings.ContainsAny(c.Name, "${}") {
 		switch {
@@ -640,16 +636,6 @@ func arraySignal(name, command string) bool {
 	}
 	return false
 }
-
-// sudoDashAssignment — за -- в аргументах sudo стоит присваивание (sudo --
-// X=1 kill): shellcmd (akit v1.76.2) его не снимает и отдаёт именем вызова
-// X=1 (X=a/b — именем b), а kill — аргументом
-func sudoDashAssignment(args []string) bool {
-	i := slices.Index(args, "--")
-	return i >= 0 && i+1 < len(args) && assignmentRe.MatchString(args[i+1])
-}
-
-var assignmentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 // killOptions отделяет опции kill от целей так же, как встроенный kill
 // bash: -s и -n со значением повторяются, и сигнал задаёт последний

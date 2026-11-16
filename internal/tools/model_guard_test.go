@@ -172,6 +172,11 @@ func TestModelGuard(t *testing.T) {
 		{"--model одобренной за sudo -- X=1", "Bash", "", "sudo -- X=1 claude --model opus -p hi", false},
 		{"переменная модели за timeout и sudo --", "Bash", "", "timeout 5 sudo -u aisee -- ANTHROPIC_MODEL=sonnet claude -p hi", true},
 		{"оболочка за sudo --", "Bash", "", "sudo -- ANTHROPIC_MODEL=sonnet bash -c 'claude -p hi'", true},
+		{"переменная модели за nice и sudo --", "Bash", "", "nice sudo -- ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"переменная модели за sudo -- перед timeout", "Bash", "", "sudo -- ANTHROPIC_MODEL=sonnet timeout 5 claude -p hi", true},
+		{"переменная модели второй за sudo --", "Bash", "", "sudo -- X=1 ANTHROPIC_MODEL=sonnet claude -p hi", true},
+		{"переменная одобренной второй за sudo --", "Bash", "", "sudo -- X=1 ANTHROPIC_MODEL=opus claude -p hi", false},
+		{"переменная модели за sudo -- без claude", "Bash", "", "sudo -- ANTHROPIC_MODEL=sonnet make test", false},
 		{"sudo -- в тексте echo", "Bash", "", "echo sudo -- ANTHROPIC_MODEL=sonnet claude --model sonnet", false},
 		{"sudo -- без claude", "Bash", "", "sudo -- ANTHROPIC_MODEL=sonnet make test", false},
 		// codex -m сразу за именем в неразобранном fish

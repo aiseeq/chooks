@@ -470,6 +470,11 @@ func TestKillGuardBlocks(t *testing.T) {
 		"zsh <<'E'\necho ${X:-=(kill -9 -1)}\nE",
 		`z'sh' -c 'echo ${X:-=(kill -9 -1)}'`,
 		`zsh -c 'true; X=${Y:-<(kill -9 -1)}'`,
+		`zsh -c 'echo ${X:->(kill -9 -1)}'`,
+		"zsh -c 'echo ${X:-\n=(kill -9 -1)}'",
+		`zsh -c 'echo ${X:-${Y}=(kill -9 -1)}'`,
+		`/bin/zsh -c 'echo ${X:-=(kill -9 -1)}'`,
+		"zsh<<'E'\necho ${X:-=(kill -9 -1)}\nE",
 		// временное правило: <(…) где-либо после ${ в команде со словом kill —
 		// отказ, и ложный (в кавычках, в теле heredoc для файла, <(…) после
 		// ${…}, а не внутри)
@@ -720,6 +725,9 @@ func TestKillGuardAllows(t *testing.T) {
 		`echo ${X}; arr=(a b); kill 455274`,
 		`cat ~/.zshrc; echo ${X}; arr=(a b); kill 455274`,
 		`zsh -c 'arr=(a b)'; kill 455274`,
+		`zsh -c 'f() { a=(1); }'; kill 455274`,
+		`ls oh-my-zsh; echo ${X}; arr=(1); kill 455274`,
+		`cat zshenv; echo ${X}; arr=(1); kill 455274`,
 		"cat <<E\nkill -l",
 		// = в имени команды за sudo -- — не присваивание
 		`sudo -- ./job=1.sh --mode kill`,

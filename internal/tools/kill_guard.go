@@ -311,15 +311,24 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 // sudoAssignment — c не программа, а присваивание после sudo -- (sudo --
 // PATH=$PATH kill 1): shellcmd отдаёт его вызовом с присваиванием вместо
 // имени (PATH=$PATH, у X=a/b — b, у X=$(…) — пустым), а программу за ним —
-// следующим вызовом с теми же текстом и Via. Программу проверяет её вызов;
-// присваивание с $ — не имя, вычисляемое при запуске, а у оболочки за ним
-// (… | sudo -- X=1 bash) ввод читает она, а не X=1
+// следующим вызовом с теми же текстом и Via. Присваиваний подряд бывает
+// несколько (sudo -- PATH=$PATH LANG=C kill 1): вызов первого несёт
+// остальные в аргументах, а программа — первое слово после них. Программу
+// проверяет её вызов; присваивание с $ — не имя, вычисляемое при запуске, а
+// у оболочки за ним (… | sudo -- X=1 bash) ввод читает она, а не X=1
 func sudoAssignment(c shellcmd.Call, calls []shellcmd.Call) bool {
-	if len(c.Args) == 0 || !slices.Contains(c.Via, "sudo") {
+	if !slices.Contains(c.Via, "sudo") {
+		return false
+	}
+	args := c.Args
+	for len(args) > 0 && assignWord.MatchString(args[0]) {
+		args = args[1:]
+	}
+	if len(args) == 0 {
 		return false
 	}
 	return slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
-		return x.Raw == c.Raw && slices.Equal(x.Via, c.Via) && x.Name == filepath.Base(c.Args[0]) && slices.Equal(x.Args, c.Args[1:])
+		return x.Raw == c.Raw && slices.Equal(x.Via, c.Via) && x.Name == filepath.Base(args[0]) && slices.Equal(x.Args, args[1:])
 	})
 }
 

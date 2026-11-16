@@ -75,13 +75,26 @@ var toolHints = map[string]string{
 
 // systemctlHint подсказка к отказу systemctl с менеджером scope (systemctl
 // или systemctl --user): юнит из переменной, шаблона или ввода — назвать
-// литералом; юнит назван, но задевает сессию (или команда гасит весь
-// менеджер), — остановить юнит без процессов сессии или лишний процесс по PID
+// литералом; юнит назван, но задевает сессию, — остановить юнит без
+// процессов сессии или лишний процесс по PID. Команде без юнита, гасящей
+// весь менеджер или машину, — systemctlEndHint
 func systemctlHint(scope string, named bool) string {
 	if !named {
 		return "Назови юнит литералом и проверь, что он не держит сессию: " + scope + " status юнит"
 	}
 	return "Останавливай юнит, где нет процессов сессии: посмотри их (" + scope + " status юнит) и убей лишний процесс литералом: kill 12345"
+}
+
+// systemctlEndHint подсказка к отказу на команду, гасящую весь менеджер
+// или машину (systemctl --user exit, systemctl poweroff): юнита в ней нет,
+// и подсказка про юнит не к месту. Машину гасят команды systemctlMachineVerbs
+// системного менеджера, остальные — менеджер scope
+func systemctlEndHint(scope, verb string) string {
+	what := "менеджер " + scope
+	if scope == "systemctl" && slices.Contains(systemctlMachineVerbs, verb) {
+		what = "машину"
+	}
+	return "Команда гасит " + what + " вместе с сессией: такое запускает пользователь сам. Остановить один юнит без процессов сессии — назови его литералом: " + scope + " stop юнит"
 }
 
 // optionValue значение опции со значением: из слова (--signal=9, -s9) или
@@ -150,6 +163,10 @@ var systemctlValues = []string{
 // менеджера или системы: переключение цели, выход менеджера, выключение
 var systemctlEndVerbs = []string{"isolate", "exit", "poweroff", "reboot", "halt", "kexec", "soft-reboot", "emergency", "rescue", "default", "switch-root"}
 
+// systemctlMachineVerbs команды из systemctlEndVerbs, которые у системного
+// менеджера выключают или перезапускают машину, а не переключают цель
+var systemctlMachineVerbs = []string{"poweroff", "reboot", "halt", "kexec", "soft-reboot", "switch-root"}
+
 // systemctlStopVerbs команды systemctl, которые останавливают, перезапускают
 // или замораживают процессы юнитов (disable и mask — с --now)
 var systemctlStopVerbs = []string{"stop", "kill", "restart", "try-restart", "reload-or-restart", "try-reload-or-restart", "condrestart", "force-reload", "freeze"}
@@ -200,7 +217,7 @@ func (t *KillGuardTool) systemctlReason(args []word, via string, procs []procInf
 	}
 	switch {
 	case slices.Contains(systemctlEndVerbs, verb):
-		return scope + " " + verb + " гасит все юниты менеджера: сессии Claude, терминал и графическую оболочку", systemctlHint(scope, true)
+		return scope + " " + verb + " гасит все юниты менеджера: сессии Claude, терминал и графическую оболочку", systemctlEndHint(scope, verb)
 	case verb == "kill" && zero:
 		return "", ""
 	case slices.Contains(systemctlStopVerbs, verb) || now && (verb == "disable" || verb == "mask"):

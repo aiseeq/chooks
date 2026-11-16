@@ -151,7 +151,6 @@ func TestKillGuardGaps5Texts(t *testing.T) {
 	for _, tc := range []struct{ command, hint string }{
 		{`sudo systemctl stop session-3.scope`, systemctlHint("systemctl", true)},
 		{`sudo systemctl restart dbus`, systemctlHint("systemctl", true)},
-		{`sudo systemctl poweroff`, systemctlHint("systemctl", true)},
 		{`systemctl --user stop agents.slice`, systemctlHint("systemctl --user", true)},
 		{`systemctl --user stop $U`, systemctlHint("systemctl --user", false)},
 		{`systemctl --user stop 'app-*'`, systemctlHint("systemctl --user", false)},

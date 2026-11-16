@@ -45,7 +45,7 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 	path := t.approvedPath()
 	models, reason := readApprovedModels(path)
 	if reason != "" {
-		return t.reject(reason), nil
+		return t.reject(reason, nil), nil
 	}
 	var reasons []string
 	for _, c := range candidates {
@@ -577,12 +577,10 @@ func withoutModelVariant(model string) string {
 	return model
 }
 
-func (t *ModelGuardTool) reject(reason string, models ...[]approvedModel) *core.ValidationResult {
+func (t *ModelGuardTool) reject(reason string, models []approvedModel) *core.ValidationResult {
 	var list []string
-	if len(models) > 0 {
-		for _, m := range models[0] {
-			list = append(list, fmt.Sprintf("%s (%s)", m.name, m.id))
-		}
+	for _, m := range models {
+		list = append(list, fmt.Sprintf("%s (%s)", m.name, m.id))
 	}
 	message := reason
 	if len(list) > 0 {

@@ -123,7 +123,7 @@ const hiddenTail = ", а исполнит его потомок systemd, не а
 // ловит то же правило имени у вызова из скрипта
 func systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call, k int) string {
 	if (c.Name == "" || strings.ContainsAny(c.Name, "$`{}")) && !systemdRunPathName(c, calls, k) {
-		return "systemd-run запускает команду, имя которой вычисляется при запуске ($X, $(…), `…`): что исполнится, не видно" + hiddenTail
+		return "systemd-run запускает команду, имя которой вычисляется при запуске ($X, $(…), `…`): текст команды станет известен только при запуске" + hiddenTail
 	}
 	script, runner := scriptArgs(c)
 	switch {

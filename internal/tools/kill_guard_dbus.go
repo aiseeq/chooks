@@ -743,6 +743,18 @@ var kdeDesktopServices = map[string]string{
 // kdeHint подсказка к отказу на выход из сеанса KDE и остановку рабочего стола
 const kdeHint = "Выход из сеанса запускает пользователь сам; панель перезапускает systemctl --user restart plasma-plasmashell"
 
+// qtQuit — quit или exit у получателя, которого не видно, адресован
+// приложению KDE или Qt: путь /MainApplication, /KWin, /org/kde/…,
+// интерфейс org.kde.* или org.qtproject.Qt.QCoreApplication, путь из
+// переменной или не назван. Quit своего интерфейса (/org/example
+// org.example.App.Quit) — не KDE
+func qtQuit(dc dbusCall) bool {
+	iface, _ := splitMember(dc.member.text)
+	path := dc.path.text
+	return !dc.path.literal || path == "" || path == "/MainApplication" || path == "/KWin" || strings.HasPrefix(path, "/org/kde/") ||
+		strings.HasPrefix(iface, "org.kde.") || iface == "org.qtproject.Qt.QCoreApplication"
+}
+
 // kdeReason вызов KDE, который завершает сеанс (logout*, closeSession) или
 // гасит рабочий стол и терминал (plasmashell, KWin, Konsole: quit, exit);
 // "" — не такой. Получатель из переменной или уникальное имя (:1.42) с
@@ -759,7 +771,7 @@ func kdeReason(dc dbusCall) string {
 	switch {
 	case !logout && !quit:
 		return ""
-	case !dc.dest.literal || strings.HasPrefix(dest, ":"):
+	case (!dc.dest.literal || strings.HasPrefix(dest, ":")) && (logout || qtQuit(dc)):
 		return fmt.Sprintf("%s %s: получатель %s не виден до запуска (переменная или уникальное имя :1.N), а этот метод у служб KDE завершает сеанс или гасит рабочий стол и терминал — проверить его заранее нельзя", dc.tool, dc.member.text, shownUnit(dest))
 	case logout && slices.Contains(kdeLogoutServices, dest):
 		return fmt.Sprintf("%s %s к %s завершает сеанс KDE: рабочий стол, терминалы и сессии Claude в нём", dc.tool, dc.member.text, dest)

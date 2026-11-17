@@ -131,3 +131,45 @@ func TestKillGuardRareTexts(t *testing.T) {
 		}
 	}
 }
+
+// Запись, снимающая ограничение cgroup, — пропуск, если значение видно: max
+// у лимитов, 0 у cgroup.freeze; cgroup.kill и невидимое значение — отказ.
+// Quit и Exit у получателя из переменной или :1.N — отказ только у пути
+// или интерфейса KDE и Qt (или пути, которого не видно)
+func TestKillGuardRareRelease(t *testing.T) {
+	const scope = cgUser + `/agents.slice/agent-x-1.scope`
+	for _, tc := range []struct {
+		command string
+		allow   bool
+	}{
+		{`echo max > ` + scope + `/memory.max`, true},
+		{`echo -n max > ` + scope + `/memory.high`, true},
+		{`printf 'max\n' > ` + scope + `/pids.max`, true},
+		{`echo "max 100000" > ` + scope + `/cpu.max`, true},
+		{`echo max > ` + scope + `/cpu.max`, true},
+		{`echo 0 > ` + scope + `/cgroup.freeze`, true},
+		{`echo 0 > ` + scope + `/cgroup.kill`, false},
+		{`echo max > ` + scope + `/cgroup.kill`, false},
+		{`echo 1 > ` + scope + `/cgroup.freeze`, false},
+		{`echo 0 > ` + scope + `/memory.max`, false},
+		{`echo "$V" > ` + scope + `/memory.max`, false},
+		{`echo max | tee ` + scope + `/memory.max`, false},
+		{`cp /tmp/max ` + scope + `/memory.max`, false},
+		{`echo "max 1 2" > ` + scope + `/cpu.max`, false},
+
+		{`busctl --user call "$BUS_NAME" /org/example org.example.App Quit`, true},
+		{`gdbus call --session --dest "$NAME" --object-path /org/example/App --method org.example.App.Exit`, true},
+		{`busctl --user call :1.42 /org/example org.example.App Quit`, true},
+		{`qdbus "$SVC" /MainApplication quit`, false},
+		{`qdbus :1.42 /MainApplication quit`, false},
+		{`busctl --user call "$B" /org/example org.qtproject.Qt.QCoreApplication quit`, false},
+		{`busctl --user call "$B" /org/example org.kde.Foo Exit`, false},
+		{`qdbus :1.42 /org/kde/app quit`, false},
+		{`gdbus call --session --dest :1.42 --object-path "$P" --method org.example.App.Exit`, false},
+		{`qdbus "$S" /org/example logout`, false},
+	} {
+		if r := validateKill(t, tc.command); r.IsValid != tc.allow {
+			t.Errorf("%s: ждали пропуск %v, получили %v %v", tc.command, tc.allow, r.IsValid, r.Suggestions)
+		}
+	}
+}

@@ -22,15 +22,34 @@ var dbusTools = map[string]func(args []word, via string) (dbusCall, bool){
 }
 
 // dbusCall вызов метода D-Bus из командной строки. bus — шина: user (шина
-// сессии, на ней менеджер systemd --user), system, "" — адрес, менеджер по
-// нему не виден. member — Интерфейс.Метод или Метод (qdbus). shifted —
-// сигнатура busctl с массивом, структурой или variant: значение аргумента
-// занимает не одно слово, позиции аргументов не сопоставить
+// сессии, на ней менеджер systemd --user), system, capsule (шина capsule
+// busctl -C — не этой сессии), "" — адрес, менеджер по нему не виден.
+// member — Интерфейс.Метод или Метод (qdbus). shiftAt — номер аргумента, с
+// которого позиции слов не сопоставить (тип сигнатуры busctl перед ним —
+// массив, структура или variant: его значение занимает не одно слово); -1
+// — все на месте
 type dbusCall struct {
 	tool, bus          string
 	dest, path, member word
 	args               []word
-	shifted            bool
+	shiftAt            int
+}
+
+// shifted — позиция i-го аргумента не видна (shiftAt)
+func (dc dbusCall) shifted(i int) bool {
+	return dc.shiftAt >= 0 && i >= dc.shiftAt
+}
+
+// busctlShift shiftAt для сигнатуры busctl: первый тип с a, (, { или v;
+// сигнатура из переменной — с нулевого
+func busctlShift(sig word) int {
+	if !sig.literal {
+		return 0
+	}
+	if k := strings.IndexAny(sig.text, "a({v"); k >= 0 {
+		return k
+	}
+	return -1
 }
 
 // arg i-й аргумент вызова без типа; нет его — пустой литерал, а под xargs
@@ -69,6 +88,7 @@ var busctlValues = []string{
 // Прочие команды (list, introspect, tree, monitor, get-property) — не вызов
 func busctlCall(args []word, via string) (dbusCall, bool) {
 	dc := dbusCall{tool: "busctl call", bus: "system"}
+	capsule := false
 	for _, a := range args {
 		switch {
 		case a.text == "--user":
@@ -77,7 +97,14 @@ func busctlCall(args []word, via string) (dbusCall, bool) {
 			dc.bus = "system"
 		case a.text == "--address" || strings.HasPrefix(a.text, "--address="):
 			dc.bus = ""
+		case a.text == "--capsule" || strings.HasPrefix(a.text, "--capsule=") || strings.HasPrefix(a.text, "-C"):
+			capsule = true
 		}
+	}
+	if capsule {
+		// шина capsule (busctl -C имя) — менеджер пользователя capsule, и с
+		// --user тоже
+		dc.bus = "capsule"
 	}
 	ops := optionOperands(args, busctlValues)
 	if len(ops) == 0 || ops[0].literal && ops[0].text != "call" {
@@ -87,7 +114,7 @@ func busctlCall(args []word, via string) (dbusCall, bool) {
 	iface, method := operand(ops, 3, via), operand(ops, 4, via)
 	dc.member = word{text: iface.text + "." + method.text, literal: iface.literal && method.literal}
 	sig := operand(ops, 5, via)
-	dc.shifted = !sig.literal || strings.ContainsAny(sig.text, "a({v")
+	dc.shiftAt = busctlShift(sig)
 	if len(ops) > 6 {
 		dc.args = ops[6:]
 	}
@@ -101,7 +128,7 @@ var gdbusValues = map[string]string{"a": "address", "d": "dest", "o": "object-pa
 // --object-path P --method I.M [ARG…]: аргументы — текст GVariant
 // ('x.service', int32 15). Прочие команды gdbus (introspect, monitor) — не вызов
 func gdbusCall(args []word, via string) (dbusCall, bool) {
-	dc := dbusCall{tool: "gdbus call"}
+	dc := dbusCall{tool: "gdbus call", shiftAt: -1}
 	if len(args) == 0 || args[0].literal && args[0].text != "call" {
 		return dc, false
 	}
@@ -230,7 +257,7 @@ func gvariantUnescape(body string) (string, error) {
 // сообщения (--type=signal) не различается: сигнал с именем метода systemd
 // не исполнит, лишний отказ на него безвреден
 func dbusSendCall(args []word, via string) (dbusCall, bool) {
-	dc := dbusCall{tool: "dbus-send", bus: "user", dest: word{literal: true}}
+	dc := dbusCall{tool: "dbus-send", bus: "user", dest: word{literal: true}, shiftAt: -1}
 	var ops []word
 	for _, a := range args {
 		switch t := a.text; {
@@ -270,7 +297,7 @@ func dbusSendValue(text string) string {
 // [[I.]METHOD [ARG…]]; шина по умолчанию — сессии. Без метода qdbus
 // перечисляет службы, объекты или методы — не вызов
 func qdbusCall(args []word, via string) (dbusCall, bool) {
-	dc := dbusCall{tool: "qdbus", bus: "user"}
+	dc := dbusCall{tool: "qdbus", bus: "user", shiftAt: -1}
 	var ops []word
 	for i := 0; i < len(args); i++ {
 		switch t := args[i].text; {
@@ -306,7 +333,8 @@ type dbusMethod struct {
 }
 
 // systemdManagerMethods методы org.freedesktop.systemd1.Manager (объект
-// /org/freedesktop/systemd1), которые гасят юнит или весь менеджер
+// /org/freedesktop/systemd1), которые гасят юнит или весь менеджер или
+// меняют свойства юнита (лимит памяти убьёт его процессы)
 var systemdManagerMethods = map[string]dbusMethod{
 	"KillUnit":               {"kill", 0, 2, -1, -1},
 	"KillUnitSubgroup":       {"kill", 0, 3, -1, -1},
@@ -328,6 +356,7 @@ var systemdManagerMethods = map[string]dbusMethod{
 	"Halt":                   {"halt", -1, -1, -1, -1},
 	"KExec":                  {"kexec", -1, -1, -1, -1},
 	"SwitchRoot":             {"switch-root", -1, -1, -1, -1},
+	"SetUnitProperties":      {"set-property", 0, -1, -1, -1},
 }
 
 // systemdUnitMethods методы org.freedesktop.systemd1.Unit (объект юнита
@@ -343,6 +372,7 @@ var systemdUnitMethods = map[string]dbusMethod{
 	"Freeze":             {"freeze", -1, -1, -1, -1},
 	"EnqueueJob":         {"", -1, -1, 0, 1},
 	"Start":              {"start", -1, -1, -1, 0},
+	"SetProperties":      {"set-property", -1, -1, -1, -1},
 }
 
 // jobVerbs тип задания systemd → команда systemctl; прочие типы (reload,
@@ -350,8 +380,9 @@ var systemdUnitMethods = map[string]dbusMethod{
 var jobVerbs = map[string]string{"start": "start", "stop": "stop", "restart": "restart", "try-restart": "try-restart"}
 
 // action команда systemctl, которую исполнит метод с аргументами dc: тип
-// задания и режим isolate — из аргументов; what — что из них вычисляется
-// при запуске и не даёт решить
+// задания и режим isolate — из аргументов (start без isolate — start:
+// запуск exit.target гасит менеджер); what — что из них вычисляется при
+// запуске и не даёт решить
 func (m dbusMethod) action(dc dbusCall, via string) (verb, what string) {
 	verb = m.verb
 	if m.job >= 0 {
@@ -369,7 +400,6 @@ func (m dbusMethod) action(dc dbusCall, via string) (verb, what string) {
 		if mode.text == "isolate" {
 			return "isolate", ""
 		}
-		return "", ""
 	}
 	return verb, ""
 }
@@ -419,9 +449,10 @@ func splitMember(member string) (iface, method string) {
 }
 
 // loginEndMethod метод logind, завершающий сеанс, пользователя или место:
-// Manager.KillSession, TerminateUser, Session.Kill, Seat.Terminate
+// Manager.KillSession, TerminateUser, Session.Kill, Seat.Terminate,
+// ReleaseSession (сеанс закрывается, его процессы logind может погасить)
 func loginEndMethod(method string) bool {
-	return strings.HasPrefix(method, "Kill") || strings.HasPrefix(method, "Terminate")
+	return strings.HasPrefix(method, "Kill") || strings.HasPrefix(method, "Terminate") || method == "ReleaseSession"
 }
 
 // loginPowerMethods методы org.freedesktop.login1.Manager, которые гасят
@@ -453,7 +484,7 @@ func (t *KillGuardTool) loginReason(dc dbusCall, method, via string, procs []pro
 		return fmt.Sprintf("%s %s (как loginctl kill-* и terminate-*) %s", dc.tool, dc.member.text, loginEndEffect), ""
 	case method == "ScheduleShutdown":
 		kind := dc.arg(0, via)
-		if !kind.literal || dc.shifted {
+		if !kind.literal || dc.shifted(0) {
 			return dbusUnresolved(dc, "тип выключения"), dbusHint
 		}
 		if slices.Contains(loginShutdownKinds, kind.text) {
@@ -487,6 +518,12 @@ const systemdUnitPath = "/org/freedesktop/systemd1/unit/"
 // как loginctl. Метод, получатель, объект, тип задания из переменной у
 // вызова, который может быть разрушающим, — отказ
 func (t *KillGuardTool) dbusReason(dc dbusCall, via string, procs []procInfo) (reason, hint string) {
+	if dc.bus == "capsule" {
+		return "", ""
+	}
+	if reason := kdeReason(dc); reason != "" {
+		return reason, kdeHint
+	}
 	target := dbusTarget(dc)
 	if target == dbusOther {
 		return "", ""
@@ -552,10 +589,10 @@ func (t *KillGuardTool) systemdMethodReason(dc dbusCall, m dbusMethod, unit word
 		return dbusUnresolved(dc, what), dbusHint
 	case verb == "":
 		return "", ""
-	case dc.shifted && (m.unit >= 0 || m.signal >= 0):
+	case m.unit >= 0 && dc.shifted(m.unit) || m.signal >= 0 && dc.shifted(m.signal):
 		return dbusUnresolved(dc, "позиция аргументов (сигнатура с массивом, структурой или variant)"), dbusHint
 	}
-	a := unitAction{verb: verb}
+	a := unitAction{verb: verb, dbus: true}
 	if m.unit >= 0 || unit.text != "" {
 		a.units = []word{unit}
 	}
@@ -572,6 +609,38 @@ func (t *KillGuardTool) systemdMethodReason(dc dbusCall, m dbusMethod, unit word
 		}
 	}
 	return "", ""
+}
+
+// kdeLogoutServices службы KDE, у которых методы logout* завершают сеанс
+// (org.kde.Shutdown.logout, logoutAndReboot; ksmserver /KSMServer logout)
+var kdeLogoutServices = []string{"org.kde.Shutdown", "org.kde.ksmserver"}
+
+// kdeDesktopServices службы рабочего стола KDE, у которых quit и exit
+// гасят их процесс: панель и рабочий стол, композитор
+var kdeDesktopServices = map[string]string{
+	"org.kde.plasmashell": "plasmashell (панель и рабочий стол), как systemctl --user stop plasma-plasmashell",
+	"org.kde.KWin":        "KWin — композитор: с ним падает графический сеанс",
+	"org.kde.kwin":        "KWin — композитор: с ним падает графический сеанс",
+}
+
+// kdeHint подсказка к отказу на выход из сеанса KDE и остановку рабочего стола
+const kdeHint = "Выход из сеанса запускает пользователь сам; панель перезапускает systemctl --user restart plasma-plasmashell"
+
+// kdeReason вызов KDE, который завершает сеанс (logout*) или гасит
+// рабочий стол (plasmashell, KWin: quit, exit); "" — не такой
+func kdeReason(dc dbusCall) string {
+	if !dc.dest.literal || !dc.member.literal {
+		return ""
+	}
+	_, method := splitMember(dc.member.text)
+	method = strings.ToLower(method)
+	switch {
+	case slices.Contains(kdeLogoutServices, dc.dest.text) && strings.HasPrefix(method, "logout"):
+		return fmt.Sprintf("%s %s к %s завершает сеанс KDE: рабочий стол, терминалы и сессии Claude в нём", dc.tool, dc.member.text, dc.dest.text)
+	case kdeDesktopServices[dc.dest.text] != "" && (method == "quit" || method == "exit"):
+		return fmt.Sprintf("%s %s к %s гасит %s", dc.tool, dc.member.text, dc.dest.text, kdeDesktopServices[dc.dest.text])
+	}
+	return ""
 }
 
 // dbusUnresolved причина отказа на вызов, где what вычисляется или не назван

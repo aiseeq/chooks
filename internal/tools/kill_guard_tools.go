@@ -15,6 +15,11 @@ import (
 // сессию, а слова kill в команде может не быть (loginctl terminate-user,
 // systemctl --user stop, fuser -k, busctl call … StopUnit). У skill, tmux kill-* и os.kill в
 // python -c подстрока kill есть всегда
+// busAddressRe присваивание адреса шины D-Bus в команде (префиксом,
+// через env, export): системная шина может оказаться шиной сессии и
+// наоборот — менеджер systemd по флагам не виден
+var busAddressRe = regexp.MustCompile(`DBUS_(SYSTEM|SESSION)_BUS_ADDRESS=`)
+
 var sessionToolWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(loginctl|systemctl|fuser|busctl|gdbus|dbus-send|qdbus(6|-qt[56])?)([^[:alnum:]_.-]|$)`)
 
 // sessionTool проверяет вызов средств, гасящих процессы или сессию, кроме
@@ -29,26 +34,56 @@ func (s *killScan) sessionTool(c shellcmd.Call, args []word, via string) error {
 	if slices.Contains(c.Via, "ssh") {
 		return nil
 	}
-	var reason string
-	group := false
-	hint := toolHints[c.Name]
+	reason, hint, group, err := s.toolReason(c, args, via)
+	if err != nil {
+		return err
+	}
+	s.addToolReason(reason, hint, group)
+	return nil
+}
+
+// addToolReason добавляет отказ на средство с его подсказкой; group —
+// отказ на сигнал группе процессов
+func (s *killScan) addToolReason(reason, hint string, group bool) {
+	if reason == "" {
+		return
+	}
+	s.addReason(reason)
+	if hint != "" {
+		if s.toolHints == nil {
+			s.toolHints = map[string]string{}
+		}
+		s.toolHints[reason] = hint
+	}
+	if group && !slices.Contains(s.groupReasons, reason) {
+		s.groupReasons = append(s.groupReasons, reason)
+	}
+}
+
+// toolReason отказ на вызов средства c.Name с аргументами args (см.
+// sessionTool): причина, подсказка, отказ на сигнал группе
+func (s *killScan) toolReason(c shellcmd.Call, args []word, via string) (reason, hint string, group bool, err error) {
+	hint = toolHints[c.Name]
 	switch {
 	case c.Name == "loginctl":
 		reason = loginctlReason(args)
 	case c.Name == "systemctl":
 		if err := s.loadProcs(); err != nil {
-			return err
+			return "", "", false, err
 		}
-		reason, hint = s.tool.systemctlReason(args, via, s.procs)
+		reason, hint = s.tool.systemctlReason(args, via, s.anyBus, s.procs)
 	case c.Name == "fuser":
 		reason = fuserReason(args, via)
 	case dbusTools[c.Name] != nil:
 		dc, ok := dbusTools[c.Name](args, via)
 		if !ok {
-			return nil
+			return "", "", false, nil
 		}
 		if err := s.loadProcs(); err != nil {
-			return err
+			return "", "", false, err
+		}
+		if s.anyBus && dc.bus != "capsule" {
+			dc.bus = ""
 		}
 		reason, hint = s.tool.dbusReason(dc, via, s.procs)
 	case c.Name == "skill":
@@ -57,27 +92,39 @@ func (s *killScan) sessionTool(c shellcmd.Call, args []word, via string) error {
 		reason = tmuxReason(args)
 	case pythonNameRe.MatchString(c.Name):
 		if err := s.loadProcs(); err != nil {
-			return err
+			return "", "", false, err
 		}
 		reason, group = s.tool.pythonReason(c, args, s.procs)
 	}
-	if reason != "" {
-		s.addReason(reason)
-		if hint != "" {
-			if s.toolHints == nil {
-				s.toolHints = map[string]string{}
-			}
-			s.toolHints[reason] = hint
+	return reason, hint, group, nil
+}
+
+// computedTools средства, которые гасят юнит или сеанс названной целью:
+// имя команды из подстановки ($(echo busctl) …) проверяется каждым из них
+var computedTools = []string{"systemctl", "loginctl", "busctl", "gdbus", "dbus-send", "qdbus"}
+
+// computedTool вызов, чьё имя вычисляется при запуске ($(echo systemctl),
+// `…`, $X): его аргументы разбираются как у systemctl, loginctl и
+// средств D-Bus; разрушающий вызов хоть одного из них — отказ, как у того
+// же вызова с именем литералом
+func (s *killScan) computedTool(c shellcmd.Call, args []word, via string) error {
+	for _, name := range computedTools {
+		named := c
+		named.Name = name
+		reason, hint, _, err := s.toolReason(named, args, via)
+		if err != nil {
+			return err
 		}
-	}
-	if group && !slices.Contains(s.groupReasons, reason) {
-		s.groupReasons = append(s.groupReasons, reason)
+		if reason != "" {
+			s.addToolReason("имя команды вычисляется при запуске ($(…), `…` или $X), а с именем "+name+" это отказ: "+reason, hint, false)
+			return nil
+		}
 	}
 	return nil
 }
 
 // toolHints подсказка к отказу на средство, где узкая цель — не PID: сессия
-// tmux, порт. У systemctl она своя по отказу (systemctlHint)
+// tmux, порт. У systemctl она своя по отказу (unitHint)
 var toolHints = map[string]string{
 	"tmux":  "Назови цель литералом: tmux kill-session -t имя",
 	"fuser": "Укажи порт вместо файла: fuser -k 8080/tcp",
@@ -206,6 +253,8 @@ var systemctlSystemEffects = map[string]string{
 	"reboot": "перезагружает машину", "kexec": "перезагружает машину",
 	"soft-reboot": "перезапускает систему без перезагрузки ядра",
 	"switch-root": "меняет корень системы и запускает на нём новый системный менеджер",
+	// не команда systemctl: запуск shutdown.target у любого менеджера
+	"shutdown": "останавливает все службы менеджера",
 }
 
 // systemctlStopVerbs команды systemctl, которые останавливают, перезапускают
@@ -246,14 +295,27 @@ var unitSuffixes = []string{".service", ".socket", ".target", ".scope", ".slice"
 // остановится с ней, не видно) и команды, гасящие весь менеджер. Юниты,
 // пришедшие из ввода (xargs), — тоже отказ. hint — подсказка к отказу.
 // Решение — unitActionReason, общее с вызовом тех же действий по D-Bus
-func (t *KillGuardTool) systemctlReason(args []word, via string, procs []procInfo) (reason, hint string) {
+// anyBus — адрес шины подменён в окружении (busAddressRe): systemctl
+// попадёт в менеджер по адресу, проверка — по обоим
+func (t *KillGuardTool) systemctlReason(args []word, via string, anyBus bool, procs []procInfo) (reason, hint string) {
 	user, now, zero := systemctlFlags(args)
 	ops := optionOperands(args, systemctlValues)
 	if len(ops) == 0 {
 		return "", ""
 	}
 	a := unitAction{user: user, now: now, zero: zero, verb: ops[0].text, units: ops[1:]}
-	return t.unitActionReason(a.scope()+" "+a.verb, a, via, procs)
+	if a.verb == "set-property" && len(a.units) > 1 {
+		// за юнитом — свойства (MemoryMax=1M), не юниты
+		a.units = a.units[:1]
+	}
+	label := a.scope() + " " + a.verb
+	reason, hint = t.unitActionReason(label, a, via, procs)
+	if reason != "" || !anyBus {
+		return reason, hint
+	}
+	other := a
+	other.user = !a.user
+	return t.unitActionReason(fmt.Sprintf("%s (адрес шины подменён в окружении — как %s %s)", label, other.scope(), a.verb), other, via, procs)
 }
 
 // unitAction действие менеджера systemd над юнитами: verb — команда
@@ -263,6 +325,9 @@ type unitAction struct {
 	user, now, zero bool
 	verb            string
 	units           []word
+	// dbus — действие пришло вызовом D-Bus: пустое имя юнита там — юнит
+	// вызывающего
+	dbus bool
 }
 
 // scope менеджер действия так, как его пишет systemctl
@@ -278,17 +343,20 @@ func (a unitAction) scope() string {
 // busctl call …KillUnit); via — обёртка, подающая юниты из ввода
 func (t *KillGuardTool) unitActionReason(label string, a unitAction, via string, procs []procInfo) (reason, hint string) {
 	scope, verb := a.scope(), a.verb
+	if reason, hint := endTargetReason(label, a); reason != "" {
+		return reason, hint
+	}
 	switch {
 	case slices.Contains(systemctlEndVerbs, verb):
 		return label + " " + systemctlEndEffect(scope, verb) + ": гаснут сессии Claude, терминал и графическая оболочка", systemctlEndHint(scope, verb)
 	case verb == "kill" && a.zero:
 		return "", ""
-	case slices.Contains(systemctlStopVerbs, verb) || a.now && (verb == "disable" || verb == "mask"):
+	case slices.Contains(systemctlStopVerbs, verb) || verb == "set-property" || a.now && (verb == "disable" || verb == "mask"):
 	default:
 		return "", ""
 	}
 	if via != "" {
-		return label + " через " + via + ": юниты приходят из ввода, проверить их до запуска нельзя", systemctlHint(scope, false)
+		return label + " через " + via + ": юниты приходят из ввода, проверить их до запуска нельзя", unitHint(scope, verb, false)
 	}
 	hosts := t.sessionUnits(procs, a.user, "")
 	for _, u := range a.units {
@@ -296,9 +364,66 @@ func (t *KillGuardTool) unitActionReason(label string, a unitAction, via string,
 		if spare := restartableComm(unitName(u.text)); spare != "" && slices.Contains(systemctlRestartVerbs, verb) {
 			h = t.sessionUnits(procs, a.user, spare)
 		}
-		if reason := unitReason(u, h); reason != "" {
+		reason := unitReason(u, h)
+		if u.literal && u.text == "" {
+			reason = emptyUnitReason(a.dbus)
+		}
+		if reason != "" {
 			named := u.literal && !strings.ContainsAny(u.text, "*?[{")
-			return fmt.Sprintf("%s %s: %s", label, shownUnit(u.text), reason), systemctlHint(scope, named)
+			return fmt.Sprintf("%s %s: %s", label, shownUnit(u.text), reason), unitHint(scope, verb, named)
+		}
+	}
+	return "", ""
+}
+
+// emptyUnitReason отказ на пустое имя юнита: по D-Bus systemd берёт юнит
+// вызывающего, systemctl такое имя отвергает сам
+func emptyUnitReason(dbus bool) string {
+	if dbus {
+		return "пустое имя — юнит самой команды, то есть этой сессии Claude"
+	}
+	return "пустое имя юнита systemctl отвергает, но тот же вызов по D-Bus гасит юнит самой команды — назови юнит литералом"
+}
+
+// unitHint подсказка к отказу на действие verb над юнитом: у set-property —
+// про свойства, у прочих — systemctlHint
+func unitHint(scope, verb string, named bool) string {
+	if verb == "set-property" && named {
+		return "Свойства (лимит памяти, CPU) меняй у юнита без процессов сессии: посмотри их (" + scope + " status юнит)"
+	}
+	return systemctlHint(scope, named)
+}
+
+// startVerbs команды systemctl, которые запускают юнит (restart — после
+// остановки)
+var startVerbs = []string{"start", "restart", "reload-or-restart"}
+
+// userEndTargets цели менеджера пользователя, запуск которых гасит его, как
+// systemctl --user exit; systemEndTargets — цели системного менеджера, как
+// systemctl poweroff, reboot. shutdown.target у обоих останавливает все службы
+var (
+	userEndTargets   = map[string]string{"exit.target": "exit", "shutdown.target": "shutdown"}
+	systemEndTargets = map[string]string{
+		"poweroff.target": "poweroff", "reboot.target": "reboot", "halt.target": "halt", "kexec.target": "kexec",
+		"soft-reboot.target": "soft-reboot", "exit.target": "exit", "shutdown.target": "shutdown",
+	}
+)
+
+// endTargetReason отказ на запуск цели, которая гасит менеджер или машину
+// (systemctl --user start exit.target, StartUnit poweroff.target): то же,
+// что systemctl --user exit и systemctl poweroff
+func endTargetReason(label string, a unitAction) (reason, hint string) {
+	if !slices.Contains(startVerbs, a.verb) && !(a.now && a.verb == "enable") {
+		return "", ""
+	}
+	targets := systemEndTargets
+	if a.user {
+		targets = userEndTargets
+	}
+	scope := a.scope()
+	for _, u := range a.units {
+		if v := targets[unitName(u.text)]; v != "" && u.literal {
+			return fmt.Sprintf("%s %s %s: гаснут сессии Claude, терминал и графическая оболочка", label, u.text, systemctlEndEffect(scope, v)), systemctlEndHint(scope, v)
 		}
 	}
 	return "", ""
@@ -360,17 +485,14 @@ func unitHosts(name string) []string {
 	return out
 }
 
-// unitReason почему юнит u останавливать нельзя: вычисляется, пустое имя,
-// шаблон или {…}, цель или корневой срез, сеанс logind, юнит сессии из
-// hosts (и за сокетом или алиасом); "" — можно
+// unitReason почему юнит u останавливать нельзя: вычисляется, шаблон или
+// {…}, цель или корневой срез, сеанс logind, юнит сессии из hosts (и за
+// сокетом или алиасом); "" — можно. Пустое имя — emptyUnitReason
 func unitReason(u word, hosts map[string]string) string {
 	name := unitName(u.text)
 	switch {
 	case !u.literal:
 		return "юнит вычисляется при запуске, проверить его заранее нельзя"
-	case u.text == "":
-		// systemd по D-Bus (KillUnit "") берёт юнит вызывающего
-		return "пустое имя — юнит самой команды, то есть этой сессии Claude"
 	case strings.ContainsAny(name, "*?[{"):
 		return "шаблон или {…} выбирает юниты при запуске, среди них может быть юнит этой сессии"
 	case strings.HasSuffix(name, ".target") || name == "-.slice":

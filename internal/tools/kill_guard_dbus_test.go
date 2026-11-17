@@ -185,7 +185,7 @@ func TestKillGuardDbusTexts(t *testing.T) {
 // Обходы из приёмки 701a45d: пустое имя юнита (systemd берёт юнит
 // вызывающего), escape в строке GVariant, аргументы gdbus после --, ID
 // запуска в пути в любом регистре и форме GUID, выключение через logind,
-// busctl -C со значением
+// busctl -C со значением (шина capsule — TestKillGuardSessionEndAllows)
 func TestKillGuardDbusReviewBlocks(t *testing.T) {
 	for _, command := range []string{
 		// 1. пустое имя юнита
@@ -228,9 +228,6 @@ func TestKillGuardDbusReviewBlocks(t *testing.T) {
 		`gdbus call --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1 --method org.freedesktop.login1.Manager.Reboot false`,
 		`dbus-send --system --dest=org.freedesktop.login1 --print-reply /org/freedesktop/login1 org.freedesktop.login1.Manager.PowerOff boolean:false`,
 		`qdbus --system org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.PowerOff false`,
-		// busctl -C (--capsule) берёт значение: команда — за ним
-		`busctl -C foo call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillSession ssi 3 all 15`,
-		`busctl --capsule foo call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager TerminateUser u 1000`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)

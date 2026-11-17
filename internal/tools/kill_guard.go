@@ -60,7 +60,8 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 	}
 
 	scan := killScan{tool: t, command: input.Command, killText: killText,
-		signalWord: signalWordRe.MatchString(text), zsh: zshWordRe.MatchString(text)}
+		signalWord: signalWordRe.MatchString(text), zsh: zshWordRe.MatchString(text),
+		anyBus: busAddressRe.MatchString(text)}
 	if err := scan.parsedCalls(); err != nil {
 		return nil, err
 	}
@@ -126,6 +127,9 @@ type killScan struct {
 	// killText — в команде без кавычек есть подстрока kill. Без неё сторож
 	// смотрит только loginctl, systemctl и fuser, и ошибка разбора — не отказ
 	killText bool
+	// anyBus — команда задаёт адрес шины D-Bus (busAddressRe): менеджер
+	// systemd у systemctl и вызовов D-Bus проверяется по обоим
+	anyBus bool
 }
 
 // signalWordRe отдельное слово kill, pkill, killall, killall5
@@ -278,6 +282,9 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if sudoAssignment(c, calls) {
 		return nil
 	}
+	if inner, ok := elevatedCommand(c); ok {
+		return s.elevated(c, inner)
+	}
 	if !s.signalWord {
 		return s.signal(c, calls)
 	}
@@ -306,6 +313,68 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		}
 	}
 	return s.signal(c, calls)
+}
+
+// elevatedValues опции run0 и pkexec со значением отдельным словом
+var elevatedValues = map[string][]string{
+	"run0": {"u", "user", "g", "group", "nice", "D", "chdir", "setenv", "unit", "p", "property", "description",
+		"slice", "machine", "background", "shell-prompt-prefix", "area", "lightweight"},
+	"pkexec": {"user"},
+}
+
+// elevatedCommand команда, которую run0 и pkexec исполнят от другого
+// пользователя (как sudo, которое снимает разбор оболочки): слова после их
+// опций, собранные в текст для разбора. Слово с подстановкой — как в
+// исходнике, литеральное — в одинарных кавычках
+func elevatedCommand(c shellcmd.Call) (string, bool) {
+	values, ok := elevatedValues[c.Name]
+	if !ok {
+		return "", false
+	}
+	i := 0
+	for ; i < len(c.Args); i++ {
+		a := c.Args[i]
+		if a == "--" {
+			i++
+			break
+		}
+		if !strings.HasPrefix(a, "-") {
+			break
+		}
+		name := strings.TrimLeft(a, "-")
+		if !strings.Contains(name, "=") && slices.Contains(values, name) {
+			i++
+		}
+	}
+	if i >= len(c.Args) {
+		return "", false
+	}
+	quoted := make([]string, 0, len(c.Args)-i)
+	for _, a := range c.Args[i:] {
+		if strings.ContainsAny(a, "$`") {
+			quoted = append(quoted, a)
+			continue
+		}
+		quoted = append(quoted, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
+	}
+	return strings.Join(quoted, " "), true
+}
+
+// elevated проверяет вызовы команды inner, которую исполнит обёртка c
+// (run0, pkexec): Via у них — с обёрткой впереди. Ошибка разбора — как у
+// всей команды
+func (s *killScan) elevated(c shellcmd.Call, inner string) error {
+	calls, err := shellcmd.Calls(inner)
+	if err != nil && s.killText {
+		s.addReason(c.Name + ": разбор команды за ним не прошёл (" + err.Error() + "): проверить сигналы в ней нельзя")
+	}
+	for _, ic := range calls {
+		ic.Via = append(append(slices.Clone(c.Via), c.Name), ic.Via...)
+		if err := s.call(ic, calls); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sudoAssignment — c не программа, а присваивание после sudo -- (sudo --
@@ -344,8 +413,18 @@ func sudoAssignment(c shellcmd.Call, calls []shellcmd.Call) bool {
 // (${X:-kill}) — то же слово kill. Имя из позиционных параметров ("$@",
 // $1) исполняет слова, переданные в другом месте команды (set -- kill -9
 // -1, f kill -9 -1, bash -c '"$@"' _ kill …): слово сигнала среди
-// аргументов любого вызова проверяется как сигнал с аргументами за ним
+// аргументов любого вызова проверяется как сигнал с аргументами за ним.
+// Прочее вычисляемое имя проверяется по аргументам как systemctl, loginctl
+// и средства D-Bus (computedTool)
 func (s *killScan) signal(c shellcmd.Call, calls []shellcmd.Call) error {
+	args := make([]word, 0, len(c.Args))
+	for _, a := range c.Args {
+		args = append(args, word{text: a, literal: !strings.ContainsAny(a, "$`")})
+	}
+	via := ""
+	if slices.Contains(c.Via, "xargs") {
+		via = "xargs"
+	}
 	// имя без каталога от ${X-/bin/kill} — «kill}»: скобка — тоже раскрытие
 	if c.Name == "" || strings.ContainsAny(c.Name, "${}") {
 		switch {
@@ -355,16 +434,10 @@ func (s *killScan) signal(c shellcmd.Call, calls []shellcmd.Call) error {
 			s.addReason("имя команды — раскрытие переменной или массива, которым в команде присвоено слово kill (a=(kill …); \"${a[@]}\"): проверить, что исполнится, нельзя")
 		case positionalRe.MatchString(unquoted(c.Name)):
 			return s.positionalSignal(calls)
+		case !slices.Contains(c.Via, "ssh"):
+			return s.computedTool(c, args, via)
 		}
 		return nil
-	}
-	args := make([]word, 0, len(c.Args))
-	for _, a := range c.Args {
-		args = append(args, word{text: a, literal: !strings.ContainsAny(a, "$`")})
-	}
-	via := ""
-	if slices.Contains(c.Via, "xargs") {
-		via = "xargs"
 	}
 	if err := s.sessionTool(c, args, via); err != nil {
 		return err

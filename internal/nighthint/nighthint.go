@@ -189,21 +189,27 @@ func Run(ctx context.Context, deps Deps, event Event) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("mark %s: %w", event.Name, err)
 	}
-	var skillErr error
-	if !fresh && event.Name == EventUserPromptSubmit {
-		// Подсказка этой ночи уже была, но скилл не вызван: ход по письму
-		// сессии после /clear начинается со скилла роли, и подсказка на
-		// SessionStart до него не доходит — повторить на этом ходе
-		var called bool
-		called, skillErr = skillCalled(deps, event.SessionID)
-		if skillErr == nil && !called {
-			fresh = true
-		}
-	}
+	fresh, skillErr := repeatUntilSkill(deps, event, fresh)
 	if !fresh {
 		return Result{Skip: "подсказка уже дана (раз за ночь, на Stop — раз за ход)", Damaged: damaged, SkillErr: skillErr}, nil
 	}
 	return Result{Context: Text(now), Damaged: damaged, SkillErr: skillErr}, nil
+}
+
+// repeatUntilSkill — давать ли подсказку на UserPromptSubmit, когда ночь уже
+// отмечена: подсказка этой ночи была, но скилл не вызван — ход по письму
+// сессии после /clear начинается со скилла роли, и подсказка на SessionStart
+// до него не доходит, поэтому повтор на этом ходе. Признака нет — решение
+// прежнее (раз за ночь), причина — вторым значением
+func repeatUntilSkill(deps Deps, event Event, fresh bool) (bool, error) {
+	if fresh || event.Name != EventUserPromptSubmit {
+		return fresh, nil
+	}
+	called, err := skillCalled(deps, event.SessionID)
+	if err != nil {
+		return false, err
+	}
+	return !called, nil
 }
 
 // ErrSkillUnknown — признака вызова скилла нет (не подключён или выключен):

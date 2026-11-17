@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -266,7 +267,7 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		config := core.DefaultConfig()
 		deps := nightTestDeps(t, night, true, nil)
-		deps.SkillCalled = autonomousSkillCalled(config)
+		deps.SkillCalled = autonomousSkillCalled(config, time.Now().Add(time.Minute))
 		writeSkillState(t, "coordinator")
 		if given, _ := run(t, config, deps, start); !given {
 			t.Fatal("SessionStart(clear) без подсказки")
@@ -279,6 +280,23 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 		writeSkillState(t, "coordinator", nighthint.AutonomousSkill)
 		if given, log := run(t, config, deps, prompt); given || strings.Contains(log, "skill call unknown") {
 			t.Errorf("после вызова скилла: подсказка %t, лог %s", given, log)
+		}
+	})
+
+	// sc2go вызывает night-work вместо autonomous-work (описание
+	// autonomous-work: «в sc2go - `night-work`»): он засчитывается наравне
+	// (тикет night-hint-night-work-budget). Имя — литералом, как в sc2go
+	t.Run("night-work called", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		config := core.DefaultConfig()
+		deps := nightTestDeps(t, night, true, nil)
+		deps.SkillCalled = autonomousSkillCalled(config, time.Now().Add(time.Minute))
+		writeSkillState(t, "coordinator", "night-work")
+		if given, _ := run(t, config, deps, start); !given {
+			t.Fatal("SessionStart(clear) без подсказки")
+		}
+		if given, log := run(t, config, deps, prompt); given || strings.Contains(log, "skill call unknown") {
+			t.Errorf("после вызова night-work: подсказка %t, лог %s", given, log)
 		}
 	})
 
@@ -308,7 +326,7 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 			config := core.DefaultConfig()
 			c.prepare(t, config)
 			deps := nightTestDeps(t, night, true, nil)
-			deps.SkillCalled = autonomousSkillCalled(config)
+			deps.SkillCalled = autonomousSkillCalled(config, time.Now().Add(time.Minute))
 			if given, _ := run(t, config, deps, start); !given {
 				t.Fatal("SessionStart(clear) без подсказки")
 			}
@@ -326,7 +344,7 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		config := core.DefaultConfig()
 		deps := nightTestDeps(t, night, true, nil)
-		deps.SkillCalled = autonomousSkillCalled(config)
+		deps.SkillCalled = autonomousSkillCalled(config, time.Now().Add(time.Minute))
 		if given, _ := run(t, config, deps, start); !given {
 			t.Fatal("SessionStart(clear) без подсказки")
 		}
@@ -354,11 +372,128 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 		config := core.DefaultConfig()
 		writeSkillState(t)
 		deps := nightTestDeps(t, time.Date(2026, 11, 17, 14, 0, 0, 0, time.Local), true, nil)
-		deps.SkillCalled = autonomousSkillCalled(config)
+		deps.SkillCalled = autonomousSkillCalled(config, time.Now().Add(time.Minute))
 		for i := range 2 {
 			if given, _ := run(t, config, deps, prompt); given {
 				t.Errorf("ход %d днём: подсказка", i+1)
 			}
+		}
+	})
+}
+
+// lockPath берёт flock файла path (создаёт его) отдельным открытием: flock
+// разных открытий конфликтует и внутри одного процесса. Снимает — Close
+func lockPath(t *testing.T, path string) *os.File {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return file
+}
+
+// nightHintTimeout — таймаут night-hint в ~/.claude/settings.json: 3 с у всех
+// четырёх регистраций (SessionStart, UserPromptSubmit, PreToolUse, Stop),
+// проверено 17.11
+const nightHintTimeout = 3 * time.Second
+
+// Ожидание записи skill-reload кончается к сроку хука: сумма ожиданий
+// UserPromptSubmit (запись night-hint дважды, logind, запись skill-reload) не
+// выходит за таймаут хука; срок прошёл — запись не читается, подсказка раз за
+// ночь, причина в лог (тикет night-hint-night-work-budget)
+func TestRunNightHintSkillWaitWithinDeadline(t *testing.T) {
+	t.Setenv("CLAUDE_PID", "")
+	night := time.Date(2026, 11, 17, 5, 6, 0, 0, time.Local)
+	start := `{"hook_event_name":"SessionStart","session_id":"s1","source":"clear"}`
+	prompt := `{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"письмо сессии"}`
+	run := func(t *testing.T, config *core.Config, deps nighthint.Deps, input string) (bool, string) {
+		t.Helper()
+		logger, logPath := nightTestLogger(t)
+		var out bytes.Buffer
+		runNightHint(context.Background(), []byte(input), config, logger, &out, deps)
+		return out.Len() > 0, readLog(t, logPath)
+	}
+	// prepare — ночь отмечена SessionStart, запись skill-reload без скилла:
+	// UserPromptSubmit идёт к записи skill-reload
+	prepare := func(t *testing.T) (*core.Config, nighthint.Deps, string) {
+		t.Helper()
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		config := core.DefaultConfig()
+		writeSkillState(t, "coordinator")
+		deps := nightTestDeps(t, night, true, nil)
+		deps.SkillCalled = autonomousSkillCalled(config, time.Now().Add(time.Minute))
+		if given, _ := run(t, config, deps, start); !given {
+			t.Fatal("SessionStart(clear) без подсказки")
+		}
+		dir, err := skillreload.DefaultStateDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return config, deps, filepath.Join(dir, "s1.json")
+	}
+
+	t.Run("deadline passed", func(t *testing.T) {
+		config, deps, _ := prepare(t)
+		deps.SkillCalled = autonomousSkillCalled(config, time.Now().Add(-time.Millisecond))
+		given, log := run(t, config, deps, prompt)
+		if given {
+			t.Error("срок хука прошёл, а запись прочитана: подсказка повторена")
+		}
+		if !strings.Contains(log, `msg="night hint once per night: skill call unknown"`) || !strings.Contains(log, "hook budget spent") {
+			t.Errorf("в логе нет причины: %s", log)
+		}
+	})
+
+	t.Run("record locked", func(t *testing.T) {
+		config, deps, skillPath := prepare(t)
+		lockPath(t, skillPath)
+		started := time.Now()
+		deps.SkillCalled = autonomousSkillCalled(config, started.Add(150*time.Millisecond))
+		given, log := run(t, config, deps, prompt)
+		if waited := time.Since(started); waited > 600*time.Millisecond {
+			t.Errorf("хук шёл %s при сроке 150ms", waited)
+		}
+		if given || !strings.Contains(log, "skill call unknown") {
+			t.Errorf("подсказка %t, лог %s", given, log)
+		}
+	})
+
+	// Худший случай: запись night-hint занята почти lockWait перед ResetStop
+	// и перед MarkNight, logind отвечает почти lockTimeout, запись skill-reload
+	// занята. Срок — optionalBudget от старта, как у runHook
+	t.Run("all locks busy", func(t *testing.T) {
+		config, deps, skillPath := prepare(t)
+		lockPath(t, skillPath)
+		nightPath := filepath.Join(deps.Store.Dir, "s1.json")
+		const hold = 900 * time.Millisecond
+		const logind = 450 * time.Millisecond
+		holder := lockPath(t, nightPath)
+		time.AfterFunc(hold, func() { _ = holder.Close() })
+		deps.Locked = func(context.Context) (bool, error) {
+			again := lockPath(t, nightPath)
+			time.AfterFunc(logind+hold, func() { _ = again.Close() })
+			time.Sleep(logind)
+			return true, nil
+		}
+		started := time.Now()
+		deps.SkillCalled = autonomousSkillCalled(config, started.Add(optionalBudget))
+		given, log := run(t, config, deps, prompt)
+		elapsed := time.Since(started)
+		if elapsed >= nightHintTimeout {
+			t.Errorf("хук шёл %s при таймауте %s", elapsed, nightHintTimeout)
+		}
+		if elapsed < 2*hold+logind {
+			t.Errorf("хук шёл %s: блокировки не дождался, проверка не о худшем случае; лог %s", elapsed, log)
+		}
+		if given || !strings.Contains(log, "skill call unknown") {
+			t.Errorf("подсказка %t, лог %s", given, log)
 		}
 	})
 }

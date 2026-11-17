@@ -256,7 +256,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		runUnsentCheck(parseSessionInput(logger, hookType, data), logger, os.Stdout)
 		return exitAllowed, nil
 	case hookNightHint:
-		defaultNightHint(ctx, data, config, logger)
+		defaultNightHint(ctx, data, config, logger, timer.deadline(optionalBudget))
 		return exitAllowed, nil
 	case hookNoPrompt:
 		if err := runNoPrompt(data, logger, os.Stdout); err != nil {

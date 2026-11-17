@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -257,13 +258,13 @@ func readStateUnlocked(dir, name string) (sessionState, error) {
 var ErrNoState = errors.New("skill reload state not found")
 
 // SkillCalled сообщает, есть ли в записи главного агента сессии вызванный
-// скилл name. Запись ведут UserPromptSubmit и PostToolBatch: вызов прошлого
+// скилл из names. Запись ведут UserPromptSubmit и PostToolBatch: вызов прошлого
 // хода виден по PostToolBatch того же хода; снимок, подложенный сжатием,
 // вызов не отменяет. Субагенты пишут свои записи, их вызовы не в счёт.
 // save перезаписывает файл на месте (Truncate и WriteAt), поэтому чтение —
 // под той же блокировкой, ожидая её не дольше deadline. Файл не создаётся:
 // нет записи — ErrNoState
-func SkillCalled(dir, sessionID, name string, deadline time.Time) (bool, error) {
+func SkillCalled(dir, sessionID string, names []string, deadline time.Time) (bool, error) {
 	fileName, err := stateFileName(sessionID, "")
 	if err != nil {
 		return false, err
@@ -295,7 +296,7 @@ func SkillCalled(dir, sessionID, name string, deadline time.Time) (bool, error) 
 		return false, fmt.Errorf("state %s has schema %d, want %d", path, state.Schema, stateSchema)
 	}
 	for _, w := range state.Files {
-		if w.Kind == kindSkill && w.Name == name {
+		if w.Kind == kindSkill && slices.Contains(names, w.Name) {
 			return true, nil
 		}
 	}

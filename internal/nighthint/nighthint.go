@@ -50,6 +50,17 @@ const askTool = "AskUserQuestion"
 // UserPromptSubmit получает подсказку на каждом ходе
 const AutonomousSkill = "autonomous-work"
 
+// NightWorkSkill — скилл sc2go вместо AutonomousSkill: описание autonomous-work —
+// «(в sc2go - `night-work`)», и сессии sc2go вызывают его; без него подсказка
+// шла бы на каждом ходе всю ночь (тикет night-hint-night-work-budget)
+const NightWorkSkill = "night-work"
+
+// AutonomousSkills — скиллы, вызов любого из которых засчитывается как вызов
+// AutonomousSkill
+func AutonomousSkills() []string {
+	return []string{AutonomousSkill, NightWorkSkill}
+}
+
 // questionMark — метка строки «нужно от тебя» в ответе агента (CLAUDE.md,
 // «Форма ответа»)
 const questionMark = "❓"
@@ -82,7 +93,8 @@ type Deps struct {
 	Now    func() time.Time
 	Locked func(ctx context.Context) (bool, error)
 	Store  Store
-	// SkillCalled — вызван ли в сессии главного агента AutonomousSkill.
+	// SkillCalled — вызван ли в сессии главного агента AutonomousSkill (или
+	// другой из AutonomousSkills).
 	// Ошибка или nil — неизвестно: UserPromptSubmit идёт по правилу «раз
 	// за ночь»
 	SkillCalled func(sessionID string) (bool, error)

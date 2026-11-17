@@ -35,17 +35,19 @@ type nightHintEvent struct {
 
 // skillStateWait — сколько ждать блокировку записи skill-reload: её держат
 // UserPromptSubmit и PostToolBatch на время чтения транскрипта (бюджет
-// skillScanBudget); вместе со сроком признака блокировки — в таймауте хука 3 с
+// skillScanBudget). Ожидание кончается и раньше — к сроку хука (deadline у
+// autonomousSkillCalled)
 const skillStateWait = time.Second
 
 // nightHintDeps — живые время, признак блокировки, записи и признак вызова
-// скилла autonomous-work по записи skill-reload
-func nightHintDeps(config *core.Config) (nighthint.Deps, error) {
+// скилла autonomous-work по записи skill-reload; deadline — срок хука для
+// чтения записи
+func nightHintDeps(config *core.Config, deadline time.Time) (nighthint.Deps, error) {
 	dir, err := nighthint.DefaultDir()
 	if err != nil {
 		return nighthint.Deps{}, err
 	}
-	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, Store: nighthint.Store{Dir: dir}, SkillCalled: autonomousSkillCalled(config)}, nil
+	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, Store: nighthint.Store{Dir: dir}, SkillCalled: autonomousSkillCalled(config, deadline)}, nil
 }
 
 // autonomousSkillCalled — признак вызова скилла autonomous-work в сессии по
@@ -54,17 +56,31 @@ func nightHintDeps(config *core.Config) (nighthint.Deps, error) {
 // не имеет — её создаёт user-prompt-submit параллельно с night-hint на том же
 // UserPromptSubmit, — и этот ход подсказку получает. Выключенный skill_reload
 // записей не ведёт: признак — ErrSkillUnknown, подсказка идёт по правилу «раз
-// за ночь»; так же — при сбое чтения существующей записи
-func autonomousSkillCalled(config *core.Config) func(sessionID string) (bool, error) {
+// за ночь»; так же — при сбое чтения существующей записи.
+//
+// Запись ждётся не дольше deadline — срока хука от старта процесса, как у
+// skill-reload: до неё UserPromptSubmit уже ждал запись night-hint дважды (по
+// lockWait) и logind (lockTimeout), и без срока сумма выходила за таймаут хука
+// 3 с из settings.json (тикет night-hint-night-work-budget). Срок наступил —
+// запись не читается, подсказка идёт по правилу «раз за ночь», причина — в лог
+func autonomousSkillCalled(config *core.Config, deadline time.Time) func(sessionID string) (bool, error) {
 	return func(sessionID string) (bool, error) {
 		if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
 			return false, fmt.Errorf("%s disabled in config: %w", skillReloadTool, nighthint.ErrSkillUnknown)
+		}
+		now := time.Now()
+		if !now.Before(deadline) {
+			return false, fmt.Errorf("skill-reload record not read, hook deadline %s passed: %w", deadline.Format("15:04:05.000"), skillreload.ErrNoTime)
 		}
 		dir, err := skillreload.DefaultStateDir()
 		if err != nil {
 			return false, err
 		}
-		called, err := skillreload.SkillCalled(dir, sessionID, nighthint.AutonomousSkill, time.Now().Add(skillStateWait))
+		wait := now.Add(skillStateWait)
+		if deadline.Before(wait) {
+			wait = deadline
+		}
+		called, err := skillreload.SkillCalled(dir, sessionID, nighthint.AutonomousSkills(), wait)
 		if errors.Is(err, skillreload.ErrNoState) {
 			return false, nil
 		}
@@ -78,7 +94,7 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 		Use:   hookNightHint,
 		Short: "Ночью при заблокированном экране подсказать сессии: пользователь спит, вопрос — тикетом админу пространства (SessionStart, UserPromptSubmit, PreToolUse AskUserQuestion, Stop с ❓)",
 		Long: "Подсказка в additionalContext, не отказ. Признак «спит» — экран заблокирован (LockedHint сессии seat0 в logind) и местное время 22:00–09:00. " +
-			"SessionStart — раз за ночь на сессию и после сжатия и /clear; UserPromptSubmit — на каждом ходе, пока в сессии не вызван скилл autonomous-work (по записи skill-reload; записи нет — не вызван), после вызова, при выключенном skill_reload или сбое чтения записи — раз за ночь; " +
+			"SessionStart — раз за ночь на сессию и после сжатия и /clear; UserPromptSubmit — на каждом ходе, пока в сессии не вызван скилл autonomous-work или night-work (sc2go) (по записи skill-reload; записи нет — не вызван), после вызова, при выключенном skill_reload, сбое чтения записи или исчерпанном сроке хука — раз за ночь; " +
 			"PreToolUse AskUserQuestion — на каждый вызов, Stop — если в последнем ответе есть строка с ❓, раз за ход. " +
 			"--probe печатает признак блокировки и время его получения.",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -174,8 +190,8 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 }
 
 // defaultNightHint — обработчик для runHook: живые зависимости
-func defaultNightHint(ctx context.Context, data []byte, config *core.Config, logger core.Logger) {
-	deps, err := nightHintDeps(config)
+func defaultNightHint(ctx context.Context, data []byte, config *core.Config, logger core.Logger, deadline time.Time) {
+	deps, err := nightHintDeps(config, deadline)
 	if err != nil {
 		logger.Warn("night hint state dir unavailable", "error", err)
 		return

@@ -181,3 +181,96 @@ func TestKillGuardDbusTexts(t *testing.T) {
 		}
 	}
 }
+
+// Обходы из приёмки 701a45d: пустое имя юнита (systemd берёт юнит
+// вызывающего), escape в строке GVariant, аргументы gdbus после --, ID
+// запуска в пути в любом регистре и форме GUID, выключение через logind,
+// busctl -C со значением
+func TestKillGuardDbusReviewBlocks(t *testing.T) {
+	for _, command := range []string{
+		// 1. пустое имя юнита
+		userMgr + `StopUnit ss "" replace`,
+		userMgr + `KillUnit ssi '' all 9`,
+		gdbusMgr + `KillUnit "''" all 9`,
+		sendMgr + `KillUnit string: string:all int32:9`,
+		qdbusMgr + `StopUnit "" replace`,
+		userUnit + `_ org.freedesktop.systemd1.Unit Stop s replace`,
+		// 2. escape в строке GVariant: -, \U0000002d, \- — дефис
+		gdbusMgr + `StopUnit "'plasma-kwin_wayland.service'" replace`,
+		gdbusMgr + `KillUnit "'agent-x-1.scope'" all 15`,
+		gdbusMgr + `KillUnit "'agent\U0000002dx-1.scope'" all 15`,
+		gdbusMgr + `KillUnit "'agent\-x\-1.scope'" all 15`,
+		gdbusMgr + `KillUnit "\"agent-x-1.scope\"" all 15`,
+		gdbusMgr + `KillUnit "string 'agent-x-1.scope'" all 15`,
+		gdbusMgr + `KillUnit "@s 'agent-x-1.scope'" all 15`,
+		// битая последовательность: имя не проверить
+		gdbusMgr + `KillUnit "'agent\u002'" all 15`,
+		// 3. аргументы gdbus после --
+		gdbusMgr + `StopUnit -- "'plasma-kwin_wayland.service'" "'replace'"`,
+		gdbusMgr + `KillUnit -- agent-x-1.scope all 15`,
+		gdbusMgr + `KillUnit -- "'agent-x-1.scope'" "'all'" "int32 9"`,
+		// 4. ID запуска: верхний регистр, GUID с _2d и _2D
+		userUnit + `0123456789ABCDEF0123456789ABCDEF org.freedesktop.systemd1.Unit Kill si all 15`,
+		userUnit + `01234567_2d89ab_2dcdef_2d0123_2d456789abcdef org.freedesktop.systemd1.Unit Kill si all 15`,
+		userUnit + `01234567_2D89AB_2DCDEF_2D0123_2D456789ABCDEF org.freedesktop.systemd1.Unit Stop s replace`,
+		userUnit + `_61gent_2Dx_2D1_2Escope org.freedesktop.systemd1.Unit Kill si all 15`,
+		// 5. выключение и перезагрузка через logind — как systemctl poweroff
+		login + `PowerOff b false`,
+		login + `Reboot b false`,
+		login + `Halt b false`,
+		login + `PowerOffWithFlags t 0`,
+		login + `RebootWithFlags t 0`,
+		login + `HaltWithFlags t 0`,
+		login + `ScheduleShutdown st poweroff 0`,
+		login + `ScheduleShutdown st reboot 0`,
+		login + `ScheduleShutdown st kexec 0`,
+		login + `ScheduleShutdown st "$K" 0`,
+		`gdbus call --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1 --method org.freedesktop.login1.Manager.Reboot false`,
+		`dbus-send --system --dest=org.freedesktop.login1 --print-reply /org/freedesktop/login1 org.freedesktop.login1.Manager.PowerOff boolean:false`,
+		`qdbus --system org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.PowerOff false`,
+		// busctl -C (--capsule) берёт значение: команда — за ним
+		`busctl -C foo call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillSession ssi 3 all 15`,
+		`busctl --capsule foo call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager TerminateUser u 1000`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+}
+
+// Соседи: сигнал 0 и чужой юнит в тех же формах, сон и пробное выключение
+// (systemctl suspend хук тоже пускает), чтение logind
+func TestKillGuardDbusReviewAllows(t *testing.T) {
+	for _, command := range []string{
+		userMgr + `KillUnit ssi '' all 0`,
+		gdbusMgr + `KillUnit "'agent-x-1.scope'" all 0`,
+		gdbusMgr + `KillUnit "'asg-dummy-kill.service'" all 15`,
+		gdbusMgr + `KillUnit -- agent-x-1.scope all 0`,
+		gdbusMgr + `KillUnit -- "'asg-dummy-kill.service'" "'all'" "int32 15"`,
+		userUnit + `asg_2Ddummy_2Dkill_2Eservice org.freedesktop.systemd1.Unit Stop s replace`,
+		login + `ScheduleShutdown st dry-poweroff 0`,
+		login + `Suspend b false`,
+		login + `Hibernate b false`,
+		login + `CanPowerOff`,
+		login + `CancelScheduledShutdown`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}
+
+// Причина на пустое имя и на выключение через logind; подсказка к
+// выключению — та же, что у systemctl poweroff
+func TestKillGuardDbusReviewTexts(t *testing.T) {
+	for _, tc := range []struct{ command, reason, hint string }{
+		{userMgr + `KillUnit ssi '' all 9`, "(как systemctl --user kill) \"\": пустое имя — юнит самой команды", "Останавливай юнит"},
+		{login + `PowerOff b false`, "busctl call org.freedesktop.login1.Manager.PowerOff (как systemctl poweroff) выключает машину", "Команда выключает машину"},
+		{login + `ScheduleShutdown st reboot 0`, "(как systemctl reboot) перезагружает машину", "Команда перезагружает машину"},
+	} {
+		r := validateKill(t, tc.command)
+		if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), tc.reason) || !slices.ContainsFunc(r.Suggestions, func(h string) bool { return strings.HasPrefix(h, tc.hint) }) {
+			t.Errorf("%s: ждали отказ с «%s» и подсказкой «%s», получили %v %q", tc.command, tc.reason, tc.hint, r.IsValid, r.Suggestions)
+		}
+	}
+}

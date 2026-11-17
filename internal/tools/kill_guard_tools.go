@@ -13,12 +13,13 @@ import (
 
 // sessionToolWordRe отдельное слово средства, которое гасит процессы или
 // сессию, а слова kill в команде может не быть (loginctl terminate-user,
-// systemctl --user stop, fuser -k). У skill, tmux kill-* и os.kill в
+// systemctl --user stop, fuser -k, busctl call … StopUnit). У skill, tmux kill-* и os.kill в
 // python -c подстрока kill есть всегда
-var sessionToolWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(loginctl|systemctl|fuser)([^[:alnum:]_.-]|$)`)
+var sessionToolWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(loginctl|systemctl|fuser|busctl|gdbus|dbus-send|qdbus(6|-qt[56])?)([^[:alnum:]_.-]|$)`)
 
 // sessionTool проверяет вызов средств, гасящих процессы или сессию, кроме
-// kill, pkill и killall: loginctl, systemctl, fuser -k, skill, os.kill в
+// kill, pkill и killall: loginctl, systemctl, вызов тех же действий по
+// D-Bus (busctl, gdbus, dbus-send, qdbus), fuser -k, skill, os.kill в
 // скрипте python, tmux kill-*. Широта цели — как у kill: названная узко
 // (юнит, порт, PID, сессия tmux) — можно, всё, группа, сессия, юнит предка
 // — отказ. via — обёртка, подающая аргументы из ввода (xargs). Вызов в
@@ -41,6 +42,15 @@ func (s *killScan) sessionTool(c shellcmd.Call, args []word, via string) error {
 		reason, hint = s.tool.systemctlReason(args, via, s.procs)
 	case c.Name == "fuser":
 		reason = fuserReason(args, via)
+	case dbusTools[c.Name] != nil:
+		dc, ok := dbusTools[c.Name](args, via)
+		if !ok {
+			return nil
+		}
+		if err := s.loadProcs(); err != nil {
+			return err
+		}
+		reason, hint = s.tool.dbusReason(dc, via, s.procs)
 	case c.Name == "skill":
 		reason = skillReason(args)
 	case c.Name == "tmux":
@@ -151,6 +161,10 @@ func optionOperands(args []word, values []string) []word {
 // loginctlValues опции loginctl со значением
 var loginctlValues = []string{"H", "host", "M", "machine", "p", "property", "s", "signal", "kill-whom", "n", "lines", "o", "output"}
 
+// loginEndEffect что делают loginctl terminate-*, kill-* и те же методы
+// logind по D-Bus (KillSession, TerminateUser)
+const loginEndEffect = "завершает процессы сеанса или всех сеансов пользователя: сессии Claude, терминал и графическую оболочку"
+
 // loginctlReason loginctl terminate-* и kill-* завершают процессы сеанса или
 // всех сеансов пользователя: свой сеанс среди них не отличить по номеру
 // (аудит-сеанс процесса и сеанс logind бывают разными)
@@ -161,7 +175,7 @@ func loginctlReason(args []word) string {
 	}
 	switch verb := ops[0].text; verb {
 	case "terminate-user", "kill-user", "terminate-session", "kill-session", "terminate-seat":
-		return "loginctl " + verb + " завершает процессы сеанса или всех сеансов пользователя: сессии Claude, терминал и графическую оболочку"
+		return "loginctl " + verb + " " + loginEndEffect
 	}
 	return ""
 }
@@ -230,39 +244,61 @@ var unitSuffixes = []string{".service", ".socket", ".target", ".scope", ".slice"
 // cgroup процесса: user.slice/…/user@1000.service/app.slice/app-…scope),
 // а также на юнит из переменной, шаблон юнитов, цель (.target: что
 // остановится с ней, не видно) и команды, гасящие весь менеджер. Юниты,
-// пришедшие из ввода (xargs), — тоже отказ. hint — подсказка к отказу
+// пришедшие из ввода (xargs), — тоже отказ. hint — подсказка к отказу.
+// Решение — unitActionReason, общее с вызовом тех же действий по D-Bus
 func (t *KillGuardTool) systemctlReason(args []word, via string, procs []procInfo) (reason, hint string) {
 	user, now, zero := systemctlFlags(args)
 	ops := optionOperands(args, systemctlValues)
 	if len(ops) == 0 {
 		return "", ""
 	}
-	verb := ops[0].text
-	scope := "systemctl"
-	if user {
-		scope += " --user"
+	a := unitAction{user: user, now: now, zero: zero, verb: ops[0].text, units: ops[1:]}
+	return t.unitActionReason(a.scope()+" "+a.verb, a, via, procs)
+}
+
+// unitAction действие менеджера systemd над юнитами: verb — команда
+// systemctl (stop, kill, isolate), user — менеджер пользователя, now — с
+// --now (disable и mask останавливают), zero — сигнал 0 у kill
+type unitAction struct {
+	user, now, zero bool
+	verb            string
+	units           []word
+}
+
+// scope менеджер действия так, как его пишет systemctl
+func (a unitAction) scope() string {
+	if a.user {
+		return "systemctl --user"
 	}
+	return "systemctl"
+}
+
+// unitActionReason отказ на действие a: гасит юнит сессии или весь
+// менеджер. label — как действие названо в причине (systemctl --user stop,
+// busctl call …KillUnit); via — обёртка, подающая юниты из ввода
+func (t *KillGuardTool) unitActionReason(label string, a unitAction, via string, procs []procInfo) (reason, hint string) {
+	scope, verb := a.scope(), a.verb
 	switch {
 	case slices.Contains(systemctlEndVerbs, verb):
-		return scope + " " + verb + " " + systemctlEndEffect(scope, verb) + ": гаснут сессии Claude, терминал и графическая оболочка", systemctlEndHint(scope, verb)
-	case verb == "kill" && zero:
+		return label + " " + systemctlEndEffect(scope, verb) + ": гаснут сессии Claude, терминал и графическая оболочка", systemctlEndHint(scope, verb)
+	case verb == "kill" && a.zero:
 		return "", ""
-	case slices.Contains(systemctlStopVerbs, verb) || now && (verb == "disable" || verb == "mask"):
+	case slices.Contains(systemctlStopVerbs, verb) || a.now && (verb == "disable" || verb == "mask"):
 	default:
 		return "", ""
 	}
 	if via != "" {
-		return scope + " " + verb + " через " + via + ": юниты приходят из ввода, проверить их до запуска нельзя", systemctlHint(scope, false)
+		return label + " через " + via + ": юниты приходят из ввода, проверить их до запуска нельзя", systemctlHint(scope, false)
 	}
-	hosts := t.sessionUnits(procs, user, "")
-	for _, u := range ops[1:] {
+	hosts := t.sessionUnits(procs, a.user, "")
+	for _, u := range a.units {
 		h := hosts
 		if spare := restartableComm(unitName(u.text)); spare != "" && slices.Contains(systemctlRestartVerbs, verb) {
-			h = t.sessionUnits(procs, user, spare)
+			h = t.sessionUnits(procs, a.user, spare)
 		}
 		if reason := unitReason(u, h); reason != "" {
 			named := u.literal && !strings.ContainsAny(u.text, "*?[{")
-			return fmt.Sprintf("%s %s %s: %s", scope, verb, u.text, reason), systemctlHint(scope, named)
+			return fmt.Sprintf("%s %s: %s", label, u.text, reason), systemctlHint(scope, named)
 		}
 	}
 	return "", ""

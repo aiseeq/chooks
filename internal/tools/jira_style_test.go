@@ -300,6 +300,28 @@ func TestJiraStyleSendForms(t *testing.T) {
 		url  = ` "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"`
 	)
 	bad, clean := filepath.Join(dir, "bad.json"), filepath.Join(dir, "clean.json")
+	// ~ bash раскрывает только в начале слова без кавычек и в значении
+	// присваивания (S=~/t, S=a:~/t, export S=~/t); в остальных формах это
+	// литера, и curl читает каталог «~» от cwd. home.json с нарушением - в
+	// домашнем каталоге, lit.json с нарушением - в буквальном dir/~/t: при
+	// ошибке в любую сторону хук читает чистый файл и пропускает отправку
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, f := range []struct{ path, body string }{
+		{filepath.Join(home, "t", "home.json"), `{"body":"Готово — выкачено."}`},
+		{filepath.Join(home, "t", "lit.json"), `{"body":"Выкатил на stage, проверь вход."}`},
+		{filepath.Join(dir, "~", "t", "home.json"), `{"body":"Выкатил на stage, проверь вход."}`},
+		{filepath.Join(dir, "~", "t", "lit.json"), `{"body":"Готово — выкачено."}`},
+		// S=a:~/t: bash раскрывает ~ и после :
+		{filepath.Join(dir, "a:"+home, "t", "home.json"), `{"body":"Готово — выкачено."}`},
+	} {
+		if err := os.MkdirAll(filepath.Dir(f.path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f.path, []byte(f.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	heredoc := func(path, body string) string {
 		return "cat > " + path + " <<'JSON'\n" + body + "\nJSON\n"
 	}
@@ -352,6 +374,35 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"-T на /comment/ID", "/", auth + "-T " + bad + ` "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment/10001"`, "jira_comment_style"},
 		{"генератор в конвейере", "/", `printf '{"body":"Выкатил на stage"}' | ` + auth + "-d @-" + url, ""},
 		{"--data-urlencode не тело", "/", auth + "--data-urlencode q@" + dir + "/missing.json" + url, ""},
+		{"--data-binary=@ через =", dir, auth + "-X POST --data-binary=@bad.json" + url, "jira_comment_style"},
+		{"-d @~ - литера", dir, auth + "-d @~/t/lit.json" + url, "jira_comment_style"},
+		{`-d @"~"`, dir, auth + `-d @"~/t/lit.json"` + url, "jira_comment_style"},
+		{"--data-binary=@~ - литера", dir, auth + "-X POST --data-binary=@~/t/lit.json" + url, "jira_comment_style"},
+		{"-T ~ - домашний", dir, auth + "-T ~/t/home.json" + url, "jira_comment_style"},
+		{`-T "~" - литера`, dir, auth + `-T "~/t/lit.json"` + url, "jira_comment_style"},
+		{"-T~ слитно - литера", dir, auth + "-T~/t/lit.json" + url, "jira_comment_style"},
+		{"--upload-file ~ - домашний", dir, auth + "--upload-file ~/t/home.json" + url, "jira_comment_style"},
+		{"--upload-file '~' - литера", dir, auth + "--upload-file '~/t/lit.json'" + url, "jira_comment_style"},
+		{"S=~ - домашний", dir, "S=~/t; " + auth + "-d @$S/home.json" + url, "jira_comment_style"},
+		{`S="~" - литера`, dir, `S="~/t"; ` + auth + "-d @$S/lit.json" + url, "jira_comment_style"},
+		{"S='~' - литера", dir, "S='~/t'; " + auth + "-d @$S/lit.json" + url, "jira_comment_style"},
+		{`S=\~ - литера`, dir, `S=\~/t; ` + auth + "-d @$S/lit.json" + url, "jira_comment_style"},
+		{`S=~"/t" - литера`, dir, `S=~"/t"; ` + auth + "-d @$S/lit.json" + url, "jira_comment_style"},
+		{"S=a:~ - домашний после :", dir, "S=a:~/t; " + auth + "-d @$S/home.json" + url, "jira_comment_style"},
+		{"export S=~ - домашний", dir, "export S=~/t; " + auth + "-d @$S/home.json" + url, "jira_comment_style"},
+		{`export S="~" - литера`, dir, `export S="~/t"; ` + auth + "-d @$S/lit.json" + url, "jira_comment_style"},
+		{`~ из значения переменной - литера`, dir, `H="~"; S=$H/t; ` + auth + "-d @$S/lit.json" + url, "jira_comment_style"},
+		{"< ~ - домашний", dir, auth + "-d @-" + url + " < ~/t/home.json", "jira_comment_style"},
+		{`< "~" - литера`, dir, auth + "-d @-" + url + ` < "~/t/lit.json"`, "jira_comment_style"},
+		{`cat "~" | curl - литера`, dir, `cat "~/t/lit.json" | ` + auth + "-d @-" + url, "jira_comment_style"},
+		{`$(cat "~") - литера`, dir, auth + `-X POST -d "$(cat "~/t/lit.json")"` + url, "jira_comment_style"},
+		{"cd ~ - домашний", dir, "cd ~/t && " + auth + "-d @home.json" + url, "jira_comment_style"},
+		{`cd "~" - литера`, dir, `cd "~/t" && ` + auth + "-d @lit.json" + url, "jira_comment_style"},
+		{"> ~ пишет домашний, @~ читает литеру", dir, heredoc("~/t/lit.json", `{"body":"ok"}`) + auth + "-d @~/t/lit.json" + url, "jira_comment_style"},
+		{"bash -c, -T ~ - домашний", dir, `bash -c 'curl -s -T ~/t/home.json "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"'`, "jira_comment_style"},
+		{`bash -c, -T "~" - литера`, dir, `bash -c 'curl -s -T "~/t/lit.json" "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"'`, "jira_comment_style"},
+		{"~user - не раскрыть до запуска", dir, auth + "-T ~root/t/home.json" + url, "jira_comment_payload"},
+		{"S=~user - не раскрыть до запуска", dir, "S=~root/t; " + auth + "-d @$S/home.json" + url, "jira_comment_payload"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

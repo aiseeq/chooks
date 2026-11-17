@@ -357,6 +357,10 @@ func TestPlanCommandScopes(t *testing.T) {
 		{"cd /a && pushd -n /b && git x", "/a"},
 		{"pushd /a && popd && git x", ""},
 		{"cd /a && cd - && git x", ""},
+		// ~ bash раскрывает только без кавычек
+		{"cd ~/a && git x", "/h/a"},
+		{`cd "~/a" && git x`, "/w/~/a"},
+		{`cd \~/a && git x`, "/w/~/a"},
 	}
 	for _, tc := range cases {
 		calls, err := shellcmd.Calls(tc.command)

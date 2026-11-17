@@ -229,6 +229,19 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`false && rm -rf "${NOPE_Q?}"/*`, false},
 		{`false && rm -rf "${NOPE_Q:?}"`, false},
 		{`false && rm -rf "$NOPE_Q/usr"`, true},
+		// там же: прочие раскрытия, способные дать пустую строку, Claude Code
+		// не спрашивает, только - и :-
+		{`false && rm -rf "${NOPE_Q:=}"/*`, false},
+		{`false && rm -rf "${NOPE_Q=}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:=}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:+x}"/*`, false},
+		{`false && rm -rf "${NOPE_Q%/}"/*`, false},
+		{`false && rm -rf "${NOPE_Q#x}"/*`, false},
+		{`false && rm -rf "${NOPE_Q/a/b}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:0:3}"/*`, false},
+		{`false && rm -rf "${NOPE_Q%/}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:=/home/nonexist-q}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:-}"/*`, true},
 	} {
 		r := validateRm(t, tc.command)
 		if r.IsValid == tc.deny {

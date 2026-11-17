@@ -294,8 +294,17 @@ func (s *killScan) literalFeed(c shellcmd.Call, calls []shellcmd.Call) []shellcm
 	if _, runner := scriptArgs(c); runner || !shellReadsInput(c.Args) || scriptBodyParsed(c, calls) {
 		return nil
 	}
-	in := s.stdinOf(c)
-	if in.feed == "" || afterXargs(c) {
+	if afterXargs(c) {
+		return nil
+	}
+	return s.feedCalls(s.stdinOf(c), []shellcmd.Call{c})
+}
+
+// feedCalls вызовы литерального текста ввода in (feed, stdinSpan), который
+// читают оболочки shells: с их Via, именем и «pipe» впереди, без места. nil —
+// текст не литеральный или не разобран
+func (s *killScan) feedCalls(in stdinSpan, shells []shellcmd.Call) []shellcmd.Call {
+	if in.feed == "" {
 		return nil
 	}
 	parsed, err := shellcmd.Calls(in.feed)
@@ -304,11 +313,13 @@ func (s *killScan) literalFeed(c shellcmd.Call, calls []shellcmd.Call) []shellcm
 		return nil
 	}
 	var body []shellcmd.Call
-	for _, x := range parsed {
-		if len(x.Via) >= len(in.feedVia) && slices.Equal(x.Via[:len(in.feedVia)], in.feedVia) {
-			x.Via = slices.Concat(c.Via, []string{c.Name, "pipe"}, x.Via[len(in.feedVia):])
-			x.Offset = -1
-			body = append(body, x)
+	for _, sh := range shells {
+		for _, x := range parsed {
+			if len(x.Via) >= len(in.feedVia) && slices.Equal(x.Via[:len(in.feedVia)], in.feedVia) {
+				x.Via = slices.Concat(sh.Via, []string{sh.Name, "pipe"}, x.Via[len(in.feedVia):])
+				x.Offset = -1
+				body = append(body, x)
+			}
 		}
 	}
 	return body

@@ -166,43 +166,6 @@ func (s *killScan) systemdRunInputReason(c shellcmd.Call, calls []shellcmd.Call,
 	return ""
 }
 
-// parallelSystemdRunReason parallel без списка ::: с вводом из пайпа
-// запускает под systemd-run оболочку, которая читает скрипт из ввода (cat
-// a.sh | parallel systemd-run --pipe bash): строки ввода станут её
-// аргументами (-c и скрипт) или вводом (--pipe), их не видно — как у xargs
-// (systemdRunInputReason). Команду за parallel shellcmd не снимает: она
-// разбирается из слов parallel от systemd-run. Разбор не прошёл — отказ:
-// что запустится, не видно
-func (s *killScan) parallelSystemdRunReason(c shellcmd.Call) string {
-	if c.Name != "parallel" || slices.ContainsFunc(c.Args, func(a string) bool { return strings.HasPrefix(a, ":::") }) {
-		return ""
-	}
-	i := slices.Index(c.Args, "systemd-run")
-	if src := s.stdinOf(c).src; i < 0 || src != stdinPipe && src != stdinFile {
-		return ""
-	}
-	const reason = "systemd-run за parallel (… | parallel systemd-run --pipe bash): строки ввода станут аргументами или вводом оболочки, их не видно до запуска" + hiddenTail
-	calls, err := shellcmd.Calls(strings.Join(c.Args[i:], " "))
-	if err != nil {
-		s.tool.Logger().Warn("kill_guard: команда за parallel не разобрана", "error", err)
-		return reason
-	}
-	local, shell := false, false
-	for _, x := range calls {
-		_, runner := scriptArgs(x)
-		switch {
-		case x.Name == "systemd-run" && len(x.Via) == 0:
-			local = local || !systemdRunHostOption(x.Args)
-		case slices.Equal(x.Via, []string{"systemd-run"}) && shellcmd.IsShell(x.Name) && !runner && shellReadsInput(x.Args):
-			shell = true
-		}
-	}
-	if local && shell {
-		return reason
-	}
-	return ""
-}
-
 // scriptCallsParsed — разбор нашёл вызовы в скрипте, который исполняет c
 // (sh -c, eval): с Via цепочки c и местом в тексте за именем c. Нет ни
 // одного — скрипт не разобран (sh -c "$CMD"x, "$A$B")

@@ -303,6 +303,12 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if reason := s.parallelSystemdRunReason(c); reason != "" {
 		s.addToolReason(reason, systemdRunHiddenHint, false)
 	}
+	inner := s.parallelInnerCalls(c)
+	for _, x := range inner {
+		if err := s.call(x, slices.Concat(calls, inner)); err != nil {
+			return err
+		}
+	}
 	if !s.signalWord {
 		return s.signal(c, calls)
 	}

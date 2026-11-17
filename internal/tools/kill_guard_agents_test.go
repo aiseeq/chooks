@@ -452,7 +452,6 @@ func TestKillGuardSystemdRunStdinTail2(t *testing.T) {
 		`cat a.sh | parallel systemd-run --pipe bash`,
 		`echo make | parallel systemd-run --user --pipe sh`,
 		`cat a.sh | parallel -j2 systemd-run --user --pipe bash`,
-		`cat a.sh | parallel --pipe systemd-run --pipe bash`,
 		`sh -c 'systemd-run --pipe bash' < "$F"`,
 		`sh -c 'systemd-run --pipe bash' < "$DIR/a.sh"`,
 		`sh -c 'systemd-run --pipe bash' <<< "$CMD"`,
@@ -483,6 +482,59 @@ func TestKillGuardSystemdRunStdinTail2(t *testing.T) {
 		`parallel systemd-run --user --pipe bash ::: a.sh b.sh`,
 		`cat a.sh | parallel systemd-run -H host --pipe bash`,
 		`cat list | parallel systemd-run --user bash build.sh`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}
+
+// parallel по приёмке: команда — слова, склеенные в строку для оболочки,
+// оболочка ищется на любой глубине под systemd-run; --pipe — как прямой
+// пайп; -S host — другая машина; имя из ввода ({}, {1}) — отказ
+func TestKillGuardSystemdRunParallel(t *testing.T) {
+	for _, command := range []string{
+		`cat a.sh | parallel 'systemd-run --pipe bash'`,
+		`cat a.sh | parallel "systemd-run --user --pipe bash"`,
+		`cat a.sh | parallel systemd-run --pipe nice bash`,
+		`cat a.sh | parallel systemd-run --pipe run0 bash`,
+		`cat a.sh | parallel /usr/bin/systemd-run --pipe bash`,
+		`cat a.sh | parallel nice systemd-run --pipe bash`,
+		`cat a.sh | parallel systemd-run --user bash -c`,
+		`cat a.sh | parallel -q systemd-run --pipe bash`,
+		`cat a.sh | parallel --sshlogin : systemd-run --pipe bash`,
+		`cat a.sh | parallel -S :,host systemd-run --pipe bash`,
+		`printf '%s\n' "$CMD" | parallel --pipe systemd-run --pipe bash`,
+		`echo 'kill 455274' | parallel --pipe systemd-run --pipe bash`,
+		`cat "$F" | parallel --pipe systemd-run --user --pipe sh`,
+		`cat a.sh | parallel systemd-run --user {}`,
+		`cat a.sh | parallel systemd-run --user "{}"`,
+		`cat a.sh | parallel --colsep ' ' systemd-run --user {1} {2}`,
+		`cat a.sh | parallel -I XX systemd-run --user XX`,
+		`cat a.sh | parallel systemd-run --user {.} arg`,
+		// и на main: shellcmd снимает parallel с ::: и отдаёт имя {}
+		`parallel systemd-run --user {} ::: make`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+	for _, command := range []string{
+		`echo make | parallel --pipe systemd-run --pipe bash`,
+		`cat a.sh | parallel --pipe systemd-run --pipe bash`,
+		`cat a.sh | parallel -S host systemd-run --pipe bash`,
+		`cat a.sh | parallel -H host systemd-run --pipe bash`,
+		`cat a.sh | parallel --sshlogin host1,host2 systemd-run --pipe bash`,
+		`cat a.sh | parallel --sshlogin=host systemd-run --pipe bash`,
+		`cat a.sh | parallel systemd-run -M c1 --pipe bash`,
+		`parallel systemd-run --user make ::: a b`,
+		`parallel -a list.txt systemd-run --user bash`,
+		`cat a.sh | parallel systemd-run --user make`,
+		`cat a.sh | parallel systemd-run --user bash build.sh`,
+		`cat a.sh | parallel systemd-run --user bash -c 'make {}'`,
+		`cat a.sh | parallel echo systemd-run`,
+		`cat hosts | parallel ssh {} uptime`,
+		`seq 3 | parallel -j2 go test ./pkg/{}`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)

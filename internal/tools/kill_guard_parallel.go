@@ -10,16 +10,6 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// parallelValues опции GNU parallel со значением отдельным словом (или
-// слитно: -j4, --jobs=4)
-var parallelValues = []string{"a", "arg-file", "arg-file-sep", "arg-sep", "basefile", "bf", "block", "block-size",
-	"colsep", "C", "d", "delimiter", "E", "env", "I", "joblog", "j", "P", "jobs", "max-procs", "J", "profile",
-	"L", "max-lines", "n", "max-args", "N", "load", "memfree", "nice", "results", "res", "retries", "return",
-	"S", "H", "sshlogin", "slf", "sshloginfile", "s", "max-chars", "tag-string", "tagstring", "termseq",
-	"timeout", "tmpdir", "transferfile", "tf", "workdir", "wd", "delay", "halt", "halt-on-error", "header",
-	"limit", "rpl", "ssh", "sshdelay", "template", "seqreplace", "compress-program", "decompress-program",
-	"group-by", "W"}
-
 // parallelSources разделители списков аргументов: аргументы из них, не из
 // ввода
 var parallelSources = []string{":::", ":::+", "::::", "::::+"}
@@ -30,68 +20,56 @@ var replacementRe = regexp.MustCompile(`\{[0-9]*[./#%]*[./]*\}|\{=`)
 
 // parallelCommand команда parallel: слова после опций, режим --pipe (ввод
 // идёт в stdin команды, аргументов нет), -q (слова в кавычках), аргументы
-// из списка (:::, -a), строка замены -I и машины -S: remote — все на другой
-// машине (--sshlogin : — эта)
+// из списка (:::, -a), строки замены (-I, --er, --rpl…) и машины -S: remote —
+// все на другой машине (--sshlogin : — эта); failed — опции не разобраны,
+// parallel выйдет, ничего не запустив
 type parallelCommand struct {
-	words               []string
-	pipe, quote, listed bool
-	remote              bool
-	replace             string
+	words                       []string
+	pipe, quote, listed, remote bool
+	failed                      bool
+	replaces                    []string
 }
 
-// parseParallel разбирает слова parallel
+// parallelPipeOptions опции, с которыми ввод идёт командам в stdin
+// (--round-robin, --fifo, --cat и --group-by включают --pipe)
+var parallelPipeOptions = []string{"pipe", "pipe-part", "round-robin", "fifo", "cat", "group-by"}
+
+// parallelReplaceOptions опции, задающие свою строку замены вместо {}, {.},
+// {/}, {//}, {/.}, {#}, {%}
+var parallelReplaceOptions = []string{"I", "replace", "extensionreplace", "basenamereplace", "dirnamereplace",
+	"basenameextensionreplace", "seqreplace", "slotreplace"}
+
+// parseParallel разбирает слова parallel (parallelGetopt)
 func parseParallel(args []string) parallelCommand {
-	var p parallelCommand
-	logins, local := false, false
-	i := 0
-	for ; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
-			i++
-			break
-		}
-		if !strings.HasPrefix(a, "-") || a == "-" {
-			break
-		}
-		name, value, inline := parallelOption(a)
-		if !inline && slices.Contains(parallelValues, name) && i+1 < len(args) {
-			i++
-			value = args[i]
-		}
-		switch name {
-		case "pipe", "pipepart", "pipe-part":
+	sets, words, ok := parallelGetopt(args)
+	p := parallelCommand{words: words, failed: !ok}
+	var logins []string
+	files := false
+	for _, o := range sets {
+		switch {
+		case slices.Contains(parallelPipeOptions, o.name):
 			p.pipe = true
-		case "q", "quote":
+		case o.name == "quote":
 			p.quote = true
-		case "a", "arg-file":
+		case o.name == "arg-file":
 			p.listed = true
-		case "I":
-			p.replace = value
-		case "S", "H", "sshlogin":
-			// машины копятся по всем -S; «:» — эта машина
-			logins = true
-			local = local || slices.Contains(strings.Split(value, ","), ":")
-		case "slf", "sshloginfile":
-			logins = true
+		case o.name == "rpl":
+			// --rpl 'XX perl': строка замены — первое слово
+			if f := strings.Fields(o.value); len(f) > 0 {
+				p.replaces = append(p.replaces, f[0])
+			}
+		case slices.Contains(parallelReplaceOptions, o.name) && o.value != "":
+			p.replaces = append(p.replaces, o.value)
+		case o.name == "sshlogin":
+			logins = append(logins, o.value)
+		case o.name == "sshloginfile":
+			files = true
 		}
 	}
-	p.remote = logins && !local
-	p.words = args[i:]
+	local, hosts := parallelLocalLogins(logins)
+	p.remote = !local && (hosts || files)
 	p.listed = p.listed || slices.ContainsFunc(p.words, func(w string) bool { return slices.Contains(parallelSources, w) })
 	return p
-}
-
-// parallelOption имя опции и значение, если оно слитно (--jobs=4, -j4)
-func parallelOption(a string) (name, value string, inline bool) {
-	if strings.HasPrefix(a, "--") {
-		name, value, inline = strings.Cut(a[2:], "=")
-		return name, value, inline
-	}
-	name = a[1:2]
-	if len(a) > 2 && slices.Contains(parallelValues, name) {
-		return name, a[2:], true
-	}
-	return name, "", false
 }
 
 // parallelSystemdRunReason причина отказа на systemd-run в команде parallel
@@ -124,7 +102,7 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 		return "", nil
 	}
 	p := parseParallel(c.Args)
-	if p.listed || p.remote || len(p.words) == 0 {
+	if p.failed || p.listed || p.remote || len(p.words) == 0 {
 		return "", nil
 	}
 	script, err := p.script()
@@ -144,18 +122,17 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 
 // parallelCalls проверка разобранной команды parallel (parallelSystemdRun)
 func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script string, calls []shellcmd.Call) (string, []shellcmd.Call) {
-	if !slices.ContainsFunc(calls, func(x shellcmd.Call) bool { return x.Name == "systemd-run" }) {
-		return "", nil
-	}
 	for i := range calls {
 		calls[i].Via = slices.Concat(c.Via, []string{"parallel"}, calls[i].Via)
 		calls[i].Offset = -1
 	}
+	// systemd-run и за run0, pkexec (parallel run0 systemd-run --pipe bash)
 	expanded := s.elevatedCalls(calls)
-	if p.replace != "" && slices.ContainsFunc(expanded, func(x shellcmd.Call) bool {
-		return strings.Contains(x.Name, p.replace) && slices.Contains(x.Via, "systemd-run")
-	}) {
-		return "systemd-run за parallel запускает команду, имя которой придёт из ввода (-I " + p.replace + "): текст команды станет известен только при запуске" + hiddenTail, calls
+	if !slices.ContainsFunc(expanded, func(x shellcmd.Call) bool { return x.Name == "systemd-run" }) {
+		return "", nil
+	}
+	if r, found := p.replacedName(expanded); found {
+		return "systemd-run за parallel запускает команду, имя которой придёт из ввода (строка замены " + r + "): текст команды станет известен только при запуске" + hiddenTail, calls
 	}
 	in := s.inputOf(c)
 	if in.src != stdinPipe && in.src != stdinFile {
@@ -221,7 +198,21 @@ func (s *killScan) elevatedCalls(calls []shellcmd.Call) []shellcmd.Call {
 
 // replaced — в команде есть строка замены: аргументы встанут на её место
 func (p parallelCommand) replaced(script string) bool {
-	return replacementRe.MatchString(script) || p.replace != "" && strings.Contains(script, p.replace)
+	return replacementRe.MatchString(script) || slices.ContainsFunc(p.replaces, func(r string) bool { return strings.Contains(script, r) })
+}
+
+// replacedName своя строка замены (-I XX, --er XX) в имени команды под
+// systemd-run: имя придёт из ввода. Строки {…} ловит правило имени из
+// подстановки (systemdRunHiddenReason)
+func (p parallelCommand) replacedName(calls []shellcmd.Call) (string, bool) {
+	for _, r := range p.replaces {
+		if slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
+			return strings.Contains(x.Name, r) && slices.Contains(x.Via, "systemd-run")
+		}) {
+			return r, true
+		}
+	}
+	return "", false
 }
 
 // inputShell оболочка под systemd-run на этой машине (на любой глубине),

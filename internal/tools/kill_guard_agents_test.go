@@ -541,3 +541,69 @@ func TestKillGuardSystemdRunParallel(t *testing.T) {
 		}
 	}
 }
+
+// parallel, последний круг приёмки: run0/pkexec перед systemd-run, машина
+// «:» в записи -S с префиксом и списки машин, которых не видно; строки
+// замены в длинной форме; опции со значением — по таблице parallel
+// 20260922 (Getopt::Long с bundling и require_order)
+func TestKillGuardSystemdRunParallelOptions(t *testing.T) {
+	for _, command := range []string{
+		`cat a.sh | parallel 'run0 systemd-run --pipe bash'`,
+		`cat a.sh | parallel run0 systemd-run --pipe bash`,
+		`cat a.sh | parallel pkexec systemd-run --pipe bash`,
+		`cat a.sh | parallel run0 systemd-run --user {}`,
+		`cat a.sh | parallel 'run0 systemd-run --user kill 455274'`,
+		`cat a.sh | parallel -S 4/: systemd-run --pipe bash`,
+		`cat a.sh | parallel --sshlogin=4/: systemd-run --pipe bash`,
+		`cat a.sh | parallel -S host,4/: systemd-run --pipe bash`,
+		`cat a.sh | parallel -S @grp/: systemd-run --pipe bash`,
+		`cat a.sh | parallel -S @grp/4/: systemd-run --pipe bash`,
+		"cat a.sh | parallel -S 'host\n:' systemd-run --pipe bash",
+		`cat a.sh | parallel -S 'ssh -p 2222 :' systemd-run --pipe bash`,
+		`cat a.sh | parallel -S 4/: systemd-run --user {}`,
+		`cat a.sh | parallel -S "$H" systemd-run --pipe bash`,
+		`cat a.sh | parallel -S - systemd-run --pipe bash`,
+		`cat a.sh | parallel -S .. systemd-run --pipe bash`,
+		`cat a.sh | parallel --replace=XX systemd-run --user XX`,
+		`cat a.sh | parallel --er XX systemd-run --user XX`,
+		`cat a.sh | parallel --extensionreplace XX systemd-run --user XX`,
+		`cat a.sh | parallel --bnr XX systemd-run --user XX`,
+		`cat a.sh | parallel --rpl 'XX s/x//' systemd-run --user XX`,
+		`cat a.sh | parallel --id x systemd-run --pipe bash`,
+		`cat a.sh | parallel --semaphorename x systemd-run --pipe bash`,
+		`cat a.sh | parallel --match x systemd-run --pipe bash`,
+		`cat a.sh | parallel --filter x systemd-run --pipe bash`,
+		`cat a.sh | parallel --trc x systemd-run --pipe bash`,
+		`cat a.sh | parallel --sqlmaster x systemd-run --pipe bash`,
+		`cat a.sh | parallel --ctagstring x systemd-run --pipe bash`,
+		`cat a.sh | parallel -e x systemd-run --pipe bash`,
+		`cat a.sh | parallel --max-replace-args 1 systemd-run --pipe bash`,
+		`cat a.sh | parallel --id x systemd-run --user {}`,
+		`cat a.sh | parallel --max-replace-args 1 systemd-run --user {}`,
+		`cat a.sh | parallel -kj4 systemd-run --pipe bash`,
+		`cat a.sh | parallel --sshd 0.5 systemd-run --pipe bash`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+	for _, command := range []string{
+		`cat a.sh | parallel -S host -S h2 systemd-run --user {}`,
+		`cat a.sh | parallel -S 'ssh -p 2222 host' systemd-run --pipe bash`,
+		`cat a.sh | parallel -S u@host:22 systemd-run --pipe bash`,
+		`cat a.sh | parallel --slf hosts systemd-run --pipe bash`,
+		`ls | parallel --id x make -C {}`,
+		`ls | parallel --replace=XX cp XX XX.bak`,
+		`echo 1 | parallel 'run0 kill 455274'`,
+		// -H у parallel — целое (H=i, снята): -H host — ошибка разбора, parallel
+		// выходит; --sshl неоднозначно (sshlogin, sshloginfile) — тоже выход
+		`cat a.sh | parallel -H host systemd-run --pipe bash`,
+		`cat a.sh | parallel --sshl host systemd-run --pipe bash`,
+		// --hgrp — флаг (hgrp|hostgroups): команда — x, systemd-run её аргумент
+		`cat a.sh | parallel --hgrp x systemd-run --pipe bash`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}

@@ -49,8 +49,12 @@ func nightHintDeps(config *core.Config) (nighthint.Deps, error) {
 }
 
 // autonomousSkillCalled — признак вызова скилла autonomous-work в сессии по
-// записи хука skill-reload. Выключенный skill_reload записей не ведёт:
-// признак — ErrSkillUnknown, подсказка идёт по правилу «раз за ночь»
+// записи хука skill-reload. Записи нет — скилл не вызван: вызов Skill всегда
+// даёт PostToolBatch, а он запись создаёт. Первый ход новой сессии записи ещё
+// не имеет — её создаёт user-prompt-submit параллельно с night-hint на том же
+// UserPromptSubmit, — и этот ход подсказку получает. Выключенный skill_reload
+// записей не ведёт: признак — ErrSkillUnknown, подсказка идёт по правилу «раз
+// за ночь»; так же — при сбое чтения существующей записи
 func autonomousSkillCalled(config *core.Config) func(sessionID string) (bool, error) {
 	return func(sessionID string) (bool, error) {
 		if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
@@ -60,7 +64,11 @@ func autonomousSkillCalled(config *core.Config) func(sessionID string) (bool, er
 		if err != nil {
 			return false, err
 		}
-		return skillreload.SkillCalled(dir, sessionID, nighthint.AutonomousSkill, time.Now().Add(skillStateWait))
+		called, err := skillreload.SkillCalled(dir, sessionID, nighthint.AutonomousSkill, time.Now().Add(skillStateWait))
+		if errors.Is(err, skillreload.ErrNoState) {
+			return false, nil
+		}
+		return called, err
 	}
 }
 
@@ -70,7 +78,7 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 		Use:   hookNightHint,
 		Short: "Ночью при заблокированном экране подсказать сессии: пользователь спит, вопрос — тикетом админу пространства (SessionStart, UserPromptSubmit, PreToolUse AskUserQuestion, Stop с ❓)",
 		Long: "Подсказка в additionalContext, не отказ. Признак «спит» — экран заблокирован (LockedHint сессии seat0 в logind) и местное время 22:00–09:00. " +
-			"SessionStart — раз за ночь на сессию и после сжатия и /clear; UserPromptSubmit — на каждом ходе, пока в сессии не вызван скилл autonomous-work (по записи skill-reload), после вызова или без записи — раз за ночь; " +
+			"SessionStart — раз за ночь на сессию и после сжатия и /clear; UserPromptSubmit — на каждом ходе, пока в сессии не вызван скилл autonomous-work (по записи skill-reload; записи нет — не вызван), после вызова, при выключенном skill_reload или сбое чтения записи — раз за ночь; " +
 			"PreToolUse AskUserQuestion — на каждый вызов, Stop — если в последнем ответе есть строка с ❓, раз за ход. " +
 			"--probe печатает признак блокировки и время его получения.",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -137,8 +145,8 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 		logger.Warn("night hint record replaced", "event", input.HookEventName, "session", input.SessionID, "error", result.Damaged)
 	}
 	if result.SkillErr != nil {
-		// Нет записи или признак выключен — обычный случай, сбой чтения — нет
-		if errors.Is(result.SkillErr, nighthint.ErrSkillUnknown) || errors.Is(result.SkillErr, skillreload.ErrNoState) {
+		// Выключенный признак — выбор конфига, сбой чтения записи — нет
+		if errors.Is(result.SkillErr, nighthint.ErrSkillUnknown) {
 			logger.Debug("night hint once per night: skill call unknown", "event", input.HookEventName, "session", input.SessionID, "reason", result.SkillErr)
 		} else {
 			logger.Warn("night hint once per night: skill call unknown", "event", input.HookEventName, "session", input.SessionID, "error", result.SkillErr)

@@ -245,7 +245,9 @@ func writeSkillState(t *testing.T, skills ...string) {
 
 // Ночь, /clear, ход по письму сессии: подсказка на каждом UserPromptSubmit,
 // пока в записи skill-reload нет autonomous-work; после вызова — нет.
-// Без записи, при выключенном skill_reload и при сбое чтения — раз за ночь
+// Записи нет — скилл не вызван: первый ход новой сессии записи ещё не имеет
+// (её создаёт user-prompt-submit параллельно). При выключенном skill_reload и
+// при сбое чтения существующей записи — раз за ночь
 // (тикет night-hint-after-clear-first-turn)
 func TestRunNightHintUntilSkillCalled(t *testing.T) {
 	t.Setenv("CLAUDE_PID", "")
@@ -284,7 +286,6 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 		name, level string
 		prepare     func(t *testing.T, config *core.Config)
 	}{
-		{"no record", "level=DEBUG", func(*testing.T, *core.Config) {}},
 		{"skill_reload disabled", "level=DEBUG", func(t *testing.T, config *core.Config) {
 			writeSkillState(t)
 			config.Tools[skillReloadTool] = core.ToolConfig{Enabled: false}
@@ -320,6 +321,33 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("no record", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		config := core.DefaultConfig()
+		deps := nightTestDeps(t, night, true, nil)
+		deps.SkillCalled = autonomousSkillCalled(config)
+		if given, _ := run(t, config, deps, start); !given {
+			t.Fatal("SessionStart(clear) без подсказки")
+		}
+		for i := range 2 {
+			if given, log := run(t, config, deps, prompt); !given || strings.Contains(log, "skill call unknown") {
+				t.Fatalf("ход %d без записи skill-reload: подсказка %t, лог %s", i+1, given, log)
+			}
+		}
+		// Чтение записи не создаёт: её ведёт только skill-reload
+		dir, err := skillreload.DefaultStateDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "s1.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("night-hint создал запись skill-reload: %v", err)
+		}
+		writeSkillState(t, nighthint.AutonomousSkill)
+		if given, _ := run(t, config, deps, prompt); given {
+			t.Error("после вызова скилла подсказка")
+		}
+	})
 
 	t.Run("day", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())

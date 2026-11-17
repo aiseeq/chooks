@@ -454,9 +454,19 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 		s.addReason(c.Name + ": разбор команды за ним не прошёл (" + err.Error() + "): проверить сигналы в ней нельзя")
 	}
 	// Via у всех вызовов — с обёрткой впереди: вызовы ищут друг друга по Via
-	// (systemd-run за run0 — systemdRunRemote)
+	// (systemd-run за run0 — systemdRunRemote). Вызовы самой команды за
+	// обёрткой (их текст — весь inner) получают её ввод и перенаправления:
+	// разбор заново их не знает (… | run0 bash, run0 systemd-run --pipe sh)
+	piped := s.pipedInput(c)
 	for i := range calls {
-		calls[i].Via = append(append(slices.Clone(c.Via), c.Name), calls[i].Via...)
+		ic := &calls[i]
+		if ic.Raw == inner {
+			ic.ScriptInput = ic.ScriptInput || piped && inputTaker(*ic)
+			if len(ic.Redirs) == 0 {
+				ic.Redirs = c.Redirs
+			}
+		}
+		ic.Via = append(append(slices.Clone(c.Via), c.Name), ic.Via...)
 	}
 	for _, ic := range calls {
 		if err := s.call(ic, calls); err != nil {

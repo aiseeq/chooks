@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/akit/shellcmd"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // Ядро (agent-signal-guard) не даёт агенту послать сигнал чужому процессу,
@@ -129,10 +130,12 @@ func systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call, k int) strin
 	switch {
 	case slices.ContainsFunc(script, wholeSubstitution):
 		return "systemd-run запускает " + c.Name + " со скриптом из одной подстановки (sh -c \"$CMD\", $(…), `…`): текст станет известен только при запуске" + hiddenTail
+	case runner && slices.ContainsFunc(script, computedArg) && !scriptCallsParsed(c, calls):
+		return "systemd-run запускает " + c.Name + " со скриптом с подстановкой, в котором разбор не видит ни одной команды (sh -c \"$CMD\"x, \"$A$B\"): текст станет известен только при запуске" + hiddenTail
 	case runner || !shellcmd.IsShell(c.Name):
 		return ""
 	}
-	if operand, _ := shellScript(c.Args); operand != "" {
+	if !shellReadsInput(c.Args) {
 		// файл скрипта (sh x.sh) — вне этой проверки
 		return ""
 	}
@@ -148,6 +151,92 @@ func systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call, k int) strin
 		}
 	}
 	return ""
+}
+
+// scriptCallsParsed — разбор нашёл вызовы в скрипте, который исполняет c
+// (sh -c, eval): с Via цепочки c и местом в тексте за именем c. Нет ни
+// одного — скрипт не разобран (sh -c "$CMD"x, "$A$B")
+func scriptCallsParsed(c shellcmd.Call, calls []shellcmd.Call) bool {
+	via := append(slices.Clone(c.Via), c.Name)
+	return slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
+		inside := x.Offset < 0 || c.Offset >= 0 && x.Offset > c.Offset && x.Offset < c.Offset+len(c.Raw)
+		return len(x.Via) >= len(via) && slices.Equal(x.Via[:len(via)], via) && inside
+	})
+}
+
+// stdinScripts пути, по которым оболочка читает скрипт со своего ввода
+var stdinScripts = []string{"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
+
+// shellReadsInput — оболочка без -c с аргументами args читает скрипт со
+// своего ввода: без операнда, с -s (за ним операнды — аргументы скрипта:
+// bash -s -- a b) или с операндом - , /dev/stdin, /dev/fd/0,
+// /proc/self/fd/0. Иной операнд — файл скрипта. Опции — как у shellScript
+func shellReadsInput(args []string) bool {
+	stdin := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return stdin || i+1 >= len(args) || slices.Contains(stdinScripts, args[i+1])
+		case a == "--rcfile" || a == "--init-file":
+			i++
+		case strings.HasPrefix(a, "--"):
+		case a == "-":
+			return true
+		case strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+"):
+			stdin = stdin || strings.HasPrefix(a, "-") && strings.Contains(a[1:], "s")
+			if strings.HasSuffix(a, "o") || strings.HasSuffix(a, "O") {
+				i++
+			}
+		default:
+			return stdin || slices.Contains(stdinScripts, a)
+		}
+	}
+	return true
+}
+
+// inputTaker — вызов, которому ввод обёртки (run0, pkexec) нужен как
+// скрипт: оболочка без -c (её ввод не забирает xargs или parallel перед
+// ней) или обёртка, за которой разбор проверит её команду
+func inputTaker(c shellcmd.Call) bool {
+	if _, ok := elevatedCommand(c); ok {
+		return true
+	}
+	if _, runner := scriptArgs(c); runner || !shellcmd.IsShell(c.Name) {
+		return false
+	}
+	return !slices.Contains(c.Via, "xargs") && !slices.Contains(c.Via, "parallel")
+}
+
+// pipedInput — ввод вызова c (обёртки run0, pkexec, machinectl shell)
+// идёт из пайпа: так уже отметил разбор (ScriptInput у вызова из повторного
+// разбора за обёрткой) или c стоит справа от | в тексте команды. Вызов из
+// повторного разбора за обёрткой (в Via run0, pkexec, machinectl) — только
+// по отметке: его место — в тексте за обёрткой, не в команде. Пайп внутри
+// скрипта sh -c этот разбор не видит
+func (s *killScan) pipedInput(c shellcmd.Call) bool {
+	if c.ScriptInput {
+		return true
+	}
+	if c.Offset < 0 || slices.ContainsFunc(c.Via, func(v string) bool { _, ok := elevatedValues[v]; return ok || v == "machinectl" }) {
+		return false
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader(s.command), "")
+	if err != nil {
+		// shellcmd команду разобрал, а синтаксис bash — нет (другой диалект):
+		// пайп не виден, ввод обёртки остаётся как его отметил разбор
+		s.tool.Logger().Warn("kill_guard: пайп перед обёрткой не проверен, разбор bash не прошёл", "wrapper", c.Name, "error", err)
+		return false
+	}
+	piped := false
+	syntax.Walk(file, func(n syntax.Node) bool {
+		if b, ok := n.(*syntax.BinaryCmd); ok && (b.Op == syntax.Pipe || b.Op == syntax.PipeAll) {
+			start, end := int(b.Y.Pos().Offset()), int(b.Y.End().Offset())
+			piped = piped || start <= c.Offset && c.Offset < end
+		}
+		return !piped
+	})
+	return piped
 }
 
 // scriptBodyParsed — разбор прочёл скрипт, который оболочка c получает на

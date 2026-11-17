@@ -293,3 +293,54 @@ func TestKillGuardSystemdRunHiddenTexts(t *testing.T) {
 		}
 	}
 }
+
+// Третий круг приёмки: скрипт с подстановкой, где разбор не видит ни одной
+// команды; пайп в оболочку за run0 (разбор за обёрткой ввода не знает);
+// оболочка читает ввод, хотя в аргументах есть слово (-s -- a b, /dev/stdin)
+func TestKillGuardSystemdRunHiddenRound3(t *testing.T) {
+	// ввод run0 забирает xargs, а не sh -c: прежняя причина, не «читает из ввода»
+	r := validateKill(t, `echo 1 | run0 xargs sh -c 'kill "$@"' _`)
+	if r.IsValid || strings.Contains(strings.Join(r.Suggestions, "\n"), "читает скрипт из ввода") {
+		t.Errorf("echo 1 | run0 xargs sh -c 'kill \"$@\"' _: ждали отказ без «читает скрипт из ввода», получили %v %q", r.IsValid, r.Suggestions)
+	}
+	for _, command := range []string{
+		`systemd-run --user sh -c "$CMD"' 455274'`,
+		`systemd-run --user sh -c "$CMD"x`,
+		`systemd-run --user sh -c "$A$B"`,
+		// имя make$X — тоже вычисляется
+		`systemd-run --user sh -c 'make'"$X"`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe run0 bash`,
+		`printf '%s\n' "$CMD" | run0 systemd-run --pipe bash`,
+		`printf '%s\n' "$CMD" | run0 run0 systemd-run --pipe bash`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash -s -- a b`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash -s`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash -`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash /dev/stdin`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash /dev/fd/0`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash -- /proc/self/fd/0`,
+		`cat script.sh | systemd-run --user --pipe bash`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+	for _, command := range []string{
+		`systemd-run --user sh -c "cd $DIR && make"`,
+		`systemd-run --user sh -c "make $TARGET"`,
+		`systemd-run --user sh -c "make -C \"$DIR\" && echo $(date)"`,
+		`systemd-run --user sh -c "go test ./... -run '$RE'"`,
+		`systemd-run --user eval "make -C $DIR"`,
+		`systemd-run --user sh -c "$HOME/bin/tool"`,
+		`systemd-run --user bash -- script.sh a b`,
+		`systemd-run --user bash -x script.sh`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe cat`,
+		`printf '%s\n' "$CMD" | run0 cat`,
+		`run0 systemd-run --user sleep 1`,
+		`echo make | systemd-run --user --pipe sh`,
+		`echo 1 | run0 xargs sh -c 'echo "$@"' _`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}

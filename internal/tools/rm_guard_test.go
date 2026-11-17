@@ -218,6 +218,36 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`S=/home/u/sb; ls -la $S | head -3; rm -f "$S"/*.zz; ls $S`, false},
 		{`S=/home/u/sb; mkdir -p "$S" && touch "$S/x.zz" && rm -f "$S"/*.zz`, false},
 		{`false && sudo rm -rf $NOT_SET_Q/*`, true},
+		// проба 2.1.326 (17.11): отказ советует ${VAR:?}; любая форма ${VAR:?…}
+		// и ${VAR?} проходит без запроса, с сообщением и без кавычек тоже
+		{`S=/home/u/sb; rm -f "${S:?S пуст}"/b.zz`, false},
+		{`S=/home/u/sb; rm -rf "${S:?}/x"`, false},
+		{`false && rm -rf "${NOPE_Q:?нет NOPE}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:?}/x"`, false},
+		{`false && rm -rf "${NOPE_Q:?msg}/usr"`, false},
+		{`false && rm -rf ${NOPE_Q:?}/*`, false},
+		{`false && rm -rf "${NOPE_Q?}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:?}"`, false},
+		{`false && rm -rf "$NOPE_Q/usr"`, true},
+		// там же: прочие раскрытия, способные дать пустую строку, Claude Code
+		// не спрашивает, только - и :-
+		{`false && rm -rf "${NOPE_Q:=}"/*`, false},
+		{`false && rm -rf "${NOPE_Q=}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:=}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:+x}"/*`, false},
+		{`false && rm -rf "${NOPE_Q%/}"/*`, false},
+		{`false && rm -rf "${NOPE_Q#x}"/*`, false},
+		{`false && rm -rf "${NOPE_Q/a/b}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:0:3}"/*`, false},
+		{`false && rm -rf "${NOPE_Q%/}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:=/home/nonexist-q}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:-}"/*`, true},
+		{`false && rm -rf "${NOPE_Q=}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:+x}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q#x}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q/a/b}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:0:3}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:-}/usr"`, true},
 	} {
 		r := validateRm(t, tc.command)
 		if r.IsValid == tc.deny {

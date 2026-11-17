@@ -443,3 +443,49 @@ func TestKillGuardSystemdRunStdinTailReview(t *testing.T) {
 		}
 	}
 }
+
+// Остаток хвоста: parallel с вводом из пайпа — как xargs; ввод sh -c (и run0
+// sh -c) из перенаправления — как у оболочки прямо под systemd-run:
+// подстановка — отказ, литерал — пропуск, а текст <<< проверяется
+func TestKillGuardSystemdRunStdinTail2(t *testing.T) {
+	for _, command := range []string{
+		`cat a.sh | parallel systemd-run --pipe bash`,
+		`echo make | parallel systemd-run --user --pipe sh`,
+		`cat a.sh | parallel -j2 systemd-run --user --pipe bash`,
+		`cat a.sh | parallel --pipe systemd-run --pipe bash`,
+		`sh -c 'systemd-run --pipe bash' < "$F"`,
+		`sh -c 'systemd-run --pipe bash' < "$DIR/a.sh"`,
+		`sh -c 'systemd-run --pipe bash' <<< "$CMD"`,
+		`sh -c 'systemd-run --pipe bash' <<< $(cat f)`,
+		`run0 sh -c 'systemd-run --pipe bash' < "$F"`,
+		`run0 sh -c 'systemd-run --pipe bash' <<< "$CMD"`,
+		`echo make | sh -c 'systemd-run --pipe bash' < "$F"`,
+		`echo make | run0 sh -c 'systemd-run --pipe bash' < "$F"`,
+		`sh -c 'true; systemd-run --user --pipe bash' 0< "$F"`,
+		`sh -c 'systemd-run --pipe bash' <<< 'kill 455274'`,
+		`run0 sh -c 'systemd-run --pipe bash' <<< 'pkill opencode'`,
+		`sh -c 'systemd-run --pipe bash' <<< "kill $PID"`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+	for _, command := range []string{
+		`sh -c 'systemd-run --pipe bash' < script.sh`,
+		`sh -c 'systemd-run --pipe bash' <<< make`,
+		`sh -c 'systemd-run --pipe bash' <<< 'make test'`,
+		`sh -c 'systemd-run --pipe bash' <<< "make $TARGET"`,
+		`run0 sh -c 'systemd-run --pipe bash' < script.sh`,
+		`run0 sh -c 'systemd-run --pipe bash' <<< make`,
+		`printf '%s\n' "$CMD" | sh -c 'systemd-run --pipe bash' < script.sh`,
+		`sh -c 'systemd-run --pipe bash' 2< "$F"`,
+		`seq 3 | parallel systemd-run --user sleep`,
+		`parallel systemd-run --user --pipe bash ::: a.sh b.sh`,
+		`cat a.sh | parallel systemd-run -H host --pipe bash`,
+		`cat list | parallel systemd-run --user bash build.sh`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}

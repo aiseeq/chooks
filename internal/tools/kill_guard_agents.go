@@ -145,15 +145,9 @@ func (s *killScan) systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call
 // systemdRunInputReason оболочка c под systemd-run читает скрипт из ввода,
 // которого не видно: пайп, который разбор не прочёл (feedRead — прочёл
 // literalFeed), пайп за xargs (слова ввода — аргументы c) или
-// перенаправление из подстановки (< "$F", <<< "$CMD")
+// перенаправление из подстановки у самой c или у команды вокруг неё (< "$F",
+// <<< "$CMD"; sh -c 'systemd-run --pipe bash' < "$F")
 func (s *killScan) systemdRunInputReason(c shellcmd.Call, calls []shellcmd.Call, feedRead bool) string {
-	switch {
-	case s.stdinOf(c).src != stdinPipe:
-	case afterXargs(c):
-		return "systemd-run запускает " + c.Name + " за xargs (… | xargs systemd-run --pipe " + c.Name + "): слова ввода станут его аргументами (-c и скрипт), их не видно до запуска" + hiddenTail
-	case !scriptBodyParsed(c, calls) && !feedRead:
-		return "systemd-run запускает " + c.Name + ", который читает скрипт из ввода (… | systemd-run --pipe " + c.Name + "): текст не виден до запуска" + hiddenTail
-	}
 	for _, r := range c.Redirs {
 		if r.N != "" && r.N != "0" {
 			continue
@@ -161,6 +155,50 @@ func (s *killScan) systemdRunInputReason(c shellcmd.Call, calls []shellcmd.Call,
 		if r.Op == "<" && computedArg(r.Target) || r.Op == "<<<" && wholeSubstitution(r.Target) {
 			return "systemd-run запускает " + c.Name + " со скриптом на вводе из " + r.Op + " " + r.Target + ": текст не виден до запуска" + hiddenTail
 		}
+	}
+	switch {
+	case s.stdinOf(c).src != stdinPipe:
+	case afterXargs(c):
+		return "systemd-run запускает " + c.Name + " за xargs (… | xargs systemd-run --pipe " + c.Name + "): слова ввода станут его аргументами (-c и скрипт), их не видно до запуска" + hiddenTail
+	case !scriptBodyParsed(c, calls) && !feedRead:
+		return "systemd-run запускает " + c.Name + ", который читает скрипт из ввода (… | systemd-run --pipe " + c.Name + ", sh -c '…' < \"$F\"): текст не виден до запуска" + hiddenTail
+	}
+	return ""
+}
+
+// parallelSystemdRunReason parallel без списка ::: с вводом из пайпа
+// запускает под systemd-run оболочку, которая читает скрипт из ввода (cat
+// a.sh | parallel systemd-run --pipe bash): строки ввода станут её
+// аргументами (-c и скрипт) или вводом (--pipe), их не видно — как у xargs
+// (systemdRunInputReason). Команду за parallel shellcmd не снимает: она
+// разбирается из слов parallel от systemd-run. Разбор не прошёл — отказ:
+// что запустится, не видно
+func (s *killScan) parallelSystemdRunReason(c shellcmd.Call) string {
+	if c.Name != "parallel" || slices.ContainsFunc(c.Args, func(a string) bool { return strings.HasPrefix(a, ":::") }) {
+		return ""
+	}
+	i := slices.Index(c.Args, "systemd-run")
+	if src := s.stdinOf(c).src; i < 0 || src != stdinPipe && src != stdinFile {
+		return ""
+	}
+	const reason = "systemd-run за parallel (… | parallel systemd-run --pipe bash): строки ввода станут аргументами или вводом оболочки, их не видно до запуска" + hiddenTail
+	calls, err := shellcmd.Calls(strings.Join(c.Args[i:], " "))
+	if err != nil {
+		s.tool.Logger().Warn("kill_guard: команда за parallel не разобрана", "error", err)
+		return reason
+	}
+	local, shell := false, false
+	for _, x := range calls {
+		_, runner := scriptArgs(x)
+		switch {
+		case x.Name == "systemd-run" && len(x.Via) == 0:
+			local = local || !systemdRunHostOption(x.Args)
+		case slices.Equal(x.Via, []string{"systemd-run"}) && shellcmd.IsShell(x.Name) && !runner && shellReadsInput(x.Args):
+			shell = true
+		}
+	}
+	if local && shell {
+		return reason
 	}
 	return ""
 }

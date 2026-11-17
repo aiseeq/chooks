@@ -300,6 +300,9 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 			return err
 		}
 	}
+	if reason := s.parallelSystemdRunReason(c); reason != "" {
+		s.addToolReason(reason, systemdRunHiddenHint, false)
+	}
 	if !s.signalWord {
 		return s.signal(c, calls)
 	}

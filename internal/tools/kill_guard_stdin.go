@@ -34,9 +34,11 @@ const (
 type stdinSpan struct {
 	start, end int
 	src        stdinSource
-	// feed — текст левой части пайпа (echo make): у литерального ввода
-	// разбор прочтёт скрипт (literalFeed)
-	feed string
+	// feed — команда, в которой разбор прочтёт скрипт этого ввода
+	// (literalFeed): «левая часть пайпа | sh» (echo make | sh) или «sh <<<
+	// слово»; feedVia — начало Via у вызовов скрипта в ней
+	feed    string
+	feedVia []string
 }
 
 // stdinScope текст, к которому отнесены места вызовов (Offset), и ввод
@@ -86,13 +88,14 @@ func stdinSpans(log core.Logger, text string, base, depth int) ([]stdinSpan, err
 				case catFiles(x.X):
 					sp.src = stdinFile
 				default:
-					sp.feed = text[x.X.Pos().Offset():x.X.End().Offset()]
+					sp.feed, sp.feedVia = text[x.X.Pos().Offset():x.X.End().Offset()]+" | sh", []string{"pipe", "sh"}
 				}
 				spans = append(spans, sp)
 			}
 		case *syntax.Stmt:
-			if src, ok := redirectInput(x.Redirs); ok {
-				spans = append(spans, stdinSpan{start: base + int(x.Pos().Offset()), end: base + int(x.End().Offset()), src: src})
+			if sp, ok := redirectInput(text, x.Redirs); ok {
+				sp.start, sp.end = base+int(x.Pos().Offset()), base+int(x.End().Offset())
+				spans = append(spans, sp)
 			}
 		case *syntax.CallExpr:
 			if depth > 0 {
@@ -152,22 +155,40 @@ func scriptText(w *syntax.Word) (string, int, bool) {
 	return "", 0, false
 }
 
-// redirectInput ввод команды по её перенаправлениям (последнее действует):
-// <, <<, <<-, <<<, <> — перенаправление, <& (копия дескриптора) — не виден,
-// как пайп. ok — ввод перенаправлен
-func redirectInput(redirs []*syntax.Redirect) (stdinSource, bool) {
+// redirectInput ввод команды по её перенаправлениям (последнее действует;
+// text — текст, в котором стоят слова перенаправлений): redirectSource по
+// оператору и исходному тексту цели. ok — ввод перенаправлен
+func redirectInput(text string, redirs []*syntax.Redirect) (stdinSpan, bool) {
 	for _, r := range slices.Backward(redirs) {
 		if r.N != nil && r.N.Value != "0" {
 			continue
 		}
 		switch r.Op {
-		case syntax.DplIn:
-			return stdinPipe, true
-		case syntax.RdrIn, syntax.RdrInOut, syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc:
-			return stdinRedirect, true
+		case syntax.DplIn, syntax.RdrIn, syntax.RdrInOut, syntax.WordHdoc:
+			return redirectSource(r.Op.String(), text[r.Word.Pos().Offset():r.Word.End().Offset()]), true
+		case syntax.Hdoc, syntax.DashHdoc:
+			return stdinSpan{src: stdinRedirect}, true
 		}
 	}
-	return stdinOwn, false
+	return stdinSpan{}, false
+}
+
+// redirectSource ввод из перенаправления op с целью target — так же, как у
+// оболочки прямо под systemd-run (systemdRunInputReason): <& — копия
+// дескриптора, не видна; < и <> из подстановки ("$F", "$DIR/a.sh") и <<< из
+// одной подстановки ("$CMD") — не видны, как пайп; <<< с иным текстом —
+// перенаправление, а его текст разбор прочтёт как скрипт (literalFeed);
+// < литерального файла, heredoc — перенаправление
+func redirectSource(op, target string) stdinSpan {
+	switch {
+	case op == "<&":
+		return stdinSpan{src: stdinPipe}
+	case (op == "<" || op == "<>") && computedArg(target), op == "<<<" && wholeSubstitution(target):
+		return stdinSpan{src: stdinPipe}
+	case op == "<<<":
+		return stdinSpan{src: stdinRedirect, feed: "sh <<< " + target, feedVia: []string{"sh"}}
+	}
+	return stdinSpan{src: stdinRedirect}
 }
 
 // catFiles — левая часть пайпа: cat с литеральными файлами без опций и
@@ -227,13 +248,15 @@ func afterXargs(c shellcmd.Call) bool {
 // inputOf ввод c без поправки на xargs (stdinOf)
 func (s *killScan) inputOf(c shellcmd.Call) stdinSpan {
 	for _, r := range slices.Backward(c.Redirs) {
-		switch {
-		case r.N != "" && r.N != "0" || !strings.HasPrefix(r.Op, "<"):
-		case r.Op == "<&":
-			// копия дескриптора (<&3, exec 3< "$F"): что в нём, не видно
-			return stdinSpan{src: stdinPipe}
-		default:
-			return stdinSpan{src: stdinRedirect}
+		if (r.N == "" || r.N == "0") && strings.HasPrefix(r.Op, "<") {
+			target, err := redirTargetWord(r)
+			if err != nil {
+				// значение с байтами, которых bash в кавычках не держит:
+				// текст не прочесть — как невидимый ввод
+				s.tool.Logger().Warn("kill_guard: текст <<< не прочитан", "error", err)
+				return stdinSpan{src: stdinPipe}
+			}
+			return redirectSource(r.Op, target)
 		}
 	}
 	scope := s.stdinScopeOf()
@@ -256,10 +279,11 @@ func (s *killScan) inputOf(c shellcmd.Call) stdinSpan {
 }
 
 // literalFeed вызовы скрипта, который оболочка c под systemd-run читает из
-// пайпа с литеральным текстом (echo make | sh -c 'systemd-run --pipe bash',
-// sh -c 'echo make | run0 systemd-run --pipe bash'): разбор shellcmd читает
+// пайпа с литеральным текстом или из <<< (echo make | sh -c 'systemd-run
+// --pipe bash', sh -c 'echo make | run0 systemd-run --pipe bash', sh -c
+// 'systemd-run --pipe bash' <<< make): разбор shellcmd читает
 // такой скрипт только у пайпа прямо в оболочку, а сквозь sh -c и run0 — нет.
-// Текст левой части разбирается как «текст | sh». Вызовы идут с Via цепочки
+// Ввод разбирается в команде feed (stdinSpan). Вызовы идут с Via цепочки
 // c и «pipe» и без места: их проверяет s.call, как вызовы скрипта. nil —
 // скрипт не литеральный, уже прочитан разбором или c — сам вызов такого
 // скрипта
@@ -271,18 +295,18 @@ func (s *killScan) literalFeed(c shellcmd.Call, calls []shellcmd.Call) []shellcm
 		return nil
 	}
 	in := s.stdinOf(c)
-	if in.src != stdinPipe || in.feed == "" {
+	if in.feed == "" || afterXargs(c) {
 		return nil
 	}
-	parsed, err := shellcmd.Calls(in.feed + " | sh")
+	parsed, err := shellcmd.Calls(in.feed)
 	if err != nil {
 		s.tool.Logger().Debug("kill_guard: ввод из пайпа не разобран, скрипт не виден", "feed", in.feed, "error", err)
 		return nil
 	}
 	var body []shellcmd.Call
 	for _, x := range parsed {
-		if len(x.Via) >= 2 && x.Via[0] == "pipe" && x.Via[1] == "sh" {
-			x.Via = slices.Concat(c.Via, []string{c.Name, "pipe"}, x.Via[2:])
+		if len(x.Via) >= len(in.feedVia) && slices.Equal(x.Via[:len(in.feedVia)], in.feedVia) {
+			x.Via = slices.Concat(c.Via, []string{c.Name, "pipe"}, x.Via[len(in.feedVia):])
 			x.Offset = -1
 			body = append(body, x)
 		}
@@ -294,4 +318,18 @@ func (s *killScan) literalFeed(c shellcmd.Call, calls []shellcmd.Call) []shellcm
 func globPart(p syntax.WordPart) bool {
 	lit, ok := p.(*syntax.Lit)
 	return ok && strings.ContainsAny(lit.Value, "*?[")
+}
+
+// redirTargetWord цель перенаправления shellcmd словом оболочки: у
+// литерального слова Target — значение (его надо взять в кавычки), иначе —
+// исходный текст
+func redirTargetWord(r shellcmd.Redir) (string, error) {
+	if r.Op != "<<<" || strings.ContainsAny(r.Target, "$`\"'") {
+		return r.Target, nil
+	}
+	q, err := syntax.Quote(r.Target, syntax.LangBash)
+	if err != nil {
+		return "", fmt.Errorf("слово <<< в кавычки: %w", err)
+	}
+	return q, nil
 }

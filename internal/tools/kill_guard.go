@@ -288,7 +288,7 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if inner, ok := elevatedCommand(c); ok {
 		return s.elevated(c, inner)
 	}
-	if reason, hint := systemdRunSignalReason(c); reason != "" {
+	if reason, hint := systemdRunSignalReason(c, calls); reason != "" {
 		s.addToolReason(reason, hint, false)
 	}
 	if !s.signalWord {
@@ -453,8 +453,12 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 	if err != nil && s.killText {
 		s.addReason(c.Name + ": разбор команды за ним не прошёл (" + err.Error() + "): проверить сигналы в ней нельзя")
 	}
+	// Via у всех вызовов — с обёрткой впереди: вызовы ищут друг друга по Via
+	// (systemd-run за run0 — systemdRunRemote)
+	for i := range calls {
+		calls[i].Via = append(append(slices.Clone(c.Via), c.Name), calls[i].Via...)
+	}
 	for _, ic := range calls {
-		ic.Via = append(append(slices.Clone(c.Via), c.Name), ic.Via...)
 		if err := s.call(ic, calls); err != nil {
 			return err
 		}

@@ -149,3 +149,73 @@ func TestKillGuardForeignUnitTexts(t *testing.T) {
 		t.Errorf("свой agent-x-1.scope: ждали прежний отказ, получили %v %q", r.IsValid, r.Suggestions)
 	}
 }
+
+// Тикет kill-guard-systemd-run-hidden-cmd: команда под systemd-run, которую
+// до запуска не видно (имя или скрипт sh -c из переменной или подстановки),
+// — отказ, как юнит из переменной; -M на эту машину (.host, пусто, user@,
+// user@.host) — проверка как без -M
+func TestKillGuardSystemdRunHiddenBlocks(t *testing.T) {
+	for _, command := range []string{
+		`systemd-run --user sh -c "$CMD"`,
+		`systemd-run --user "$X" 455274`,
+		`systemd-run --user $X 455274`,
+		`systemd-run --user ${X} 455274`,
+		`systemd-run --user --scope bash -c "$(cat script)"`,
+		"systemd-run --user sh -c `cat script`",
+		`systemd-run --user sh -c 'sh -c "$CMD"'`,
+		`systemd-run --user sh -c '$X 455274'`,
+		`systemd-run --user env "$X" 455274`,
+		`sudo systemd-run "$X" 455274`,
+		`run0 systemd-run sh -c "$CMD"`,
+		// эта машина: -M .host, пусто, user@, user@.host
+		`systemd-run -M .host --user kill 455274`,
+		`systemd-run --machine=.host kill 455274`,
+		`systemd-run -M '' kill 455274`,
+		`systemd-run -M aisee@ --user kill 455274`,
+		`systemd-run --machine aisee@.host --user kill 455274`,
+		`systemd-run -M "$M" kill 455274`,
+		// systemd-run на другую машину и рядом здешний — проверка как здесь
+		`systemd-run -H h true; systemd-run --user sh -c 'kill 455274'`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+}
+
+// systemd-run -H/--host и -M на чужую машину или контейнер исполнит команду
+// не здесь — как под ssh; видимые имя и скрипт — пропуск
+func TestKillGuardSystemdRunRemoteAllows(t *testing.T) {
+	for _, command := range []string{
+		`systemd-run -H host kill 455274`,
+		`systemd-run --host=user@host kill 455274`,
+		`systemd-run --host user@host --scope sh -c 'pkill opencode'`,
+		`systemd-run -qH host podman stop x`,
+		`systemd-run -M c1 kill 455274`,
+		`systemd-run --machine=user@c1 --user pkill opencode`,
+		`systemd-run -Mc1 kill 455274`,
+		`nice systemd-run -M c1 kill 455274`,
+		`run0 systemd-run -H host kill 455274`,
+		`systemd-run -H host sh -c "$CMD"`,
+		`systemd-run --user sh -c 'make -C "$DIR"'`,
+		`systemd-run --user "$(go env GOPATH)/bin/tool" 1`,
+		`systemd-run --user "$HOME/bin/tool" 1`,
+		`systemd-run --user --scope -p MemoryMax=4G go test ./...`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}
+
+func TestKillGuardSystemdRunHiddenTexts(t *testing.T) {
+	for _, tc := range []struct{ command, reason string }{
+		{`systemd-run --user "$X" 455274`, "systemd-run запускает команду, имя которой вычисляется при запуске"},
+		{`systemd-run --user sh -c "$CMD"`, "systemd-run запускает sh со скриптом из подстановки"},
+	} {
+		r := validateKill(t, tc.command)
+		if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), tc.reason) || !slices.Contains(r.Suggestions, systemdRunHiddenHint) {
+			t.Errorf("%s: ждали отказ с «%s» и подсказкой, получили %v %q", tc.command, tc.reason, r.IsValid, r.Suggestions)
+		}
+	}
+}

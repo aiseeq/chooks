@@ -17,6 +17,7 @@ import (
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/nighthint"
+	"github.com/aiseeq/chooks/internal/skillreload"
 )
 
 func nightTestDeps(t *testing.T, now time.Time, locked bool, lockErr error) nighthint.Deps {
@@ -215,4 +216,121 @@ func printModeProcess(t *testing.T) string {
 		_ = cmd.Wait()
 	})
 	return strconv.Itoa(cmd.Process.Pid)
+}
+
+// writeSkillState пишет запись skill-reload главного агента сессии s1 со
+// скиллами skills в каталог под XDG_STATE_HOME
+func writeSkillState(t *testing.T, skills ...string) {
+	t.Helper()
+	dir, err := skillreload.DefaultStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]any{}
+	for _, name := range skills {
+		path := filepath.Join("/skills", name, "SKILL.md")
+		files[path] = map[string]any{"kind": "skill", "name": name, "path": path}
+	}
+	data, err := json.Marshal(map[string]any{"schema": 2, "transcript": "/t/s1.jsonl", "offset": 10, "files": files})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "s1.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Ночь, /clear, ход по письму сессии: подсказка на каждом UserPromptSubmit,
+// пока в записи skill-reload нет autonomous-work; после вызова — нет.
+// Без записи, при выключенном skill_reload и при сбое чтения — раз за ночь
+// (тикет night-hint-after-clear-first-turn)
+func TestRunNightHintUntilSkillCalled(t *testing.T) {
+	t.Setenv("CLAUDE_PID", "")
+	night := time.Date(2026, 11, 17, 5, 6, 0, 0, time.Local)
+	start := `{"hook_event_name":"SessionStart","session_id":"s1","source":"clear"}`
+	prompt := `{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"письмо сессии"}`
+	run := func(t *testing.T, config *core.Config, deps nighthint.Deps, input string) (bool, string) {
+		t.Helper()
+		logger, logPath := nightTestLogger(t)
+		var out bytes.Buffer
+		runNightHint(context.Background(), []byte(input), config, logger, &out, deps)
+		return out.Len() > 0, readLog(t, logPath)
+	}
+
+	t.Run("repeat until called", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		config := core.DefaultConfig()
+		deps := nightTestDeps(t, night, true, nil)
+		deps.SkillCalled = autonomousSkillCalled(config)
+		writeSkillState(t, "coordinator")
+		if given, _ := run(t, config, deps, start); !given {
+			t.Fatal("SessionStart(clear) без подсказки")
+		}
+		for i := range 2 {
+			if given, log := run(t, config, deps, prompt); !given {
+				t.Fatalf("ход %d без вызова скилла: подсказки нет, лог %s", i+1, log)
+			}
+		}
+		writeSkillState(t, "coordinator", nighthint.AutonomousSkill)
+		if given, log := run(t, config, deps, prompt); given || strings.Contains(log, "skill call unknown") {
+			t.Errorf("после вызова скилла: подсказка %t, лог %s", given, log)
+		}
+	})
+
+	for _, c := range []struct {
+		name, level string
+		prepare     func(t *testing.T, config *core.Config)
+	}{
+		{"no record", "level=DEBUG", func(*testing.T, *core.Config) {}},
+		{"skill_reload disabled", "level=DEBUG", func(t *testing.T, config *core.Config) {
+			writeSkillState(t)
+			config.Tools[skillReloadTool] = core.ToolConfig{Enabled: false}
+		}},
+		{"broken record", "level=WARN", func(t *testing.T, _ *core.Config) {
+			dir, err := skillreload.DefaultStateDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "s1.json"), []byte(`{"schema":2,"files":`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			config := core.DefaultConfig()
+			c.prepare(t, config)
+			deps := nightTestDeps(t, night, true, nil)
+			deps.SkillCalled = autonomousSkillCalled(config)
+			if given, _ := run(t, config, deps, start); !given {
+				t.Fatal("SessionStart(clear) без подсказки")
+			}
+			given, log := run(t, config, deps, prompt)
+			if given {
+				t.Error("повтор подсказки без признака вызова")
+			}
+			if !strings.Contains(log, c.level+` msg="night hint once per night: skill call unknown"`) {
+				t.Errorf("в логе нет причины уровня %s: %s", c.level, log)
+			}
+		})
+	}
+
+	t.Run("day", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		config := core.DefaultConfig()
+		writeSkillState(t)
+		deps := nightTestDeps(t, time.Date(2026, 11, 17, 14, 0, 0, 0, time.Local), true, nil)
+		deps.SkillCalled = autonomousSkillCalled(config)
+		for i := range 2 {
+			if given, _ := run(t, config, deps, prompt); given {
+				t.Errorf("ход %d днём: подсказка", i+1)
+			}
+		}
+	})
 }

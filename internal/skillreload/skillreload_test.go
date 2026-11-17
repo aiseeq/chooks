@@ -1081,3 +1081,105 @@ func TestCleanupAtMostDaily(t *testing.T) {
 		t.Errorf("метка не поправлена: %v %v", info, err)
 	}
 }
+
+// SkillCalled читает запись главного агента: вызов скилла виден после
+// события хука, сжатие его не отменяет, вызов субагента не в счёт
+func TestSkillCalledFromRecord(t *testing.T) {
+	f := newFixture(t)
+	dir := f.checker.StateDir
+	base := time.Now().Add(-time.Hour)
+
+	// Записи нет — ErrNoState, файл не создаётся
+	if _, err := SkillCalled(dir, "sess-1", "demo", time.Now().Add(time.Second)); !errors.Is(err, ErrNoState) {
+		t.Fatalf("без записи: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sess-1.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("чтение создало запись: %v", err)
+	}
+
+	// Запись есть, скилл не вызван
+	f.writeSkill("Тело.", base)
+	f.appendTranscript(jsonLine(t, map[string]any{"type": "user", "timestamp": stamp(base), "message": map[string]any{"role": "user", "content": "письмо сессии"}}))
+	f.check(Event{})
+	if called, err := SkillCalled(dir, "sess-1", "demo", time.Now().Add(time.Second)); err != nil || called {
+		t.Fatalf("до вызова: called %t, %v", called, err)
+	}
+
+	// Субагент вызвал скилл в своём транскрипте — не вызов главного агента
+	agentTranscript := strings.TrimSuffix(f.transcript, ".jsonl") + "/subagents/agent-a1.jsonl"
+	if err := os.MkdirAll(filepath.Dir(agentTranscript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agentTranscript, []byte(snapshotLine(t, f.skillDir, "Тело.", base.Add(time.Minute))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.check(Event{AgentID: "a1", AgentType: "general-purpose"})
+	if data, err := os.ReadFile(filepath.Join(dir, "sess-1.a1.json")); err != nil || !strings.Contains(string(data), `"name":"demo"`) {
+		t.Fatalf("в записи субагента нет вызова: %s, %v", data, err)
+	}
+	if called, err := SkillCalled(dir, "sess-1", "demo", time.Now().Add(time.Second)); err != nil || called {
+		t.Fatalf("вызов субагента засчитан: called %t, %v", called, err)
+	}
+
+	// Вызов главным агентом, затем сжатие
+	f.load("Тело.", base.Add(2*time.Minute))
+	f.check(Event{})
+	if called, err := SkillCalled(dir, "sess-1", "demo", time.Now().Add(time.Second)); err != nil || !called {
+		t.Fatalf("после вызова: called %t, %v", called, err)
+	}
+	if called, err := SkillCalled(dir, "sess-1", "other", time.Now().Add(time.Second)); err != nil || called {
+		t.Fatalf("другой скилл: called %t, %v", called, err)
+	}
+	f.appendTranscript(f.compactLines("", base.Add(3*time.Minute))...)
+	f.check(Event{})
+	if called, err := SkillCalled(dir, "sess-1", "demo", time.Now().Add(time.Second)); err != nil || !called {
+		t.Fatalf("после сжатия: called %t, %v", called, err)
+	}
+}
+
+func TestSkillCalledBadRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s1.json")
+	for name, body := range map[string]string{
+		"empty":    "",
+		"broken":   `{"schema":2,"files":`,
+		"schema 1": `{"schema":1,"skills":{}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			called, err := SkillCalled(dir, "s1", "demo", time.Now().Add(time.Second))
+			if err == nil || called {
+				t.Fatalf("called %t, ошибка %v", called, err)
+			}
+			if got := errors.Is(err, ErrNoState); got != (name == "empty") {
+				t.Errorf("ErrNoState = %t: %v", got, err)
+			}
+		})
+	}
+	if _, err := SkillCalled(dir, "../s1", "demo", time.Now()); err == nil {
+		t.Error("имя сессии с путём принято")
+	}
+}
+
+// Запись держит хук skill-reload: чтение ждёт блокировку не дольше срока
+func TestSkillCalledLockBounded(t *testing.T) {
+	dir := t.TempDir()
+	holder, err := os.OpenFile(filepath.Join(dir, "s1.json"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = SkillCalled(dir, "s1", "demo", started.Add(150*time.Millisecond))
+	if !errors.Is(err, core.ErrLockBusy) {
+		t.Fatalf("ожидалась занятая блокировка, получено %v", err)
+	}
+	if waited := time.Since(started); waited > 600*time.Millisecond {
+		t.Errorf("ждали блокировку %s при сроке 150ms", waited)
+	}
+}

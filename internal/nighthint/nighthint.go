@@ -10,7 +10,15 @@
 // админ пространства, не Сон: пользователь 16.11 — «Я буду отвечать на вопросы
 // Админам пространств» (tl 13d1062b:15130), «можно всё в эту доку писать»
 // (tl 13d1062b:15683); п.3 autonomous-work с этим адресом — «да» на текст
-// (tl deac8a3d:18093), тикет night-hint-question-to-admin
+// (tl deac8a3d:18093), тикет night-hint-question-to-admin.
+//
+// SessionStart — раз за ночь на сессию и снова после сжатия и /clear.
+// UserPromptSubmit — на каждом ходе, пока в сессии не вызван скилл
+// autonomous-work, после вызова — раз за ночь: сессия после /clear получала
+// подсказку на SessionStart, первый ход будило письмо другой сессии, и агент
+// начинал со скилла роли (8 из 30 сессий 15–17.11, тикет
+// night-hint-after-clear-first-turn). Признак вызова — запись хука
+// skill-reload, не транскрипт
 package nighthint
 
 import (
@@ -38,6 +46,10 @@ const (
 // askTool — инструмент вопроса с выбором: ночью его вызов получает подсказку
 const askTool = "AskUserQuestion"
 
+// AutonomousSkill — скилл, который велит вызвать подсказка: пока он не вызван,
+// UserPromptSubmit получает подсказку на каждом ходе
+const AutonomousSkill = "autonomous-work"
+
 // questionMark — метка строки «нужно от тебя» в ответе агента (CLAUDE.md,
 // «Форма ответа»)
 const questionMark = "❓"
@@ -64,12 +76,16 @@ func (e Event) contextReset() bool {
 	return e.Source == "compact" || e.Source == "clear"
 }
 
-// Deps — время, признак блокировки экрана и записи сессий; в тестах
-// подменяются
+// Deps — время, признак блокировки экрана, записи сессий и признак вызова
+// скилла; в тестах подменяются
 type Deps struct {
 	Now    func() time.Time
 	Locked func(ctx context.Context) (bool, error)
 	Store  Store
+	// SkillCalled — вызван ли в сессии главного агента AutonomousSkill.
+	// Ошибка или nil — неизвестно: UserPromptSubmit идёт по правилу «раз
+	// за ночь»
+	SkillCalled func(sessionID string) (bool, error)
 }
 
 // Result — подсказка для контекста агента или причина, почему её нет.
@@ -81,6 +97,9 @@ type Result struct {
 	// Damaged — запись сессии была испорчена и заменена (ErrRecordDamaged):
 	// решение принято, причина — в лог
 	Damaged error
+	// SkillErr — вызов AutonomousSkill не узнать: UserPromptSubmit пошёл по
+	// правилу «раз за ночь», причина — в лог
+	SkillErr error
 }
 
 // IsNight сообщает, что t — ночные часы по местному времени
@@ -154,8 +173,9 @@ func Run(ctx context.Context, deps Deps, event Event) (Result, error) {
 	fresh := true
 	switch event.Name {
 	case EventSessionStart, EventUserPromptSubmit:
-		// Раз за ночь на сессию: письма сессий тоже приходят ходом
-		// UserPromptSubmit, и подсказка на каждое забила бы контекст
+		// Ночь отмечается всегда: после вызова скилла UserPromptSubmit идёт
+		// по ней — раз за ночь, письма сессий тоже приходят его ходом, и
+		// подсказка на каждое забила бы контекст
 		fresh, err = deps.Store.MarkNight(event.SessionID, NightOf(now))
 		fresh = fresh || event.contextReset()
 	case EventStop:
@@ -169,8 +189,31 @@ func Run(ctx context.Context, deps Deps, event Event) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("mark %s: %w", event.Name, err)
 	}
-	if !fresh {
-		return Result{Skip: "подсказка уже дана (раз за ночь, на Stop — раз за ход)"}, nil
+	var skillErr error
+	if !fresh && event.Name == EventUserPromptSubmit {
+		// Подсказка этой ночи уже была, но скилл не вызван: ход по письму
+		// сессии после /clear начинается со скилла роли, и подсказка на
+		// SessionStart до него не доходит — повторить на этом ходе
+		var called bool
+		called, skillErr = skillCalled(deps, event.SessionID)
+		if skillErr == nil && !called {
+			fresh = true
+		}
 	}
-	return Result{Context: Text(now), Damaged: damaged}, nil
+	if !fresh {
+		return Result{Skip: "подсказка уже дана (раз за ночь, на Stop — раз за ход)", Damaged: damaged, SkillErr: skillErr}, nil
+	}
+	return Result{Context: Text(now), Damaged: damaged, SkillErr: skillErr}, nil
+}
+
+// ErrSkillUnknown — признака вызова скилла нет (не подключён или выключен):
+// UserPromptSubmit идёт по правилу «раз за ночь»
+var ErrSkillUnknown = errors.New("skill call check off")
+
+// skillCalled — вызван ли AutonomousSkill в сессии; без признака — ошибка
+func skillCalled(deps Deps, sessionID string) (bool, error) {
+	if deps.SkillCalled == nil {
+		return false, ErrSkillUnknown
+	}
+	return deps.SkillCalled(sessionID)
 }

@@ -402,3 +402,44 @@ func TestKillGuardSystemdRunStdinTail(t *testing.T) {
 		}
 	}
 }
+
+// Приёмка хвоста: дескриптор, маска и |& у cat — не файл; за xargs ввод из
+// пайпа — отказ при любом источнике; литеральный ввод проходит сквозь sh -c
+// и run0 так же, как напрямую, а kill в нём виден
+func TestKillGuardSystemdRunStdinTailReview(t *testing.T) {
+	for _, command := range []string{
+		`exec 3< "$F"; cat /dev/fd/3 | systemd-run --user --pipe bash`,
+		`cat /proc/self/fd/3 | systemd-run --user --pipe bash`,
+		`cat /proc/$$/fd/7 | systemd-run --user --pipe bash`,
+		`cat /dev/fd/./3 | systemd-run --user --pipe bash`,
+		`cat a.sh /dev/fd/3 | run0 systemd-run --pipe bash`,
+		`cat *.sh | systemd-run --user --pipe bash`,
+		`cat a.sh |& systemd-run --user --pipe bash`,
+		`cat a.sh | xargs systemd-run --pipe bash`,
+		`echo make | xargs systemd-run --pipe bash`,
+		`cat a.sh | sh -c 'xargs systemd-run --pipe bash'`,
+		`echo 'kill 455274' | sh -c 'systemd-run --pipe bash'`,
+		`sh -c 'echo "kill 455274" | run0 systemd-run --pipe bash'`,
+		`echo 'make; pkill opencode' | run0 sh -c 'systemd-run --pipe bash'`,
+		`echo "$CMD" | sh -c 'systemd-run --pipe bash'`,
+		`echo '' | sh -c 'systemd-run --pipe bash'`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+	for _, command := range []string{
+		`echo make | sh -c 'systemd-run --pipe bash'`,
+		`sh -c 'echo make | run0 systemd-run --pipe bash'`,
+		`echo make | systemd-run --pipe bash`,
+		`echo make | run0 systemd-run --pipe bash`,
+		`echo make | run0 sh -c 'systemd-run --pipe bash'`,
+		`printf '%s\n' 'make test' | sh -c 'cd /tmp && systemd-run --user --pipe sh'`,
+		`cat 'my*.sh' | systemd-run --user --pipe bash`,
+		`cat a.sh | systemd-run --user --pipe bash`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}

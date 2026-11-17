@@ -34,6 +34,9 @@ const (
 type stdinSpan struct {
 	start, end int
 	src        stdinSource
+	// feed — текст левой части пайпа (echo make): у литерального ввода
+	// разбор прочтёт скрипт (literalFeed)
+	feed string
 }
 
 // stdinScope текст, к которому отнесены места вызовов (Offset), и ввод
@@ -41,7 +44,7 @@ type stdinSpan struct {
 type stdinScope struct {
 	text  string
 	spans []stdinSpan
-	src   stdinSource
+	in    stdinSpan
 }
 
 // shellCOption опция -c оболочки, возможно в связке (-c, -ec, -lc): слово за
@@ -51,6 +54,10 @@ var shellCOption = regexp.MustCompile(`^-[a-zA-Z]*c[a-zA-Z]*$`)
 // stdinPathRe пути к своему вводу после path.Clean: /dev/stdin, /dev/fd/0,
 // /proc/self/fd/0, /proc/$$/fd/0, /proc/thread-self/fd/0
 var stdinPathRe = regexp.MustCompile(`^/(dev/stdin|dev/fd/0+|proc/[^/]+/fd/0+)$`)
+
+// fdPathRe путь к дескриптору после path.Clean: /dev/fd/N, /proc/*/fd/N
+// (exec 3< "$F"; cat /dev/fd/3) — что в нём, не видно
+var fdPathRe = regexp.MustCompile(`^/(dev/fd|proc/[^/]+/fd)/`)
 
 // stdinPath — слово (операнд оболочки) называет её ввод: - или путь к нему
 // в любом написании (/dev/fd/./0, //dev/stdin, "/proc/$$/fd/0")
@@ -72,15 +79,20 @@ func stdinSpans(log core.Logger, text string, base, depth int) ([]stdinSpan, err
 		switch x := n.(type) {
 		case *syntax.BinaryCmd:
 			if x.Op == syntax.Pipe || x.Op == syntax.PipeAll {
-				src := stdinPipe
-				if catFiles(x.X) {
-					src = stdinFile
+				// |& добавляет к вводу вывод ошибок: ни файл, ни литерал
+				sp := stdinSpan{start: base + int(x.Y.Pos().Offset()), end: base + int(x.Y.End().Offset()), src: stdinPipe}
+				switch {
+				case x.Op == syntax.PipeAll:
+				case catFiles(x.X):
+					sp.src = stdinFile
+				default:
+					sp.feed = text[x.X.Pos().Offset():x.X.End().Offset()]
 				}
-				spans = append(spans, stdinSpan{base + int(x.Y.Pos().Offset()), base + int(x.Y.End().Offset()), src})
+				spans = append(spans, sp)
 			}
 		case *syntax.Stmt:
 			if src, ok := redirectInput(x.Redirs); ok {
-				spans = append(spans, stdinSpan{base + int(x.Pos().Offset()), base + int(x.End().Offset()), src})
+				spans = append(spans, stdinSpan{start: base + int(x.Pos().Offset()), end: base + int(x.End().Offset()), src: src})
 			}
 		case *syntax.CallExpr:
 			if depth > 0 {
@@ -160,7 +172,8 @@ func redirectInput(redirs []*syntax.Redirect) (stdinSource, bool) {
 
 // catFiles — левая часть пайпа: cat с литеральными файлами без опций и
 // перенаправлений (cat build.sh, cat a.sh b.sh): текст скрипта лежит в
-// файле, как у sh < build.sh
+// файле, как у sh < build.sh. Не файл скрипта: маска (*.sh — какие файлы,
+// видно при запуске), ввод и дескриптор (/dev/fd/3, /proc/self/fd/3)
 func catFiles(st *syntax.Stmt) bool {
 	call, ok := st.Cmd.(*syntax.CallExpr)
 	if !ok || len(st.Redirs) > 0 || len(call.Assigns) > 0 || len(call.Args) < 2 || call.Args[0].Lit() != "cat" {
@@ -168,7 +181,8 @@ func catFiles(st *syntax.Stmt) bool {
 	}
 	for _, w := range call.Args[1:] {
 		v, literal := literalValue(w)
-		if !literal || v == "" || strings.HasPrefix(v, "-") || stdinPath(v) {
+		if !literal || v == "" || strings.HasPrefix(v, "-") || stdinPath(v) || fdPathRe.MatchString(path.Clean(v)) ||
+			slices.ContainsFunc(w.Parts, globPart) {
 			return false
 		}
 	}
@@ -197,15 +211,29 @@ func (s *killScan) stdinScopeOf() *stdinScope {
 // parallel из пайпа это не ввод команды, а её аргументы, текста которых не
 // видно (… | xargs systemd-run --pipe bash: строки «-c», «kill 1» станут
 // скриптом), — тот же пайп
-func (s *killScan) stdinOf(c shellcmd.Call) stdinSource {
+func (s *killScan) stdinOf(c shellcmd.Call) stdinSpan {
+	in := s.inputOf(c)
+	if in.src != stdinOwn && in.src != stdinRedirect && afterXargs(c) {
+		return stdinSpan{src: stdinPipe}
+	}
+	return in
+}
+
+// afterXargs — c идёт за xargs или parallel: слова их ввода — аргументы c
+func afterXargs(c shellcmd.Call) bool {
+	return slices.Contains(c.Via, "xargs") || slices.Contains(c.Via, "parallel")
+}
+
+// inputOf ввод c без поправки на xargs (stdinOf)
+func (s *killScan) inputOf(c shellcmd.Call) stdinSpan {
 	for _, r := range slices.Backward(c.Redirs) {
 		switch {
 		case r.N != "" && r.N != "0" || !strings.HasPrefix(r.Op, "<"):
 		case r.Op == "<&":
 			// копия дескриптора (<&3, exec 3< "$F"): что в нём, не видно
-			return stdinPipe
+			return stdinSpan{src: stdinPipe}
 		default:
-			return stdinRedirect
+			return stdinSpan{src: stdinRedirect}
 		}
 	}
 	scope := s.stdinScopeOf()
@@ -220,9 +248,50 @@ func (s *killScan) stdinOf(c shellcmd.Call) stdinSource {
 	}
 	switch {
 	case c.Offset >= 0 && best >= 0:
-		return scope.spans[best].src
-	case scope.src != stdinOwn || !c.ScriptInput:
-		return scope.src
+		return scope.spans[best]
+	case scope.in.src != stdinOwn || !c.ScriptInput:
+		return scope.in
 	}
-	return stdinPipe
+	return stdinSpan{src: stdinPipe}
+}
+
+// literalFeed вызовы скрипта, который оболочка c под systemd-run читает из
+// пайпа с литеральным текстом (echo make | sh -c 'systemd-run --pipe bash',
+// sh -c 'echo make | run0 systemd-run --pipe bash'): разбор shellcmd читает
+// такой скрипт только у пайпа прямо в оболочку, а сквозь sh -c и run0 — нет.
+// Текст левой части разбирается как «текст | sh». Вызовы идут с Via цепочки
+// c и «pipe» и без места: их проверяет s.call, как вызовы скрипта. nil —
+// скрипт не литеральный, уже прочитан разбором или c — сам вызов такого
+// скрипта
+func (s *killScan) literalFeed(c shellcmd.Call, calls []shellcmd.Call) []shellcmd.Call {
+	if !slices.Contains(c.Via, "systemd-run") || slices.Contains(c.Via, "pipe") || !shellcmd.IsShell(c.Name) {
+		return nil
+	}
+	if _, runner := scriptArgs(c); runner || !shellReadsInput(c.Args) || scriptBodyParsed(c, calls) {
+		return nil
+	}
+	in := s.stdinOf(c)
+	if in.src != stdinPipe || in.feed == "" {
+		return nil
+	}
+	parsed, err := shellcmd.Calls(in.feed + " | sh")
+	if err != nil {
+		s.tool.Logger().Debug("kill_guard: ввод из пайпа не разобран, скрипт не виден", "feed", in.feed, "error", err)
+		return nil
+	}
+	var body []shellcmd.Call
+	for _, x := range parsed {
+		if len(x.Via) >= 2 && x.Via[0] == "pipe" && x.Via[1] == "sh" {
+			x.Via = slices.Concat(c.Via, []string{c.Name, "pipe"}, x.Via[2:])
+			x.Offset = -1
+			body = append(body, x)
+		}
+	}
+	return body
+}
+
+// globPart часть слова без кавычек с символом маски (*, ?, [)
+func globPart(p syntax.WordPart) bool {
+	lit, ok := p.(*syntax.Lit)
+	return ok && strings.ContainsAny(lit.Value, "*?[")
 }

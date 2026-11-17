@@ -291,8 +291,14 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if inner, ok := elevatedCommand(c); ok {
 		return s.elevated(c, inner)
 	}
-	if reason, hint := s.systemdRunSignalReason(c, calls); reason != "" {
+	feed := s.literalFeed(c, calls)
+	if reason, hint := s.systemdRunSignalReason(c, calls, feed != nil); reason != "" {
 		s.addToolReason(reason, hint, false)
+	}
+	for _, f := range feed {
+		if err := s.call(f, slices.Concat(calls, feed)); err != nil {
+			return err
+		}
 	}
 	if !s.signalWord {
 		return s.signal(c, calls)
@@ -461,7 +467,7 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 	// обёрткой (их текст — весь inner) получают её ввод и перенаправления:
 	// разбор заново их не знает (… | run0 bash, run0 systemd-run --pipe sh)
 	src := s.stdinOf(c)
-	piped := src == stdinPipe || src == stdinFile
+	piped := src.src == stdinPipe || src.src == stdinFile
 	for i := range calls {
 		ic := &calls[i]
 		if ic.Raw == inner {
@@ -475,7 +481,7 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 	// места вызовов за обёрткой — в её тексте, ввод текста — её ввод
 	outer := s.stdinScopeOf()
 	defer func() { s.stdin = outer }()
-	s.stdin = &stdinScope{text: inner, src: src}
+	s.stdin = &stdinScope{text: inner, in: src}
 	if spans, err := stdinSpans(s.tool.Logger(), inner, 0, 4); err == nil {
 		s.stdin.spans = spans
 	} else {

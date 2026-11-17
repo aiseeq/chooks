@@ -86,7 +86,7 @@ func podmanStop(args []string) (string, bool) {
 // процессов. Вызов в скрипте ssh и systemd-run на другую машину
 // (systemdRunRemote) исполнится не здесь. calls — все вызовы команды:
 // среди них ищется сам systemd-run
-func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call) (reason, hint string) {
+func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call, feedRead bool) (reason, hint string) {
 	k := slices.Index(c.Via, "systemd-run")
 	if k < 0 || slices.Contains(c.Via, "ssh") || systemdRunRemote(c, calls, k) {
 		return "", ""
@@ -101,7 +101,7 @@ func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call
 		}
 		name = c.Name + " " + verb
 	default:
-		if reason := s.systemdRunHiddenReason(c, calls, k); reason != "" {
+		if reason := s.systemdRunHiddenReason(c, calls, k, feedRead); reason != "" {
 			return reason, systemdRunHiddenHint
 		}
 		return "", ""
@@ -122,7 +122,7 @@ const hiddenTail = ", а исполнит его потомок systemd, не а
 // | … — файл, как sh < build.sh). Подстановка в аргументах скрипта (sh -c "make -C
 // $DIR") — не повод: команды скрипта видны, а на месте имени команды её
 // ловит то же правило имени у вызова из скрипта
-func (s *killScan) systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call, k int) string {
+func (s *killScan) systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call, k int, feedRead bool) string {
 	if (c.Name == "" || strings.ContainsAny(c.Name, "$`{}")) && !systemdRunPathName(c, calls, k) {
 		return "systemd-run запускает команду, имя которой вычисляется при запуске ($X, $(…), `…`): текст команды станет известен только при запуске" + hiddenTail
 	}
@@ -139,7 +139,19 @@ func (s *killScan) systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call
 		// файл скрипта (sh x.sh) — вне этой проверки
 		return ""
 	}
-	if s.stdinOf(c) == stdinPipe && !scriptBodyParsed(c, calls) {
+	return s.systemdRunInputReason(c, calls, feedRead)
+}
+
+// systemdRunInputReason оболочка c под systemd-run читает скрипт из ввода,
+// которого не видно: пайп, который разбор не прочёл (feedRead — прочёл
+// literalFeed), пайп за xargs (слова ввода — аргументы c) или
+// перенаправление из подстановки (< "$F", <<< "$CMD")
+func (s *killScan) systemdRunInputReason(c shellcmd.Call, calls []shellcmd.Call, feedRead bool) string {
+	switch {
+	case s.stdinOf(c).src != stdinPipe:
+	case afterXargs(c):
+		return "systemd-run запускает " + c.Name + " за xargs (… | xargs systemd-run --pipe " + c.Name + "): слова ввода станут его аргументами (-c и скрипт), их не видно до запуска" + hiddenTail
+	case !scriptBodyParsed(c, calls) && !feedRead:
 		return "systemd-run запускает " + c.Name + ", который читает скрипт из ввода (… | systemd-run --pipe " + c.Name + "): текст не виден до запуска" + hiddenTail
 	}
 	for _, r := range c.Redirs {

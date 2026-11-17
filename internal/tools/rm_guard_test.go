@@ -242,6 +242,12 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`false && rm -rf "${NOPE_Q%/}/usr"`, false},
 		{`false && rm -rf "${NOPE_Q:=/home/nonexist-q}"/*`, false},
 		{`false && rm -rf "${NOPE_Q:-}"/*`, true},
+		{`false && rm -rf "${NOPE_Q=}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:+x}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q#x}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q/a/b}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:0:3}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q:-}/usr"`, true},
 	} {
 		r := validateRm(t, tc.command)
 		if r.IsValid == tc.deny {

@@ -83,7 +83,7 @@ func operand(ops []word, i int, via string) word {
 // busctlValues опции busctl со значением отдельным словом
 var busctlValues = []string{
 	"H", "host", "M", "machine", "C", "capsule", "address", "match", "size", "json", "expect-reply", "auto-start",
-	"allow-interactive-authorization", "timeout", "augment-creds", "watch-bind", "destination", "N", "limit-messages",
+	"allow-interactive-authorization", "timeout", "augment-creds", "watch-bind", "destination", "N", "limit-messages", "J",
 }
 
 // busctlCall busctl [--user|--system|--address A] call SERVICE OBJECT
@@ -114,9 +114,11 @@ func busctlCall(args []word, via string) (dbusCall, bool) {
 // busctl, как getopt, разбирает опции и после операндов: --user и
 // --system там действуют. Капсула учитывается только до первого операнда:
 // она ведёт к пропуску, и -C среди аргументов метода (строка «-Cx») пропуска
-// не даёт — лишний отказ на редкую форму дешевле обхода
+// не даёт — лишний отказ на редкую форму дешевле обхода. Капсула вместе с
+// транспортом (--address, -M, -H) — не капсула: какую шину выберет busctl
+// при обоих, не разбираем, и вызов проверяется по шине
 func busctlBus(args []word) string {
-	bus, capsule, operand := "system", false, false
+	bus, capsule, operand, transport := "system", false, false, false
 	for i := 0; i < len(args); i++ {
 		t := args[i].text
 		switch {
@@ -130,7 +132,9 @@ func busctlBus(args []word) string {
 			case "system":
 				bus = "system"
 			case "address":
-				bus = ""
+				bus, transport = "", true
+			case "machine", "host":
+				transport = true
 			case "capsule":
 				capsule = capsule || !operand
 			}
@@ -138,8 +142,9 @@ func busctlBus(args []word) string {
 				i++
 			}
 		case len(t) > 1 && t[0] == '-':
-			letter, next := shortValue(t, busctlValues)
+			letter, _, next := shortValue(t, busctlValues)
 			capsule = capsule || letter == "C" && !operand
+			transport = transport || letter == "M" || letter == "H"
 			if next {
 				i++
 			}
@@ -147,22 +152,22 @@ func busctlBus(args []word) string {
 			operand = true
 		}
 	}
-	if capsule {
+	if capsule && !transport {
 		return "capsule"
 	}
 	return bus
 }
 
 // shortValue опция со значением в связке коротких опций (-qC foo, -Cfoo):
-// её буква и next — значение в следующем слове (буква последняя в связке);
-// буквы после неё — уже значение. "" — в связке такой нет
-func shortValue(bundle string, values []string) (letter string, next bool) {
+// её буква, значение в той же связке (rest: -s9 → 9) и next — значение в
+// следующем слове (буква последняя в связке). "" — в связке такой нет
+func shortValue(bundle string, values []string) (letter, rest string, next bool) {
 	for j := 1; j < len(bundle); j++ {
 		if l := bundle[j : j+1]; slices.Contains(values, l) {
-			return l, j == len(bundle)-1
+			return l, bundle[j+1:], j == len(bundle)-1
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // gdbusValues опции gdbus call со значением: буква — длинное имя

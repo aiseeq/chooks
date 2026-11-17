@@ -9,8 +9,8 @@ import (
 const sysUnit = `busctl call org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/`
 
 // Формы с приёмки: -C внутри значения чужой опции или после -- — не
-// капсула; вычисляемое имя, связанное со средством; последний из --user,
-// --system и --global выбирает менеджер; алиасы целей выключения; kquitapp
+// капсула; вычисляемое имя, связанное со средством; последний из --user и
+// --system выбирает менеджер; алиасы целей выключения; kquitapp
 // и closeSession KDE
 func TestKillGuardSessionEndReviewBlocks(t *testing.T) {
 	for _, command := range []string{
@@ -68,8 +68,8 @@ func TestKillGuardSessionEndReviewBlocks(t *testing.T) {
 }
 
 // Соседи: капсула в опциях busctl до операндов (и в связке -qC), вычисляемое
-// имя без связи со средством, менеджер по последнему флагу, --global (только
-// файлы юнитов), чтение алиасов целей, kquitapp прочих приложений
+// имя без связи со средством, менеджер по последнему флагу, чтение алиасов
+// целей, kquitapp прочих приложений
 func TestKillGuardSessionEndReviewAllows(t *testing.T) {
 	for _, command := range []string{
 		`busctl --user -qC foo call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StopUnit ss plasma-kwin_wayland.service replace`,
@@ -83,7 +83,6 @@ func TestKillGuardSessionEndReviewAllows(t *testing.T) {
 
 		`systemctl --user --system stop plasma-kwin_wayland.service`,
 		`systemctl --system --user stop sddm.service`,
-		`systemctl --user --global disable --now plasma-kwin_wayland.service`,
 
 		`systemctl status runlevel0.target`,
 		`systemctl --user cat systemd-exit.service`,
@@ -95,6 +94,46 @@ func TestKillGuardSessionEndReviewAllows(t *testing.T) {
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}
+
+// Капсула вместе с транспортом busctl (--address, -M, -H) — проверка по
+// шине; менеджер systemctl — только из опций до -- и не из значений опций
+// (-p --global, --message --user), --global менеджер не меняет
+func TestKillGuardSessionEndOptionBlocks(t *testing.T) {
+	const kwin = `org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StopUnit ss plasma-kwin_wayland.service replace`
+	const terminate = `org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager TerminateUser u 1000`
+	for _, command := range []string{
+		`busctl --address=unix:path=/run/user/1000/bus -C foo call ` + kwin,
+		`busctl -C foo --address unix:path=/run/user/1000/bus call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StartUnit ss exit.target replace`,
+		`busctl -C foo --address=unix:path=/run/dbus/system_bus_socket call ` + terminate,
+		`busctl -C foo -M .host call ` + terminate,
+		`busctl --machine=.host --capsule foo call ` + terminate,
+		`busctl -C foo -H localhost call ` + terminate,
+		`busctl --capsule=foo -M aisee@.host --user call ` + kwin,
+		`busctl -M aisee@.host -C foo --user call ` + kwin,
+		`busctl --user -J -C call ` + kwin,
+
+		`systemctl --user stop plasma-kwin_wayland.service -- --global`,
+		`systemctl --user stop plasma-kwin_wayland.service --global`,
+		`systemctl --user stop -- plasma-kwin_wayland.service --global`,
+		`systemctl --user kill agent-x-1.scope -- --global`,
+		`systemctl --user start exit.target -- --global`,
+		`systemctl --user disable --now plasma-kwin_wayland.service --global`,
+		`systemctl --user --global disable --now plasma-kwin_wayland.service`,
+		`systemctl --user -p --global stop plasma-kwin_wayland.service`,
+		`systemctl --user stop plasma-kwin_wayland.service -p --global`,
+		`systemctl --user --message --global stop plasma-kwin_wayland.service`,
+		`systemctl --user -P --global kill agent-x-1.scope`,
+		`systemctl --user --property=x stop plasma-kwin_wayland.service --property --global`,
+		`systemctl --user -p --system stop plasma-kwin_wayland.service`,
+		`systemctl --user stop -- plasma-kwin_wayland.service --system`,
+		`systemctl -p --user stop sddm.service`,
+		`systemctl --user --system stop sddm.service`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
 		}
 	}
 }

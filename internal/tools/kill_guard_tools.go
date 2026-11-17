@@ -280,6 +280,7 @@ var systemctlValues = []string{
 	"t", "type", "s", "signal", "p", "property", "P", "H", "host", "M", "machine", "n", "lines", "o", "output",
 	"state", "job-mode", "root", "image", "kill-whom", "kill-value", "what", "timestamp", "when", "message",
 	"boot-loader-entry", "reboot-argument", "drop-in", "check-inhibitors", "preset-mode",
+	"C", "capsule", "legend", "image-policy", "boot-loader-menu", "kill-subgroup",
 }
 
 // systemctlEndVerbs команды systemctl без юнита, которые гасят сессию
@@ -346,9 +347,9 @@ var unitSuffixes = []string{".service", ".socket", ".target", ".scope", ".slice"
 // anyBus — адрес шины подменён в окружении (busAddressRe): systemctl
 // попадёт в менеджер по адресу, проверка — по обоим
 func (t *KillGuardTool) systemctlReason(args []word, via string, anyBus bool, procs []procInfo) (reason, hint string) {
-	a, global := systemctlFlags(args)
+	a := systemctlFlags(args)
 	ops := optionOperands(args, systemctlValues)
-	if len(ops) == 0 || global {
+	if len(ops) == 0 {
 		return "", ""
 	}
 	a.verb, a.units = ops[0].text, ops[1:]
@@ -488,31 +489,46 @@ func endTargetReason(label string, a unitAction) (reason, hint string) {
 }
 
 // systemctlFlags опции systemctl, от которых зависит отказ: менеджер
-// (--user, --system, --global — действует последний из них, как в
-// systemctl), --now (disable и mask останавливают), сигнал 0 у kill
-// (последний -s или --signal). global — последним стоит --global: им
-// systemctl правит только файлы юнитов, к менеджеру не обращается
-// (acquire_bus: «--global is not supported for this operation»), так что
-// и stop, и disable --now с ним ничего не гасят. -M (--machine) менеджер
-// не выбирает: .host и user@ — эта машина, менеджер — по --user
-func systemctlFlags(args []word) (a unitAction, global bool) {
+// (--user или --system — действует последний), --now (disable и mask
+// останавливают), сигнал 0 у kill (последний -s или --signal). Опции —
+// как их разбирает getopt systemctl: до --, без значений опций со значением
+// (-p --global, --message --user — значения, не опции), с короткими в
+// связке (-qs 0). --global менеджер не выбирает
+func systemctlFlags(args []word) (a unitAction) {
 	for i := 0; i < len(args); i++ {
-		switch t := args[i].text; {
-		case t == "--user":
-			a.user, global = true, false
-		case t == "--system":
-			a.user, global = false, false
-		case t == "--global":
-			a.user, global = false, true
-		case t == "--now":
-			a.now = true
-		case t == "-s" || t == "--signal":
-			a.zero = optionValue(args, &i, "").text == "0"
-		case strings.HasPrefix(t, "--signal=") || strings.HasPrefix(t, "-s"):
-			a.zero = t == "--signal=0" || t == "-s0"
+		t := args[i].text
+		switch {
+		case t == "--":
+			return a
+		case strings.HasPrefix(t, "--"):
+			name, value, inline := strings.Cut(t[2:], "=")
+			if !inline && slices.Contains(systemctlValues, name) {
+				value = optionValue(args, &i, "").text
+			}
+			systemctlOption(&a, name, value)
+		case len(t) > 1 && t[0] == '-':
+			letter, rest, _ := shortValue(t, systemctlValues)
+			if letter != "" {
+				systemctlOption(&a, letter, optionValue(args, &i, rest).text)
+			}
 		}
 	}
-	return a, global
+	return a
+}
+
+// systemctlOption учитывает в a опцию name (длинное имя или буква) со
+// значением value
+func systemctlOption(a *unitAction, name, value string) {
+	switch name {
+	case "user":
+		a.user = true
+	case "system":
+		a.user = false
+	case "now":
+		a.now = true
+	case "s", "signal":
+		a.zero = value == "0"
+	}
 }
 
 // unitName имя юнита с типом: имя без типа systemctl дополняет .service

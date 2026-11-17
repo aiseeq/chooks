@@ -430,7 +430,9 @@ func describeSend(send *commentSend) string {
 
 // shellVar значение переменной после присваивания в команде: S=/abs/dir,
 // export D="$S/sub". Подстановка, которую видно только при запуске, остаётся
-// в значении текстом ($JIRA_BASE_URL, $(pwd))
+// в значении текстом ($JIRA_BASE_URL, $(pwd)). У присваивания с неизвестным
+// значением (assign.Unknown: вызов функции, которая меняет переменную,
+// S[0]=, переменная for) value пустое: ссылка на такую переменную не раскрывается
 type shellVar struct {
 	assign shellcmd.Assign
 	name   string
@@ -450,6 +452,10 @@ func commandVars(command, home string) ([]shellVar, error) {
 	}
 	var vars []shellVar
 	for _, a := range assigns {
+		if a.Unknown {
+			vars = append(vars, shellVar{assign: a, name: a.Name})
+			continue
+		}
 		value := expandVars(vars, normalizeShellPath(a.Value), a.Offset)
 		if (value == "~" || strings.HasPrefix(value, "~/")) && home != "" {
 			value = home + value[1:]
@@ -463,13 +469,18 @@ func commandVars(command, home string) ([]shellVar, error) {
 }
 
 // expandVars подставляет в путь значения переменных, присвоенных в команде
-// и видимых на смещении at. Ссылка на переменную без присваивания остаётся текстом
+// и видимых на смещении at. Ссылка на переменную без присваивания или с
+// последним видимым присваиванием неизвестного значения (Unknown) остаётся
+// текстом: такой путь до запуска не раскрыть, прежнее значение не берётся
 func expandVars(vars []shellVar, path string, at int) string {
 	return shellVarRef.ReplaceAllStringFunc(path, func(ref string) string {
 		m := shellVarRef.FindStringSubmatch(ref)
 		name := m[1] + m[2]
 		for i := len(vars) - 1; i >= 0; i-- {
 			if v := vars[i]; v.name == name && at >= 0 && v.assign.VisibleAt(at) {
+				if v.assign.Unknown {
+					return ref
+				}
 				return v.value
 			}
 		}

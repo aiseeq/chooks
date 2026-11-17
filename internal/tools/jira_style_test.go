@@ -295,6 +295,15 @@ func TestJiraStyleSendForms(t *testing.T) {
 	// Прежнее тело файла, который команда перезаписывает: читать его
 	// нельзя, на отправку уйдёт новый текст
 	write("stale.json", `{"body":"Готово — выкачено."}`)
+	// Тот же файл body.json в двух каталогах: в good чистый, в dir с
+	// нарушением. Переменная с прежним значением good и присваиванием dir,
+	// значение которого видно только при запуске, должна дать отказ
+	good := filepath.Join(dir, "good")
+	if err := os.Mkdir(good, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write("good/body.json", `{"body":"Выкатил на stage, проверь вход."}`)
+	write("body.json", `{"body":"Готово — выкачено."}`)
 	const (
 		auth = `curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -H 'Content-Type: application/json' `
 		url  = ` "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"`
@@ -326,6 +335,13 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"переменная из звена конвейера", "/", "S=" + dir + " | true; " + auth + "-d @$S/bad.json" + url, "jira_comment_payload"},
 		{"переменная дописана +=", "/", "S=" + filepath.Dir(dir) + "; S+=/" + filepath.Base(dir) + "; " + auth + "-d @$S/bad.json" + url, "jira_comment_style"},
 		{"переменная из тела функции", "/", "f() { S=" + dir + "; }; f; " + auth + "-d @$S/bad.json" + url, "jira_comment_payload"},
+		{"вызов функции меняет прежнее значение", "/", "S=" + good + "; f() { S=" + dir + "; }; f; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"элемент массива поверх прежнего", "/", "S=" + good + "; S[0]=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"переменная for поверх прежней", "/", "S=" + good + "; for S in " + dir + "; do :; done; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"функция объявлена, не вызвана", "/", "S=" + good + "; f() { S=" + dir + "; }; " + auth + "-d @$S/body.json" + url, ""},
+		{"command f не вызывает функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; command f; " + auth + "-d @$S/body.json" + url, ""},
+		{"вызов функции в закрытой подоболочке", "/", "S=" + good + "; f() { S=" + dir + "; }; (f); " + auth + "-d @$S/body.json" + url, ""},
+		{"присвоено после вызова функции", "/", "S=" + good + "; f() { S=" + good + "; }; f; S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_style"},
 		{"файл переписан после отправки", "/", auth + "-d @" + bad + url + "; " + heredoc(bad, `{"body":"ok"}`), "jira_comment_style"},
 		{"адрес в переменной", "/", `U="$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"; ` + auth + "-d @" + bad + ` "$U"`, "jira_comment_style"},
 		{"perl -i поверх старого", "/", "perl -pi -e 's/ — / - /' " + dir + "/stale.json && " + auth + "-d @" + dir + "/stale.json" + url, ""},

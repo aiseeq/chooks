@@ -338,10 +338,26 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"вызов функции меняет прежнее значение", "/", "S=" + good + "; f() { S=" + dir + "; }; f; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"элемент массива поверх прежнего", "/", "S=" + good + "; S[0]=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"переменная for поверх прежней", "/", "S=" + good + "; for S in " + dir + "; do :; done; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
-		{"функция объявлена, не вызвана", "/", "S=" + good + "; f() { S=" + dir + "; }; " + auth + "-d @$S/body.json" + url, ""},
-		{"command f не вызывает функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; command f; " + auth + "-d @$S/body.json" + url, ""},
-		{"вызов функции в закрытой подоболочке", "/", "S=" + good + "; f() { S=" + dir + "; }; (f); " + auth + "-d @$S/body.json" + url, ""},
-		{"присвоено после вызова функции", "/", "S=" + good + "; f() { S=" + good + "; }; f; S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_style"},
+		// Тело функции присваивает S: ссылка вне тела после определения не
+		// раскрывается, даже если функция не вызвана (её вызовет alias, trap
+		// DEBUG/ERR, mapfile -C или другая функция) - цена правила
+		{"функция объявлена, не вызвана", "/", "S=" + good + "; f() { S=" + dir + "; }; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"command f не вызывает функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; command f; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"вызов функции в закрытой подоболочке", "/", "S=" + good + "; f() { S=" + dir + "; }; (f); " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"функция f() ( … ) не меняет S", "/", "S=" + good + "; f() ( S=" + dir + " ); f; " + auth + "-d @$S/body.json" + url, ""},
+		{"функция меняет S в подоболочке тела", "/", "S=" + good + "; f() { (S=" + dir + "); }; f; " + auth + "-d @$S/body.json" + url, ""},
+		{"отправка в другой функции после вызова f", "/", "S=" + good + "; f() { S=" + dir + "; }; g() { " + auth + "-d @$S/body.json" + url + "; }; f; g", "jira_comment_payload"},
+		{"alias на функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; alias g=f\ng; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"trap DEBUG на функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; trap f DEBUG; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"trap ERR на функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; trap f ERR; false; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"mapfile -C на функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; mapfile -C f -c 1 A <<< x; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"lastpipe: последнее звено конвейера", "/", "shopt -s lastpipe; S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"без lastpipe звено конвейера закрыто", "/", "S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, ""},
+		{"отправка в теле функции, присвоено до вызова", "/", "S=" + good + "; g() { " + auth + "-d @$S/body.json" + url + "; }; S=" + dir + "; g", "jira_comment_payload"},
+		{"отправка в теле функции, присвоено до определения", "/", "S=" + good + "; g() { " + auth + "-d @$S/body.json" + url + "; }; g", ""},
+		// trap f DEBUG перед curl вернул бы good: тело f присваивает S, ссылка
+		// после определения не раскрывается и после прямого присваивания
+		{"присвоено после вызова функции", "/", "S=" + good + "; f() { S=" + good + "; }; f; S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"файл переписан после отправки", "/", auth + "-d @" + bad + url + "; " + heredoc(bad, `{"body":"ok"}`), "jira_comment_style"},
 		{"адрес в переменной", "/", `U="$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"; ` + auth + "-d @" + bad + ` "$U"`, "jira_comment_style"},
 		{"perl -i поверх старого", "/", "perl -pi -e 's/ — / - /' " + dir + "/stale.json && " + auth + "-d @" + dir + "/stale.json" + url, ""},

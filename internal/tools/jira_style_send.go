@@ -124,7 +124,7 @@ type writtenFile struct {
 type commandPlan struct {
 	command string
 	home    string // домашний каталог для ~ и cd без аргументов; "" - неизвестен
-	vars    []shellVar
+	vars    shellVars
 	varsErr error // присваивания не разобраны: пути через переменные не раскрыть
 	calls   []shellcmd.Call
 	cwds    []string // cwds[i] - каталог перед вызовом i
@@ -138,7 +138,7 @@ type commandPlan struct {
 // комментария запоминаются
 func planCommand(command, cwd, home string, calls []shellcmd.Call) commandPlan {
 	plan := commandPlan{command: command, home: home, calls: calls, cwds: make([]string, len(calls))}
-	plan.vars, plan.varsErr = commandVars(command, home)
+	plan.vars, plan.varsErr = commandVars(command, home, calls)
 	scopes, scopesErr := commandScopes(command)
 	var changes []dirChange
 	for i := range calls {
@@ -190,7 +190,7 @@ var perlInPlace = regexp.MustCompile(`^-[0-9alnp]*i`)
 // path путь из слова вызова index без кавычек, с переменными, присвоенными
 // в команде раньше вызова. Неизвестная переменная остаётся в пути как $NAME
 func (p *commandPlan) path(raw string, index int) string {
-	return expandVars(p.vars, normalizeShellPath(raw), p.callOffset(index))
+	return p.vars.expand(normalizeShellPath(raw), p.callOffset(index))
 }
 
 // callOffset место вызова в тексте команды: у имени из переменной ($C -X
@@ -439,45 +439,76 @@ type shellVar struct {
 	value  string
 }
 
+// shellVars присваивания команды с их значениями и области команды (тела
+// функций, звенья конвейера), по которым ссылка на переменную раскрывается
+// или остаётся текстом
+type shellVars struct {
+	vars    []shellVar
+	assigns []shellcmd.Assign // все присваивания команды, и после ссылки
+	scopes  []shellcmd.Scope
+	// lastpipe включён (shopt -s lastpipe): последнее звено конвейера идёт
+	// в той же оболочке, его присваивание переживает конвейер
+	lastpipe bool
+}
+
 // shellVarRef ссылка на переменную в пути: $NAME или ${NAME}
 var shellVarRef = regexp.MustCompile(`\$(\w+)|\$\{(\w+)\}`)
 
 // commandVars присваивания команды по порядку текста, каждое со своей областью
 // видимости (подоболочка, звено конвейера, тело функции). Присваивание перед
 // командой (S=x cmd) в её аргументы не попадает и не берётся
-func commandVars(command, home string) ([]shellVar, error) {
+func commandVars(command, home string, calls []shellcmd.Call) (shellVars, error) {
 	assigns, err := shellcmd.Assigns(command)
 	if err != nil {
-		return nil, fmt.Errorf("разбор присваиваний: %w", err)
+		return shellVars{}, fmt.Errorf("разбор присваиваний: %w", err)
 	}
-	var vars []shellVar
+	scopes, err := shellcmd.Scopes(command)
+	if err != nil {
+		return shellVars{}, fmt.Errorf("разбор областей: %w", err)
+	}
+	sv := shellVars{assigns: assigns, scopes: scopes, lastpipe: slices.ContainsFunc(calls, setsLastpipe)}
 	for _, a := range assigns {
 		if a.Unknown {
-			vars = append(vars, shellVar{assign: a, name: a.Name})
+			sv.vars = append(sv.vars, shellVar{assign: a, name: a.Name})
 			continue
 		}
-		value := expandVars(vars, normalizeShellPath(a.Value), a.Offset)
+		value := sv.expand(normalizeShellPath(a.Value), a.Offset)
 		if (value == "~" || strings.HasPrefix(value, "~/")) && home != "" {
 			value = home + value[1:]
 		}
 		if a.Append {
-			value = expandVars(vars, "${"+a.Name+"}", a.Offset) + value
+			value = sv.expand("${"+a.Name+"}", a.Offset) + value
 		}
-		vars = append(vars, shellVar{assign: a, name: a.Name, value: value})
+		sv.vars = append(sv.vars, shellVar{assign: a, name: a.Name, value: value})
 	}
-	return vars, nil
+	return sv, nil
 }
 
-// expandVars подставляет в путь значения переменных, присвоенных в команде
-// и видимых на смещении at. Ссылка на переменную без присваивания или с
-// последним видимым присваиванием неизвестного значения (Unknown) остаётся
-// текстом: такой путь до запуска не раскрыть, прежнее значение не берётся
-func expandVars(vars []shellVar, path string, at int) string {
+// setsLastpipe вызов shopt -s lastpipe. set -o lastpipe в bash 5.3 - invalid
+// option, lastpipe включает только shopt
+func setsLastpipe(c shellcmd.Call) bool {
+	if c.Name != "shopt" || !slices.Contains(c.Args, "lastpipe") {
+		return false
+	}
+	return slices.ContainsFunc(c.Args, func(a string) bool {
+		return strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.Contains(a, "s")
+	})
+}
+
+// expand подставляет в путь значения переменных, присвоенных в команде и
+// видимых на смещении at. Ссылка остаётся текстом - такой путь до запуска не
+// раскрыть, прежнее значение не берётся, - когда у переменной нет видимого
+// присваивания, последнее видимое - неизвестного значения (Unknown) или
+// значение на месте ссылки зависит от вызова функции (unsettled)
+func (sv *shellVars) expand(path string, at int) string {
 	return shellVarRef.ReplaceAllStringFunc(path, func(ref string) string {
 		m := shellVarRef.FindStringSubmatch(ref)
 		name := m[1] + m[2]
-		for i := len(vars) - 1; i >= 0; i-- {
-			if v := vars[i]; v.name == name && at >= 0 && v.assign.VisibleAt(at) {
+		if at < 0 || sv.unsettled(name, at) {
+			return ref
+		}
+		for i := len(sv.vars) - 1; i >= 0; i-- {
+			if v := sv.vars[i]; v.name == name && v.assign.VisibleAt(at) {
 				if v.assign.Unknown {
 					return ref
 				}
@@ -485,5 +516,77 @@ func expandVars(vars []shellVar, path string, at int) string {
 			}
 		}
 		return ref
+	})
+}
+
+// unsettled значение переменной name на смещении at статически не узнать,
+// хотя видимое присваивание может быть (известное значение или Unknown):
+//   - тело функции присваивает name, а ссылка - вне этого тела после
+//     определения функции: функцию мог вызвать alias, trap DEBUG/ERR,
+//     mapfile -C или другая функция. Отказ и тогда, когда функция не
+//     вызвана, - цена правила;
+//   - ссылка в теле функции, а name присвоено в теле другой функции, после
+//     определения этой функции или в её же теле после ссылки: тело
+//     выполнится при вызове, после этих присваиваний;
+//   - shopt -s lastpipe и присваивание name в звене конвейера: последнее
+//     звено идёт в той же оболочке
+func (sv *shellVars) unsettled(name string, at int) bool {
+	var around []shellcmd.Scope // тела функций, в которых ссылка
+	for _, s := range sv.scopes {
+		if s.Kind == shellcmd.ScopeFunctionBody && s.Start <= at && at < s.End {
+			around = append(around, s)
+		}
+	}
+	for _, a := range sv.assigns {
+		if a.Name != name {
+			continue
+		}
+		if body, ok := sv.leakingBody(a); ok && !(body.Start <= at && at < body.End) && at > body.DeclOffset {
+			return true
+		}
+		if len(around) > 0 && sv.laterForBody(a, at, around) {
+			return true
+		}
+		if sv.lastpipe && sv.inScope(a.Offset, shellcmd.ScopePipePart) {
+			return true
+		}
+	}
+	return false
+}
+
+// leakingBody тело функции, из которого присваивание a доходит до
+// вызвавшей оболочки: a - прямо в теле (не в подоболочке и не в звене
+// конвейера внутри него), тело в фигурных скобках, не f() ( … )
+func (sv *shellVars) leakingBody(a shellcmd.Assign) (shellcmd.Scope, bool) {
+	for _, s := range sv.scopes {
+		if s.Kind == shellcmd.ScopeFunctionBody && !s.Isolated && s.Start == a.ScopeStart && s.End == a.ScopeEnd {
+			return s, true
+		}
+	}
+	return shellcmd.Scope{}, false
+}
+
+// laterForBody присваивание a может сработать до ссылки at, которая стоит в
+// телах функций around: a - в теле другой функции, вне around после
+// определения внешней из них или в around после ссылки (повторный вызов)
+func (sv *shellVars) laterForBody(a shellcmd.Assign, at int, around []shellcmd.Scope) bool {
+	inside := func(s shellcmd.Scope) bool { return s.Start <= a.Offset && a.Offset < s.End }
+	if slices.ContainsFunc(around, inside) {
+		return a.Offset > at
+	}
+	if sv.inScope(a.Offset, shellcmd.ScopeFunctionBody) {
+		return true
+	}
+	decl := at
+	for _, s := range around {
+		decl = min(decl, s.DeclOffset)
+	}
+	return a.Offset > decl
+}
+
+// inScope смещение off внутри области вида kind
+func (sv *shellVars) inScope(off int, kind shellcmd.ScopeKind) bool {
+	return slices.ContainsFunc(sv.scopes, func(s shellcmd.Scope) bool {
+		return s.Kind == kind && s.Start <= off && off < s.End
 	})
 }

@@ -421,13 +421,19 @@ func (t *KillGuardTool) unitActionReason(label string, a unitAction, via string,
 		if spare := restartableComm(unitName(u.text)); spare != "" && slices.Contains(systemctlRestartVerbs, verb) {
 			h = t.sessionUnits(procs, a.user, spare)
 		}
-		reason := unitReason(u, h)
+		reason, hint := unitReason(u, h), ""
 		if u.literal && u.text == "" {
 			reason = emptyUnitReason(a.dbus)
 		}
+		if reason == "" && u.literal {
+			reason, hint = agentUnitReason(scope, unitName(u.text))
+		}
 		if reason != "" {
-			named := u.literal && !strings.ContainsAny(u.text, "*?[{")
-			return fmt.Sprintf("%s %s: %s", label, shownUnit(u.text), reason), unitHint(scope, verb, named)
+			if hint == "" {
+				named := u.literal && !strings.ContainsAny(u.text, "*?[{")
+				hint = unitHint(scope, verb, named)
+			}
+			return fmt.Sprintf("%s %s: %s", label, shownUnit(u.text), reason), hint
 		}
 	}
 	return "", ""

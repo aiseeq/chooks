@@ -288,6 +288,9 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if inner, ok := elevatedCommand(c); ok {
 		return s.elevated(c, inner)
 	}
+	if reason, hint := systemdRunSignalReason(c); reason != "" {
+		s.addToolReason(reason, hint, false)
+	}
 	if !s.signalWord {
 		return s.signal(c, calls)
 	}

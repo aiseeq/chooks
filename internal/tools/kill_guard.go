@@ -55,7 +55,7 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 	}
 	text := unquoted(input.Command)
 	killText := strings.Contains(text, "kill")
-	if !killText && !sessionToolWordRe.MatchString(text) {
+	if !killText && !sessionToolWordRe.MatchString(text) && !strings.Contains(text, cgroupRoot) {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
@@ -282,6 +282,9 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if sudoAssignment(c, calls) {
 		return nil
 	}
+	if err := s.cgroupWrite(c); err != nil {
+		return err
+	}
 	if inner, ok := elevatedCommand(c); ok {
 		return s.elevated(c, inner)
 	}
@@ -322,16 +325,20 @@ var elevatedValues = map[string][]string{
 	"pkexec": {"user"},
 }
 
-// elevatedCommand команда, которую run0 и pkexec исполнят от другого
-// пользователя (как sudo, которое снимает разбор оболочки): слова после их
-// опций, собранные в текст для разбора. Слово с подстановкой — как в
-// исходнике, литеральное — в одинарных кавычках
+// elevatedCommand команда, которую run0, pkexec и machinectl shell исполнят
+// от другого пользователя (как sudo, которое снимает разбор оболочки): слова
+// после их опций, собранные в текст для разбора. run0 --via-shell (и -i)
+// склеивает слова через пробел и отдаёт оболочке -c (systemd v259,
+// exec-invoke.c: strv_join(argv, " ")) — текст разбирается как sh -c
 func elevatedCommand(c shellcmd.Call) (string, bool) {
+	if c.Name == "machinectl" {
+		return machinectlCommand(c.Args)
+	}
 	values, ok := elevatedValues[c.Name]
 	if !ok {
 		return "", false
 	}
-	i := 0
+	i, viaShell := 0, false
 	for ; i < len(c.Args); i++ {
 		a := c.Args[i]
 		if a == "--" {
@@ -342,6 +349,7 @@ func elevatedCommand(c shellcmd.Call) (string, bool) {
 			break
 		}
 		name := strings.TrimLeft(a, "-")
+		viaShell = viaShell || name == "via-shell" || a == "-i"
 		if !strings.Contains(name, "=") && slices.Contains(values, name) {
 			i++
 		}
@@ -349,15 +357,89 @@ func elevatedCommand(c shellcmd.Call) (string, bool) {
 	if i >= len(c.Args) {
 		return "", false
 	}
-	quoted := make([]string, 0, len(c.Args)-i)
-	for _, a := range c.Args[i:] {
+	if viaShell {
+		return strings.Join(c.Args[i:], " "), true
+	}
+	return shellWords(c.Args[i:]), true
+}
+
+// shellWords слова команды текстом для разбора: слово с подстановкой — как
+// в исходнике, литеральное — в одинарных кавычках
+func shellWords(args []string) string {
+	quoted := make([]string, 0, len(args))
+	for _, a := range args {
 		if strings.ContainsAny(a, "$`") {
 			quoted = append(quoted, a)
 			continue
 		}
 		quoted = append(quoted, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
 	}
-	return strings.Join(quoted, " "), true
+	return strings.Join(quoted, " ")
+}
+
+// machinectlValues опции machinectl со значением (getopt systemd v259
+// "-hp:P:als:H:M:qn:o:E:V" и длинные с required_argument)
+var machinectlValues = []string{
+	"p", "P", "s", "H", "M", "n", "o", "E",
+	"property", "kill-whom", "signal", "host", "machine", "lines", "output", "verify", "runner", "format", "uid",
+	"setenv", "max-addresses",
+}
+
+// machinectlCommand команда machinectl shell [[USER]@MACHINE [COMMAND …]] на
+// этой машине (MACHINE пусто или .host, без -H и -M к другой машине):
+// machined исполняет её слова без оболочки, как sudo. Опции после имени
+// машины — уже команды (machinectl не переставляет их за глаголом shell)
+func machinectlCommand(args []string) (string, bool) {
+	var pos []string
+	remote, done := false, false
+	for i := 0; i < len(args) && len(pos) < 2; i++ {
+		a := args[i]
+		switch {
+		case done || !strings.HasPrefix(a, "-") || a == "-":
+			pos = append(pos, a)
+		case a == "--":
+			done = true
+		default:
+			name, value := machinectlOption(args, &i)
+			remote = remote || name == "H" || name == "host" || (name == "M" || name == "machine") && !localMachine(value)
+		}
+		if len(pos) == 2 {
+			args = args[i+1:]
+		}
+	}
+	if len(pos) < 2 || pos[0] != "shell" || remote || !localMachine(pos[1]) || len(args) == 0 {
+		return "", false
+	}
+	return shellWords(args), true
+}
+
+// machinectlOption опция machinectl в args[*i]: имя (длинное или буква со
+// значением) и значение; *i сдвигается за значение отдельным словом
+func machinectlOption(args []string, i *int) (name, value string) {
+	a := args[*i]
+	if strings.HasPrefix(a, "--") {
+		n, v, inline := strings.Cut(a[2:], "=")
+		if !inline && slices.Contains(machinectlValues, n) && *i+1 < len(args) {
+			*i++
+			v = args[*i]
+		}
+		return n, v
+	}
+	letter, rest, next := shortValue(a, machinectlValues)
+	if next && *i+1 < len(args) {
+		*i++
+		rest = args[*i]
+	}
+	return letter, rest
+}
+
+// localMachine — машина machinectl ([USER@]MACHINE) — эта: .host или пусто
+func localMachine(spec string) bool {
+	_, machine, found := strings.Cut(spec, "@")
+	if !found {
+		machine = spec
+	}
+	return machine == "" || machine == ".host"
 }
 
 // elevated проверяет вызовы команды inner, которую исполнит обёртка c
@@ -425,6 +507,10 @@ func (s *killScan) signal(c shellcmd.Call, calls []shellcmd.Call) error {
 	via := ""
 	if slices.Contains(c.Via, "xargs") {
 		via = "xargs"
+	}
+	if name := substitutedPathName(c); name != "" {
+		// $(npm bin)/pm2 kill — программа pm2, kill — её аргумент
+		c.Name = name
 	}
 	// имя без каталога от ${X-/bin/kill} — «kill}»: скобка — тоже раскрытие
 	if c.Name == "" || strings.ContainsAny(c.Name, "${}") {
@@ -714,6 +800,32 @@ func (t *KillGuardTool) ancestors(procs []procInfo) map[int]bool {
 		out[pid] = true
 	}
 	return out
+}
+
+// substitutedPathName имя программы у вызова, чьё имя — путь с
+// подстановкой каталога и литеральным файлом: $(npm bin)/pm2,
+// "$(go env GOPATH)/bin/tool". Файл известен до запуска, и слово kill в
+// аргументах — аргумент этой программы, а не сигнал. Подстановка со словом
+// сигнала ($(echo kill -9 -1 x)/pm2: без кавычек вывод делится на слова) —
+// не такое имя; "" — не такое имя
+func substitutedPathName(c shellcmd.Call) string {
+	if c.Name != "" {
+		return ""
+	}
+	raw := strings.TrimPrefix(c.Raw, `"`)
+	sub := nameSubstitution(raw)
+	if sub == "" || !strings.HasPrefix(raw, sub) || signalWordRe.MatchString(unquoted(sub)) {
+		return ""
+	}
+	tail := strings.TrimPrefix(raw[len(sub):], `"`)
+	if end := strings.IndexAny(tail, " \t\n\"';|&<>()"); end >= 0 {
+		tail = tail[:end]
+	}
+	name := filepath.Base(tail)
+	if !strings.HasPrefix(tail, "/") || strings.ContainsAny(tail, "$`\\*?[") || name == "/" {
+		return ""
+	}
+	return name
 }
 
 // nameVarRe переменная, которую раскрывает имя вызова: ${a[@]}, ${a[0]},

@@ -118,7 +118,17 @@ func busctlCall(args []word, via string) (dbusCall, bool) {
 // транспортом (--address, -M, -H) — не капсула: какую шину выберет busctl
 // при обоих, не разбираем, и вызов проверяется по шине
 func busctlBus(args []word) string {
-	bus, capsule, operand, transport := "system", false, false, false
+	o := busOptions(args, busctlValues)
+	if o.capsule && !o.transport {
+		return "capsule"
+	}
+	return o.bus
+}
+
+// busOptions опции шины в словах вызова busctl или systemctl (values — их
+// опции со значением): см. busctlBus
+func busOptions(args []word, values []string) busctlOpts {
+	o := busctlOpts{bus: "system"}
 	for i := 0; i < len(args); i++ {
 		t := args[i].text
 		switch {
@@ -126,36 +136,44 @@ func busctlBus(args []word) string {
 			i = len(args)
 		case strings.HasPrefix(t, "--"):
 			name, _, inline := strings.Cut(t[2:], "=")
-			switch name {
-			case "user":
-				bus = "user"
-			case "system":
-				bus = "system"
-			case "address":
-				bus, transport = "", true
-			case "machine", "host":
-				transport = true
-			case "capsule":
-				capsule = capsule || !operand
-			}
-			if !inline && slices.Contains(busctlValues, name) {
+			o.option(name)
+			if !inline && slices.Contains(values, name) {
 				i++
 			}
 		case len(t) > 1 && t[0] == '-':
-			letter, _, next := shortValue(t, busctlValues)
-			capsule = capsule || letter == "C" && !operand
-			transport = transport || letter == "M" || letter == "H"
+			letter, _, next := shortValue(t, values)
+			o.option(letter)
 			if next {
 				i++
 			}
 		default:
-			operand = true
+			o.operand = true
 		}
 	}
-	if capsule && !transport {
-		return "capsule"
+	return o
+}
+
+// busctlOpts опции busctl, выбирающие шину (busctlBus): operand — первый
+// операнд уже был
+type busctlOpts struct {
+	bus                         string
+	capsule, operand, transport bool
+}
+
+// option учитывает опцию busctl: длинное имя или букву
+func (o *busctlOpts) option(name string) {
+	switch name {
+	case "user":
+		o.bus = "user"
+	case "system":
+		o.bus = "system"
+	case "address":
+		o.bus, o.transport = "", true
+	case "machine", "host", "M", "H":
+		o.transport = true
+	case "capsule", "C":
+		o.capsule = o.capsule || !o.operand
 	}
-	return bus
 }
 
 // shortValue опция со значением в связке коротких опций (-qC foo, -Cfoo):
@@ -725,19 +743,30 @@ var kdeDesktopServices = map[string]string{
 // kdeHint подсказка к отказу на выход из сеанса KDE и остановку рабочего стола
 const kdeHint = "Выход из сеанса запускает пользователь сам; панель перезапускает systemctl --user restart plasma-plasmashell"
 
-// kdeReason вызов KDE, который завершает сеанс (logout*) или гасит
-// рабочий стол (plasmashell, KWin: quit, exit); "" — не такой
+// kdeReason вызов KDE, который завершает сеанс (logout*, closeSession) или
+// гасит рабочий стол и терминал (plasmashell, KWin, Konsole: quit, exit);
+// "" — не такой. Получатель из переменной или уникальное имя (:1.42) с
+// таким методом — отказ: служба не видна до запуска, как у systemd
 func kdeReason(dc dbusCall) string {
-	if !dc.dest.literal || !dc.member.literal {
+	if !dc.member.literal {
 		return ""
 	}
 	_, method := splitMember(dc.member.text)
 	method = strings.ToLower(method)
+	logout := strings.HasPrefix(method, "logout") || method == "closesession"
+	quit := method == "quit" || method == "exit"
+	dest := dc.dest.text
 	switch {
-	case slices.Contains(kdeLogoutServices, dc.dest.text) && (strings.HasPrefix(method, "logout") || method == "closesession"):
-		return fmt.Sprintf("%s %s к %s завершает сеанс KDE: рабочий стол, терминалы и сессии Claude в нём", dc.tool, dc.member.text, dc.dest.text)
-	case kdeDesktopServices[dc.dest.text] != "" && (method == "quit" || method == "exit"):
-		return fmt.Sprintf("%s %s к %s гасит %s", dc.tool, dc.member.text, dc.dest.text, kdeDesktopServices[dc.dest.text])
+	case !logout && !quit:
+		return ""
+	case !dc.dest.literal || strings.HasPrefix(dest, ":"):
+		return fmt.Sprintf("%s %s: получатель %s не виден до запуска (переменная или уникальное имя :1.N), а этот метод у служб KDE завершает сеанс или гасит рабочий стол и терминал — проверить его заранее нельзя", dc.tool, dc.member.text, shownUnit(dest))
+	case logout && slices.Contains(kdeLogoutServices, dest):
+		return fmt.Sprintf("%s %s к %s завершает сеанс KDE: рабочий стол, терминалы и сессии Claude в нём", dc.tool, dc.member.text, dest)
+	case quit && kdeDesktopServices[dest] != "":
+		return fmt.Sprintf("%s %s к %s гасит %s", dc.tool, dc.member.text, dest, kdeDesktopServices[dest])
+	case quit && (dest == "org.kde.konsole" || strings.HasPrefix(dest, "org.kde.konsole-")):
+		return fmt.Sprintf("%s %s к %s закрывает Konsole со всеми вкладками — и терминал, где идёт сессия Claude", dc.tool, dc.member.text, dest)
 	}
 	return ""
 }

@@ -21,7 +21,7 @@ import (
 // наоборот — менеджер systemd по флагам не виден
 var busAddressRe = regexp.MustCompile(`DBUS_(SYSTEM|SESSION)_BUS_ADDRESS=`)
 
-var sessionToolWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(loginctl|systemctl|fuser|busctl|gdbus|dbus-send|qdbus(6|-qt[56])?|kquitapp[56]?)([^[:alnum:]_.-]|$)`)
+var sessionToolWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(loginctl|systemctl|fuser|busctl|gdbus|dbus-send|qdbus(6|-qt[56])?|kquitapp[56]?|systemd-run)([^[:alnum:]_.-]|$)`)
 
 // sessionTool проверяет вызов средств, гасящих процессы или сессию, кроме
 // kill, pkill и killall: loginctl, systemctl, вызов тех же действий по
@@ -75,6 +75,8 @@ func (s *killScan) toolReason(c shellcmd.Call, args []word, via string) (reason,
 		reason, hint = s.tool.systemctlReason(args, via, s.anyBus, s.procs)
 	case c.Name == "fuser":
 		reason = fuserReason(args, via)
+	case c.Name == "systemd-run":
+		reason, hint = systemdRunReason(args)
 	case dbusTools[c.Name] != nil:
 		dc, ok := dbusTools[c.Name](args, via)
 		if !ok {
@@ -352,6 +354,12 @@ func (t *KillGuardTool) systemctlReason(args []word, via string, anyBus bool, pr
 	if len(ops) == 0 {
 		return "", ""
 	}
+	if o := busOptions(args, systemctlValues); o.capsule && !o.transport && !slices.Contains(systemctlEndVerbs, ops[0].text) {
+		// systemctl -C имя — юниты менеджера пользователя капсулы, не этой
+		// сессии. poweroff и прочие systemctlEndVerbs systemctl может
+		// отдать logind — их отказ остаётся
+		return "", ""
+	}
 	a.verb, a.units = ops[0].text, ops[1:]
 	if a.verb == "set-property" && len(a.units) > 1 {
 		// за юнитом — свойства (MemoryMax=1M), не юниты
@@ -453,7 +461,9 @@ var startVerbs = []string{"start", "restart", "reload-or-restart"}
 // Те же действия под другими именами: runlevel0.target и runlevel6.target —
 // алиасы poweroff и reboot, ctrl-alt-del.target ведёт к reboot, а службы
 // systemd-poweroff, -reboot, -halt, -kexec, -soft-reboot и -exit.service
-// цели запускают сами (у менеджера пользователя — systemd-exit.service)
+// цели запускают сами (у менеджера пользователя — systemd-exit.service).
+// rescue.target и emergency.target (и их службы) переводят систему в
+// однопользовательский режим, как systemctl rescue и emergency
 var (
 	userEndTargets = map[string]string{
 		"exit.target": "exit", "systemd-exit.service": "exit", "shutdown.target": "shutdown",
@@ -465,6 +475,7 @@ var (
 		"kexec.target": "kexec", "systemd-kexec.service": "kexec",
 		"soft-reboot.target": "soft-reboot", "systemd-soft-reboot.service": "soft-reboot",
 		"exit.target": "exit", "systemd-exit.service": "exit", "shutdown.target": "shutdown",
+		"rescue.target": "rescue", "runlevel1.target": "rescue", "rescue.service": "rescue", "emergency.target": "emergency", "emergency.service": "emergency",
 	}
 )
 
@@ -604,8 +615,32 @@ var userManagerRe = regexp.MustCompile(`^user@[0-9]+\.service$`)
 // spare — имя процесса, которому рестарт не страшен: он не держит юнит,
 // если не предок сессии
 func (t *KillGuardTool) sessionUnits(procs []procInfo, user bool, spare string) map[string]string {
-	ancestors := t.ancestors(procs)
 	out := map[string]string{}
+	t.eachSessionCgroup(procs, spare, func(p procInfo, why, path string) {
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+		k := slices.IndexFunc(parts, userManagerRe.MatchString)
+		units := parts
+		if k >= 0 && user {
+			units = parts[k+1:]
+		} else if k >= 0 {
+			units = parts[:k+1]
+		} else if user {
+			units = nil
+		}
+		for _, u := range units {
+			if out[u] == "" {
+				out[u] = fmt.Sprintf("в юните идёт %s (PID %d) — %s", p.comm, p.pid, why)
+			}
+		}
+	})
+	return out
+}
+
+// eachSessionCgroup вызывает fn для процессов, без которых падает сессия
+// (предки этой сессии, рабочий стол — dangerous), с путём cgroup из
+// /proc/PID/cgroup и причиной. spare — как у sessionUnits
+func (t *KillGuardTool) eachSessionCgroup(procs []procInfo, spare string, fn func(p procInfo, why, path string)) {
+	ancestors := t.ancestors(procs)
 	for _, p := range procs {
 		why := t.dangerous(p.pid, procs, ancestors)
 		if why == "" || p.pid <= 1 || p.comm == spare && !ancestors[p.pid] {
@@ -618,24 +653,9 @@ func (t *KillGuardTool) sessionUnits(procs []procInfo, user bool, spare string) 
 		}
 		for line := range strings.Lines(string(data)) {
 			_, path, _ := strings.Cut(strings.TrimSpace(line), "::")
-			parts := strings.Split(strings.Trim(path, "/"), "/")
-			k := slices.IndexFunc(parts, userManagerRe.MatchString)
-			units := parts
-			if k >= 0 && user {
-				units = parts[k+1:]
-			} else if k >= 0 {
-				units = parts[:k+1]
-			} else if user {
-				units = nil
-			}
-			for _, u := range units {
-				if out[u] == "" {
-					out[u] = fmt.Sprintf("в юните идёт %s (PID %d) — %s", p.comm, p.pid, why)
-				}
-			}
+			fn(p, why, path)
 		}
 	}
-	return out
 }
 
 // portRe порт fuser: 8080/tcp, 8080,host,80/udp

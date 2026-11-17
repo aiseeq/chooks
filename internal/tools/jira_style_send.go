@@ -446,9 +446,20 @@ type shellVars struct {
 	vars    []shellVar
 	assigns []shellcmd.Assign // все присваивания команды, и после ссылки
 	scopes  []shellcmd.Scope
-	// lastpipe включён (shopt -s lastpipe): последнее звено конвейера идёт
-	// в той же оболочке, его присваивание переживает конвейер
-	lastpipe bool
+	calls   []shellcmd.Call
+	// lastpipe места, с которых может быть включён shopt -s lastpipe:
+	// последнее звено конвейера после них идёт в той же оболочке, его
+	// присваивание переживает конвейер
+	lastpipe []lastpipeOn
+}
+
+// lastpipeOn вызов, который может включить lastpipe: с места offset в
+// области within (nil - оболочка команды); everywhere - для всей команды
+// (тело функции, имя вызова из переменной)
+type lastpipeOn struct {
+	offset     int
+	within     *shellcmd.Scope
+	everywhere bool
 }
 
 // shellVarRef ссылка на переменную в пути: $NAME или ${NAME}
@@ -466,7 +477,12 @@ func commandVars(command, home string, calls []shellcmd.Call) (shellVars, error)
 	if err != nil {
 		return shellVars{}, fmt.Errorf("разбор областей: %w", err)
 	}
-	sv := shellVars{assigns: assigns, scopes: scopes, lastpipe: slices.ContainsFunc(calls, setsLastpipe)}
+	sv := shellVars{assigns: assigns, scopes: scopes, calls: calls}
+	for _, c := range calls {
+		if mayEnableLastpipe(c) {
+			sv.lastpipe = append(sv.lastpipe, sv.lastpipeFrom(c))
+		}
+	}
 	for _, a := range assigns {
 		if a.Unknown {
 			sv.vars = append(sv.vars, shellVar{assign: a, name: a.Name})
@@ -484,15 +500,55 @@ func commandVars(command, home string, calls []shellcmd.Call) (shellVars, error)
 	return sv, nil
 }
 
-// setsLastpipe вызов shopt -s lastpipe. set -o lastpipe в bash 5.3 - invalid
-// option, lastpipe включает только shopt
-func setsLastpipe(c shellcmd.Call) bool {
-	if c.Name != "shopt" || !slices.Contains(c.Args, "lastpipe") {
+// mayEnableLastpipe вызов может включить lastpipe: shopt с ключом -s
+// (и в связке, -qs) и словом lastpipe или словом, которое видно только при
+// запуске (shopt -s $o); eval такого слова; имя вызова из переменной или
+// подстановки ($c -s lastpipe). set -o lastpipe в bash 5.3 - invalid option,
+// lastpipe включает только shopt
+func mayEnableLastpipe(c shellcmd.Call) bool {
+	switch {
+	case c.Name == "" || dynamicWord(c.Name):
+		return true
+	case c.Name == "eval":
+		return slices.ContainsFunc(c.Args, dynamicWord)
+	case c.Name != "shopt":
 		return false
 	}
-	return slices.ContainsFunc(c.Args, func(a string) bool {
+	set := slices.ContainsFunc(c.Args, func(a string) bool {
 		return strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.Contains(a, "s")
 	})
+	return set && (slices.Contains(c.Args, "lastpipe") || slices.ContainsFunc(c.Args, dynamicWord))
+}
+
+// dynamicWord в слове вызова подстановка: значение видно только при запуске
+func dynamicWord(word string) bool {
+	return strings.ContainsAny(word, "$`")
+}
+
+// lastpipeFrom где действует lastpipe, включённый вызовом c: в оболочке
+// команды или в подоболочке вызова - после вызова; из тела функции (её могут
+// вызвать где угодно) или без места в тексте - во всей команде
+func (sv *shellVars) lastpipeFrom(c shellcmd.Call) lastpipeOn {
+	if c.Offset < 0 {
+		return lastpipeOn{everywhere: true}
+	}
+	within := sv.innermost(func(s shellcmd.Scope) bool { return s.Start <= c.Offset && c.Offset < s.End })
+	if within != nil && within.Kind == shellcmd.ScopeFunctionBody {
+		return lastpipeOn{everywhere: true}
+	}
+	return lastpipeOn{offset: c.Offset, within: within}
+}
+
+// innermost самая узкая область, для которой fit верно; nil - такой нет
+func (sv *shellVars) innermost(fit func(shellcmd.Scope) bool) *shellcmd.Scope {
+	var best *shellcmd.Scope
+	for i := range sv.scopes {
+		s := &sv.scopes[i]
+		if fit(*s) && (best == nil || s.End-s.Start < best.End-best.Start) {
+			best = s
+		}
+	}
+	return best
 }
 
 // expand подставляет в путь значения переменных, присвоенных в команде и
@@ -507,16 +563,21 @@ func (sv *shellVars) expand(path string, at int) string {
 		if at < 0 || sv.unsettled(name, at) {
 			return ref
 		}
-		for i := len(sv.vars) - 1; i >= 0; i-- {
-			if v := sv.vars[i]; v.name == name && v.assign.VisibleAt(at) {
-				if v.assign.Unknown {
-					return ref
-				}
-				return v.value
-			}
+		if v, ok := sv.lastVisible(name, at); ok && !v.assign.Unknown {
+			return v.value
 		}
 		return ref
 	})
+}
+
+// lastVisible последнее присваивание name, видимое на смещении at
+func (sv *shellVars) lastVisible(name string, at int) (shellVar, bool) {
+	for i := len(sv.vars) - 1; i >= 0; i-- {
+		if v := sv.vars[i]; v.name == name && v.assign.VisibleAt(at) {
+			return v, true
+		}
+	}
+	return shellVar{}, false
 }
 
 // unsettled значение переменной name на смещении at статически не узнать,
@@ -527,9 +588,11 @@ func (sv *shellVars) expand(path string, at int) string {
 //     вызвана, - цена правила;
 //   - ссылка в теле функции, а name присвоено в теле другой функции, после
 //     определения этой функции или в её же теле после ссылки: тело
-//     выполнится при вызове, после этих присваиваний;
-//   - shopt -s lastpipe и присваивание name в звене конвейера: последнее
-//     звено идёт в той же оболочке
+//     выполнится при вызове, после этих присваиваний. Вызовы самой функции
+//     не в счёт, когда значение на месте ссылки задано известным
+//     присваиванием в её теле до ссылки (selfCalls);
+//   - lastpipe может быть включён, и присваивание name в последнем звене
+//     конвейера доходит до места ссылки (lastpipeReaches)
 func (sv *shellVars) unsettled(name string, at int) bool {
 	var around []shellcmd.Scope // тела функций, в которых ссылка
 	for _, s := range sv.scopes {
@@ -537,8 +600,9 @@ func (sv *shellVars) unsettled(name string, at int) bool {
 			around = append(around, s)
 		}
 	}
+	self := sv.selfCalls(name, at, around)
 	for _, a := range sv.assigns {
-		if a.Name != name {
+		if a.Name != name || self(a) {
 			continue
 		}
 		if body, ok := sv.leakingBody(a); ok && !(body.Start <= at && at < body.End) && at > body.DeclOffset {
@@ -547,11 +611,36 @@ func (sv *shellVars) unsettled(name string, at int) bool {
 		if len(around) > 0 && sv.laterForBody(a, at, around) {
 			return true
 		}
-		if sv.lastpipe && sv.inScope(a.Offset, shellcmd.ScopePipePart) {
+		if sv.lastpipeReaches(a, at) {
 			return true
 		}
 	}
 	return false
+}
+
+// selfCalls отбирает Unknown-присваивания name от вызовов функции, в теле
+// которой стоит ссылка at, когда последнее видимое на месте ссылки
+// присваивание name - известное и стоит прямо в этом теле (не в подоболочке):
+// вызов функции снова выполнит это присваивание до ссылки. Вызов через eval
+// не распознаётся и остаётся в счёте
+func (sv *shellVars) selfCalls(name string, at int, around []shellcmd.Scope) func(shellcmd.Assign) bool {
+	none := func(shellcmd.Assign) bool { return false }
+	v, ok := sv.lastVisible(name, at)
+	if !ok || v.assign.Unknown {
+		return none
+	}
+	i := slices.IndexFunc(around, func(s shellcmd.Scope) bool {
+		return s.Start == v.assign.ScopeStart && s.End == v.assign.ScopeEnd
+	})
+	if i < 0 {
+		return none
+	}
+	fn := around[i].Name
+	return func(a shellcmd.Assign) bool {
+		return a.Unknown && slices.ContainsFunc(sv.calls, func(c shellcmd.Call) bool {
+			return c.Name == fn && c.Offset == a.Offset
+		})
+	}
 }
 
 // leakingBody тело функции, из которого присваивание a доходит до
@@ -582,6 +671,79 @@ func (sv *shellVars) laterForBody(a shellcmd.Assign, at int, around []shellcmd.S
 		decl = min(decl, s.DeclOffset)
 	}
 	return a.Offset > decl
+}
+
+// lastpipeReaches присваивание a стоит в последнем звене конвейера, при
+// включённом lastpipe выходит из него (и из объемлющих последних звеньев) и
+// видно на месте ссылки at: в той области, куда вышло, до ссылки. Вышло в
+// тело функции {…} - как присваивание тела функции: ссылка после её
+// определения не раскрывается. Вышло в оболочку команды - и ссылка в теле
+// любой функции не раскрывается
+func (sv *shellVars) lastpipeReaches(a shellcmd.Assign, at int) bool {
+	if a.ScopeStart < 0 || len(sv.lastpipe) == 0 {
+		return false
+	}
+	start, end := a.ScopeStart, a.ScopeEnd
+	escaped := false
+	for {
+		part := sv.lastPart(start, end)
+		if part == nil {
+			break
+		}
+		escaped = true
+		up := sv.innermost(func(s shellcmd.Scope) bool {
+			return s.Start <= part.Start && part.End <= s.End && (s.Start != part.Start || s.End != part.End)
+		})
+		if up == nil {
+			start, end = -1, -1
+			break
+		}
+		start, end = up.Start, up.End
+	}
+	if !escaped {
+		return false
+	}
+	if start < 0 {
+		return a.Offset < at || sv.inScope(at, shellcmd.ScopeFunctionBody)
+	}
+	region := sv.innermost(func(s shellcmd.Scope) bool { return s.Start == start && s.End == end })
+	in := start <= at && at < end
+	if region.Kind == shellcmd.ScopeFunctionBody && !region.Isolated {
+		return at > region.DeclOffset && !(in && at < a.Offset)
+	}
+	return in && a.Offset < at
+}
+
+// lastPart последнее звено конвейера ровно на [start, end), для которого
+// lastpipe может быть включён; nil - область не такое звено (подоболочка
+// того же размера - своя оболочка, присваивание из неё не выходит)
+func (sv *shellVars) lastPart(start, end int) *shellcmd.Scope {
+	var part *shellcmd.Scope
+	for i := range sv.scopes {
+		s := &sv.scopes[i]
+		if s.Start != start || s.End != end {
+			continue
+		}
+		if s.Kind != shellcmd.ScopePipePart || !s.Last {
+			return nil
+		}
+		part = s
+	}
+	if part == nil || !slices.ContainsFunc(sv.lastpipe, func(on lastpipeOn) bool { return on.covers(*part) }) {
+		return nil
+	}
+	return part
+}
+
+// covers lastpipe, включённый on, действует в звене part
+func (on lastpipeOn) covers(part shellcmd.Scope) bool {
+	if on.everywhere {
+		return true
+	}
+	if on.within != nil && (part.Start < on.within.Start || part.End > on.within.End) {
+		return false
+	}
+	return part.Start > on.offset
 }
 
 // inScope смещение off внутри области вида kind

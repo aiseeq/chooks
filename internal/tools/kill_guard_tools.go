@@ -13,14 +13,15 @@ import (
 
 // sessionToolWordRe отдельное слово средства, которое гасит процессы или
 // сессию, а слова kill в команде может не быть (loginctl terminate-user,
-// systemctl --user stop, fuser -k, busctl call … StopUnit). У skill, tmux kill-* и os.kill в
+// systemctl --user stop, fuser -k, busctl call … StopUnit, kquitapp6
+// plasmashell). У skill, tmux kill-* и os.kill в
 // python -c подстрока kill есть всегда
 // busAddressRe присваивание адреса шины D-Bus в команде (префиксом,
 // через env, export): системная шина может оказаться шиной сессии и
 // наоборот — менеджер systemd по флагам не виден
 var busAddressRe = regexp.MustCompile(`DBUS_(SYSTEM|SESSION)_BUS_ADDRESS=`)
 
-var sessionToolWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(loginctl|systemctl|fuser|busctl|gdbus|dbus-send|qdbus(6|-qt[56])?)([^[:alnum:]_.-]|$)`)
+var sessionToolWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(loginctl|systemctl|fuser|busctl|gdbus|dbus-send|qdbus(6|-qt[56])?|kquitapp[56]?)([^[:alnum:]_.-]|$)`)
 
 // sessionTool проверяет вызов средств, гасящих процессы или сессию, кроме
 // kill, pkill и killall: loginctl, systemctl, вызов тех же действий по
@@ -99,16 +100,63 @@ func (s *killScan) toolReason(c shellcmd.Call, args []word, via string) (reason,
 	return reason, hint, group, nil
 }
 
-// computedTools средства, которые гасят юнит или сеанс названной целью:
-// имя команды из подстановки ($(echo busctl) …) проверяется каждым из них
-var computedTools = []string{"systemctl", "loginctl", "busctl", "gdbus", "dbus-send", "qdbus"}
+// computedNames средства (systemctl, loginctl, busctl, qdbus…), с которыми
+// разбор связывает вычисляемое имя вызова: средство названо в тексте
+// подстановки имени ($(echo busctl), `which systemctl`) или в значении,
+// которое команда присваивает переменной имени (export X=systemctl; $X,
+// X="sudo busctl"). Прочее вычисляемое имя ("$ADB" reboot, $(which grep)
+// -r stop) средством не считается: его аргументы — не повод для отказа
+func computedNames(c shellcmd.Call, command string) []string {
+	texts := append([]string{c.Name}, assignedValues(c.Name, command)...)
+	if c.Name == "" {
+		texts[0] = nameSubstitution(c.Raw)
+	}
+	var names []string
+	for _, t := range texts {
+		for _, m := range sessionToolWordRe.FindAllStringSubmatch(unquoted(t), -1) {
+			if !slices.Contains(names, m[2]) {
+				names = append(names, m[2])
+			}
+		}
+	}
+	return names
+}
+
+// nameSubstitution первая подстановка команды в тексте вызова: $(…) с
+// вложенными скобками или `…`. Текст вызова начинается с имени, у
+// обёртки (sudo $(echo systemctl) …) — с её имени
+func nameSubstitution(raw string) string {
+	start := strings.Index(raw, "$(")
+	if tick := strings.IndexByte(raw, '`'); tick >= 0 && (start < 0 || tick < start) {
+		if end := strings.IndexByte(raw[tick+1:], '`'); end >= 0 {
+			return raw[tick : tick+end+2]
+		}
+		return raw[tick:]
+	}
+	if start < 0 {
+		return ""
+	}
+	depth := 0
+	for i := start + 1; i < len(raw); i++ {
+		switch raw[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return raw[start : i+1]
+			}
+		}
+	}
+	return raw[start:]
+}
 
 // computedTool вызов, чьё имя вычисляется при запуске ($(echo systemctl),
-// `…`, $X): его аргументы разбираются как у systemctl, loginctl и
-// средств D-Bus; разрушающий вызов хоть одного из них — отказ, как у того
+// `…`, $X) и связано со средствами names (computedNames): его аргументы
+// разбираются как у каждого из них; разрушающий вызов — отказ, как у того
 // же вызова с именем литералом
-func (s *killScan) computedTool(c shellcmd.Call, args []word, via string) error {
-	for _, name := range computedTools {
+func (s *killScan) computedTool(c shellcmd.Call, args []word, via string, names []string) error {
+	for _, name := range names {
 		named := c
 		named.Name = name
 		reason, hint, _, err := s.toolReason(named, args, via)
@@ -298,12 +346,12 @@ var unitSuffixes = []string{".service", ".socket", ".target", ".scope", ".slice"
 // anyBus — адрес шины подменён в окружении (busAddressRe): systemctl
 // попадёт в менеджер по адресу, проверка — по обоим
 func (t *KillGuardTool) systemctlReason(args []word, via string, anyBus bool, procs []procInfo) (reason, hint string) {
-	user, now, zero := systemctlFlags(args)
+	a, global := systemctlFlags(args)
 	ops := optionOperands(args, systemctlValues)
-	if len(ops) == 0 {
+	if len(ops) == 0 || global {
 		return "", ""
 	}
-	a := unitAction{user: user, now: now, zero: zero, verb: ops[0].text, units: ops[1:]}
+	a.verb, a.units = ops[0].text, ops[1:]
 	if a.verb == "set-property" && len(a.units) > 1 {
 		// за юнитом — свойства (MemoryMax=1M), не юниты
 		a.units = a.units[:1]
@@ -400,12 +448,22 @@ var startVerbs = []string{"start", "restart", "reload-or-restart"}
 
 // userEndTargets цели менеджера пользователя, запуск которых гасит его, как
 // systemctl --user exit; systemEndTargets — цели системного менеджера, как
-// systemctl poweroff, reboot. shutdown.target у обоих останавливает все службы
+// systemctl poweroff, reboot. shutdown.target у обоих останавливает все службы.
+// Те же действия под другими именами: runlevel0.target и runlevel6.target —
+// алиасы poweroff и reboot, ctrl-alt-del.target ведёт к reboot, а службы
+// systemd-poweroff, -reboot, -halt, -kexec, -soft-reboot и -exit.service
+// цели запускают сами (у менеджера пользователя — systemd-exit.service)
 var (
-	userEndTargets   = map[string]string{"exit.target": "exit", "shutdown.target": "shutdown"}
+	userEndTargets = map[string]string{
+		"exit.target": "exit", "systemd-exit.service": "exit", "shutdown.target": "shutdown",
+	}
 	systemEndTargets = map[string]string{
-		"poweroff.target": "poweroff", "reboot.target": "reboot", "halt.target": "halt", "kexec.target": "kexec",
-		"soft-reboot.target": "soft-reboot", "exit.target": "exit", "shutdown.target": "shutdown",
+		"poweroff.target": "poweroff", "runlevel0.target": "poweroff", "systemd-poweroff.service": "poweroff",
+		"reboot.target": "reboot", "runlevel6.target": "reboot", "ctrl-alt-del.target": "reboot", "systemd-reboot.service": "reboot",
+		"halt.target": "halt", "systemd-halt.service": "halt",
+		"kexec.target": "kexec", "systemd-kexec.service": "kexec",
+		"soft-reboot.target": "soft-reboot", "systemd-soft-reboot.service": "soft-reboot",
+		"exit.target": "exit", "systemd-exit.service": "exit", "shutdown.target": "shutdown",
 	}
 )
 
@@ -429,23 +487,32 @@ func endTargetReason(label string, a unitAction) (reason, hint string) {
 	return "", ""
 }
 
-// systemctlFlags опции systemctl, от которых зависит отказ: --user (юниты
-// менеджера пользователя), --now (disable и mask останавливают), сигнал 0
-// у kill (последний -s или --signal)
-func systemctlFlags(args []word) (user, now, zero bool) {
+// systemctlFlags опции systemctl, от которых зависит отказ: менеджер
+// (--user, --system, --global — действует последний из них, как в
+// systemctl), --now (disable и mask останавливают), сигнал 0 у kill
+// (последний -s или --signal). global — последним стоит --global: им
+// systemctl правит только файлы юнитов, к менеджеру не обращается
+// (acquire_bus: «--global is not supported for this operation»), так что
+// и stop, и disable --now с ним ничего не гасят. -M (--machine) менеджер
+// не выбирает: .host и user@ — эта машина, менеджер — по --user
+func systemctlFlags(args []word) (a unitAction, global bool) {
 	for i := 0; i < len(args); i++ {
-		switch a := args[i].text; {
-		case a == "--user":
-			user = true
-		case a == "--now":
-			now = true
-		case a == "-s" || a == "--signal":
-			zero = optionValue(args, &i, "").text == "0"
-		case strings.HasPrefix(a, "--signal=") || strings.HasPrefix(a, "-s"):
-			zero = a == "--signal=0" || a == "-s0"
+		switch t := args[i].text; {
+		case t == "--user":
+			a.user, global = true, false
+		case t == "--system":
+			a.user, global = false, false
+		case t == "--global":
+			a.user, global = false, true
+		case t == "--now":
+			a.now = true
+		case t == "-s" || t == "--signal":
+			a.zero = optionValue(args, &i, "").text == "0"
+		case strings.HasPrefix(t, "--signal=") || strings.HasPrefix(t, "-s"):
+			a.zero = t == "--signal=0" || t == "-s0"
 		}
 	}
-	return user, now, zero
+	return a, global
 }
 
 // unitName имя юнита с типом: имя без типа systemctl дополняет .service

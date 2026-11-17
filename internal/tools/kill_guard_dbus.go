@@ -19,6 +19,9 @@ var dbusTools = map[string]func(args []word, via string) (dbusCall, bool){
 	"qdbus6":    qdbusCall,
 	"qdbus-qt5": qdbusCall,
 	"qdbus-qt6": qdbusCall,
+	"kquitapp":  kquitappCall,
+	"kquitapp5": kquitappCall,
+	"kquitapp6": kquitappCall,
 }
 
 // dbusCall вызов метода D-Bus из командной строки. bus — шина: user (шина
@@ -87,25 +90,7 @@ var busctlValues = []string{
 // INTERFACE METHOD [SIGNATURE [ARGUMENT…]]; шина по умолчанию — системная.
 // Прочие команды (list, introspect, tree, monitor, get-property) — не вызов
 func busctlCall(args []word, via string) (dbusCall, bool) {
-	dc := dbusCall{tool: "busctl call", bus: "system"}
-	capsule := false
-	for _, a := range args {
-		switch {
-		case a.text == "--user":
-			dc.bus = "user"
-		case a.text == "--system":
-			dc.bus = "system"
-		case a.text == "--address" || strings.HasPrefix(a.text, "--address="):
-			dc.bus = ""
-		case a.text == "--capsule" || strings.HasPrefix(a.text, "--capsule=") || strings.HasPrefix(a.text, "-C"):
-			capsule = true
-		}
-	}
-	if capsule {
-		// шина capsule (busctl -C имя) — менеджер пользователя capsule, и с
-		// --user тоже
-		dc.bus = "capsule"
-	}
+	dc := dbusCall{tool: "busctl call", bus: busctlBus(args)}
 	ops := optionOperands(args, busctlValues)
 	if len(ops) == 0 || ops[0].literal && ops[0].text != "call" {
 		return dc, false
@@ -119,6 +104,65 @@ func busctlCall(args []word, via string) (dbusCall, bool) {
 		dc.args = ops[6:]
 	}
 	return dc, true
+}
+
+// busctlBus шина вызова по опциям busctl: system (по умолчанию), user
+// (--user), "" (--address — любая), capsule (-C, --capsule — менеджер
+// пользователя capsule, и с --user тоже). Опция — слово до --, кроме
+// значения опции (--match -Cx: -Cx — правило --match); в связке коротких
+// опций (-qC foo) буква со значением забирает остаток или следующее слово.
+// busctl, как getopt, разбирает опции и после операндов: --user и
+// --system там действуют. Капсула учитывается только до первого операнда:
+// она ведёт к пропуску, и -C среди аргументов метода (строка «-Cx») пропуска
+// не даёт — лишний отказ на редкую форму дешевле обхода
+func busctlBus(args []word) string {
+	bus, capsule, operand := "system", false, false
+	for i := 0; i < len(args); i++ {
+		t := args[i].text
+		switch {
+		case t == "--":
+			i = len(args)
+		case strings.HasPrefix(t, "--"):
+			name, _, inline := strings.Cut(t[2:], "=")
+			switch name {
+			case "user":
+				bus = "user"
+			case "system":
+				bus = "system"
+			case "address":
+				bus = ""
+			case "capsule":
+				capsule = capsule || !operand
+			}
+			if !inline && slices.Contains(busctlValues, name) {
+				i++
+			}
+		case len(t) > 1 && t[0] == '-':
+			letter, next := shortValue(t, busctlValues)
+			capsule = capsule || letter == "C" && !operand
+			if next {
+				i++
+			}
+		default:
+			operand = true
+		}
+	}
+	if capsule {
+		return "capsule"
+	}
+	return bus
+}
+
+// shortValue опция со значением в связке коротких опций (-qC foo, -Cfoo):
+// её буква и next — значение в следующем слове (буква последняя в связке);
+// буквы после неё — уже значение. "" — в связке такой нет
+func shortValue(bundle string, values []string) (letter string, next bool) {
+	for j := 1; j < len(bundle); j++ {
+		if l := bundle[j : j+1]; slices.Contains(values, l) {
+			return l, j == len(bundle)-1
+		}
+	}
+	return "", false
 }
 
 // gdbusValues опции gdbus call со значением: буква — длинное имя
@@ -319,6 +363,54 @@ func qdbusCall(args []word, via string) (dbusCall, bool) {
 	dc.dest, dc.path, dc.member = operand(ops, 0, via), operand(ops, 1, via), operand(ops, 2, via)
 	if len(ops) > 3 {
 		dc.args = ops[3:]
+	}
+	return dc, true
+}
+
+// kquitappApps приложения kquitapp, чья служба — не org.kde.ИМЯ: процессы
+// композитора KWin
+var kquitappApps = map[string]string{"kwin_wayland": "org.kde.KWin", "kwin_x11": "org.kde.KWin"}
+
+// kquitappCall kquitapp6 [--service S] [--path P] ПРИЛОЖЕНИЕ — вызов quit у
+// службы org.kde.ПРИЛОЖЕНИЕ (или S) по шине сессии, то же, что qdbus
+// org.kde.plasmashell /MainApplication quit. Без приложения и службы —
+// не вызов (--help, --version)
+func kquitappCall(args []word, via string) (dbusCall, bool) {
+	dc := dbusCall{tool: "kquitapp", bus: "user", shiftAt: -1,
+		path: word{text: "/MainApplication", literal: true}, member: word{text: "quit", literal: true}}
+	var service, app *word
+	for i := 0; i < len(args); i++ {
+		t := args[i].text
+		if !strings.HasPrefix(t, "-") || t == "-" {
+			if app == nil {
+				app = &args[i]
+			}
+			continue
+		}
+		name, value, inline := strings.Cut(strings.TrimLeft(t, "-"), "=")
+		if name != "service" && name != "path" {
+			continue
+		}
+		v := word{text: value, literal: args[i].literal}
+		if !inline {
+			v = optionValue(args, &i, "")
+		}
+		if name == "service" {
+			service = &v
+		} else {
+			dc.path = v
+		}
+	}
+	switch {
+	case service != nil:
+		dc.dest = *service
+	case app != nil:
+		dc.dest = word{text: "org.kde." + app.text, literal: app.literal}
+		if s := kquitappApps[app.text]; s != "" {
+			dc.dest.text = s
+		}
+	default:
+		return dc, false
 	}
 	return dc, true
 }
@@ -611,8 +703,9 @@ func (t *KillGuardTool) systemdMethodReason(dc dbusCall, m dbusMethod, unit word
 	return "", ""
 }
 
-// kdeLogoutServices службы KDE, у которых методы logout* завершают сеанс
-// (org.kde.Shutdown.logout, logoutAndReboot; ksmserver /KSMServer logout)
+// kdeLogoutServices службы KDE, у которых методы logout* и closeSession
+// завершают сеанс (org.kde.Shutdown.logout, logoutAndReboot; ksmserver
+// /KSMServer logout, closeSession)
 var kdeLogoutServices = []string{"org.kde.Shutdown", "org.kde.ksmserver"}
 
 // kdeDesktopServices службы рабочего стола KDE, у которых quit и exit
@@ -621,6 +714,7 @@ var kdeDesktopServices = map[string]string{
 	"org.kde.plasmashell": "plasmashell (панель и рабочий стол), как systemctl --user stop plasma-plasmashell",
 	"org.kde.KWin":        "KWin — композитор: с ним падает графический сеанс",
 	"org.kde.kwin":        "KWin — композитор: с ним падает графический сеанс",
+	"org.kde.ksmserver":   "ksmserver — менеджер сеанса KDE: с ним завершается сеанс",
 }
 
 // kdeHint подсказка к отказу на выход из сеанса KDE и остановку рабочего стола
@@ -635,7 +729,7 @@ func kdeReason(dc dbusCall) string {
 	_, method := splitMember(dc.member.text)
 	method = strings.ToLower(method)
 	switch {
-	case slices.Contains(kdeLogoutServices, dc.dest.text) && strings.HasPrefix(method, "logout"):
+	case slices.Contains(kdeLogoutServices, dc.dest.text) && (strings.HasPrefix(method, "logout") || method == "closesession"):
 		return fmt.Sprintf("%s %s к %s завершает сеанс KDE: рабочий стол, терминалы и сессии Claude в нём", dc.tool, dc.member.text, dc.dest.text)
 	case kdeDesktopServices[dc.dest.text] != "" && (method == "quit" || method == "exit"):
 		return fmt.Sprintf("%s %s к %s гасит %s", dc.tool, dc.member.text, dc.dest.text, kdeDesktopServices[dc.dest.text])

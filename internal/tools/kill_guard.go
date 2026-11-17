@@ -414,8 +414,9 @@ func sudoAssignment(c shellcmd.Call, calls []shellcmd.Call) bool {
 // $1) исполняет слова, переданные в другом месте команды (set -- kill -9
 // -1, f kill -9 -1, bash -c '"$@"' _ kill …): слово сигнала среди
 // аргументов любого вызова проверяется как сигнал с аргументами за ним.
-// Прочее вычисляемое имя проверяется по аргументам как systemctl, loginctl
-// и средства D-Bus (computedTool)
+// Прочее вычисляемое имя, связанное со средством (имя systemctl, busctl…
+// в подстановке имени или в значении, присвоенном его переменной),
+// проверяется по аргументам как это средство (computedTool)
 func (s *killScan) signal(c shellcmd.Call, calls []shellcmd.Call) error {
 	args := make([]word, 0, len(c.Args))
 	for _, a := range c.Args {
@@ -435,7 +436,7 @@ func (s *killScan) signal(c shellcmd.Call, calls []shellcmd.Call) error {
 		case positionalRe.MatchString(unquoted(c.Name)):
 			return s.positionalSignal(calls)
 		case !slices.Contains(c.Via, "ssh"):
-			return s.computedTool(c, args, via)
+			return s.computedTool(c, args, via, computedNames(c, s.command))
 		}
 		return nil
 	}
@@ -726,15 +727,22 @@ var nameVarRe = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
 // Присваивание ищется в тексте всей команды: оно бывает и в теле heredoc
 // для оболочки
 func arraySignal(name, command string) bool {
+	return slices.ContainsFunc(assignedValues(name, command), func(v string) bool {
+		return signalWordRe.MatchString(unquoted(v))
+	})
+}
+
+// assignedValues значения, которые команда присваивает переменным из имени
+// вызова (a=(…), a+=(…), a[0]=…, X="…", export X=…), без снятия кавычек
+func assignedValues(name, command string) []string {
+	var out []string
 	for _, m := range nameVarRe.FindAllStringSubmatch(name, -1) {
-		assign := regexp.MustCompile(`(^|[^A-Za-z0-9_])` + m[1] + `(\[[^\]]*\])?\+?=(\([^)]*\)|\S*)`)
+		assign := regexp.MustCompile(`(^|[^A-Za-z0-9_])` + m[1] + `(\[[^\]]*\])?\+?=(\([^)]*\)|"[^"]*"|'[^']*'|\S*)`)
 		for _, a := range assign.FindAllStringSubmatch(command, -1) {
-			if signalWordRe.MatchString(unquoted(a[3])) {
-				return true
-			}
+			out = append(out, a[3])
 		}
 	}
-	return false
+	return out
 }
 
 // killOptions отделяет опции kill от целей так же, как встроенный kill

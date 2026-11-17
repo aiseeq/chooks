@@ -130,6 +130,9 @@ type killScan struct {
 	// anyBus — команда задаёт адрес шины D-Bus (busAddressRe): менеджер
 	// systemd у systemctl и вызовов D-Bus проверяется по обоим
 	anyBus bool
+	// stdin — ввод участков текста, к которому отнесены места вызовов
+	// (stdinOf): команды, а за run0 и pkexec — текста за обёрткой
+	stdin *stdinScope
 }
 
 // signalWordRe отдельное слово kill, pkill, killall, killall5
@@ -288,7 +291,7 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if inner, ok := elevatedCommand(c); ok {
 		return s.elevated(c, inner)
 	}
-	if reason, hint := systemdRunSignalReason(c, calls); reason != "" {
+	if reason, hint := s.systemdRunSignalReason(c, calls); reason != "" {
 		s.addToolReason(reason, hint, false)
 	}
 	if !s.signalWord {
@@ -457,7 +460,8 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 	// (systemd-run за run0 — systemdRunRemote). Вызовы самой команды за
 	// обёрткой (их текст — весь inner) получают её ввод и перенаправления:
 	// разбор заново их не знает (… | run0 bash, run0 systemd-run --pipe sh)
-	piped := s.pipedInput(c)
+	src := s.stdinOf(c)
+	piped := src == stdinPipe || src == stdinFile
 	for i := range calls {
 		ic := &calls[i]
 		if ic.Raw == inner {
@@ -467,6 +471,15 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 			}
 		}
 		ic.Via = append(append(slices.Clone(c.Via), c.Name), ic.Via...)
+	}
+	// места вызовов за обёрткой — в её тексте, ввод текста — её ввод
+	outer := s.stdinScopeOf()
+	defer func() { s.stdin = outer }()
+	s.stdin = &stdinScope{text: inner, src: src}
+	if spans, err := stdinSpans(s.tool.Logger(), inner, 0, 4); err == nil {
+		s.stdin.spans = spans
+	} else {
+		s.tool.Logger().Warn("kill_guard: ввод вызовов за обёрткой не проверен, разбор bash не прошёл", "wrapper", c.Name, "error", err)
 	}
 	for _, ic := range calls {
 		if err := s.call(ic, calls); err != nil {

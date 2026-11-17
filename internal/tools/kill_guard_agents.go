@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/aiseeq/akit/shellcmd"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // Ядро (agent-signal-guard) не даёт агенту послать сигнал чужому процессу,
@@ -87,7 +86,7 @@ func podmanStop(args []string) (string, bool) {
 // процессов. Вызов в скрипте ssh и systemd-run на другую машину
 // (systemdRunRemote) исполнится не здесь. calls — все вызовы команды:
 // среди них ищется сам systemd-run
-func systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call) (reason, hint string) {
+func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call) (reason, hint string) {
 	k := slices.Index(c.Via, "systemd-run")
 	if k < 0 || slices.Contains(c.Via, "ssh") || systemdRunRemote(c, calls, k) {
 		return "", ""
@@ -102,7 +101,7 @@ func systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call) (reason, hin
 		}
 		name = c.Name + " " + verb
 	default:
-		if reason := systemdRunHiddenReason(c, calls, k); reason != "" {
+		if reason := s.systemdRunHiddenReason(c, calls, k); reason != "" {
 			return reason, systemdRunHiddenHint
 		}
 		return "", ""
@@ -119,10 +118,11 @@ const hiddenTail = ", а исполнит его потомок systemd, не а
 // подстановки ("$X" 1; путь с литеральным файлом — нет), скрипт, слово
 // которого целиком одна подстановка (sh -c "$CMD", eval "$(cat f)"), и
 // оболочка, читающая скрипт из ввода, которого не видно (… | systemd-run
-// --pipe bash, sh < "$F"). Подстановка в аргументах скрипта (sh -c "make -C
+// --pipe bash, … | sh -c 'systemd-run --pipe bash', sh < "$F"; cat build.sh
+// | … — файл, как sh < build.sh). Подстановка в аргументах скрипта (sh -c "make -C
 // $DIR") — не повод: команды скрипта видны, а на месте имени команды её
 // ловит то же правило имени у вызова из скрипта
-func systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call, k int) string {
+func (s *killScan) systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call, k int) string {
 	if (c.Name == "" || strings.ContainsAny(c.Name, "$`{}")) && !systemdRunPathName(c, calls, k) {
 		return "systemd-run запускает команду, имя которой вычисляется при запуске ($X, $(…), `…`): текст команды станет известен только при запуске" + hiddenTail
 	}
@@ -139,7 +139,7 @@ func systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call, k int) strin
 		// файл скрипта (sh x.sh) — вне этой проверки
 		return ""
 	}
-	if c.ScriptInput && !scriptBodyParsed(c, calls) {
+	if s.stdinOf(c) == stdinPipe && !scriptBodyParsed(c, calls) {
 		return "systemd-run запускает " + c.Name + ", который читает скрипт из ввода (… | systemd-run --pipe " + c.Name + "): текст не виден до запуска" + hiddenTail
 	}
 	for _, r := range c.Redirs {
@@ -164,20 +164,17 @@ func scriptCallsParsed(c shellcmd.Call, calls []shellcmd.Call) bool {
 	})
 }
 
-// stdinScripts пути, по которым оболочка читает скрипт со своего ввода
-var stdinScripts = []string{"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
-
 // shellReadsInput — оболочка без -c с аргументами args читает скрипт со
 // своего ввода: без операнда, с -s (за ним операнды — аргументы скрипта:
-// bash -s -- a b) или с операндом - , /dev/stdin, /dev/fd/0,
-// /proc/self/fd/0. Иной операнд — файл скрипта. Опции — как у shellScript
+// bash -s -- a b) или с операндом - и путём к вводу (stdinPath: /dev/stdin,
+// /dev/fd/./0, /proc/$$/fd/0). Иной операнд — файл скрипта. Опции — как у shellScript
 func shellReadsInput(args []string) bool {
 	stdin := false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--":
-			return stdin || i+1 >= len(args) || slices.Contains(stdinScripts, args[i+1])
+			return stdin || i+1 >= len(args) || stdinPath(args[i+1])
 		case a == "--rcfile" || a == "--init-file":
 			i++
 		case strings.HasPrefix(a, "--"):
@@ -189,7 +186,7 @@ func shellReadsInput(args []string) bool {
 				i++
 			}
 		default:
-			return stdin || slices.Contains(stdinScripts, a)
+			return stdin || stdinPath(a)
 		}
 	}
 	return true
@@ -208,44 +205,22 @@ func inputTaker(c shellcmd.Call) bool {
 	return !slices.Contains(c.Via, "xargs") && !slices.Contains(c.Via, "parallel")
 }
 
-// pipedInput — ввод вызова c (обёртки run0, pkexec, machinectl shell)
-// идёт из пайпа: так уже отметил разбор (ScriptInput у вызова из повторного
-// разбора за обёрткой) или c стоит справа от | в тексте команды. Вызов из
-// повторного разбора за обёрткой (в Via run0, pkexec, machinectl) — только
-// по отметке: его место — в тексте за обёрткой, не в команде. Пайп внутри
-// скрипта sh -c этот разбор не видит
-func (s *killScan) pipedInput(c shellcmd.Call) bool {
-	if c.ScriptInput {
-		return true
-	}
-	if c.Offset < 0 || slices.ContainsFunc(c.Via, func(v string) bool { _, ok := elevatedValues[v]; return ok || v == "machinectl" }) {
-		return false
-	}
-	file, err := syntax.NewParser().Parse(strings.NewReader(s.command), "")
-	if err != nil {
-		// shellcmd команду разобрал, а синтаксис bash — нет (другой диалект):
-		// пайп не виден, ввод обёртки остаётся как его отметил разбор
-		s.tool.Logger().Warn("kill_guard: пайп перед обёрткой не проверен, разбор bash не прошёл", "wrapper", c.Name, "error", err)
-		return false
-	}
-	piped := false
-	syntax.Walk(file, func(n syntax.Node) bool {
-		if b, ok := n.(*syntax.BinaryCmd); ok && (b.Op == syntax.Pipe || b.Op == syntax.PipeAll) {
-			start, end := int(b.Y.Pos().Offset()), int(b.Y.End().Offset())
-			piped = piped || start <= c.Offset && c.Offset < end
-		}
-		return !piped
-	})
-	return piped
-}
-
 // scriptBodyParsed — разбор прочёл скрипт, который оболочка c получает на
-// ввод (echo 'make' | sh): его вызовы идут с Via «pipe» и цепочкой c
+// ввод (echo 'make' | sh): его вызовы идут с Via цепочки c, где «pipe»
+// стоит на уровне пайпа: впереди у пайпа в команде, после sh -c у пайпа в
+// скрипте (sh -c 'echo make | systemd-run --pipe bash' — sh -c pipe
+// systemd-run bash)
 func scriptBodyParsed(c shellcmd.Call, calls []shellcmd.Call) bool {
-	via := append(append([]string{"pipe"}, c.Via...), c.Name)
-	return slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
-		return len(x.Via) >= len(via) && slices.Equal(x.Via[len(x.Via)-len(via):], via)
-	})
+	chain := append(slices.Clone(c.Via), c.Name)
+	for j := range chain {
+		via := slices.Concat(chain[:j], []string{"pipe"}, chain[j:])
+		if slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
+			return len(x.Via) >= len(via) && slices.Equal(x.Via[len(x.Via)-len(via):], via)
+		}) {
+			return true
+		}
+	}
+	return false
 }
 
 // systemdRunHiddenHint подсказка к отказу на невидимую команду под

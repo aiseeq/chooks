@@ -318,7 +318,6 @@ func TestKillGuardSystemdRunHiddenRound3(t *testing.T) {
 		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash /dev/stdin`,
 		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash /dev/fd/0`,
 		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash -- /proc/self/fd/0`,
-		`cat script.sh | systemd-run --user --pipe bash`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -338,6 +337,65 @@ func TestKillGuardSystemdRunHiddenRound3(t *testing.T) {
 		`run0 systemd-run --user sleep 1`,
 		`echo make | systemd-run --user --pipe sh`,
 		`echo 1 | run0 xargs sh -c 'echo "$@"' _`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}
+
+// Хвост: ввод наследуется через sh -c и run0 (пайп снаружи скрипта и
+// внутри), пути к вводу в других написаниях, литеральный файл через cat —
+// как sh < файл
+func TestKillGuardSystemdRunStdinTail(t *testing.T) {
+	for _, command := range []string{
+		`printf '%s\n' "$CMD" | sh -c 'systemd-run --pipe bash'`,
+		`printf '%s\n' "$CMD" | sh -c "systemd-run --pipe bash"`,
+		`printf '%s\n' "$CMD" | run0 sh -c 'systemd-run --pipe bash'`,
+		`printf '%s\n' "$CMD" | bash -ec 'cd /tmp; systemd-run --user --pipe sh'`,
+		`printf '%s\n' "$CMD" | sh -c 'sh -c "systemd-run --pipe bash"'`,
+		`sh -c 'printf "%s\n" "$CMD" | run0 systemd-run --pipe bash'`,
+		`sh -c 'printf "%s\n" "$CMD" | systemd-run --pipe bash'`,
+		`run0 sh -c 'printf "%s\n" "$CMD" | systemd-run --pipe bash'`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash /proc/$$/fd/0`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash /dev/fd/./0`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash //dev/stdin`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash "/proc/$BASHPID/fd/0"`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash /proc/thread-self/fd/0`,
+		// cat не литерального файла, cat с вводом — текст не виден
+		`cat "$F" | systemd-run --user --pipe bash`,
+		`cat - | systemd-run --user --pipe bash`,
+		`cat /dev/stdin | systemd-run --user --pipe bash`,
+		`cat -A script.sh | systemd-run --user --pipe bash`,
+		`cat < "$F" | systemd-run --user --pipe bash`,
+		`printf '%s\n' "$CMD" | cat script.sh - | systemd-run --user --pipe bash`,
+		// строки ввода станут аргументами bash (-c, kill 1)
+		`printf '%s\n' "$CMD" | xargs systemd-run --user --pipe bash`,
+		// копия дескриптора — не перенаправление из файла
+		`exec 3< "$F"; systemd-run --user --scope sh <&3`,
+		`systemd-run --user --scope sh 0<&3`,
+		`sh -c 'systemd-run --user --scope sh <&3' 3< "$F"`,
+		`printf x | sh -c 'systemd-run --user --scope sh' 0<&3`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+	for _, command := range []string{
+		`cat script.sh | systemd-run --user --pipe bash`,
+		`cat a.sh b.sh | systemd-run --user --pipe sh`,
+		`cat ./build.sh | run0 systemd-run --pipe bash`,
+		`cat build.sh | sh -c 'systemd-run --user --pipe bash'`,
+		`systemd-run --user --scope sh < script.sh`,
+		// ввод sh внутри скрипта — свой, литеральный
+		`printf '%s\n' "$CMD" | sh -c 'systemd-run --user --pipe bash < build.sh'`,
+		`printf '%s\n' "$CMD" | sh -c 'echo make | systemd-run --user --pipe bash'`,
+		// тело из пайпа в скрипте разбор читает (Via sh -c pipe systemd-run bash)
+		`sh -c 'echo make | systemd-run --user --pipe bash'`,
+		// без пайпа ввод — агента
+		`sh -c 'systemd-run --user --pipe bash build.sh'`,
+		`systemd-run --user --scope bash`,
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash /proc/1/fd/0x`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)

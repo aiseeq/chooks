@@ -298,7 +298,7 @@ func (t *KillGuardTool) unitActionReason(label string, a unitAction, via string,
 		}
 		if reason := unitReason(u, h); reason != "" {
 			named := u.literal && !strings.ContainsAny(u.text, "*?[{")
-			return fmt.Sprintf("%s %s: %s", label, u.text, reason), systemctlHint(scope, named)
+			return fmt.Sprintf("%s %s: %s", label, shownUnit(u.text), reason), systemctlHint(scope, named)
 		}
 	}
 	return "", ""
@@ -325,10 +325,15 @@ func systemctlFlags(args []word) (user, now, zero bool) {
 
 // unitName имя юнита с типом: имя без типа systemctl дополняет .service
 func unitName(text string) string {
-	if !slices.ContainsFunc(unitSuffixes, func(s string) bool { return strings.HasSuffix(text, s) }) {
+	if !hasUnitSuffix(text) {
 		return text + ".service"
 	}
 	return text
+}
+
+// hasUnitSuffix — у имени есть тип юнита (.service, .scope)
+func hasUnitSuffix(text string) bool {
+	return slices.ContainsFunc(unitSuffixes, func(s string) bool { return strings.HasSuffix(text, s) })
 }
 
 // sessionScopeRe юнит сеанса logind: session-3.scope, session-c2.scope
@@ -355,14 +360,17 @@ func unitHosts(name string) []string {
 	return out
 }
 
-// unitReason почему юнит u останавливать нельзя: вычисляется, шаблон или
-// {…}, цель или корневой срез, сеанс logind, юнит сессии из hosts (и за
-// сокетом или алиасом); "" — можно
+// unitReason почему юнит u останавливать нельзя: вычисляется, пустое имя,
+// шаблон или {…}, цель или корневой срез, сеанс logind, юнит сессии из
+// hosts (и за сокетом или алиасом); "" — можно
 func unitReason(u word, hosts map[string]string) string {
 	name := unitName(u.text)
 	switch {
 	case !u.literal:
 		return "юнит вычисляется при запуске, проверить его заранее нельзя"
+	case u.text == "":
+		// systemd по D-Bus (KillUnit "") берёт юнит вызывающего
+		return "пустое имя — юнит самой команды, то есть этой сессии Claude"
 	case strings.ContainsAny(name, "*?[{"):
 		return "шаблон или {…} выбирает юниты при запуске, среди них может быть юнит этой сессии"
 	case strings.HasSuffix(name, ".target") || name == "-.slice":
@@ -729,4 +737,12 @@ func pythonScripts(c shellcmd.Call, args []word) []string {
 		}
 	}
 	return scripts
+}
+
+// shownUnit имя юнита в причине отказа: пустое — кавычками
+func shownUnit(name string) string {
+	if name == "" {
+		return `""`
+	}
+	return name
 }

@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -59,7 +60,7 @@ func operand(ops []word, i int, via string) word {
 
 // busctlValues опции busctl со значением отдельным словом
 var busctlValues = []string{
-	"H", "host", "M", "machine", "address", "match", "size", "json", "expect-reply", "auto-start",
+	"H", "host", "M", "machine", "C", "capsule", "address", "match", "size", "json", "expect-reply", "auto-start",
 	"allow-interactive-authorization", "timeout", "augment-creds", "watch-bind", "destination", "N", "limit-messages",
 }
 
@@ -111,10 +112,12 @@ func gdbusCall(args []word, via string) (dbusCall, bool) {
 		name, v, ok := gdbusOption(args, &i)
 		switch {
 		case a == "--":
-			dc.args = append(dc.args, args[i+1:]...)
+			for _, w := range args[i+1:] {
+				dc.args = append(dc.args, gvariantArg(w))
+			}
 			i = len(args)
 		case !ok:
-			dc.args = append(dc.args, word{text: gvariantValue(a), literal: args[i].literal})
+			dc.args = append(dc.args, gvariantArg(args[i]))
 		case name == "session" || name == "e":
 			dc.bus = "user"
 		case name == "system" || name == "y":
@@ -164,13 +167,62 @@ func gdbusLongValue(name string) bool {
 // gvariantTypeRe тип перед значением в тексте GVariant: int32 15, @i 15
 var gvariantTypeRe = regexp.MustCompile(`^(@\S+|boolean|byte|int16|uint16|int32|uint32|int64|uint64|handle|double|string|objectpath|signature)\s+`)
 
-// gvariantValue значение GVariant без типа и кавычек: 'x.service' → x.service
-func gvariantValue(text string) string {
-	v := gvariantTypeRe.ReplaceAllString(strings.TrimSpace(text), "")
-	if len(v) >= 2 && (v[0] == '\'' || v[0] == '"') && v[len(v)-1] == v[0] {
-		return v[1 : len(v)-1]
+// gvariantArg аргумент gdbus call: значение GVariant без типа и кавычек
+// ('x.service' → x.service). Строку с битой escape-последовательностью
+// gdbus передаст как есть, с кавычками, — имя не проверить: не литерал
+func gvariantArg(w word) word {
+	v := strings.TrimSpace(w.text)
+	for {
+		t := gvariantTypeRe.ReplaceAllString(v, "")
+		if t == v {
+			break
+		}
+		v = t
 	}
-	return v
+	if len(v) < 2 || v[0] != '\'' && v[0] != '"' || v[len(v)-1] != v[0] {
+		return word{text: v, literal: w.literal}
+	}
+	text, err := gvariantUnescape(v[1 : len(v)-1])
+	return word{text: text, literal: w.literal && err == nil}
+}
+
+// gvariantEscapes escape-последовательности строки GVariant с особым
+// значением; прочие \c — сам символ c (\x2d — x2d, \055 — 055, \- — -),
+// как у g_variant_parse (сверено с GLib 17.11)
+var gvariantEscapes = map[byte]rune{'a': '\a', 'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t', 'v': '\v'}
+
+// gvariantUnescape тело строки GVariant в кавычках: \uXXXX, \UXXXXXXXX,
+// \n и прочие; ошибка — последовательность битая (\u002, \ в конце)
+func gvariantUnescape(body string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(body); i++ {
+		if body[i] != '\\' {
+			b.WriteByte(body[i])
+			continue
+		}
+		i++
+		if i >= len(body) {
+			return b.String(), fmt.Errorf("\\ в конце строки GVariant")
+		}
+		switch c := body[i]; {
+		case c == 'u' || c == 'U':
+			n := map[byte]int{'u': 4, 'U': 8}[c]
+			if i+1+n > len(body) {
+				return b.String(), fmt.Errorf("\\%c: меньше %d цифр", c, n)
+			}
+			r, err := strconv.ParseUint(body[i+1:i+1+n], 16, 32)
+			if err != nil {
+				return b.String(), fmt.Errorf("\\%c: %w", c, err)
+			}
+			b.WriteRune(rune(r))
+			i += n
+		case gvariantEscapes[c] != 0:
+			b.WriteRune(gvariantEscapes[c])
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), nil
 }
 
 // dbusSendCall dbus-send [--system|--session|--bus=A|--peer=A] [--dest=D]
@@ -372,6 +424,49 @@ func loginEndMethod(method string) bool {
 	return strings.HasPrefix(method, "Kill") || strings.HasPrefix(method, "Terminate")
 }
 
+// loginPowerMethods методы org.freedesktop.login1.Manager, которые гасят
+// машину, — команда systemctl с тем же действием (systemctl poweroff сам
+// идёт в logind). Сон (Suspend, Hibernate) systemctl не отбивает — и тут нет
+var loginPowerMethods = map[string]string{
+	"PowerOff": "poweroff", "PowerOffWithFlags": "poweroff", "Reboot": "reboot", "RebootWithFlags": "reboot",
+	"Halt": "halt", "HaltWithFlags": "halt", "KExec": "kexec", "KExecWithFlags": "kexec",
+	"SoftReboot": "soft-reboot", "SoftRebootWithFlags": "soft-reboot",
+}
+
+// loginShutdownKinds типы ScheduleShutdown, которые гасят машину; dry-* —
+// только сообщение
+var loginShutdownKinds = []string{"poweroff", "reboot", "halt", "kexec", "soft-reboot"}
+
+// loginPowerMethod метод logind, который гасит машину сейчас или по расписанию
+func loginPowerMethod(method string) bool {
+	return loginPowerMethods[method] != "" || method == "ScheduleShutdown"
+}
+
+// loginReason отказ на вызов logind: Kill* и Terminate* — целиком, как
+// loginctl; выключение и перезагрузка (PowerOff, RebootWithFlags,
+// ScheduleShutdown poweroff) — как systemctl poweroff и reboot, общей
+// проверкой unitActionReason
+func (t *KillGuardTool) loginReason(dc dbusCall, method, via string, procs []procInfo) (reason, hint string) {
+	verb := loginPowerMethods[method]
+	switch {
+	case loginEndMethod(method):
+		return fmt.Sprintf("%s %s (как loginctl kill-* и terminate-*) %s", dc.tool, dc.member.text, loginEndEffect), ""
+	case method == "ScheduleShutdown":
+		kind := dc.arg(0, via)
+		if !kind.literal || dc.shifted {
+			return dbusUnresolved(dc, "тип выключения"), dbusHint
+		}
+		if slices.Contains(loginShutdownKinds, kind.text) {
+			verb = kind.text
+		}
+	}
+	if verb == "" {
+		return "", ""
+	}
+	label := fmt.Sprintf("%s %s (как systemctl %s)", dc.tool, dc.member.text, verb)
+	return t.unitActionReason(label, unitAction{verb: verb}, via, procs)
+}
+
 // systemdMethod разрушающий метод systemd с таким именем у менеджера или юнита
 func systemdMethod(method string) bool {
 	_, manager := systemdManagerMethods[method]
@@ -384,9 +479,6 @@ const dbusHint = "Назови получателя, объект, метод и
 
 // systemdUnitPath путь объекта юнита systemd
 const systemdUnitPath = "/org/freedesktop/systemd1/unit/"
-
-// invocationIDRe ID запуска юнита в пути объекта: systemd находит юнит по нему
-var invocationIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // dbusReason отказ на вызов D-Bus, который гасит то же, что systemctl или
 // loginctl: метод systemd приводится к действию systemctl (KillUnit → kill,
@@ -404,9 +496,9 @@ func (t *KillGuardTool) dbusReason(dc dbusCall, via string, procs []procInfo) (r
 	}
 	_, method := splitMember(dc.member.text)
 	switch {
-	case target == dbusLogin && loginEndMethod(method):
-		return fmt.Sprintf("%s %s (как loginctl kill-* и terminate-*) %s", dc.tool, dc.member.text, loginEndEffect), ""
-	case target == dbusUnknown && (loginEndMethod(method) || systemdMethod(method)):
+	case target == dbusLogin:
+		return t.loginReason(dc, method, via, procs)
+	case target == dbusUnknown && (loginEndMethod(method) || loginPowerMethod(method) || systemdMethod(method)):
 		return dbusUnresolved(dc, "получатель или объект"), dbusHint
 	case target != dbusSystemd:
 		return "", ""
@@ -440,9 +532,11 @@ func systemdTarget(dc dbusCall, method, via string) (m *dbusMethod, unit word, w
 		if !ok {
 			return nil, word{}, ""
 		}
+		// без типа юнита в пути — не имя: self (юнит самой команды), ID
+		// запуска (32 цифры или GUID, в любом регистре), пустое _
 		name := busLabelUnescape(strings.TrimPrefix(path, systemdUnitPath))
-		if name == "self" || invocationIDRe.MatchString(name) {
-			return nil, word{}, "юнит объекта " + path + " (self — юнит самой команды, иначе ID запуска)"
+		if !hasUnitSuffix(name) {
+			return nil, word{}, "юнит объекта " + path + " (self — юнит самой команды, ID запуска — любой юнит)"
 		}
 		return &um, word{text: name, literal: true}, ""
 	}

@@ -176,6 +176,35 @@ func TestKillGuardSystemdRunHiddenBlocks(t *testing.T) {
 		`systemd-run -M "$M" kill 455274`,
 		// systemd-run на другую машину и рядом здешний — проверка как здесь
 		`systemd-run -H h true; systemd-run --user sh -c 'kill 455274'`,
+		// транспорт задаёт последняя из -H, -M, -C (src/run/run.c)
+		`systemd-run -H host -M .host kill 455274`,
+		`systemd-run -M c1 -M .host kill 455274`,
+		`systemd-run -M .host -M c1 -M .host kill 455274`,
+		`systemd-run -H host -M '' kill 455274`,
+		`systemd-run -H host --machine=aisee@.host --user kill 455274`,
+		`systemd-run -H host --machine .host kill 455274`,
+		`systemd-run --host=h -qM.host kill 455274`,
+		`systemd-run -M c1 --machine=.host sh -c "$CMD"`,
+		`systemd-run -H host -C cap kill 455274`,
+		`systemd-run -H host --capsule=cap kill 455274`,
+		// сокращение длинной опции getopt_long дополняет: --mach — --machine
+		`systemd-run -H host --mach=.host kill 455274`,
+		`systemd-run --mach=.host kill 455274`,
+		// скрипт — одна подстановка
+		`systemd-run --user sh -c "${CMD:-kill 455274}"`,
+		`systemd-run --user sh -c ${CMD}`,
+		`systemd-run --user bash -lc "$CMD"`,
+		`systemd-run --user eval "$CMD"`,
+		// подстановка на месте имени команды в скрипте — правило имени
+		`systemd-run --user sh -c "make && $X"`,
+		// оболочка читает скрипт из ввода, которого не видно
+		`printf '%s\n' "$CMD" | systemd-run --user --pipe bash`,
+		`cat "$F" | systemd-run --user --scope sh`,
+		`echo "$CMD" | systemd-run --user -P sh`,
+		`systemd-run --user --scope sh < "$F"`,
+		`systemd-run --user --scope sh -s < "$F"`,
+		`systemd-run --user --scope sh <<< "$CMD"`,
+		"systemd-run --user --scope sh <<'EOF'\nkill 455274\nEOF",
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -201,6 +230,26 @@ func TestKillGuardSystemdRunRemoteAllows(t *testing.T) {
 		`systemd-run --user "$(go env GOPATH)/bin/tool" 1`,
 		`systemd-run --user "$HOME/bin/tool" 1`,
 		`systemd-run --user --scope -p MemoryMax=4G go test ./...`,
+		// последняя из -H, -M, -C — удалённая
+		`systemd-run -M .host -H host kill 455274`,
+		`systemd-run -C cap -M c1 kill 455274`,
+		`systemd-run --mach=.host --ho=h kill 455274`,
+		// подстановка только в аргументах скрипта — команды видны
+		`systemd-run --user sh -c "cd $DIR && make"`,
+		`systemd-run --user sh -c "make -C $DIR"`,
+		`systemd-run --user bash -c "go test ./... > $LOG 2>&1"`,
+		`systemd-run --user sh -c "echo $HOME"`,
+		`systemd-run --user sh -c "make -j$(nproc)"`,
+		`DIR=/x; systemd-run --user sh -c "cd $DIR && make"`,
+		`systemd-run --user sh -c "$HOME/bin/tool"`,
+		`systemd-run --user -E DIR="$DIR" sh -c 'make -C "$DIR"'`,
+		`systemd-run --user --working-directory="$DIR" make`,
+		// ввод оболочки виден или это файл скрипта (вне проверки)
+		"systemd-run --user --scope sh <<'EOF'\nmake\nEOF",
+		`echo 'make' | systemd-run --user -P sh`,
+		`systemd-run --user --scope sh < build.sh`,
+		`systemd-run --user bash script.sh`,
+		`systemd-run --user -t bash`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
@@ -208,10 +257,35 @@ func TestKillGuardSystemdRunRemoteAllows(t *testing.T) {
 	}
 }
 
+// Правка elevated (Via с обёрткой у всех вызовов за run0): присваивание
+// после sudo -- за run0 узнаётся, как без run0 — программа за ним
+// проверяется своим вызовом. Было отказом из-за вызова-присваивания, стало
+// как у sudo -- PATH=$PATH kill 455274 без run0
+func TestKillGuardElevatedSudoAssignment(t *testing.T) {
+	for _, command := range []string{
+		`run0 sudo -- PATH=$PATH kill 455274`,
+		`sudo -- PATH=$PATH kill 455274`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+	for _, command := range []string{
+		`run0 sudo -- PATH=$PATH kill 1`,
+		`run0 sudo -- PATH=$PATH systemd-run kill 455274`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+}
+
 func TestKillGuardSystemdRunHiddenTexts(t *testing.T) {
 	for _, tc := range []struct{ command, reason string }{
 		{`systemd-run --user "$X" 455274`, "systemd-run запускает команду, имя которой вычисляется при запуске"},
-		{`systemd-run --user sh -c "$CMD"`, "systemd-run запускает sh со скриптом из подстановки"},
+		{`systemd-run --user sh -c "$CMD"`, "systemd-run запускает sh со скриптом из одной подстановки"},
+		{`cat "$F" | systemd-run --user --scope sh`, "systemd-run запускает sh, который читает скрипт из ввода"},
+		{`systemd-run --user --scope sh < "$F"`, "systemd-run запускает sh со скриптом на вводе из < \"$F\""},
 	} {
 		r := validateKill(t, tc.command)
 		if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), tc.reason) || !slices.Contains(r.Suggestions, systemdRunHiddenHint) {

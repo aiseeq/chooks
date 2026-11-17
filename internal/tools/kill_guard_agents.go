@@ -80,13 +80,12 @@ func podmanStop(args []string) (string, bool) {
 
 // systemdRunSignalReason отказ на сигнал из-под systemd-run (в том числе
 // через sh -c и обёртки, которые снимает разбор): kill, pkill, killall,
-// podman rm/stop/kill, а также команда, которую до запуска не видно: имя
-// из переменной или подстановки ("$X" 1), скрипт sh -c из них (sh -c
-// "$CMD") — как юнит из переменной у systemctl. Процесс, запущенный
-// systemd-run, — потомок systemd, не агента, и ядро его сигналы не
-// сверяет: он дотянется до чужих процессов. Вызов в скрипте ssh и
-// systemd-run на другую машину (systemdRunRemote) исполнится не здесь.
-// calls — все вызовы команды: среди них ищется сам systemd-run
+// podman rm/stop/kill, а также команда, которую до запуска не видно
+// (systemdRunHiddenReason). Процесс, запущенный systemd-run, — потомок
+// systemd, не агента, и ядро его сигналы не сверяет: он дотянется до чужих
+// процессов. Вызов в скрипте ssh и systemd-run на другую машину
+// (systemdRunRemote) исполнится не здесь. calls — все вызовы команды:
+// среди них ищется сам systemd-run
 func systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call) (reason, hint string) {
 	k := slices.Index(c.Via, "systemd-run")
 	if k < 0 || slices.Contains(c.Via, "ssh") || systemdRunRemote(c, calls, k) {
@@ -101,11 +100,9 @@ func systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call) (reason, hin
 			return "", ""
 		}
 		name = c.Name + " " + verb
-	case (c.Name == "" || strings.ContainsAny(c.Name, "$`{}")) && !systemdRunPathName(c, calls, k):
-		return "systemd-run запускает команду, имя которой вычисляется при запуске ($X, $(…), `…`): что исполнится потомком systemd, а не агента, проверить нельзя — ядро (agent-signal-guard) его сигналы не сверяет", systemdRunHiddenHint
 	default:
-		if script, _ := scriptArgs(c); slices.ContainsFunc(script, computedArg) {
-			return "systemd-run запускает " + c.Name + " со скриптом из подстановки $ или ` (sh -c \"$CMD\"): текст станет известен только при запуске, а исполнит его потомок systemd, не агента — ядро (agent-signal-guard) его сигналы не сверяет", systemdRunHiddenHint
+		if reason := systemdRunHiddenReason(c, calls, k); reason != "" {
+			return reason, systemdRunHiddenHint
 		}
 		return "", ""
 	}
@@ -113,8 +110,59 @@ func systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call) (reason, hin
 		"Шли сигнал прямо, без systemd-run: найди PID отдельной командой (pgrep -a '[x]yz') и убей литералом: kill 12345; контейнер — podman stop имя"
 }
 
-// systemdRunHiddenHint подсказка к отказу на невидимую команду под systemd-run
-const systemdRunHiddenHint = "Назови команду под systemd-run литералом; переменную раскрывай внутри скрипта, в одинарных кавычках: systemd-run --user sh -c 'make -C \"$DIR\"'"
+// hiddenTail конец причины отказа на невидимую команду под systemd-run
+const hiddenTail = ", а исполнит его потомок systemd, не агента — ядро (agent-signal-guard) его сигналы не сверяет"
+
+// systemdRunHiddenReason команда под systemd-run, которую до запуска не
+// видно, — как юнит из переменной у systemctl: имя из переменной или
+// подстановки ("$X" 1; путь с литеральным файлом — нет), скрипт, слово
+// которого целиком одна подстановка (sh -c "$CMD", eval "$(cat f)"), и
+// оболочка, читающая скрипт из ввода, которого не видно (… | systemd-run
+// --pipe bash, sh < "$F"). Подстановка в аргументах скрипта (sh -c "make -C
+// $DIR") — не повод: команды скрипта видны, а на месте имени команды её
+// ловит то же правило имени у вызова из скрипта
+func systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call, k int) string {
+	if (c.Name == "" || strings.ContainsAny(c.Name, "$`{}")) && !systemdRunPathName(c, calls, k) {
+		return "systemd-run запускает команду, имя которой вычисляется при запуске ($X, $(…), `…`): что исполнится, не видно" + hiddenTail
+	}
+	script, runner := scriptArgs(c)
+	switch {
+	case slices.ContainsFunc(script, wholeSubstitution):
+		return "systemd-run запускает " + c.Name + " со скриптом из одной подстановки (sh -c \"$CMD\", $(…), `…`): текст станет известен только при запуске" + hiddenTail
+	case runner || !shellcmd.IsShell(c.Name):
+		return ""
+	}
+	if operand, _ := shellScript(c.Args); operand != "" {
+		// файл скрипта (sh x.sh) — вне этой проверки
+		return ""
+	}
+	if c.ScriptInput && !scriptBodyParsed(c, calls) {
+		return "systemd-run запускает " + c.Name + ", который читает скрипт из ввода (… | systemd-run --pipe " + c.Name + "): текст не виден до запуска" + hiddenTail
+	}
+	for _, r := range c.Redirs {
+		if r.N != "" && r.N != "0" {
+			continue
+		}
+		if r.Op == "<" && computedArg(r.Target) || r.Op == "<<<" && wholeSubstitution(r.Target) {
+			return "systemd-run запускает " + c.Name + " со скриптом на вводе из " + r.Op + " " + r.Target + ": текст не виден до запуска" + hiddenTail
+		}
+	}
+	return ""
+}
+
+// scriptBodyParsed — разбор прочёл скрипт, который оболочка c получает на
+// ввод (echo 'make' | sh): его вызовы идут с Via «pipe» и цепочкой c
+func scriptBodyParsed(c shellcmd.Call, calls []shellcmd.Call) bool {
+	via := append(append([]string{"pipe"}, c.Via...), c.Name)
+	return slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
+		return len(x.Via) >= len(via) && slices.Equal(x.Via[len(x.Via)-len(via):], via)
+	})
+}
+
+// systemdRunHiddenHint подсказка к отказу на невидимую команду под
+// systemd-run: служба окружение агента не наследует, значения передаются
+// опциями
+const systemdRunHiddenHint = "Назови команду под systemd-run литералом, а значения передай опциями: -E VAR=\"$VAR\" (окружение службы) и --working-directory=\"$DIR\": systemd-run --user -E DIR=\"$DIR\" sh -c 'make -C \"$DIR\"'"
 
 // systemdRunRemote — вызов c исполнит systemd-run на другой машине: -H/--host
 // (по ssh) или -M/--machine с литеральным именем чужой машины или
@@ -168,37 +216,77 @@ func plainWords(args []string) []word {
 	return out
 }
 
-// systemdRunHostOption — среди опций systemd-run (до первого слова команды)
-// есть -H/--host или -M/--machine с литеральным именем другой машины
+// systemdRunLongFlags длинные опции systemd-run без значения (getopt
+// systemd v259, src/run/run.c); со значением — длинные из systemdRunValues.
+// Вместе — имена, до которых getopt_long дополняет сокращение (--mach)
+var systemdRunLongFlags = []string{
+	"help", "version", "user", "system", "scope", "slice-inherit", "remain-after-exit", "send-sighup", "wait",
+	"tty", "pty", "pty-late", "pipe", "quiet", "verbose", "on-timezone-change", "on-clock-change", "no-block",
+	"no-ask-password", "collect", "same-dir", "same-root-dir", "shell", "ignore-failure", "no-pager",
+}
+
+// systemdRunLongName полное имя длинной опции systemd-run, как его находит
+// getopt_long: точное совпадение или единственное, которое начинается с
+// name; "" — нет такой или сокращение неоднозначно (systemd-run не
+// запустится)
+func systemdRunLongName(name string) string {
+	var found []string
+	for _, n := range append(slices.Clone(systemdRunLongFlags), systemdRunValues...) {
+		switch {
+		case len(n) < 2:
+		case n == name:
+			return n
+		case strings.HasPrefix(n, name):
+			found = append(found, n)
+		}
+	}
+	if len(found) == 1 {
+		return found[0]
+	}
+	return ""
+}
+
+// systemdRunHostOption — systemd-run исполнит команду на другой машине.
+// Транспорт задаёт последняя из -H/--host, -M/--machine и -C/--capsule: каждая
+// перезаписывает arg_transport и arg_host (src/run/run.c). -H — другая
+// машина по ssh; -M — другая, если имя литеральное и не эта машина
+// (localMachine); -C — капсула на этой машине. Опции кончаются на первом
+// слове команды и на --
 func systemdRunHostOption(args []string) bool {
+	remote := false
 	for i := 0; i < len(args); i++ {
 		t := args[i]
 		if t == "--" || !strings.HasPrefix(t, "-") || t == "-" {
-			return false
+			return remote
 		}
-		name, value := "", ""
-		if n, v, inline := strings.Cut(strings.TrimPrefix(t, "--"), "="); strings.HasPrefix(t, "--") {
-			name, value = n, v
-			if !inline && slices.Contains(systemdRunValues, n) && i+1 < len(args) {
-				i++
-				value = args[i]
-			}
-		} else {
-			var next bool
-			name, value, next = shortValue(t, systemdRunValues)
-			if next && i+1 < len(args) {
-				i++
-				value = args[i]
-			}
-		}
-		switch {
-		case name == "H" || name == "host":
-			return true
-		case name == "M" || name == "machine":
-			if !strings.ContainsAny(value, "$`\"'") && !localMachine(value) {
-				return true
-			}
+		name, value := systemdRunOption(args, &i)
+		switch name {
+		case "H", "host":
+			remote = true
+		case "M", "machine":
+			remote = !strings.ContainsAny(value, "$`\"'\\") && !localMachine(value)
+		case "C", "capsule":
+			remote = false
 		}
 	}
-	return false
+	return remote
+}
+
+// systemdRunOption опция systemd-run в args[*i]: имя (полное длинное или
+// буква со значением) и значение; *i сдвигается за значение отдельным словом
+func systemdRunOption(args []string, i *int) (name, value string) {
+	t := args[*i]
+	next := false
+	if strings.HasPrefix(t, "--") {
+		n, v, inline := strings.Cut(t[2:], "=")
+		name, value = systemdRunLongName(n), v
+		next = !inline && slices.Contains(systemdRunValues, name)
+	} else {
+		name, value, next = shortValue(t, systemdRunValues)
+	}
+	if next && *i+1 < len(args) {
+		*i++
+		value = args[*i]
+	}
+	return name, value
 }

@@ -421,22 +421,30 @@ func (t *KillGuardTool) unitActionReason(label string, a unitAction, via string,
 		if spare := restartableComm(unitName(u.text)); spare != "" && slices.Contains(systemctlRestartVerbs, verb) {
 			h = t.sessionUnits(procs, a.user, spare)
 		}
-		reason, hint := unitReason(u, h), ""
-		if u.literal && u.text == "" {
-			reason = emptyUnitReason(a.dbus)
-		}
-		if reason == "" && u.literal {
-			reason, hint = agentUnitReason(scope, unitName(u.text))
-		}
-		if reason != "" {
-			if hint == "" {
-				named := u.literal && !strings.ContainsAny(u.text, "*?[{")
-				hint = unitHint(scope, verb, named)
-			}
+		if reason, hint := actionUnitReason(a, u, h); reason != "" {
 			return fmt.Sprintf("%s %s: %s", label, shownUnit(u.text), reason), hint
 		}
 	}
 	return "", ""
+}
+
+// actionUnitReason почему действие a нельзя над юнитом u: юнит сессии из
+// hosts (unitReason), пустое имя, юнит другого агента (agentUnitReason); с
+// подсказкой. "" — можно
+func actionUnitReason(a unitAction, u word, hosts map[string]string) (reason, hint string) {
+	scope := a.scope()
+	reason = unitReason(u, hosts)
+	if u.literal && u.text == "" {
+		reason = emptyUnitReason(a.dbus)
+	}
+	if reason == "" && u.literal {
+		return agentUnitReason(scope, unitName(u.text))
+	}
+	if reason == "" {
+		return "", ""
+	}
+	named := u.literal && !strings.ContainsAny(u.text, "*?[{")
+	return reason, unitHint(scope, a.verb, named)
 }
 
 // emptyUnitReason отказ на пустое имя юнита: по D-Bus systemd берёт юнит

@@ -232,7 +232,10 @@ func optionValue(args []word, i *int, rest string) word {
 }
 
 // optionOperands слова вызова без опций: values — опции со значением отдельным
-// словом (короткие — буквой, длинные — с --), их значения не операнды
+// словом (короткие — буквой, длинные — с --), их значения не операнды.
+// В склейке коротких опций (-ps) значение берёт первая буква со значением,
+// как у getopt: остаток склейки — её значение, следующее слово — только
+// если она последняя
 func optionOperands(args []word, values []string) []word {
 	var out []word
 	for i := 0; i < len(args); i++ {
@@ -245,7 +248,7 @@ func optionOperands(args []word, values []string) []word {
 				i++
 			}
 		case len(a) > 1 && a[0] == '-':
-			if slices.Contains(values, a[len(a)-1:]) {
+			if clusterTakesNext(a[1:], values) {
 				i++
 			}
 		default:
@@ -253,6 +256,17 @@ func optionOperands(args []word, values []string) []word {
 		}
 	}
 	return out
+}
+
+// clusterTakesNext склейка коротких опций берёт значением следующее слово:
+// первая буква со значением стоит последней
+func clusterTakesNext(letters string, values []string) bool {
+	for j, r := range letters {
+		if slices.Contains(values, string(r)) {
+			return j+len(string(r)) == len(letters)
+		}
+	}
+	return false
 }
 
 // loginctlValues опции loginctl со значением
@@ -363,7 +377,7 @@ func (t *KillGuardTool) systemctlReason(args []word, via string, anyBus bool, pr
 	a.verb, a.units = ops[0].text, ops[1:]
 	if a.verb == "set-property" && len(a.units) > 1 {
 		// за юнитом — свойства (MemoryMax=1M), не юниты
-		a.units = a.units[:1]
+		a.units, a.props = a.units[:1], a.units[1:]
 	}
 	label := a.scope() + " " + a.verb
 	reason, hint = t.unitActionReason(label, a, via, procs)
@@ -385,6 +399,9 @@ type unitAction struct {
 	// dbus — действие пришло вызовом D-Bus: пустое имя юнита там — юнит
 	// вызывающего
 	dbus bool
+	// props — свойства set-property из systemctl (Имя=значение); у D-Bus не
+	// разбираются
+	props []word
 }
 
 // scope менеджер действия так, как его пишет systemctl
@@ -438,7 +455,13 @@ func actionUnitReason(a unitAction, u word, hosts map[string]string) (reason, hi
 		reason = emptyUnitReason(a.dbus)
 	}
 	if reason == "" && u.literal {
-		return agentUnitReason(scope, unitName(u.text))
+		name := unitName(u.text)
+		if a.verb == "set-property" && workerUnitRe.MatchString(name) && throttleOnly(a.props) {
+			// предел IO или CPU бойца замедляет его, а не гасит: мастер
+			// унимает бойца, который вешает машину, не останавливая его
+			return "", ""
+		}
+		return agentUnitReason(scope, name)
 	}
 	if reason == "" {
 		return "", ""

@@ -24,9 +24,37 @@ var agentUnits = []struct {
 	worker bool
 }{
 	{regexp.MustCompile(`^agent-.+\.scope$`), "юнит другого агента (agents.slice/agent-*.scope): с ним гаснет его сессия Claude", false},
-	{regexp.MustCompile(`^worker-.+\.service$`), "юнит бойца (worker-*.service): с ним гаснет его работа, а мастер не узнает почему", true},
+	{workerUnitRe, "юнит бойца (worker-*.service): с ним гаснет его работа, а мастер не узнает почему", true},
 	{regexp.MustCompile(`^graft-heavy-.+\.scope$`), "тяжёлая команда graft другого агента (graft-heavy-*.scope): гаснут его сборка или тесты", false},
 	{regexp.MustCompile(`^run-.+\.(service|scope|timer|path|socket)$`), "юнит systemd-run без имени (run-*): в нём может идти работа другого агента", false},
+}
+
+// workerUnitRe юнит бойца (worker run)
+var workerUnitRe = regexp.MustCompile(`^worker-.+\.service$`)
+
+// throttleProperties свойства ресурсов, которые только замедляют юнит:
+// процесс не останавливается и сигналов не получает. Память (MemoryMax,
+// MemoryHigh) и TasksMax сюда не входят: низкий предел убивает процесс
+// (OOM) или ломает его работу (fork не проходит)
+var throttleProperties = []string{
+	"IOReadBandwidthMax", "IOWriteBandwidthMax", "IOReadIOPSMax", "IOWriteIOPSMax",
+	"IOWeight", "StartupIOWeight", "IODeviceWeight", "IODeviceLatencyTargetSec",
+	"CPUWeight", "StartupCPUWeight", "CPUQuota", "CPUQuotaPeriodSec", "AllowedCPUs", "StartupAllowedCPUs",
+}
+
+// throttleOnly все свойства set-property — литералы Имя=значение из
+// throttleProperties. Пустой список (свойства не видны, вызов по D-Bus) — нет
+func throttleOnly(props []word) bool {
+	if len(props) == 0 {
+		return false
+	}
+	for _, p := range props {
+		name, _, ok := strings.Cut(p.text, "=")
+		if !p.literal || !ok || !slices.Contains(throttleProperties, name) {
+			return false
+		}
+	}
+	return true
 }
 
 // agentUnitReason отказ на действие над юнитом другого агента: name — имя

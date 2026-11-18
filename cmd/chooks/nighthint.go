@@ -80,7 +80,25 @@ func autonomousSkillCalled(config *core.Config, deadline time.Time) func(session
 		if deadline.Before(wait) {
 			wait = deadline
 		}
-		called, err := skillreload.SkillCalled(dir, sessionID, nighthint.AutonomousSkills(), wait)
+		// LockFile ограничивает ожидание блокировки, но обычное чтение после
+		// захвата может задержаться на диске. Оно только читает запись, поэтому
+		// уносим его в горутину и возвращаемся к абсолютному сроку хука.
+		type skillCallResult struct {
+			called bool
+			err    error
+		}
+		result := make(chan skillCallResult, 1)
+		go func() {
+			called, err := skillreload.SkillCalled(dir, sessionID, nighthint.AutonomousSkills(), wait)
+			result <- skillCallResult{called: called, err: err}
+		}()
+		var called bool
+		select {
+		case answer := <-result:
+			called, err = answer.called, answer.err
+		case <-time.After(time.Until(deadline)):
+			return false, fmt.Errorf("skill-reload record read abandoned at hook deadline: %w", skillreload.ErrNoTime)
+		}
 		if errors.Is(err, skillreload.ErrNoState) {
 			return false, nil
 		}

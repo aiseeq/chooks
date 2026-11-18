@@ -987,6 +987,100 @@ func TestCheck_LockWaitBoundedByDeadline(t *testing.T) {
 	}
 }
 
+type expiryStore struct {
+	textStore
+	now      *time.Time
+	deadline time.Time
+	puts     int
+}
+
+func (s *expiryStore) put(text string) (string, error) {
+	hash, err := s.textStore.put(text)
+	s.puts++
+	*s.now = s.deadline
+	return hash, err
+}
+
+// Просроченная проверка не сохраняет сдвинутую базу после store.put:
+// следующая проверка выдаёт ту же правку, не теряя напоминание.
+func TestCheck_DeadlineAfterNoticePutKeepsStateAndNotice(t *testing.T) {
+	f := newFixture(t)
+	base := time.Now().Add(-time.Hour)
+	f.writeSkill("до", base)
+	f.load("до", base.Add(time.Minute))
+	f.check(Event{})
+	statePath := filepath.Join(f.checker.StateDir, "sess-1.json")
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.writeSkill("после", base.Add(5*time.Minute))
+	now := time.Now()
+	deadline := now.Add(time.Second)
+	store := &expiryStore{textStore: newDirStore(f.checker.StateDir), now: &now, deadline: deadline}
+	f.checker.Now = func() time.Time { return now }
+	f.checker.Deadline = deadline
+	f.checker.store = store
+	var stages []string
+	f.checker.Substage = func(stage string) { stages = append(stages, stage) }
+	_, err = f.checker.Check(Event{SessionID: "sess-1", TranscriptPath: f.transcript})
+	if !errors.Is(err, ErrNoTime) {
+		t.Fatalf("ждали ErrNoTime после put, получили %v", err)
+	}
+	if store.puts != 1 {
+		t.Fatalf("store.put вызван %d раз", store.puts)
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("запись изменилась после срока: err=%v, before=%s, after=%s", err, before, after)
+	}
+	if stages[len(stages)-1] != "notices" {
+		t.Fatalf("после истечения срока началась следующая подстадия: %v", stages)
+	}
+	f.checker.Now = nil
+	f.checker.Deadline = time.Time{}
+	f.checker.store = nil
+	f.checker.Substage = nil
+	got := f.check(Event{SessionID: "sess-1", TranscriptPath: f.transcript})
+	if len(got) != 1 || !strings.Contains(got[0].Diff, "+после") {
+		t.Fatalf("следующая проверка потеряла напоминание: %+v", got)
+	}
+	if got := f.check(Event{SessionID: "sess-1", TranscriptPath: f.transcript}); len(got) != 0 {
+		t.Fatalf("напоминание выдано повторно: %+v", got)
+	}
+}
+
+// При неполном сканировании сохраняется смещение даже после срока Check:
+// три последовательных события продолжают чтение с предыдущего места.
+func TestCheck_ExpiredPendingScanAdvancesOffset(t *testing.T) {
+	f := newFixture(t)
+	line := `{"type":"progress","payload":"` + strings.Repeat("x", 96) + `"}` + "\n"
+	if err := os.WriteFile(f.transcript, []byte(strings.Repeat(line, 400_000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.checker.ScanBudget = time.Second
+	event := Event{SessionID: "sess-1", TranscriptPath: f.transcript}
+	var previous int64
+	for i := range 3 {
+		f.checker.Deadline = time.Now().Add(30 * time.Millisecond)
+		result, err := f.checker.Check(event)
+		if err != nil {
+			t.Fatalf("событие %d: Check: %v", i+1, err)
+		}
+		if !result.Pending {
+			t.Fatalf("событие %d: транскрипт неожиданно дочитан", i+1)
+		}
+		state, err := readStateUnlocked(f.checker.StateDir, "sess-1.json")
+		if err != nil {
+			t.Fatalf("событие %d: read state: %v", i+1, err)
+		}
+		if state.Offset <= previous {
+			t.Fatalf("событие %d: смещение не выросло: было %d, стало %d", i+1, previous, state.Offset)
+		}
+		previous = state.Offset
+	}
+}
+
 // Метку не записать — чистка всё равно идёт, сбой виден вызывающему
 func TestCleanupRunsWhenMarkUnwritable(t *testing.T) {
 	f := newFixture(t)

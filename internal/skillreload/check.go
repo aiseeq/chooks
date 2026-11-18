@@ -42,9 +42,12 @@ type Checker struct {
 	// транскрипта не заходят за него. Нулевое — без общего срока
 	Deadline time.Time
 	Now      func() time.Time
+	// Substage сообщает текущую подстадию для журнала таймаутов хука.
+	Substage func(string)
+	store    textStore
 }
 
-// ErrNoTime — срок проверки наступил до её начала
+// ErrNoTime — срок проверки наступил до её начала или до сохранения напоминания
 var ErrNoTime = errors.New("skill reload check skipped: hook budget spent")
 
 // forkAgentType — тип субагента, который наследует контекст родителя вместе
@@ -66,6 +69,7 @@ func (c Checker) Check(event Event) (Result, error) {
 	if !c.Deadline.IsZero() && !c.now().Before(c.Deadline) {
 		return Result{}, ErrNoTime
 	}
+	c.substage("lock")
 	locked, err := openState(c.StateDir, name, c.within(c.now().Add(lockWait)))
 	if err != nil {
 		return Result{}, err
@@ -78,18 +82,31 @@ func (c Checker) Check(event Event) (Result, error) {
 	}
 	state := &locked.State
 	if locked.Fresh {
+		c.substage("fresh")
 		result.Warnings = append(result.Warnings, c.prepareFresh(event, state)...)
 	}
 
+	c.substage("scan")
 	scan, err := c.update(state, transcript)
 	if err != nil {
 		// Прочитанное до сбоя сохраняется: следующее событие продолжит с него
-		return Result{}, errors.Join(err, locked.save())
+		expired := c.expired()
+		c.substage("save")
+		err = errors.Join(err, locked.save())
+		if expired {
+			err = errors.Join(err, ErrNoTime)
+		}
+		return Result{}, err
 	}
 	result.Pending = !scan.Complete
 	result.Warnings = append(result.Warnings, scan.Broken...)
 
-	t := tracker{state: state, store: newDirStore(c.StateDir), view: diskView}
+	c.substage("apply")
+	store := c.store
+	if store == nil {
+		store = newDirStore(c.StateDir)
+	}
+	t := tracker{state: state, store: store, view: diskView}
 	for _, ev := range scan.Events {
 		if ev.Kind == evSkillLoad || ev.Kind == evMemoryLoad {
 			result.NewLoads++
@@ -102,16 +119,34 @@ func (c Checker) Check(event Event) (Result, error) {
 	// Недочитанный транскрипт может ниже держать новый вызов того же скилла
 	// или заметку Claude Code: выдача по старому месту была бы ложной
 	if !result.Pending {
+		c.substage("notices")
 		notices, warnings := t.notices(c.now())
 		result.Notices = notices
 		result.Warnings = append(result.Warnings, warnings...)
 	}
+	// Когда транскрипт ещё не дочитан либо выдачи нет, сохранение смещения
+	// позволяет продолжить чтение следующим событием. Не сохраняем только
+	// состояние с уже вычисленным напоминанием: иначе оно будет потеряно.
+	if len(result.Notices) > 0 && c.expired() {
+		return Result{}, ErrNoTime
+	}
+	c.substage("save")
 	if err := locked.save(); err != nil {
 		// Без записи та же правка придёт ещё раз — лишнее лучше
 		// пропущенного, поэтому итог отдаётся
 		result.Warnings = append(result.Warnings, err)
 	}
 	return result, nil
+}
+
+func (c Checker) substage(name string) {
+	if c.Substage != nil {
+		c.Substage(name)
+	}
+}
+
+func (c Checker) expired() bool {
+	return !c.Deadline.IsZero() && !c.now().Before(c.Deadline)
 }
 
 // prepareFresh готовит запись впервые встреченной сессии: убирает давние

@@ -218,7 +218,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		timer.stage("state")
 		saveState(logger, input.SessionID, core.StateWorking)
 		timer.stage("skills")
-		remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget))
+		remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer)
 		return exitAllowed, nil
 	case hookPostToolBatch:
 		// Пакет инструментов — место напоминания в длинном ходе и у субагентов,
@@ -234,7 +234,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 			}
 		}
 		timer.stage("skills")
-		remindStaleSkills(eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget))
+		remindStaleSkills(eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget), timer)
 		return exitAllowed, nil
 	case hookStop:
 		runSessionEvent(core.EventStop, data, config, logger)

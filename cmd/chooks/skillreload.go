@@ -43,7 +43,7 @@ type hookContextOutput struct {
 // инструкций, сделанные после того, как их текст попал в контекст: diff, а
 // при большой правке — просьбу перечитать. Сбой только логируется: выдача не
 // повод показывать человеку ошибку хука на каждом ходу
-func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, deadline time.Time) {
+func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, deadline time.Time, timer *hookTimer) {
 	if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
 		return
 	}
@@ -56,16 +56,54 @@ func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Con
 		return
 	}
 
-	checker := skillreload.Checker{StateDir: stateDir, ScanBudget: skillScanBudget, Deadline: deadline}
-	result, err := checker.Check(skillreload.Event{
-		SessionID:      input.SessionID,
-		AgentID:        input.AgentID,
-		AgentType:      input.AgentType,
-		TranscriptPath: input.TranscriptPath,
+	checker := skillreload.Checker{StateDir: stateDir, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
+	awaitSkillCheck(timer, logger, eventName, input, func() {
+		result, err := checker.Check(skillreload.Event{
+			SessionID:      input.SessionID,
+			AgentID:        input.AgentID,
+			AgentType:      input.AgentType,
+			TranscriptPath: input.TranscriptPath,
+		})
+		finishSkillCheck(eventName, input, logger, result, err)
 	})
-	if errors.Is(err, skillreload.ErrNoTime) {
-		// Напоминание придёт следующим событием: запись сессии не тронута
+}
+
+// awaitSkillCheck ограничивает ожидание Check абсолютным сроком от старта
+// процесса. Ушедшая горутина может закончить начатую запись, но хук её не ждёт.
+func awaitSkillCheck(timer *hookTimer, logger core.Logger, eventName string, input *core.ToolInput, check func()) {
+	if !timer.now().Before(timer.deadline(optionalBudget)) {
 		logger.Warn("skill reload skipped: hook budget spent", "hook", eventName, "session", input.SessionID, "agent", input.AgentID)
+		return
+	}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		check()
+	}()
+	wait := time.Until(timer.deadline(skillHardBudget))
+	if wait <= 0 {
+		warnSkillAbandoned(timer, logger, eventName, input)
+		return
+	}
+	select {
+	case <-finished:
+		timer.setSubstage("")
+	case <-time.After(wait):
+		warnSkillAbandoned(timer, logger, eventName, input)
+	}
+}
+
+func warnSkillAbandoned(timer *hookTimer, logger core.Logger, eventName string, input *core.ToolInput) {
+	logger.Warn("skill reload abandoned: hook budget spent", "hook", eventName, "session", input.SessionID,
+		"agent", input.AgentID, "substage", timer.currentSubstage())
+}
+
+func finishSkillCheck(eventName string, input *core.ToolInput, logger core.Logger, result skillreload.Result, err error) {
+	if errors.Is(err, skillreload.ErrNoTime) {
+		// Напоминание останется для следующего события; сбой чтения
+		// транскрипта, случившийся после срока, — в поле error
+		logger.Warn("skill reload skipped: hook budget spent", "hook", eventName, "session", input.SessionID,
+			"agent", input.AgentID, "error", err)
 		return
 	}
 	if errors.Is(err, core.ErrLockBusy) {
@@ -91,14 +129,14 @@ func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Con
 			diffs++
 		}
 	}
-	logger.Info("skill reload notified", "hook", eventName, "session", input.SessionID, "agent", input.AgentID, "files", names, "diffs", diffs)
-
 	var output hookContextOutput
 	output.HookSpecificOutput.HookEventName = eventName
 	output.HookSpecificOutput.AdditionalContext = skillreload.Format(result.Notices)
 	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
 		logger.Warn("skill reload reminder not printed", "error", err)
+		return
 	}
+	logger.Info("skill reload notified", "hook", eventName, "session", input.SessionID, "agent", input.AgentID, "files", names, "diffs", diffs)
 }
 
 func newSkillScanCmd() *cobra.Command {

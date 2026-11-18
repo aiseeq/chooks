@@ -26,6 +26,10 @@ const slowFloor = 1500 * time.Millisecond
 // на вывод и на запуск процесса под нагрузкой
 const optionalBudget = 2 * time.Second
 
+// skillHardBudget даёт Check 2 с и ещё 0,5 с на завершение записи,
+// начатой до срока Check; остаток до SIGTERM на 3 с нужен для лога и выхода.
+const skillHardBudget = 2500 * time.Millisecond
+
 // killedExitCode — код выхода по SIGTERM, как у процесса без обработчика
 const killedExitCode = 128 + int(syscall.SIGTERM)
 
@@ -46,14 +50,15 @@ const timeoutSlack = time.Second
 // строкой в файл длительностей, а стадии — в лог: при SIGTERM и у запуска
 // дольше половины таймаута
 type hookTimer struct {
-	mu      sync.Mutex
-	hook    string
-	start   time.Time
-	mark    time.Time
-	current string
-	stages  []string
-	logger  core.Logger
-	session string
+	mu       sync.Mutex
+	hook     string
+	start    time.Time
+	mark     time.Time
+	current  string
+	substage string
+	stages   []string
+	logger   core.Logger
+	session  string
 	// startErr — старт процесса не прочитан, отсчёт идёт от main
 	startErr error
 	now      func() time.Time
@@ -96,6 +101,20 @@ func (t *hookTimer) stage(name string) {
 	t.stages = append(t.stages, formatStage(t.current, now.Sub(t.mark)))
 	t.mark = now
 	t.current = name
+	t.substage = ""
+}
+
+// setSubstage обновляет подстадию долгой стадии, видимую в логах таймаута.
+func (t *hookTimer) setSubstage(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.substage = name
+}
+
+func (t *hookTimer) currentSubstage() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.substage
 }
 
 // setSession — сессия известна после разбора входа
@@ -186,12 +205,20 @@ func (t *hookTimer) reportTermination() {
 	at := t.now()
 	elapsed := at.Sub(t.start)
 	current := t.current
+	substage := t.substage
 	session := t.session
-	stages := append(append([]string{}, t.stages...), formatStage(current+"(running)", t.now().Sub(t.mark)))
+	running := current + "(running)"
+	if substage != "" {
+		running = current + "." + substage + "(running)"
+	}
+	stages := append(append([]string{}, t.stages...), formatStage(running, t.now().Sub(t.mark)))
 	logger := t.logger
 	t.mu.Unlock()
 	args := []string{"hook", t.hook, "session", session, "elapsed_ms", strconv.FormatInt(elapsed.Milliseconds(), 10),
 		"stage", current, "stages", strings.Join(stages, ",")}
+	if substage != "" {
+		args = append(args, "substage", substage)
+	}
 	status, statusErr := t.terminationStatus(elapsed)
 	if statusErr != nil {
 		args = append(args, "timeout_error", statusErr.Error())
@@ -215,6 +242,7 @@ func (t *hookTimer) finish(status string) {
 	t.stages = append(t.stages, formatStage(t.current, now.Sub(t.mark)))
 	elapsed := now.Sub(t.start)
 	stages := strings.Join(t.stages, ",")
+	substage := t.substage
 	logger := t.logger
 	session := t.session
 	t.mu.Unlock()
@@ -224,6 +252,9 @@ func (t *hookTimer) finish(status string) {
 		return
 	}
 	args := []any{"hook", t.hook, "session", session, "elapsed_ms", elapsed.Milliseconds(), "stages", stages}
+	if substage != "" {
+		args = append(args, "substage", substage)
+	}
 	if t.startErr != nil {
 		args = append(args, "process_start_error", t.startErr)
 	}

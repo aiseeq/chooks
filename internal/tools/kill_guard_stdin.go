@@ -249,6 +249,12 @@ func afterXargs(c shellcmd.Call) bool {
 func (s *killScan) inputOf(c shellcmd.Call) stdinSpan {
 	for _, r := range slices.Backward(c.Redirs) {
 		if (r.N == "" || r.N == "0") && strings.HasPrefix(r.Op, "<") {
+			if r.Op == "<<" || r.Op == "<<-" {
+				// тело heredoc — скрипт оболочки, которая читает ввод:
+				// за run0 разбор его не видит, команда за обёрткой разобрана
+				// заново без него (literalFeed)
+				return stdinSpan{src: stdinRedirect, feed: r.Body}
+			}
 			target, err := redirTargetWord(r)
 			if err != nil {
 				// значение с байтами, которых bash в кавычках не держит:
@@ -288,7 +294,7 @@ func (s *killScan) inputOf(c shellcmd.Call) stdinSpan {
 // скрипт не литеральный, уже прочитан разбором или c — сам вызов такого
 // скрипта
 func (s *killScan) literalFeed(c shellcmd.Call, calls []shellcmd.Call) []shellcmd.Call {
-	if !slices.Contains(c.Via, "systemd-run") || slices.Contains(c.Via, "pipe") || !shellcmd.IsShell(c.Name) {
+	if !slices.Contains(c.Via, "systemd-run") && !slices.Contains(c.Via, "run0") || slices.Contains(c.Via, "pipe") || !shellcmd.IsShell(c.Name) {
 		return nil
 	}
 	if _, runner := scriptArgs(c); runner || !shellReadsInput(c.Args) || scriptBodyParsed(c, calls) {

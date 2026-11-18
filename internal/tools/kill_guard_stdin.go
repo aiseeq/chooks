@@ -167,12 +167,7 @@ func redirectInput(text string, redirs []*syntax.Redirect) (stdinSpan, bool) {
 		case syntax.DplIn, syntax.RdrIn, syntax.RdrInOut, syntax.WordHdoc:
 			return redirectSource(r.Op.String(), text[r.Word.Pos().Offset():r.Word.End().Offset()]), true
 		case syntax.Hdoc, syntax.DashHdoc:
-			// тело heredoc у блока или цикла ({ …; run0 bash; } <<EOF) —
-			// скрипт оболочки внутри, которая читает ввод (literalFeed)
-			if r.Hdoc == nil {
-				return stdinSpan{src: stdinRedirect}, true
-			}
-			return stdinSpan{src: stdinRedirect, feed: text[r.Hdoc.Pos().Offset():r.Hdoc.End().Offset()]}, true
+			return stdinSpan{src: stdinRedirect}, true
 		}
 	}
 	return stdinSpan{}, false
@@ -180,7 +175,7 @@ func redirectInput(text string, redirs []*syntax.Redirect) (stdinSpan, bool) {
 
 // redirectSource ввод из перенаправления op с целью target — так же, как у
 // оболочки прямо под systemd-run (systemdRunInputReason): <& — копия
-// дескриптора, не видна; < и <> из подстановки ("$F", "$DIR/a.sh", <(…)) и <<< из
+// дескриптора, не видна; < и <> из подстановки ("$F", "$DIR/a.sh") и <<< из
 // одной подстановки ("$CMD") — не видны, как пайп; <<< с иным текстом —
 // перенаправление, а его текст разбор прочтёт как скрипт (literalFeed);
 // < литерального файла, heredoc — перенаправление
@@ -188,7 +183,7 @@ func redirectSource(op, target string) stdinSpan {
 	switch {
 	case op == "<&":
 		return stdinSpan{src: stdinPipe}
-	case (op == "<" || op == "<>") && (computedArg(target) || strings.HasPrefix(target, "<(")), op == "<<<" && wholeSubstitution(target):
+	case (op == "<" || op == "<>") && computedArg(target), op == "<<<" && wholeSubstitution(target):
 		return stdinSpan{src: stdinPipe}
 	case op == "<<<":
 		return stdinSpan{src: stdinRedirect, feed: "sh <<< " + target, feedVia: []string{"sh"}}
@@ -254,12 +249,6 @@ func afterXargs(c shellcmd.Call) bool {
 func (s *killScan) inputOf(c shellcmd.Call) stdinSpan {
 	for _, r := range slices.Backward(c.Redirs) {
 		if (r.N == "" || r.N == "0") && strings.HasPrefix(r.Op, "<") {
-			if r.Op == "<<" || r.Op == "<<-" {
-				// тело heredoc — скрипт оболочки, которая читает ввод:
-				// за run0 разбор его не видит, команда за обёрткой разобрана
-				// заново без него (literalFeed)
-				return stdinSpan{src: stdinRedirect, feed: r.Body}
-			}
 			target, err := redirTargetWord(r)
 			if err != nil {
 				// значение с байтами, которых bash в кавычках не держит:
@@ -299,30 +288,16 @@ func (s *killScan) inputOf(c shellcmd.Call) stdinSpan {
 // скрипт не литеральный, уже прочитан разбором или c — сам вызов такого
 // скрипта
 func (s *killScan) literalFeed(c shellcmd.Call, calls []shellcmd.Call) []shellcmd.Call {
-	if !slices.Contains(c.Via, "systemd-run") && !slices.Contains(c.Via, "run0") || slices.Contains(c.Via, "pipe") || !shellcmd.IsShell(c.Name) {
+	if !slices.Contains(c.Via, "systemd-run") || slices.Contains(c.Via, "pipe") || !shellcmd.IsShell(c.Name) {
 		return nil
 	}
 	if _, runner := scriptArgs(c); runner || !shellReadsInput(c.Args) || scriptBodyParsed(c, calls) {
 		return nil
 	}
-	in := s.stdinOf(c)
-	if !slices.Contains(c.Via, "systemd-run") && s.killText && in.src == stdinPipe && in.feed == "" {
-		// под systemd-run невидимый ввод — systemdRunInputReason
-		s.addReason(c.Name + " за run0 читает скрипт из ввода, текста которого не видно до запуска (пайп, <(…), \"$F\", xargs): проверить сигналы в нём нельзя")
-		return nil
-	}
 	if afterXargs(c) {
 		return nil
 	}
-	if in.feed != "" && s.killText {
-		if _, err := shellcmd.Calls(in.feed); err != nil {
-			// оболочка исполняет ввод построчно и до ошибки разбора успеет
-			// выполнить начало (kill 1234⏎fi): невидимый скрипт — отказ
-			s.addReason(c.Name + " читает скрипт из ввода, а разбор его не прошёл (" + err.Error() + "): проверить сигналы в нём нельзя")
-			return nil
-		}
-	}
-	return s.feedCalls(in, []shellcmd.Call{c})
+	return s.feedCalls(s.stdinOf(c), []shellcmd.Call{c})
 }
 
 // feedCalls вызовы литерального текста ввода in (feed, stdinSpan), который

@@ -127,6 +127,10 @@ func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call
 		return "run0 запускает " + name + " временной службой от менеджера systemd, а не потомком агента: ядро (agent-signal-guard) его сигналы не сверяет, и он дотянется до процессов других агентов",
 			"Шли сигнал прямо, без run0: найди PID отдельной командой (pgrep -a '[x]yz') и убей литералом: kill 12345; чужой процесс root — sudo kill 12345"
 	}
+	if slices.Contains(c.Via, "run0") && s.killText && run0HiddenScript(c, calls) {
+		return "run0 запускает " + c.Name + " временной службой от менеджера systemd, а скрипт он берёт с ввода: разбор его не видит, ядро (agent-signal-guard) сигналы службы не сверяет, а kill в команде есть",
+			"Без run0: sudo " + c.Name + " (sudo оставляет процесс потомком агента)"
+	}
 	if k < 0 {
 		return "", ""
 	}
@@ -444,4 +448,16 @@ func systemdRunOption(args []string, i *int) (name, value string) {
 		value = args[*i]
 	}
 	return name, value
+}
+
+// run0HiddenScript — оболочка c за run0 исполняет скрипт с ввода, которого
+// разбор не прочёл: форм подачи много (пайп, heredoc блока или функции,
+// exec <, вложенный heredoc, слова xargs: xargs run0 bash -c), за run0 их
+// не разобрать. Скрипт файлом (bash a.sh) и через -c 'текст' — не этот
+// случай: -c разобран, файл — как у sudo
+func run0HiddenScript(c shellcmd.Call, calls []shellcmd.Call) bool {
+	if !shellcmd.IsShell(c.Name) {
+		return false
+	}
+	return shellReadsInput(c.Args) && !scriptBodyParsed(c, calls)
 }

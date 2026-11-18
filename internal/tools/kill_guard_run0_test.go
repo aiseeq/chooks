@@ -32,6 +32,19 @@ func TestKillGuardRun0Signal(t *testing.T) {
 		`while read x; do run0 bash; done < <(printf 'x\nkill 1234\n')`,
 		`printf 'x\nkill 1234\n' | { read x; run0 bash; }`,
 		`cat kill-list | xargs run0 bash`,
+		// функция, exec <, xargs с heredoc, вложенный heredoc
+		"f() { run0 bash; }; f <<EOF\nkill 1234\nEOF",
+		`f() { run0 bash; }; f <<< 'kill 1234'`,
+		`f() { run0 bash; }; echo 'kill 1234' | f`,
+		`exec < <(echo kill 1234); run0 bash`,
+		"exec <<EOF\nkill 1234\nEOF\nrun0 bash",
+		"{ xargs run0 bash -c; } <<EOF\n'kill 1234'\nEOF",
+		"xargs run0 bash -c <<EOF\n'kill 1234'\nEOF",
+		"bash <<EOF\n{ read x; run0 bash; } <<IN\nx\nkill 1234\nIN\nEOF",
+		// цена правила: скрипт с ввода за run0 не разбирается, kill в
+		// тексте — отказ, даже когда сам скрипт литеральный
+		`echo make | run0 bash; echo skill`,
+		`run0 sh -c 'echo kill 1234 | bash'`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -51,8 +64,19 @@ func TestKillGuardRun0Signal(t *testing.T) {
 		`systemd-run --user --pipe bash <<< 'echo (('`,
 		`systemd-run --user --pipe bash <<< 'make; fi'`,
 		"run0 bash <<EOF\nmake\nfi\nEOF",
-		// литеральный пайп разбор читает: kill в тексте — не повод отказа
-		`echo make | run0 bash; echo skill`,
+		`systemd-run --user bash < <(echo make)`,
+		`systemd-run --user --scope sh < <(echo make)`,
+		`{ read x; systemd-run --user --pipe bash; } < <(printf 'x\nmake\n')`,
+		// скрипт аргументом и файлом за run0 — не с ввода
+		`run0 bash -c 'make'; echo skill`,
+		`run0 bash ./build.sh; echo skill`,
+		// скрипт с ввода прочитан разбором
+		`run0 sh -c 'echo make | bash'; echo skill`,
+		// без run0 скрипт с ввода — потомок агента, ядро его сверяет
+		`bash < ./build.sh; echo skill`,
+		"f() { sudo bash; }; f <<EOF\nmake\nEOF\necho skill",
+		// без kill в тексте скрипт с ввода — не отказ
+		`echo make | run0 bash; systemctl --user status x.service`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)

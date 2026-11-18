@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -82,8 +83,8 @@ var podmanValues = []string{
 }
 
 // podmanStopVerbs команды podman (и podman container, podman pod), которые
-// гасят контейнер
-var podmanStopVerbs = []string{"rm", "stop", "kill"}
+// гасят контейнер: restart сначала останавливает его (сигнал процессам)
+var podmanStopVerbs = []string{"rm", "stop", "kill", "restart"}
 
 // podmanStop — вызов podman останавливает или удаляет контейнер (pod):
 // первая команда после глобальных опций, за container и pod — следующая
@@ -116,21 +117,10 @@ func podmanStop(args []string) (string, bool) {
 // среди них ищется сам systemd-run
 func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call, feedRead bool) (reason, hint string) {
 	k := slices.Index(c.Via, "systemd-run")
-	if slices.Contains(c.Via, "ssh") || k >= 0 && systemdRunRemote(c, calls, k) {
+	if slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
 		return "", ""
 	}
 	name, signal := signalCommand(c)
-	if signal && slices.Contains(c.Via, "run0") {
-		// run0 запускает команду временной службой, порождённой менеджером
-		// (man run0: «a fresh, isolated service forked off by the service
-		// manager»), даже с --scope у systemd-run под ним
-		return "run0 запускает " + name + " временной службой от менеджера systemd, а не потомком агента: ядро (agent-signal-guard) его сигналы не сверяет, и он дотянется до процессов других агентов",
-			"Шли сигнал прямо, без run0: найди PID отдельной командой (pgrep -a '[x]yz') и убей литералом: kill 12345; чужой процесс root — sudo kill 12345"
-	}
-	if slices.Contains(c.Via, "run0") && s.killText && run0HiddenScript(c, calls) {
-		return "run0 запускает " + c.Name + " временной службой от менеджера systemd, а скрипт он берёт с ввода: разбор его не видит, ядро (agent-signal-guard) сигналы службы не сверяет, а kill в команде есть",
-			"Без run0: sudo " + c.Name + " (sudo оставляет процесс потомком агента)"
-	}
 	if k < 0 {
 		return "", ""
 	}
@@ -179,7 +169,53 @@ func (s *killScan) systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call
 		// файл скрипта (sh x.sh) — вне этой проверки
 		return ""
 	}
-	return s.systemdRunInputReason(c, calls, feedRead)
+	if reason := s.systemdRunInputReason(c, calls, feedRead); reason != "" {
+		return reason
+	}
+	if s.killText && !feedRead && s.unreadInput(c, calls) {
+		return "systemd-run запускает " + c.Name + ", который читает скрипт с ввода, а разбор этого скрипта не видит (ввод задан функции, exec <, циклу, xargs), и в команде есть kill: проверить скрипт до запуска нельзя" + hiddenTail
+	}
+	return ""
+}
+
+// unreadInput оболочка c под службой systemd-run (не --scope) читает скрипт
+// с ввода, текста которого разбор не прочёл: форм подачи ввода много
+// (функция, exec <, цикл с < <(…), xargs, coproc), и каждую разбор не
+// знает. Прочитан — разбор нашёл вызовы скрипта (scriptBodyParsed,
+// inputCallsParsed). Ввод, текст которого известен и без вызовов, — не
+// повод: свой heredoc и <<< (пустое тело, комментарий) и литеральный файл
+// (sh < build.sh — файл скрипта, как sh build.sh), кроме ввода xargs перед
+// c: его строки станут аргументами c (-c и скрипт)
+func (s *killScan) unreadInput(c shellcmd.Call, calls []shellcmd.Call) bool {
+	switch {
+	case systemdRunScopeOnly(c, calls) || scriptBodyParsed(c, calls) || inputCallsParsed(c, calls):
+		return false
+	case afterXargs(c):
+		// ввод у xargs и parallel перед c — не скрипт c, а его аргументы
+		return true
+	}
+	for _, r := range slices.Backward(c.Redirs) {
+		if r.N == "" || r.N == "0" {
+			switch r.Op {
+			case "<<", "<<-", "<<<":
+				return false
+			case "<", "<>":
+				return computedArg(r.Target) || strings.HasPrefix(r.Target, "<(")
+			}
+		}
+	}
+	return true
+}
+
+// inputCallsParsed — разбор нашёл вызовы скрипта, который оболочка c
+// читает с ввода (тело heredoc у неё, у блока или функции вокруг): с Via
+// цепочки c впереди и местом за c в тексте
+func inputCallsParsed(c shellcmd.Call, calls []shellcmd.Call) bool {
+	chain := append(slices.Clone(c.Via), c.Name)
+	return slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
+		after := x.Offset < 0 || c.Offset < 0 || x.Offset > c.Offset
+		return len(x.Via) >= len(chain) && slices.Equal(x.Via[:len(chain)], chain) && after
+	})
 }
 
 // systemdRunInputReason оболочка c под systemd-run читает скрипт из ввода,
@@ -249,7 +285,7 @@ func shellReadsInput(args []string) bool {
 // скрипт: оболочка без -c (её ввод не забирает xargs или parallel перед
 // ней) или обёртка, за которой разбор проверит её команду
 func inputTaker(c shellcmd.Call) bool {
-	if _, ok := elevatedCommand(c); ok {
+	if _, ok := rewrittenCommand(c); ok {
 		return true
 	}
 	if _, runner := scriptArgs(c); runner || !shellcmd.IsShell(c.Name) {
@@ -294,6 +330,42 @@ func systemdRunRemote(c shellcmd.Call, calls []shellcmd.Call, k int) bool {
 		return systemdRunHostOption(runs[0].Args)
 	}
 	return len(runs) > 0 && !slices.ContainsFunc(runs, func(x shellcmd.Call) bool { return !systemdRunHostOption(x.Args) })
+}
+
+// systemdRunElsewhere — какой-то systemd-run над c исполнит его на другой
+// машине (systemdRunRemote): run0 systemd-run -H host kill 1 — служба
+// здесь запускает systemd-run, а kill идёт на host. systemd-run прямо под
+// systemd-run разбор вызовом не отдаёт: его опции — слова внешнего после
+// его опций (nestedSystemdRunRemote)
+func systemdRunElsewhere(c shellcmd.Call, calls []shellcmd.Call) bool {
+	for k, v := range c.Via {
+		if v != "systemd-run" {
+			continue
+		}
+		if systemdRunRemote(c, calls, k) {
+			return true
+		}
+		if runs, own := systemdRunCalls(c, calls, k); own && nestedSystemdRunRemote(runs[0].Args) {
+			return true
+		}
+	}
+	return false
+}
+
+// nestedSystemdRunRemote — команда systemd-run с опциями args — снова
+// systemd-run (и так далее), и один из них идёт на другую машину
+func nestedSystemdRunRemote(args []string) bool {
+	for range maxRun0Rewrites {
+		start := systemdRunCommandStart(args)
+		if start >= len(args) || path.Base(args[start]) != "systemd-run" {
+			return false
+		}
+		args = args[start+1:]
+		if systemdRunHostOption(args) {
+			return true
+		}
+	}
+	return false
 }
 
 // signalCommand c шлёт сигнал или гасит контейнер: kill, pkill, killall,
@@ -448,16 +520,4 @@ func systemdRunOption(args []string, i *int) (name, value string) {
 		value = args[*i]
 	}
 	return name, value
-}
-
-// run0HiddenScript — оболочка c за run0 исполняет скрипт с ввода, которого
-// разбор не прочёл: форм подачи много (пайп, heredoc блока или функции,
-// exec <, вложенный heredoc, слова xargs: xargs run0 bash -c), за run0 их
-// не разобрать. Скрипт файлом (bash a.sh) и через -c 'текст' — не этот
-// случай: -c разобран, файл — как у sudo
-func run0HiddenScript(c shellcmd.Call, calls []shellcmd.Call) bool {
-	if !shellcmd.IsShell(c.Name) {
-		return false
-	}
-	return shellReadsInput(c.Args) && !scriptBodyParsed(c, calls)
 }

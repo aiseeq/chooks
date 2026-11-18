@@ -177,7 +177,7 @@ func (p parallelCommand) script() (string, error) {
 func (s *killScan) elevatedCalls(calls []shellcmd.Call) []shellcmd.Call {
 	out := slices.Clone(calls)
 	for i := 0; i < len(out) && i < 64; i++ {
-		inner, ok := elevatedCommand(out[i])
+		inner, ok := rewrittenCommand(out[i])
 		if !ok {
 			continue
 		}

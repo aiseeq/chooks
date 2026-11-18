@@ -55,11 +55,18 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 	}
 	text := unquoted(input.Command)
 	killText := strings.Contains(text, "kill")
-	if !killText && !sessionToolWordRe.MatchString(text) && !strings.Contains(text, cgroupRoot) {
+	if !killText && !sessionToolWordRe.MatchString(text) && !run0WordRe.MatchString(text) && !strings.Contains(text, cgroupRoot) {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
-	scan := killScan{tool: t, command: input.Command, killText: killText,
+	command, rewritten := input.Command, false
+	if run0WordRe.MatchString(text) {
+		var err error
+		if command, rewritten, err = rewriteRun0(input.Command); err != nil {
+			t.Logger().Warn("kill_guard: вызов run0 не заменён в тексте, проверен текстом run0Command", "error", err)
+		}
+	}
+	scan := killScan{tool: t, command: command, source: input.Command, run0: rewritten, killText: killText,
 		signalWord: signalWordRe.MatchString(text), zsh: zshWordRe.MatchString(text),
 		anyBus: busAddressRe.MatchString(text)}
 	if err := scan.parsedCalls(); err != nil {
@@ -82,6 +89,9 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 // его отказу, обычная про литеральный PID — к прочим
 func (s *killScan) hints() []string {
 	var out []string
+	if s.run0 {
+		out = append(out, run0Hint)
+	}
 	for _, r := range s.reasons {
 		hint := killGuardHint
 		switch {
@@ -108,11 +118,15 @@ const maxScriptNesting = 4
 // killScan проверка вызовов команды, найденных разбором оболочки
 type killScan struct {
 	tool *KillGuardTool
-	// command — команда целиком: её текст стоит в cmdline оболочки, и pkill -f
-	// по нему убьёт эту оболочку
-	command string
-	procs   []procInfo
-	reasons []string
+	// command — команда целиком, где run0 заменён на systemd-run
+	// (rewriteRun0): её разбирают правила; source — как её прислал агент:
+	// этот текст стоит в cmdline оболочки, и pkill -f по нему убьёт эту
+	// оболочку; run0 — в команде есть run0, проверенный как systemd-run
+	// (заменой в тексте или текстом run0Command)
+	command, source string
+	run0            bool
+	procs           []procInfo
+	reasons         []string
 	// groupReasons — те из reasons, что про сигнал группе процессов (kill -N)
 	groupReasons []string
 	// toolHints — подсказка к отказу на средство с узкой целью не PID
@@ -288,8 +302,11 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if err := s.cgroupWrite(c); err != nil {
 		return err
 	}
-	if inner, ok := elevatedCommand(c); ok {
+	if inner, ok := rewrittenCommand(c); ok {
 		return s.elevated(c, inner)
+	}
+	if err := s.serviceParallel(c, calls); err != nil {
+		return err
 	}
 	feed := s.literalFeed(c, calls)
 	if reason, hint := s.systemdRunSignalReason(c, calls, feed != nil); reason != "" {
@@ -339,27 +356,22 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	return s.signal(c, calls)
 }
 
-// elevatedValues опции run0 и pkexec со значением отдельным словом
-var elevatedValues = map[string][]string{
-	"run0": {"u", "user", "g", "group", "nice", "D", "chdir", "setenv", "unit", "p", "property", "description",
-		"slice", "machine", "background", "shell-prompt-prefix", "area", "lightweight"},
-	"pkexec": {"user"},
-}
+// pkexecValues опции pkexec со значением отдельным словом
+var pkexecValues = []string{"user"}
 
-// elevatedCommand команда, которую run0, pkexec и machinectl shell исполнят
-// от другого пользователя (как sudo, которое снимает разбор оболочки): слова
-// после их опций, собранные в текст для разбора. run0 --via-shell (и -i)
-// склеивает слова через пробел и отдаёт оболочке -c (systemd v259,
-// exec-invoke.c: strv_join(argv, " ")) — текст разбирается как sh -c
+// elevatedCommand команда, которую pkexec и machinectl shell исполнят от
+// другого пользователя (как sudo, которое снимает разбор оболочки): слова
+// после их опций, собранные в текст для разбора. run0 — не здесь: он
+// запускает службу, как systemd-run (run0Command)
 func elevatedCommand(c shellcmd.Call) (string, bool) {
-	if c.Name == "machinectl" {
+	switch c.Name {
+	case "machinectl":
 		return machinectlCommand(c.Args)
-	}
-	values, ok := elevatedValues[c.Name]
-	if !ok {
+	case "pkexec":
+	default:
 		return "", false
 	}
-	i, viaShell := 0, false
+	i := 0
 	for ; i < len(c.Args); i++ {
 		a := c.Args[i]
 		if a == "--" {
@@ -370,16 +382,12 @@ func elevatedCommand(c shellcmd.Call) (string, bool) {
 			break
 		}
 		name := strings.TrimLeft(a, "-")
-		viaShell = viaShell || name == "via-shell" || a == "-i"
-		if !strings.Contains(name, "=") && slices.Contains(values, name) {
+		if !strings.Contains(name, "=") && slices.Contains(pkexecValues, name) {
 			i++
 		}
 	}
 	if i >= len(c.Args) {
 		return "", false
-	}
-	if viaShell {
-		return strings.Join(c.Args[i:], " "), true
 	}
 	return shellWords(c.Args[i:]), true
 }
@@ -409,7 +417,9 @@ var machinectlValues = []string{
 // machinectlCommand команда machinectl shell [[USER]@MACHINE [COMMAND …]] на
 // этой машине (MACHINE пусто или .host, без -H и -M к другой машине):
 // machined исполняет её слова без оболочки, как sudo. Опции после имени
-// машины — уже команды (machinectl не переставляет их за глаголом shell)
+// машины — уже команды (machinectl не переставляет их за глаголом shell).
+// Без команды machinectl shell запускает оболочку, которая читает его ввод:
+// текст — sh
 func machinectlCommand(args []string) (string, bool) {
 	var pos []string
 	remote, done := false, false
@@ -428,8 +438,11 @@ func machinectlCommand(args []string) (string, bool) {
 			args = args[i+1:]
 		}
 	}
-	if len(pos) < 2 || pos[0] != "shell" || remote || !localMachine(pos[1]) || len(args) == 0 {
+	if len(pos) == 0 || pos[0] != "shell" || remote || len(pos) == 2 && !localMachine(pos[1]) {
 		return "", false
+	}
+	if len(pos) == 1 || len(args) == 0 {
+		return "sh", true
 	}
 	return shellWords(args), true
 }
@@ -463,11 +476,22 @@ func localMachine(spec string) bool {
 	return machine == "" || machine == ".host"
 }
 
-// elevated проверяет вызовы команды inner, которую исполнит обёртка c
-// (run0, pkexec): Via у них — с обёрткой впереди. Ошибка разбора — как у
-// всей команды
+// elevated проверяет вызовы команды inner, которой проверяется вызов c
+// (rewrittenCommand: run0 — systemd-run службой, pkexec, оболочка script и
+// machinectl shell): Via у них — с c впереди. Перенаправления ввода c
+// разбираются вместе с inner (inputRedirs): тело heredoc и <<< оболочки за
+// обёрткой разбор читает как её скрипт. Ошибка разбора — как у всей команды
 func (s *killScan) elevated(c shellcmd.Call, inner string) error {
-	calls, err := shellcmd.Calls(inner)
+	s.run0 = s.run0 || c.Name == "run0"
+	redirs, err := inputRedirs(c)
+	if err != nil {
+		s.tool.Logger().Warn("kill_guard: ввод вызова за обёрткой не перенесён в текст для разбора", "wrapper", c.Name, "error", err)
+		if s.killText {
+			s.addReason(c.Name + ": ввод за ним не переносится в текст для разбора (" + err.Error() + "): проверить сигналы в нём нельзя")
+		}
+	}
+	text := inner + redirs
+	calls, err := shellcmd.Calls(text)
 	if err != nil && s.killText {
 		s.addReason(c.Name + ": разбор команды за ним не прошёл (" + err.Error() + "): проверить сигналы в ней нельзя")
 	}
@@ -490,8 +514,8 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 	// места вызовов за обёрткой — в её тексте, ввод текста — её ввод
 	outer := s.stdinScopeOf()
 	defer func() { s.stdin = outer }()
-	s.stdin = &stdinScope{text: inner, in: src}
-	if spans, err := stdinSpans(s.tool.Logger(), inner, 0, 4); err == nil {
+	s.stdin = &stdinScope{text: text, in: src}
+	if spans, err := stdinSpans(s.tool.Logger(), text, 0, 4); err == nil {
 		s.stdin.spans = spans
 	} else {
 		s.tool.Logger().Warn("kill_guard: ввод вызовов за обёрткой не проверен, разбор bash не прошёл", "wrapper", c.Name, "error", err)
@@ -502,6 +526,24 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 		}
 	}
 	return nil
+}
+
+// serviceParallel проверяет parallel без команды под systemd-run
+// (bareParallel) как вызов. Команда systemd-run, которую разбор не прочёл, —
+// отказ при kill в тексте: исполнит ли parallel в ней ввод оболочкой, не видно
+func (s *killScan) serviceParallel(c shellcmd.Call, calls []shellcmd.Call) error {
+	x, ok, err := bareParallel(c)
+	if err != nil {
+		s.tool.Logger().Warn("kill_guard: команда systemd-run не разобрана отдельно", "error", err)
+		if s.killText {
+			s.addReason("systemd-run: разбор его команды не прошёл (" + err.Error() + "): исполнит ли parallel в ней ввод оболочкой, проверить нельзя")
+		}
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return s.call(x, append(slices.Clone(calls), x))
 }
 
 // sudoAssignment — c не программа, а присваивание после sudo -- (sudo --
@@ -702,7 +744,7 @@ func (s *killScan) check(name string, args []word, via string) error {
 	case name == "kill":
 		reason, group = s.tool.checkKill(args, s.procs)
 	default:
-		reason, group = s.tool.checkPattern(name, args, s.command, s.procs)
+		reason, group = s.tool.checkPattern(name, args, s.source, s.procs)
 	}
 	if reason != "" {
 		s.addReason(reason)

@@ -585,6 +585,8 @@ func TestKillGuardSystemdRunParallelOptions(t *testing.T) {
 		`cat a.sh | parallel --max-replace-args 1 systemd-run --user {}`,
 		`cat a.sh | parallel -kj4 systemd-run --pipe bash`,
 		`cat a.sh | parallel --sshd 0.5 systemd-run --pipe bash`,
+		// parallel исполнит run0 kill 455274 1: run0 — служба, как systemd-run
+		`echo 1 | parallel 'run0 kill 455274'`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -597,7 +599,6 @@ func TestKillGuardSystemdRunParallelOptions(t *testing.T) {
 		`cat a.sh | parallel --slf hosts systemd-run --pipe bash`,
 		`ls | parallel --id x make -C {}`,
 		`ls | parallel --replace=XX cp XX XX.bak`,
-		`echo 1 | parallel 'run0 kill 455274'`,
 		// -H у parallel — целое (H=i, снята): -H host — ошибка разбора, parallel
 		// выходит; --sshl неоднозначно (sshlogin, sshloginfile) — тоже выход
 		`cat a.sh | parallel -H host systemd-run --pipe bash`,

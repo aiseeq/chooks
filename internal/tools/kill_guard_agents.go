@@ -116,19 +116,21 @@ func podmanStop(args []string) (string, bool) {
 // среди них ищется сам systemd-run
 func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call, feedRead bool) (reason, hint string) {
 	k := slices.Index(c.Via, "systemd-run")
-	if k < 0 || slices.Contains(c.Via, "ssh") || systemdRunRemote(c, calls, k) {
+	if slices.Contains(c.Via, "ssh") || k >= 0 && systemdRunRemote(c, calls, k) {
 		return "", ""
 	}
-	name := c.Name
-	switch {
-	case slices.Contains(signalNames, c.Name):
-	case c.Name == "podman" || c.Name == "podman-remote":
-		verb, ok := podmanStop(c.Args)
-		if !ok {
-			return "", ""
-		}
-		name = c.Name + " " + verb
-	default:
+	name, signal := signalCommand(c)
+	if signal && slices.Contains(c.Via, "run0") {
+		// run0 запускает команду временной службой, порождённой менеджером
+		// (man run0: «a fresh, isolated service forked off by the service
+		// manager»), даже с --scope у systemd-run под ним
+		return "run0 запускает " + name + " временной службой от менеджера systemd, а не потомком агента: ядро (agent-signal-guard) его сигналы не сверяет, и он дотянется до процессов других агентов",
+			"Шли сигнал прямо, без run0: найди PID отдельной командой (pgrep -a '[x]yz') и убей литералом: kill 12345; чужой процесс root — sudo kill 12345"
+	}
+	if k < 0 {
+		return "", ""
+	}
+	if !signal {
 		if reason := s.systemdRunHiddenReason(c, calls, k, feedRead); reason != "" {
 			return reason, systemdRunHiddenHint
 		}
@@ -288,6 +290,19 @@ func systemdRunRemote(c shellcmd.Call, calls []shellcmd.Call, k int) bool {
 		return systemdRunHostOption(runs[0].Args)
 	}
 	return len(runs) > 0 && !slices.ContainsFunc(runs, func(x shellcmd.Call) bool { return !systemdRunHostOption(x.Args) })
+}
+
+// signalCommand c шлёт сигнал или гасит контейнер: kill, pkill, killall,
+// podman rm/stop/kill; name — как назвать её в причине
+func signalCommand(c shellcmd.Call) (name string, ok bool) {
+	switch {
+	case slices.Contains(signalNames, c.Name):
+		return c.Name, true
+	case c.Name == "podman" || c.Name == "podman-remote":
+		verb, ok := podmanStop(c.Args)
+		return c.Name + " " + verb, ok
+	}
+	return c.Name, false
 }
 
 // systemdRunScopeOnly каждый systemd-run над c найден и запускает его в

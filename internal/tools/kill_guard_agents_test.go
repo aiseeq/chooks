@@ -263,7 +263,10 @@ func TestKillGuardSystemdRunRemoteAllows(t *testing.T) {
 // как у sudo -- PATH=$PATH kill 455274 без run0
 func TestKillGuardElevatedSudoAssignment(t *testing.T) {
 	for _, command := range []string{
-		`run0 sudo -- PATH=$PATH kill 455274`,
+		// под run0 kill — отказ по другой причине (kill-guard-run0-signal):
+		// присваивание проверяется на программе без сигнала, но со словом
+		// kill — иначе скан не идёт
+		`run0 sudo -- PATH=$PATH grep kill /var/log/messages`,
 		`sudo -- PATH=$PATH kill 455274`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {

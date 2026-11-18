@@ -105,7 +105,6 @@ func TestKillGuardSessionEndAllows(t *testing.T) {
 		`echo $DBUS_SESSION_BUS_ADDRESS; systemctl --user stop asg-dummy-kill.service`,
 		`run0 systemctl status sddm`,
 		`pkexec systemctl restart asg-dummy-kill.service`,
-		`run0 kill 455274`,
 		`run0 --help`,
 		`pkexec --version`,
 		`$(which systemctl) --user stop asg-dummy-kill.service`,

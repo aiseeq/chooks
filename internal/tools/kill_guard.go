@@ -330,13 +330,27 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		// цели parallel берёт из списка ::: или ввода, а команду без :::
 		// shellcmd не снимает (pgrep foo | parallel kill): сигнал — слово
 		// среди аргументов parallel
-		for _, a := range c.Args {
-			if err := s.check(filepath.Base(a), nil, "parallel"); err != nil {
+		if err := s.parallelSignal(c, inner); err != nil {
+			return err
+		}
+	}
+	return s.signal(c, calls)
+}
+
+func (s *killScan) parallelSignal(c shellcmd.Call, inner []shellcmd.Call) error {
+	for _, arg := range c.Args {
+		if err := s.check(filepath.Base(arg), nil, "parallel"); err != nil {
+			return err
+		}
+	}
+	for _, call := range inner {
+		if parallelVariableSignal(call) {
+			if err := s.check(call.Name, nil, "parallel"); err != nil {
 				return err
 			}
 		}
 	}
-	return s.signal(c, calls)
+	return nil
 }
 
 // elevatedValues опции run0 и pkexec со значением отдельным словом

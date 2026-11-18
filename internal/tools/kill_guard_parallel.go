@@ -2,11 +2,13 @@ package tools
 
 import (
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/aiseeq/akit/shellcmd"
+	shExpand "mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -68,7 +70,10 @@ func parseParallel(args []string) parallelCommand {
 	}
 	local, hosts := parallelLocalLogins(logins)
 	p.remote = !local && (hosts || files)
-	p.listed = p.listed || slices.ContainsFunc(p.words, func(w string) bool { return slices.Contains(parallelSources, w) })
+	if source := slices.IndexFunc(p.words, func(w string) bool { return slices.Contains(parallelSources, w) }); source >= 0 {
+		p.words = p.words[:source]
+		p.listed = true
+	}
 	return p
 }
 
@@ -102,7 +107,7 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 		return "", nil
 	}
 	p := parseParallel(c.Args)
-	if p.failed || p.listed || p.remote || len(p.words) == 0 {
+	if p.failed || p.remote || len(p.words) == 0 {
 		return "", nil
 	}
 	script, err := p.script()
@@ -129,6 +134,9 @@ func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script stri
 	// systemd-run и за run0, pkexec (parallel run0 systemd-run --pipe bash)
 	expanded := s.elevatedCalls(calls)
 	if !slices.ContainsFunc(expanded, func(x shellcmd.Call) bool { return x.Name == "systemd-run" }) {
+		return "", expanded
+	}
+	if p.listed {
 		return "", nil
 	}
 	if r, found := p.replacedName(expanded); found {
@@ -154,14 +162,17 @@ func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script stri
 	return "", append(calls, feed...)
 }
 
-// script строка команды для оболочки: слова через пробел, с -q — каждое в
-// кавычках
+// script склеивает argv parallel после снятия кавычек внешней оболочкой.
 func (p parallelCommand) script() (string, error) {
-	if !p.quote {
-		return strings.Join(p.words, " "), nil
+	words, err := parallelArgv(p.words)
+	if err != nil {
+		return "", err
 	}
-	out := make([]string, 0, len(p.words))
-	for _, w := range p.words {
+	if !p.quote {
+		return strings.Join(words, " "), nil
+	}
+	out := make([]string, 0, len(words))
+	for _, w := range words {
 		q, err := syntax.Quote(w, syntax.LangBash)
 		if err != nil {
 			return "", fmt.Errorf("parallel -q: слово в кавычки: %w", err)
@@ -169,6 +180,43 @@ func (p parallelCommand) script() (string, error) {
 		out = append(out, q)
 	}
 	return strings.Join(out, " "), nil
+}
+
+// parallelArgv снимает синтаксис внешних кавычек через mvdan shell AST;
+// неизвестные раскрытия сохраняются текстом и не выполняются.
+func parallelArgv(words []string) ([]string, error) {
+	source := "__chooks_parallel_argv_probe__ " + strings.Join(words, " ")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(source), "")
+	if err != nil {
+		return nil, fmt.Errorf("parse parallel argv: %w", err)
+	}
+	if len(file.Stmts) != 1 {
+		return nil, fmt.Errorf("parallel argv probe: unexpected statements")
+	}
+	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return nil, fmt.Errorf("parallel argv probe: missing command")
+	}
+	return shellFields(call.Args[1:])
+}
+
+func shellFields(words []*syntax.Word) ([]string, error) {
+	config := &shExpand.Config{
+		Env: shExpand.FuncEnviron(func(name string) string { return "$" + name }),
+		CmdSubst: func(w io.Writer, cmd *syntax.CmdSubst) error {
+			return syntax.NewPrinter().Print(w, cmd)
+		},
+		ProcSubst: func(proc *syntax.ProcSubst) (string, error) {
+			var text strings.Builder
+			err := syntax.NewPrinter().Print(&text, proc)
+			return text.String(), err
+		},
+	}
+	return shExpand.Fields(config, words...)
+}
+
+func parallelVariableSignal(call shellcmd.Call) bool {
+	return slices.Contains(signalNames, call.Name) && strings.Contains(call.Raw, "$")
 }
 
 // elevatedCalls calls и вызовы за run0, pkexec и machinectl shell среди них

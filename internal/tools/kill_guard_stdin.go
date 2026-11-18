@@ -167,7 +167,12 @@ func redirectInput(text string, redirs []*syntax.Redirect) (stdinSpan, bool) {
 		case syntax.DplIn, syntax.RdrIn, syntax.RdrInOut, syntax.WordHdoc:
 			return redirectSource(r.Op.String(), text[r.Word.Pos().Offset():r.Word.End().Offset()]), true
 		case syntax.Hdoc, syntax.DashHdoc:
-			return stdinSpan{src: stdinRedirect}, true
+			// тело heredoc у блока или цикла ({ …; run0 bash; } <<EOF) —
+			// скрипт оболочки внутри, которая читает ввод (literalFeed)
+			if r.Hdoc == nil {
+				return stdinSpan{src: stdinRedirect}, true
+			}
+			return stdinSpan{src: stdinRedirect, feed: text[r.Hdoc.Pos().Offset():r.Hdoc.End().Offset()]}, true
 		}
 	}
 	return stdinSpan{}, false
@@ -300,11 +305,16 @@ func (s *killScan) literalFeed(c shellcmd.Call, calls []shellcmd.Call) []shellcm
 	if _, runner := scriptArgs(c); runner || !shellReadsInput(c.Args) || scriptBodyParsed(c, calls) {
 		return nil
 	}
+	in := s.stdinOf(c)
+	if !slices.Contains(c.Via, "systemd-run") && s.killText && in.src == stdinPipe && in.feed == "" {
+		// под systemd-run невидимый ввод — systemdRunInputReason
+		s.addReason(c.Name + " за run0 читает скрипт из ввода, текста которого не видно до запуска (пайп, <(…), \"$F\", xargs): проверить сигналы в нём нельзя")
+		return nil
+	}
 	if afterXargs(c) {
 		return nil
 	}
-	in := s.stdinOf(c)
-	if in.feed != "" {
+	if in.feed != "" && s.killText {
 		if _, err := shellcmd.Calls(in.feed); err != nil {
 			// оболочка исполняет ввод построчно и до ошибки разбора успеет
 			// выполнить начало (kill 1234⏎fi): невидимый скрипт — отказ

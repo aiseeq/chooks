@@ -25,6 +25,13 @@ func TestKillGuardRun0Signal(t *testing.T) {
 		// ввод из подстановки не виден
 		`run0 bash < <(echo kill -9 -1)`,
 		`echo kill 12345 | run0 bash`,
+		// ввод задан блоку или циклу вокруг run0 bash
+		"{ read x; run0 bash; } <<EOF\nx\nkill 1234\nEOF",
+		"{ read x; run0 bash; } <<-EOF\n\tx\n\tkill 1234\n\tEOF",
+		"while read x; do run0 bash; done <<EOF\nx\nkill 1234\nEOF",
+		`while read x; do run0 bash; done < <(printf 'x\nkill 1234\n')`,
+		`printf 'x\nkill 1234\n' | { read x; run0 bash; }`,
+		`cat kill-list | xargs run0 bash`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -35,6 +42,17 @@ func TestKillGuardRun0Signal(t *testing.T) {
 		`pkexec kill 12345`,
 		`run0 systemctl --user status x.service`,
 		`systemd-run --user --scope kill 12345`,
+		"{ read x; run0 bash; } <<EOF\nx\nmake\nEOF",
+		`while read x; do run0 bash; done < <(printf 'x\nmake\n')`,
+		// без kill в тексте сторож команду не разбирает: ошибка разбора
+		// скрипта на вводе — не отказ
+		"systemd-run --user bash <<EOF\nmake\nfi\nEOF",
+		"systemd-run --user --scope bash <<EOF\nmake\nfi\nEOF",
+		`systemd-run --user --pipe bash <<< 'echo (('`,
+		`systemd-run --user --pipe bash <<< 'make; fi'`,
+		"run0 bash <<EOF\nmake\nfi\nEOF",
+		// литеральный пайп разбор читает: kill в тексте — не повод отказа
+		`echo make | run0 bash; echo skill`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)

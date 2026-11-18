@@ -118,6 +118,7 @@ func TestKillGuardRun0AsSystemdRun(t *testing.T) {
 		`f() { systemd-run --pipe bash; }; echo 'kill 1234' | f`,
 		`exec < <(echo kill 1234); run0 bash`,
 		`exec < <(echo kill 1234); systemd-run --pipe bash`,
+		`systemd-run --user bash < <(echo kill -9 -1)`,
 		"exec <<EOF\nkill 1234\nEOF\nrun0 bash",
 		"exec <<EOF\nkill 1234\nEOF\nsystemd-run --pipe bash",
 		"xargs run0 bash -c <<EOF\n'kill 1234'\nEOF",
@@ -197,6 +198,10 @@ func TestKillGuardRun0AsSystemdRun(t *testing.T) {
 		`while read x; do run0 bash; done < <(printf 'x\nmake\n')`,
 		`echo make | run0 bash; systemctl --user status x.service`,
 		`f() { run0 bash; }; echo make | f`,
+		// тикет kill-guard-exec-stdin-systemd-run: литеральная подстановка и
+		// файл скрипта на вводе — не отказ, как на main
+		`systemd-run --user bash < <(echo make)`,
+		`exec < ./a.sh; systemd-run --user --pipe bash`,
 		`run0 bash`,
 		`run0 dnf install x`,
 		`run0 systemctl restart foo`,

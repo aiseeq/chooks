@@ -447,19 +447,6 @@ type shellVars struct {
 	assigns []shellcmd.Assign // все присваивания команды, и после ссылки
 	scopes  []shellcmd.Scope
 	calls   []shellcmd.Call
-	// lastpipe места, с которых может быть включён shopt -s lastpipe:
-	// последнее звено конвейера после них идёт в той же оболочке, его
-	// присваивание переживает конвейер
-	lastpipe []lastpipeOn
-}
-
-// lastpipeOn вызов, который может включить lastpipe: с места offset в
-// области within (nil - оболочка команды); everywhere - для всей команды
-// (тело функции, имя вызова из переменной)
-type lastpipeOn struct {
-	offset     int
-	within     *shellcmd.Scope
-	everywhere bool
 }
 
 // shellVarRef ссылка на переменную в пути: $NAME или ${NAME}
@@ -478,11 +465,6 @@ func commandVars(command, home string, calls []shellcmd.Call) (shellVars, error)
 		return shellVars{}, fmt.Errorf("разбор областей: %w", err)
 	}
 	sv := shellVars{assigns: assigns, scopes: scopes, calls: calls}
-	for _, c := range calls {
-		if mayEnableLastpipe(c) {
-			sv.lastpipe = append(sv.lastpipe, sv.lastpipeFrom(c))
-		}
-	}
 	for _, a := range assigns {
 		if a.Unknown {
 			sv.vars = append(sv.vars, shellVar{assign: a, name: a.Name})
@@ -498,57 +480,6 @@ func commandVars(command, home string, calls []shellcmd.Call) (shellVars, error)
 		sv.vars = append(sv.vars, shellVar{assign: a, name: a.Name, value: value})
 	}
 	return sv, nil
-}
-
-// mayEnableLastpipe вызов может включить lastpipe: shopt с ключом -s
-// (и в связке, -qs) и словом lastpipe или словом, которое видно только при
-// запуске (shopt -s $o); eval такого слова; имя вызова из переменной или
-// подстановки ($c -s lastpipe). set -o lastpipe в bash 5.3 - invalid option,
-// lastpipe включает только shopt
-func mayEnableLastpipe(c shellcmd.Call) bool {
-	switch {
-	case c.Name == "" || dynamicWord(c.Name):
-		return true
-	case c.Name == "eval":
-		return slices.ContainsFunc(c.Args, dynamicWord)
-	case c.Name != "shopt":
-		return false
-	}
-	set := slices.ContainsFunc(c.Args, func(a string) bool {
-		return strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.Contains(a, "s")
-	})
-	return set && (slices.Contains(c.Args, "lastpipe") || slices.ContainsFunc(c.Args, dynamicWord))
-}
-
-// dynamicWord в слове вызова подстановка: значение видно только при запуске
-func dynamicWord(word string) bool {
-	return strings.ContainsAny(word, "$`")
-}
-
-// lastpipeFrom где действует lastpipe, включённый вызовом c: в оболочке
-// команды или в подоболочке вызова - после вызова; из тела функции (её могут
-// вызвать где угодно) или без места в тексте - во всей команде
-func (sv *shellVars) lastpipeFrom(c shellcmd.Call) lastpipeOn {
-	if c.Offset < 0 {
-		return lastpipeOn{everywhere: true}
-	}
-	within := sv.innermost(func(s shellcmd.Scope) bool { return s.Start <= c.Offset && c.Offset < s.End })
-	if within != nil && within.Kind == shellcmd.ScopeFunctionBody {
-		return lastpipeOn{everywhere: true}
-	}
-	return lastpipeOn{offset: c.Offset, within: within}
-}
-
-// innermost самая узкая область, для которой fit верно; nil - такой нет
-func (sv *shellVars) innermost(fit func(shellcmd.Scope) bool) *shellcmd.Scope {
-	var best *shellcmd.Scope
-	for i := range sv.scopes {
-		s := &sv.scopes[i]
-		if fit(*s) && (best == nil || s.End-s.Start < best.End-best.Start) {
-			best = s
-		}
-	}
-	return best
 }
 
 // expand подставляет в путь значения переменных, присвоенных в команде и
@@ -591,8 +522,11 @@ func (sv *shellVars) lastVisible(name string, at int) (shellVar, bool) {
 //     выполнится при вызове, после этих присваиваний. Вызовы самой функции
 //     не в счёт, когда значение на месте ссылки задано известным
 //     присваиванием в её теле до ссылки (selfCalls);
-//   - lastpipe может быть включён, и присваивание name в последнем звене
-//     конвейера доходит до места ссылки (lastpipeReaches)
+//   - name присвоено где-либо в звене конвейера, на любой глубине: при
+//     shopt -s lastpipe (его включают и trap, alias, eval, source, тело
+//     функции, повтор цикла) присваивание последнего звена переживает
+//     конвейер. Включён ли lastpipe и в каком порядке, не выясняется: отказ
+//     и на конвейере без lastpipe - цена правила
 func (sv *shellVars) unsettled(name string, at int) bool {
 	var around []shellcmd.Scope // тела функций, в которых ссылка
 	for _, s := range sv.scopes {
@@ -611,7 +545,7 @@ func (sv *shellVars) unsettled(name string, at int) bool {
 		if len(around) > 0 && sv.laterForBody(a, at, around) {
 			return true
 		}
-		if sv.lastpipeReaches(a, at) {
+		if sv.inScope(a.Offset, shellcmd.ScopePipePart) {
 			return true
 		}
 	}
@@ -671,79 +605,6 @@ func (sv *shellVars) laterForBody(a shellcmd.Assign, at int, around []shellcmd.S
 		decl = min(decl, s.DeclOffset)
 	}
 	return a.Offset > decl
-}
-
-// lastpipeReaches присваивание a стоит в последнем звене конвейера, при
-// включённом lastpipe выходит из него (и из объемлющих последних звеньев) и
-// видно на месте ссылки at: в той области, куда вышло, до ссылки. Вышло в
-// тело функции {…} - как присваивание тела функции: ссылка после её
-// определения не раскрывается. Вышло в оболочку команды - и ссылка в теле
-// любой функции не раскрывается
-func (sv *shellVars) lastpipeReaches(a shellcmd.Assign, at int) bool {
-	if a.ScopeStart < 0 || len(sv.lastpipe) == 0 {
-		return false
-	}
-	start, end := a.ScopeStart, a.ScopeEnd
-	escaped := false
-	for {
-		part := sv.lastPart(start, end)
-		if part == nil {
-			break
-		}
-		escaped = true
-		up := sv.innermost(func(s shellcmd.Scope) bool {
-			return s.Start <= part.Start && part.End <= s.End && (s.Start != part.Start || s.End != part.End)
-		})
-		if up == nil {
-			start, end = -1, -1
-			break
-		}
-		start, end = up.Start, up.End
-	}
-	if !escaped {
-		return false
-	}
-	if start < 0 {
-		return a.Offset < at || sv.inScope(at, shellcmd.ScopeFunctionBody)
-	}
-	region := sv.innermost(func(s shellcmd.Scope) bool { return s.Start == start && s.End == end })
-	in := start <= at && at < end
-	if region.Kind == shellcmd.ScopeFunctionBody && !region.Isolated {
-		return at > region.DeclOffset && !(in && at < a.Offset)
-	}
-	return in && a.Offset < at
-}
-
-// lastPart последнее звено конвейера ровно на [start, end), для которого
-// lastpipe может быть включён; nil - область не такое звено (подоболочка
-// того же размера - своя оболочка, присваивание из неё не выходит)
-func (sv *shellVars) lastPart(start, end int) *shellcmd.Scope {
-	var part *shellcmd.Scope
-	for i := range sv.scopes {
-		s := &sv.scopes[i]
-		if s.Start != start || s.End != end {
-			continue
-		}
-		if s.Kind != shellcmd.ScopePipePart || !s.Last {
-			return nil
-		}
-		part = s
-	}
-	if part == nil || !slices.ContainsFunc(sv.lastpipe, func(on lastpipeOn) bool { return on.covers(*part) }) {
-		return nil
-	}
-	return part
-}
-
-// covers lastpipe, включённый on, действует в звене part
-func (on lastpipeOn) covers(part shellcmd.Scope) bool {
-	if on.everywhere {
-		return true
-	}
-	if on.within != nil && (part.Start < on.within.Start || part.End > on.within.End) {
-		return false
-	}
-	return part.Start > on.offset
 }
 
 // inScope смещение off внутри области вида kind

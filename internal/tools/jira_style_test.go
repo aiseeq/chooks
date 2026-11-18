@@ -304,6 +304,7 @@ func TestJiraStyleSendForms(t *testing.T) {
 	}
 	write("good/body.json", `{"body":"Выкатил на stage, проверь вход."}`)
 	write("body.json", `{"body":"Готово — выкачено."}`)
+	write("lp.sh", "shopt -s lastpipe\n")
 	const (
 		auth = `curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -H 'Content-Type: application/json' `
 		url  = ` "$JIRA_BASE_URL/rest/api/3/issue/PROJ-1/comment"`
@@ -352,18 +353,25 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"trap ERR на функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; trap f ERR; false; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"mapfile -C на функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; mapfile -C f -c 1 A <<< x; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"lastpipe: последнее звено конвейера", "/", "shopt -s lastpipe; S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
-		{"без lastpipe звено конвейера закрыто", "/", "S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, ""},
+		// Присваивание в звене конвейера (любом, на любой глубине): ссылка не
+		// раскрывается, включён ли lastpipe и где, не выясняется - отказ и без
+		// lastpipe, цена правила
+		{"без lastpipe звено конвейера закрыто", "/", "S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"отправка в теле функции, присвоено до вызова", "/", "S=" + good + "; g() { " + auth + "-d @$S/body.json" + url + "; }; S=" + dir + "; g", "jira_comment_payload"},
 		{"отправка в теле функции, присвоено до определения", "/", "S=" + good + "; g() { " + auth + "-d @$S/body.json" + url + "; }; g", ""},
 		{"lastpipe через переменную", "/", "o=lastpipe; shopt -s $o; S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"lastpipe из подстановки", "/", `shopt -s "$(echo lastpipe)"; S=` + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"lastpipe через eval переменной", "/", `c='shopt -s lastpipe'; eval "$c"; S=` + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"lastpipe в теле функции", "/", "f() { shopt -s lastpipe; }; f; S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
-		{"lastpipe: звено после отправки", "/", "shopt -s lastpipe; S=" + good + "; " + auth + "-d @$S/body.json" + url + "; true | S=" + dir, ""},
-		{"lastpipe включён после конвейера", "/", "S=" + good + "; true | S=" + dir + "; shopt -s lastpipe; " + auth + "-d @$S/body.json" + url, ""},
-		{"lastpipe включён в подоболочке", "/", "(shopt -s lastpipe); S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, ""},
-		{"lastpipe: первое звено", "/", "shopt -s lastpipe; S=" + good + "; S=" + dir + " | true; " + auth + "-d @$S/body.json" + url, ""},
-		{"lastpipe: конвейер в подоболочке", "/", "shopt -s lastpipe; S=" + good + "; (true | S=" + dir + "); " + auth + "-d @$S/body.json" + url, ""},
+		{"lastpipe: звено после отправки", "/", "shopt -s lastpipe; S=" + good + "; " + auth + "-d @$S/body.json" + url + "; true | S=" + dir, "jira_comment_payload"},
+		{"lastpipe включён после конвейера", "/", "S=" + good + "; true | S=" + dir + "; shopt -s lastpipe; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"lastpipe включён в подоболочке", "/", "(shopt -s lastpipe); S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"lastpipe: первое звено", "/", "shopt -s lastpipe; S=" + good + "; S=" + dir + " | true; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"lastpipe: конвейер в подоболочке", "/", "shopt -s lastpipe; S=" + good + "; (true | S=" + dir + "); " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"lastpipe: звено в теле функции до shopt", "/", "S=" + good + "; f() { echo | S=" + dir + "; }; shopt -s lastpipe; f; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"lastpipe: shopt после звена в цикле", "/", "S=" + good + "; for i in 1 2; do echo | S=" + dir + "; shopt -s lastpipe; done; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"lastpipe из source", "/", "S=" + good + "; source " + dir + "/lp.sh; echo | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"lastpipe через alias", "/", "S=" + good + "; alias x='shopt -s lastpipe'\nx; echo | S=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		// ${ ; } и ${| ; } (bash 5.3) идут в текущей оболочке: присваивание
 		// внутри видно после подстановки
 		{"присвоено в ${ ; }", "/", "S=" + good + "; x=${ S=" + dir + "; }; " + auth + "-d @$S/body.json" + url, "jira_comment_style"},

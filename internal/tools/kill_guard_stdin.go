@@ -175,7 +175,7 @@ func redirectInput(text string, redirs []*syntax.Redirect) (stdinSpan, bool) {
 
 // redirectSource ввод из перенаправления op с целью target — так же, как у
 // оболочки прямо под systemd-run (systemdRunInputReason): <& — копия
-// дескриптора, не видна; < и <> из подстановки ("$F", "$DIR/a.sh") и <<< из
+// дескриптора, не видна; < и <> из подстановки ("$F", "$DIR/a.sh", <(…)) и <<< из
 // одной подстановки ("$CMD") — не видны, как пайп; <<< с иным текстом —
 // перенаправление, а его текст разбор прочтёт как скрипт (literalFeed);
 // < литерального файла, heredoc — перенаправление
@@ -183,7 +183,7 @@ func redirectSource(op, target string) stdinSpan {
 	switch {
 	case op == "<&":
 		return stdinSpan{src: stdinPipe}
-	case (op == "<" || op == "<>") && computedArg(target), op == "<<<" && wholeSubstitution(target):
+	case (op == "<" || op == "<>") && (computedArg(target) || strings.HasPrefix(target, "<(")), op == "<<<" && wholeSubstitution(target):
 		return stdinSpan{src: stdinPipe}
 	case op == "<<<":
 		return stdinSpan{src: stdinRedirect, feed: "sh <<< " + target, feedVia: []string{"sh"}}
@@ -303,7 +303,16 @@ func (s *killScan) literalFeed(c shellcmd.Call, calls []shellcmd.Call) []shellcm
 	if afterXargs(c) {
 		return nil
 	}
-	return s.feedCalls(s.stdinOf(c), []shellcmd.Call{c})
+	in := s.stdinOf(c)
+	if in.feed != "" {
+		if _, err := shellcmd.Calls(in.feed); err != nil {
+			// оболочка исполняет ввод построчно и до ошибки разбора успеет
+			// выполнить начало (kill 1234⏎fi): невидимый скрипт — отказ
+			s.addReason(c.Name + " читает скрипт из ввода, а разбор его не прошёл (" + err.Error() + "): проверить сигналы в нём нельзя")
+			return nil
+		}
+	}
+	return s.feedCalls(in, []shellcmd.Call{c})
 }
 
 // feedCalls вызовы литерального текста ввода in (feed, stdinSpan), который

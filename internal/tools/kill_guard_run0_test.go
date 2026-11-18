@@ -19,6 +19,12 @@ func TestKillGuardRun0Signal(t *testing.T) {
 		`run0 bash <<< 'kill 12345'`,
 		"run0 sh -s <<EOF\nkill 12345\nEOF",
 		"run0 systemd-run --scope bash <<EOF\nkill 12345\nEOF",
+		// тело с ошибкой разбора: bash исполнит kill до неё
+		"run0 bash <<EOF\nkill 1234\nfi\nEOF",
+		"run0 bash <<EOF\nkill -9 -1\n)\nEOF",
+		// ввод из подстановки не виден
+		`run0 bash < <(echo kill -9 -1)`,
+		`echo kill 12345 | run0 bash`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)

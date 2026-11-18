@@ -339,6 +339,12 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"вызов функции меняет прежнее значение", "/", "S=" + good + "; f() { S=" + dir + "; }; f; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"элемент массива поверх прежнего", "/", "S=" + good + "; S[0]=" + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"переменная for поверх прежней", "/", "S=" + good + "; for S in " + dir + "; do :; done; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"read меняет путь", "/", "S=" + good + "; read S <<< " + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"printf -v меняет путь", "/", "S=" + good + "; printf -v S %s " + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"unset удаляет путь", "/", "S=" + good + "; unset S; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"mapfile меняет путь", "/", "S=" + good + "; mapfile -t S <<< " + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"readarray меняет путь", "/", "S=" + good + "; readarray -d '' S <<< " + dir + "; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
+		{"getopts меняет путь", "/", "S=" + good + "; getopts x S -x; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		// Тело функции присваивает S: ссылка вне тела после определения не
 		// раскрывается, даже если функция не вызвана (её вызовет alias, trap
 		// DEBUG/ERR, mapfile -C или другая функция) - цена правила

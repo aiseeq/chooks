@@ -528,6 +528,13 @@ func (sv *shellVars) lastVisible(name string, at int) (shellVar, bool) {
 //     конвейер. Включён ли lastpipe и в каком порядке, не выясняется: отказ
 //     и на конвейере без lastpipe - цена правила
 func (sv *shellVars) unsettled(name string, at int) bool {
+	// Встроенные команды меняют переменные, но Assigns их не возвращает.
+	// Учитываем даже вызовы после ссылки: они могут быть в цикле или функции.
+	for _, c := range sv.calls {
+		if builtinMayWrite(c, name) {
+			return true
+		}
+	}
 	var around []shellcmd.Scope // тела функций, в которых ссылка
 	for _, s := range sv.scopes {
 		if s.Kind == shellcmd.ScopeFunctionBody && s.Start <= at && at < s.End {
@@ -547,6 +554,32 @@ func (sv *shellVars) unsettled(name string, at int) bool {
 		}
 		if sv.inScope(a.Offset, shellcmd.ScopePipePart) {
 			return true
+		}
+	}
+	return false
+}
+
+// builtinMayWrite консервативно учитывает имена аргументов встроенных команд.
+// Совпадение с аргументом опции тоже даёт отказ.
+func builtinMayWrite(c shellcmd.Call, name string) bool {
+	switch c.Name {
+	case "read", "unset", "mapfile", "readarray", "getopts":
+		for _, arg := range c.Args {
+			if arg == name || strings.HasPrefix(arg, name+"[") || unexpanded(arg) {
+				return true
+			}
+		}
+		return c.Name == "read" && name == "REPLY" && len(c.Args) == 0
+	case "printf":
+		for i, arg := range c.Args {
+			if arg == "-v" && i+1 < len(c.Args) {
+				target := c.Args[i+1]
+				return target == name || strings.HasPrefix(target, name+"[") || unexpanded(target)
+			}
+			if strings.HasPrefix(arg, "-v") && len(arg) > 2 {
+				target := arg[2:]
+				return target == name || strings.HasPrefix(target, name+"[") || unexpanded(target)
+			}
 		}
 	}
 	return false

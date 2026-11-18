@@ -131,7 +131,7 @@ func NightOf(t time.Time) string {
 
 // Text — подсказка агенту на время t
 func Text(t time.Time) string {
-	return fmt.Sprintf("Сейчас ночь (%s): пользователь спит — скилл autonomous-work; вопрос — тикетом админу пространства (autonomous-work п.3), работай дальше", t.Format("15:04"))
+	return fmt.Sprintf("Сейчас ночь (%s), пользователь спит: первым действием хода вызови Skill autonomous-work, если его текста нет в контексте; вопрос — тикетом админу пространства (autonomous-work п.3), работай дальше", t.Format("15:04"))
 }
 
 // HasQuestion сообщает, что в ответе агента есть строка с меткой ❓

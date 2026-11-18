@@ -563,3 +563,17 @@ func TestPromptSkillCheckOnlyAtLockedNight(t *testing.T) {
 		}
 	}
 }
+
+// Подсказка велит вызвать скилл, а не называет его: «скилл autonomous-work»
+// без глагола на свежем старте ночи 17→18.11 не вызвали 4 из 8 сессий без
+// текста скилла в контексте (тикет night-hint-skill-share-1118). Сессия, у
+// которой скилл уже в контексте (вызван или в invoked_skills после
+// компакции), вызывать его заново не обязана
+func TestTextOrdersSkillCall(t *testing.T) {
+	text := Text(time.Date(2026, 11, 18, 4, 1, 0, 0, time.Local))
+	for _, want := range []string{"вызови Skill autonomous-work", "первым действием", "если его текста нет в контексте"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("в подсказке нет %q: %q", want, text)
+		}
+	}
+}

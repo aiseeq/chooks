@@ -134,6 +134,12 @@ func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call
 		}
 		return "", ""
 	}
+	if systemdRunScopeOnly(c, calls) {
+		// systemd-run --scope делает exec в своём процессе: сигнальная
+		// команда остаётся потомком агента, ядро её сверяет, а цель
+		// проверяется, как у прямого вызова
+		return "", ""
+	}
 	return "systemd-run запускает " + name + " потомком systemd, а не агента: ядро (agent-signal-guard) его сигналы не сверяет, и он дотянется до процессов других агентов",
 		"Шли сигнал прямо, без systemd-run: найди PID отдельной командой (pgrep -a '[x]yz') и убей литералом: kill 12345; контейнер — podman stop имя"
 }
@@ -282,6 +288,35 @@ func systemdRunRemote(c shellcmd.Call, calls []shellcmd.Call, k int) bool {
 		return systemdRunHostOption(runs[0].Args)
 	}
 	return len(runs) > 0 && !slices.ContainsFunc(runs, func(x shellcmd.Call) bool { return !systemdRunHostOption(x.Args) })
+}
+
+// systemdRunScopeOnly каждый systemd-run над c найден и запускает его в
+// режиме --scope (процесс остаётся потомком агента), а не службой
+func systemdRunScopeOnly(c shellcmd.Call, calls []shellcmd.Call) bool {
+	for k, via := range c.Via {
+		if via != "systemd-run" {
+			continue
+		}
+		runs, own := systemdRunCalls(c, calls, k)
+		if !own || !systemdRunScopeOption(runs[0].Args) {
+			return false
+		}
+	}
+	return true
+}
+
+// systemdRunScopeOption среди опций systemd-run (до команды) есть --scope
+func systemdRunScopeOption(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		t := args[i]
+		if t == "--" || !strings.HasPrefix(t, "-") || t == "-" {
+			return false
+		}
+		if name, _ := systemdRunOption(args, &i); name == "scope" {
+			return true
+		}
+	}
+	return false
 }
 
 // systemdRunCalls вызовы systemd-run, под которым может идти c: с Via до

@@ -120,6 +120,24 @@ func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call
 	if slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
 		return "", ""
 	}
+	if c.Name == "systemd-run" {
+		if options := parseSystemdRunOptions(toWords(c.Args)); options.shell {
+			shell := shellcmd.Call{Name: "bash", Args: []string{"-s"}, Via: slices.Concat(c.Via, []string{"systemd-run"}),
+				Raw: c.Raw, Offset: c.Offset, Redirs: c.Redirs, ScriptInput: c.ScriptInput}
+			feed := s.literalFeed(shell, calls)
+			if reason := s.systemdRunHiddenReason(shell, calls, len(shell.Via)-1, len(feed) > 0); reason != "" {
+				return reason, systemdRunHiddenHint
+			}
+			for _, f := range feed {
+				if name, signal := signalCommand(f); signal {
+					return "systemd-run запускает " + name + " из --shell потомком systemd, а не агента: ядро (agent-signal-guard) его сигналы не сверяет", systemdRunHiddenHint
+				}
+			}
+		}
+		if reason := s.systemdRunExecPropertyReason(c); reason != "" {
+			return reason, systemdRunHiddenHint
+		}
+	}
 	name, signal := signalCommand(c)
 	if k < 0 {
 		return "", ""
@@ -138,6 +156,63 @@ func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call
 	}
 	return "systemd-run запускает " + name + " потомком systemd, а не агента: ядро (agent-signal-guard) его сигналы не сверяет, и он дотянется до процессов других агентов",
 		"Шли сигнал прямо, без systemd-run: найди PID отдельной командой (pgrep -a '[x]yz') и убей литералом: kill 12345; контейнер — podman stop имя"
+}
+
+var systemdRunExecProperties = []string{"ExecStart", "ExecStartPre", "ExecStartPost", "ExecCondition", "ExecReload", "ExecStop", "ExecStopPost"}
+
+// systemdRunExecPropertyReason проверяет команды Exec* в свойствах временной
+// службы как команды, исполняемые самим systemd.
+func (s *killScan) systemdRunExecPropertyReason(c shellcmd.Call) string {
+	options := parseSystemdRunOptions(systemdRunCallWords(c))
+	if options.scope {
+		return ""
+	}
+	for _, p := range options.properties {
+		if !p.literal {
+			if s.killText {
+				return "systemd-run задаёт вычисляемое свойство: оно может содержать Exec-команду с kill, проверить его до запуска нельзя" + hiddenTail
+			}
+			continue
+		}
+		key, value, ok := strings.Cut(p.text, "=")
+		if !ok || !slices.Contains(systemdRunExecProperties, key) {
+			continue
+		}
+		value = strings.TrimLeft(value, "-@: +!")
+		calls, err := shellcmd.Calls(value)
+		if err != nil { //nolint:silent-error-handling // parse failure rejects a command that may contain a signal
+			// Ошибка разбора не позволяет проверить возможный сигнал; отказываем по kill-тексту.
+			if s.killText {
+				//nolint:fallback-return // intentional fail-closed rejection
+				return "systemd-run задаёт Exec-свойство, которое не удалось разобрать: команда может содержать kill, проверить её до запуска нельзя" + hiddenTail
+			}
+			continue
+		}
+		for _, call := range calls {
+			if name, signal := signalCommand(call); signal {
+				return "systemd-run запускает " + name + " из Exec-свойства потомком systemd, а не агента: ядро (agent-signal-guard) его сигналы не сверяет"
+			}
+		}
+	}
+	return ""
+}
+
+// systemdRunCallWords восстанавливает значения аргументов из shellcmd.Call:
+// литеральные кавычки снимаются, а вычисляемое слово сохраняет подстановку.
+func systemdRunCallWords(c shellcmd.Call) []word {
+	out := make([]word, len(c.Args))
+	for i, arg := range c.Args {
+		out[i] = word{text: unquoted(arg), literal: !computedArg(arg)}
+	}
+	return out
+}
+
+func toWords(args []string) []word {
+	out := make([]word, len(args))
+	for i, arg := range args {
+		out[i] = word{text: arg, literal: !strings.ContainsAny(arg, "$`")}
+	}
+	return out
 }
 
 // hiddenTail конец причины отказа на невидимую команду под systemd-run
@@ -419,16 +494,7 @@ func systemdRunScopeOnly(c shellcmd.Call, calls []shellcmd.Call) bool {
 
 // systemdRunScopeOption среди опций systemd-run (до команды) есть --scope
 func systemdRunScopeOption(args []string) bool {
-	for i := 0; i < len(args); i++ {
-		t := args[i]
-		if t == "--" || !strings.HasPrefix(t, "-") || t == "-" {
-			return false
-		}
-		if name, _ := systemdRunOption(args, &i); name == "scope" {
-			return true
-		}
-	}
-	return false
+	return parseSystemdRunOptions(toWords(args)).scope
 }
 
 // systemdRunCalls вызовы systemd-run, под которым может идти c: с Via до
@@ -483,20 +549,7 @@ var systemdRunLongFlags = []string{
 // name; "" — нет такой или сокращение неоднозначно (systemd-run не
 // запустится)
 func systemdRunLongName(name string) string {
-	var found []string
-	for _, n := range append(slices.Clone(systemdRunLongFlags), systemdRunValues...) {
-		switch {
-		case len(n) < 2:
-		case n == name:
-			return n
-		case strings.HasPrefix(n, name):
-			found = append(found, n)
-		}
-	}
-	if len(found) == 1 {
-		return found[0]
-	}
-	return ""
+	return uniqueLongOptionName(name, systemdRunValues, systemdRunLongFlags)
 }
 
 // systemdRunHostOption — systemd-run исполнит команду на другой машине.
@@ -506,40 +559,5 @@ func systemdRunLongName(name string) string {
 // (localMachine); -C — капсула на этой машине. Опции кончаются на первом
 // слове команды и на --
 func systemdRunHostOption(args []string) bool {
-	remote := false
-	for i := 0; i < len(args); i++ {
-		t := args[i]
-		if t == "--" || !strings.HasPrefix(t, "-") || t == "-" {
-			return remote
-		}
-		name, value := systemdRunOption(args, &i)
-		switch name {
-		case "H", "host":
-			remote = true
-		case "M", "machine":
-			remote = !strings.ContainsAny(value, "$`\"'\\") && !localMachine(value)
-		case "C", "capsule":
-			remote = false
-		}
-	}
-	return remote
-}
-
-// systemdRunOption опция systemd-run в args[*i]: имя (полное длинное или
-// буква со значением) и значение; *i сдвигается за значение отдельным словом
-func systemdRunOption(args []string, i *int) (name, value string) {
-	t := args[*i]
-	next := false
-	if strings.HasPrefix(t, "--") {
-		n, v, inline := strings.Cut(t[2:], "=")
-		name, value = systemdRunLongName(n), v
-		next = !inline && slices.Contains(systemdRunValues, name)
-	} else {
-		name, value, next = shortValue(t, systemdRunValues)
-	}
-	if next && *i+1 < len(args) {
-		*i++
-		value = args[*i]
-	}
-	return name, value
+	return parseSystemdRunOptions(toWords(args)).remote
 }

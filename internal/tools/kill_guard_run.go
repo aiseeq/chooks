@@ -31,33 +31,9 @@ var unitEndActions = append([]string{"exit"}, loginShutdownKinds...)
 // как systemctl --user exit и systemctl poweroff. Опции systemd-run
 // кончаются на первом слове команды ("+" в getopt)
 func systemdRunReason(args []word) (reason, hint string) {
-	var a unitAction
-	var props []word
-	for i := 0; i < len(args); i++ {
-		t := args[i].text
-		if t == "--" || !strings.HasPrefix(t, "-") || t == "-" {
-			break
-		}
-		name, value := t[2:], word{}
-		if !strings.HasPrefix(t, "--") {
-			var rest string
-			name, rest, _ = shortValue(t, systemdRunValues)
-			if name == "" {
-				continue
-			}
-			value = optionValue(args, &i, rest)
-		} else if n, v, inline := strings.Cut(name, "="); inline {
-			name, value = n, word{text: v, literal: args[i].literal}
-		} else if slices.Contains(systemdRunValues, name) {
-			value = optionValue(args, &i, "")
-		}
-		a.user = a.user && name != "system" || name == "user"
-		if slices.Contains(systemdRunProperties, name) {
-			props = append(props, value)
-		}
-	}
-	scope := a.scope()
-	for _, p := range props {
+	options := parseSystemdRunOptions(args)
+	scope := (unitAction{user: options.user}).scope()
+	for _, p := range options.properties {
 		key, action, _ := strings.Cut(p.text, "=")
 		end := strings.TrimSuffix(strings.TrimSuffix(action, "-force"), "-immediate")
 		if !p.literal || key != "SuccessAction" && key != "FailureAction" || !slices.Contains(unitEndActions, end) {
@@ -67,4 +43,93 @@ func systemdRunReason(args []word) (reason, hint string) {
 		return fmt.Sprintf("%s -p %s: когда служба завершится, менеджер выполнит %s — %s: гаснут сессии Claude, терминал и графическая оболочка", label, p.text, action, systemctlEndEffect(scope, end)), systemctlEndHint(scope, end)
 	}
 	return "", ""
+}
+
+type systemdRunOptions struct {
+	user, scope, shell bool
+	start              int
+	properties         []word
+	remote             bool
+}
+
+var systemdRunShortNames = map[string]string{
+	"C": "capsule", "H": "host", "M": "machine", "E": "setenv", "p": "property", "u": "unit",
+	"h": "help", "r": "remain-after-exit", "t": "tty", "T": "pty", "P": "pty-late",
+	"q": "quiet", "v": "verbose", "G": "no-pager", "d": "same-dir", "S": "shell",
+}
+
+// parseSystemdRunOptions разбирает все интересующие опции одним проходом,
+// как getopt_long: длинные имена допускают однозначные сокращения, короткие
+// флаги склеиваются, а опция со значением завершает связку.
+func parseSystemdRunOptions(args []word) systemdRunOptions {
+	var out systemdRunOptions
+	for i := 0; i < len(args); i++ {
+		t := args[i].text
+		if t == "--" {
+			out.start = i + 1
+			return out
+		}
+		if !strings.HasPrefix(t, "-") || t == "-" {
+			out.start = i
+			return out
+		}
+		if strings.HasPrefix(t, "--") {
+			raw, rest, inline := strings.Cut(t[2:], "=")
+			name := systemdRunLongName(raw)
+			if name == "" {
+				continue
+			}
+			value := word{text: rest, literal: args[i].literal}
+			if slices.Contains(systemdRunValues, name) && !inline {
+				value = optionValue(args, &i, "")
+			}
+			applySystemdRunOption(&out, name, value)
+			continue
+		}
+		for j := 1; j < len(t); j++ {
+			letter := t[j : j+1]
+			name := systemdRunShortNames[letter]
+			if name == "" {
+				continue
+			}
+			value := word{text: "", literal: args[i].literal}
+			if slices.Contains(systemdRunValues, letter) {
+				rest := t[j+1:]
+				if rest == "" {
+					value = optionValue(args, &i, "")
+				} else {
+					value.text = rest
+					j = len(t)
+				}
+			}
+			applySystemdRunOption(&out, name, value)
+			if slices.Contains(systemdRunValues, letter) {
+				break
+			}
+		}
+	}
+	out.start = len(args)
+	return out
+}
+
+func applySystemdRunOption(out *systemdRunOptions, name string, value word) {
+	switch name {
+	case "user":
+		out.user = true
+	case "system":
+		out.user = false
+	case "scope":
+		out.scope = true
+	case "shell":
+		out.shell = true
+	case "host":
+		out.remote = true
+	case "machine":
+		out.remote = !strings.ContainsAny(value.text, "$`\"'\\") && !localMachine(value.text)
+	case "capsule":
+		out.remote = false
+	}
+	if slices.Contains(systemdRunProperties, name) {
+		out.properties = append(out.properties, value)
+	}
 }

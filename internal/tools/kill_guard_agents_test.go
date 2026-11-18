@@ -6,6 +6,43 @@ import (
 	"testing"
 )
 
+func TestKillGuardSystemdRunExecProperties(t *testing.T) {
+	for _, command := range []string{
+		`run0 --property=ExecStartPre=/usr/bin/kill true`,
+		`run0 '--property=ExecStopPost=/usr/bin/kill 12345' true`,
+		`systemd-run --user -p 'ExecStopPost=/usr/bin/kill 12345' true`,
+		`systemd-run --user --property=ExecStartPre=/usr/bin/kill true`,
+		`systemd-run --user -p 'ExecStartPre=-/usr/bin/pkill foo' true`,
+		`systemd-run --user --shell <<< 'kill 12345'`,
+		`systemd-run -S <<< 'kill 12345'`,
+		`systemd-run --user --prop=ExecStopPost=/usr/bin/kill true`,
+		`systemd-run --user -qS <<< 'kill 12345'`,
+		`echo 'kill 12345' | systemd-run --user --shell`,
+		`X='/usr/bin/kill 12345'; systemd-run --user -p "ExecStartPre=$X" true`,
+		`P="ExecStopPost=/usr/bin/kill 1"; systemd-run --user -p "$P" true`,
+		`systemd-run --user -p "ExecStartPre=$(cat /tmp/f)" true # kill`,
+		`systemd-run --user -p "ExecStartPre=$Y" true; echo kill`,
+		`exec < <(echo 'kill 12345'); systemd-run --user --shell`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+	for _, command := range []string{
+		`systemd-run --user -p MemoryMax=1G make`,
+		`run0 --property=Nice=5 dnf update`,
+		`systemd-run --user -p 'ExecStartPre=/usr/bin/true' make`,
+		`systemd-run --user --scope -p 'ExecStopPost=/usr/bin/kill 1' true`,
+		`systemd-run --user --prop=MemoryMax=1G make`,
+		`echo make | systemd-run --user --shell`,
+		`systemd-run --user -p "ExecStartPre=$Y" true`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("должно пропускаться: %s: %v", command, r)
+		}
+	}
+}
+
 // Тикет kill-guard-foreign-agent-units, а: stop/kill/restart/freeze юнита
 // другого агента через systemctl и D-Bus — отказ. Своя сессия — agent-x-1.scope
 // (в нём claude), чужая — agent-y-2.scope

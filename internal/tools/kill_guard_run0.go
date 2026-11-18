@@ -58,19 +58,28 @@ type run0Invocation struct {
 // точное совпадение или единственное имя, которое начинается с name; "" —
 // нет такой или сокращение неоднозначно (run0 выйдет с ошибкой)
 func run0LongName(name string) string {
-	var found []string
-	for _, n := range slices.Concat(run0LongValues, run0LongFlags) {
+	return uniqueLongOptionName(name, run0LongValues, run0LongFlags)
+}
+
+// uniqueLongOptionName разрешает полное имя или однозначное сокращение,
+// как getopt_long для systemd-run и run0.
+func uniqueLongOptionName(name string, values, flags []string) string {
+	var found string
+	for _, n := range slices.Concat(values, flags) {
+		if len(n) < 2 {
+			continue
+		}
 		switch {
 		case n == name:
 			return n
 		case name != "" && strings.HasPrefix(n, name):
-			found = append(found, n)
+			if found != "" {
+				return ""
+			}
+			found = n
 		}
 	}
-	if len(found) == 1 {
-		return found[0]
-	}
-	return ""
+	return found
 }
 
 // parseRun0 разбирает слова run0 так, как getopt_long с "+": опции до
@@ -476,17 +485,7 @@ func redirWord(target string) (string, error) {
 // systemdRunCommandStart место первого слова команды в словах systemd-run
 // (опции до первого операнда или --, "+" в getopt); len(args) — команды нет
 func systemdRunCommandStart(args []string) int {
-	for i := 0; i < len(args); i++ {
-		t := args[i]
-		switch {
-		case t == "--":
-			return i + 1
-		case !strings.HasPrefix(t, "-") || t == "-":
-			return i
-		}
-		systemdRunOption(args, &i)
-	}
-	return len(args)
+	return parseSystemdRunOptions(toWords(args)).start
 }
 
 // bareParallel вызов parallel без команды под systemd-run (systemd-run

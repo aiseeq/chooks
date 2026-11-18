@@ -987,6 +987,100 @@ func TestCheck_LockWaitBoundedByDeadline(t *testing.T) {
 	}
 }
 
+type expiryStore struct {
+	textStore
+	now      *time.Time
+	deadline time.Time
+	puts     int
+}
+
+func (s *expiryStore) put(text string) (string, error) {
+	hash, err := s.textStore.put(text)
+	s.puts++
+	*s.now = s.deadline
+	return hash, err
+}
+
+// Просроченная проверка не сохраняет сдвинутую базу после store.put:
+// следующая проверка выдаёт ту же правку, не теряя напоминание.
+func TestCheck_DeadlineAfterNoticePutKeepsStateAndNotice(t *testing.T) {
+	f := newFixture(t)
+	base := time.Now().Add(-time.Hour)
+	f.writeSkill("до", base)
+	f.load("до", base.Add(time.Minute))
+	f.check(Event{})
+	statePath := filepath.Join(f.checker.StateDir, "sess-1.json")
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.writeSkill("после", base.Add(5*time.Minute))
+	now := time.Now()
+	deadline := now.Add(time.Second)
+	store := &expiryStore{textStore: newDirStore(f.checker.StateDir), now: &now, deadline: deadline}
+	f.checker.Now = func() time.Time { return now }
+	f.checker.Deadline = deadline
+	f.checker.store = store
+	var stages []string
+	f.checker.Substage = func(stage string) { stages = append(stages, stage) }
+	_, err = f.checker.Check(Event{SessionID: "sess-1", TranscriptPath: f.transcript})
+	if !errors.Is(err, ErrNoTime) {
+		t.Fatalf("ждали ErrNoTime после put, получили %v", err)
+	}
+	if store.puts != 1 {
+		t.Fatalf("store.put вызван %d раз", store.puts)
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("запись изменилась после срока: err=%v, before=%s, after=%s", err, before, after)
+	}
+	if stages[len(stages)-1] != "notices" {
+		t.Fatalf("после истечения срока началась следующая подстадия: %v", stages)
+	}
+	f.checker.Now = nil
+	f.checker.Deadline = time.Time{}
+	f.checker.store = nil
+	f.checker.Substage = nil
+	got := f.check(Event{SessionID: "sess-1", TranscriptPath: f.transcript})
+	if len(got) != 1 || !strings.Contains(got[0].Diff, "+после") {
+		t.Fatalf("следующая проверка потеряла напоминание: %+v", got)
+	}
+	if got := f.check(Event{SessionID: "sess-1", TranscriptPath: f.transcript}); len(got) != 0 {
+		t.Fatalf("напоминание выдано повторно: %+v", got)
+	}
+}
+
+// При неполном сканировании сохраняется смещение даже после срока Check:
+// три последовательных события продолжают чтение с предыдущего места.
+func TestCheck_ExpiredPendingScanAdvancesOffset(t *testing.T) {
+	f := newFixture(t)
+	line := `{"type":"progress","payload":"` + strings.Repeat("x", 96) + `"}` + "\n"
+	if err := os.WriteFile(f.transcript, []byte(strings.Repeat(line, 400_000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.checker.ScanBudget = time.Second
+	event := Event{SessionID: "sess-1", TranscriptPath: f.transcript}
+	var previous int64
+	for i := range 3 {
+		f.checker.Deadline = time.Now().Add(30 * time.Millisecond)
+		result, err := f.checker.Check(event)
+		if err != nil {
+			t.Fatalf("событие %d: Check: %v", i+1, err)
+		}
+		if !result.Pending {
+			t.Fatalf("событие %d: транскрипт неожиданно дочитан", i+1)
+		}
+		state, err := readStateUnlocked(f.checker.StateDir, "sess-1.json")
+		if err != nil {
+			t.Fatalf("событие %d: read state: %v", i+1, err)
+		}
+		if state.Offset <= previous {
+			t.Fatalf("событие %d: смещение не выросло: было %d, стало %d", i+1, previous, state.Offset)
+		}
+		previous = state.Offset
+	}
+}
+
 // Метку не записать — чистка всё равно идёт, сбой виден вызывающему
 func TestCleanupRunsWhenMarkUnwritable(t *testing.T) {
 	f := newFixture(t)
@@ -1079,5 +1173,111 @@ func TestCleanupAtMostDaily(t *testing.T) {
 	}
 	if info, err := os.Stat(mark); err != nil || !info.ModTime().Equal(now) {
 		t.Errorf("метка не поправлена: %v %v", info, err)
+	}
+}
+
+// SkillCalled читает запись главного агента: вызов скилла виден после
+// события хука, сжатие его не отменяет, вызов субагента не в счёт
+func TestSkillCalledFromRecord(t *testing.T) {
+	f := newFixture(t)
+	dir := f.checker.StateDir
+	base := time.Now().Add(-time.Hour)
+
+	// Записи нет — ErrNoState, файл не создаётся
+	if _, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); !errors.Is(err, ErrNoState) {
+		t.Fatalf("без записи: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sess-1.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("чтение создало запись: %v", err)
+	}
+
+	// Запись есть, скилл не вызван
+	f.writeSkill("Тело.", base)
+	f.appendTranscript(jsonLine(t, map[string]any{"type": "user", "timestamp": stamp(base), "message": map[string]any{"role": "user", "content": "письмо сессии"}}))
+	f.check(Event{})
+	if called, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || called {
+		t.Fatalf("до вызова: called %t, %v", called, err)
+	}
+
+	// Субагент вызвал скилл в своём транскрипте — не вызов главного агента
+	agentTranscript := strings.TrimSuffix(f.transcript, ".jsonl") + "/subagents/agent-a1.jsonl"
+	if err := os.MkdirAll(filepath.Dir(agentTranscript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agentTranscript, []byte(snapshotLine(t, f.skillDir, "Тело.", base.Add(time.Minute))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.check(Event{AgentID: "a1", AgentType: "general-purpose"})
+	if data, err := os.ReadFile(filepath.Join(dir, "sess-1.a1.json")); err != nil || !strings.Contains(string(data), `"name":"demo"`) {
+		t.Fatalf("в записи субагента нет вызова: %s, %v", data, err)
+	}
+	if called, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || called {
+		t.Fatalf("вызов субагента засчитан: called %t, %v", called, err)
+	}
+
+	// Вызов главным агентом, затем сжатие
+	f.load("Тело.", base.Add(2*time.Minute))
+	f.check(Event{})
+	if called, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || !called {
+		t.Fatalf("после вызова: called %t, %v", called, err)
+	}
+	if called, err := SkillCalled(dir, "sess-1", []string{"other"}, time.Now().Add(time.Second)); err != nil || called {
+		t.Fatalf("другой скилл: called %t, %v", called, err)
+	}
+	// Любой из списка засчитывается
+	if called, err := SkillCalled(dir, "sess-1", []string{"other", "demo"}, time.Now().Add(time.Second)); err != nil || !called {
+		t.Fatalf("скилл вторым в списке: called %t, %v", called, err)
+	}
+	f.appendTranscript(f.compactLines("", base.Add(3*time.Minute))...)
+	f.check(Event{})
+	if called, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || !called {
+		t.Fatalf("после сжатия: called %t, %v", called, err)
+	}
+}
+
+func TestSkillCalledBadRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s1.json")
+	for name, body := range map[string]string{
+		"empty":    "",
+		"broken":   `{"schema":2,"files":`,
+		"schema 1": `{"schema":1,"skills":{}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			called, err := SkillCalled(dir, "s1", []string{"demo"}, time.Now().Add(time.Second))
+			if err == nil || called {
+				t.Fatalf("called %t, ошибка %v", called, err)
+			}
+			if got := errors.Is(err, ErrNoState); got != (name == "empty") {
+				t.Errorf("ErrNoState = %t: %v", got, err)
+			}
+		})
+	}
+	if _, err := SkillCalled(dir, "../s1", []string{"demo"}, time.Now()); err == nil {
+		t.Error("имя сессии с путём принято")
+	}
+}
+
+// Запись держит хук skill-reload: чтение ждёт блокировку не дольше срока
+func TestSkillCalledLockBounded(t *testing.T) {
+	dir := t.TempDir()
+	holder, err := os.OpenFile(filepath.Join(dir, "s1.json"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = SkillCalled(dir, "s1", []string{"demo"}, started.Add(150*time.Millisecond))
+	if !errors.Is(err, core.ErrLockBusy) {
+		t.Fatalf("ожидалась занятая блокировка, получено %v", err)
+	}
+	if waited := time.Since(started); waited > 600*time.Millisecond {
+		t.Errorf("ждали блокировку %s при сроке 150ms", waited)
 	}
 }

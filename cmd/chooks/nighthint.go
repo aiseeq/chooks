@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/nighthint"
+	"github.com/aiseeq/chooks/internal/skillreload"
 )
 
 // hookNightHint — подкоманда ночной подсказки; включает её регистрация в
@@ -31,13 +33,77 @@ type nightHintEvent struct {
 	Source               string `json:"source"`
 }
 
-// nightHintDeps — живые время, признак блокировки и записи
-func nightHintDeps() (nighthint.Deps, error) {
+// skillStateWait — сколько ждать блокировку записи skill-reload: её держат
+// UserPromptSubmit и PostToolBatch на время чтения транскрипта (бюджет
+// skillScanBudget). Ожидание кончается и раньше — к сроку хука (deadline у
+// autonomousSkillCalled)
+const skillStateWait = time.Second
+
+// nightHintDeps — живые время, признак блокировки, записи и признак вызова
+// скилла autonomous-work по записи skill-reload; deadline — срок хука для
+// чтения записи
+func nightHintDeps(config *core.Config, deadline time.Time) (nighthint.Deps, error) {
 	dir, err := nighthint.DefaultDir()
 	if err != nil {
 		return nighthint.Deps{}, err
 	}
-	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, Store: nighthint.Store{Dir: dir}}, nil
+	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, Store: nighthint.Store{Dir: dir}, SkillCalled: autonomousSkillCalled(config, deadline)}, nil
+}
+
+// autonomousSkillCalled — признак вызова скилла autonomous-work в сессии по
+// записи хука skill-reload. Записи нет — скилл не вызван: вызов Skill всегда
+// даёт PostToolBatch, а он запись создаёт. Первый ход новой сессии записи ещё
+// не имеет — её создаёт user-prompt-submit параллельно с night-hint на том же
+// UserPromptSubmit, — и этот ход подсказку получает. Выключенный skill_reload
+// записей не ведёт: признак — ErrSkillUnknown, подсказка идёт по правилу «раз
+// за ночь»; так же — при сбое чтения существующей записи.
+//
+// Запись ждётся не дольше deadline — срока хука от старта процесса, как у
+// skill-reload: до неё UserPromptSubmit уже ждал запись night-hint дважды (по
+// lockWait) и logind (lockTimeout), и без срока сумма выходила за таймаут хука
+// 3 с из settings.json (тикет night-hint-night-work-budget). Срок наступил —
+// запись не читается, подсказка идёт по правилу «раз за ночь», причина — в лог
+func autonomousSkillCalled(config *core.Config, deadline time.Time) func(sessionID string) (bool, error) {
+	return func(sessionID string) (bool, error) {
+		if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
+			return false, fmt.Errorf("%s disabled in config: %w", skillReloadTool, nighthint.ErrSkillUnknown)
+		}
+		now := time.Now()
+		if !now.Before(deadline) {
+			return false, fmt.Errorf("skill-reload record not read, hook deadline %s passed: %w", deadline.Format("15:04:05.000"), skillreload.ErrNoTime)
+		}
+		dir, err := skillreload.DefaultStateDir()
+		if err != nil {
+			return false, err
+		}
+		wait := now.Add(skillStateWait)
+		if deadline.Before(wait) {
+			wait = deadline
+		}
+		// LockFile ограничивает ожидание блокировки, но обычное чтение после
+		// захвата может задержаться на диске. Оно только читает запись, поэтому
+		// уносим его в горутину и возвращаемся к абсолютному сроку хука.
+		type skillCallResult struct {
+			called bool
+			err    error
+		}
+		result := make(chan skillCallResult, 1)
+		go func() {
+			called, err := skillreload.SkillCalled(dir, sessionID, nighthint.AutonomousSkills(), wait)
+			result <- skillCallResult{called: called, err: err}
+		}()
+		var called bool
+		select {
+		case answer := <-result:
+			called, err = answer.called, answer.err
+		case <-time.After(time.Until(deadline)):
+			return false, fmt.Errorf("skill-reload record read abandoned at hook deadline: %w", skillreload.ErrNoTime)
+		}
+		if errors.Is(err, skillreload.ErrNoState) {
+			return false, nil
+		}
+		return called, err
+	}
 }
 
 func newNightHintCmd(exitCode *int) *cobra.Command {
@@ -46,7 +112,8 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 		Use:   hookNightHint,
 		Short: "Ночью при заблокированном экране подсказать сессии: пользователь спит, вопрос — тикетом админу пространства (SessionStart, UserPromptSubmit, PreToolUse AskUserQuestion, Stop с ❓)",
 		Long: "Подсказка в additionalContext, не отказ. Признак «спит» — экран заблокирован (LockedHint сессии seat0 в logind) и местное время 22:00–09:00. " +
-			"SessionStart и UserPromptSubmit — раз за ночь на сессию, PreToolUse AskUserQuestion — на каждый вызов, Stop — если в последнем ответе есть строка с ❓, раз за ход. " +
+			"SessionStart — раз за ночь на сессию и после сжатия и /clear; UserPromptSubmit — на каждом ходе, пока в сессии не вызван скилл autonomous-work или night-work (sc2go) (по записи skill-reload; записи нет — не вызван), после вызова, при выключенном skill_reload, сбое чтения записи или исчерпанном сроке хука — раз за ночь; " +
+			"PreToolUse AskUserQuestion — на каждый вызов, Stop — если в последнем ответе есть строка с ❓, раз за ход. " +
 			"--probe печатает признак блокировки и время его получения.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if probe {
@@ -111,6 +178,14 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 	if result.Damaged != nil {
 		logger.Warn("night hint record replaced", "event", input.HookEventName, "session", input.SessionID, "error", result.Damaged)
 	}
+	if result.SkillErr != nil {
+		// Выключенный признак — выбор конфига, сбой чтения записи — нет
+		if errors.Is(result.SkillErr, nighthint.ErrSkillUnknown) {
+			logger.Debug("night hint once per night: skill call unknown", "event", input.HookEventName, "session", input.SessionID, "reason", result.SkillErr)
+		} else {
+			logger.Warn("night hint once per night: skill call unknown", "event", input.HookEventName, "session", input.SessionID, "error", result.SkillErr)
+		}
+	}
 	if result.LockErr != nil {
 		logger.Warn("night hint skipped: screen lock state unknown", "event", input.HookEventName, "session", input.SessionID, "error", result.LockErr)
 		return
@@ -133,8 +208,8 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 }
 
 // defaultNightHint — обработчик для runHook: живые зависимости
-func defaultNightHint(ctx context.Context, data []byte, config *core.Config, logger core.Logger) {
-	deps, err := nightHintDeps()
+func defaultNightHint(ctx context.Context, data []byte, config *core.Config, logger core.Logger, deadline time.Time) {
+	deps, err := nightHintDeps(config, deadline)
 	if err != nil {
 		logger.Warn("night hint state dir unavailable", "error", err)
 		return

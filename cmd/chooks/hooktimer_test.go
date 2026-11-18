@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/skillreload"
 )
 
 // captureLogger запоминает предупреждения и сообщения INFO
@@ -74,6 +75,7 @@ func TestHookTimer_SlowOverHalfTimeout(t *testing.T) {
 	timer.stage("state")
 	clock.advance(1600 * time.Millisecond)
 	timer.stage("skills")
+	timer.setSubstage("notices")
 	clock.advance(20 * time.Millisecond)
 	timer.finish("ok")
 
@@ -81,7 +83,7 @@ func TestHookTimer_SlowOverHalfTimeout(t *testing.T) {
 		t.Fatalf("ожидалась одна строка о медленном хуке, получено %q", logger.warns)
 	}
 	line := logger.warns[0]
-	for _, want := range []string{"over half of timeout", "elapsed_ms 1630", "timeout_ms 3000", "input=10,state=1600,skills=20"} {
+	for _, want := range []string{"over half of timeout", "elapsed_ms 1630", "timeout_ms 3000", "input=10,state=1600,skills=20", "substage notices"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("в строке нет %q: %s", want, line)
 		}
@@ -113,6 +115,95 @@ func TestHookTimer_TimeoutUnknown(t *testing.T) {
 	timer.finish("ok")
 	if len(logger.warns) != 1 || !strings.Contains(logger.warns[0], "timeout unknown") {
 		t.Errorf("хука нет в settings — строка с ошибкой, получено %q", logger.warns)
+	}
+}
+
+func TestAwaitSkillCheckAbandonsAtHardDeadlineWithSubstage(t *testing.T) {
+	timer, _, logger := newTestTimer(t, hookUserPromptSubmit, upsSettings)
+	timer.start = time.Now().Add(-1900 * time.Millisecond)
+	timer.now = time.Now
+	input := &core.ToolInput{SessionID: "session-1", AgentID: "agent-2"}
+	finished := make(chan struct{})
+	started := time.Now()
+	awaitSkillCheck(timer, logger, eventPostToolBatch, input, func() {
+		timer.setSubstage("notices")
+		<-finished
+	})
+	defer close(finished)
+	if time.Since(started) > 700*time.Millisecond {
+		t.Fatalf("хук ждал Check после жёсткого срока: %s", time.Since(started))
+	}
+	if len(logger.warns) != 1 {
+		t.Fatalf("ожидался WARN об обрыве, получено %q", logger.warns)
+	}
+	for _, want := range []string{"skill reload abandoned: hook budget spent", "hook PostToolBatch", "session session-1", "agent agent-2", "substage notices"} {
+		if !strings.Contains(logger.warns[0], want) {
+			t.Errorf("WARN не содержит %q: %s", want, logger.warns[0])
+		}
+	}
+}
+
+func TestAwaitSlowSkillCheckerReturnsBeforeHardDeadline(t *testing.T) {
+	timer, _, logger := newTestTimer(t, hookUserPromptSubmit, upsSettings)
+	timer.start = time.Now().Add(-1950 * time.Millisecond)
+	timer.now = time.Now
+	root := t.TempDir()
+	transcript := filepath.Join(root, "transcript.jsonl")
+	if err := os.WriteFile(transcript, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	checker := skillreload.Checker{
+		StateDir: root, Deadline: timer.deadline(optionalBudget),
+		Substage: func(stage string) {
+			timer.setSubstage(stage)
+			if stage == "lock" {
+				close(entered)
+				<-release
+			}
+		},
+	}
+	input := &core.ToolInput{SessionID: "session-1", AgentID: "agent-2"}
+	started := time.Now()
+	checkDone := make(chan struct{})
+	awaitSkillCheck(timer, logger, eventUserPromptSubmit, input, func() {
+		defer close(checkDone)
+		_, _ = checker.Check(skillreload.Event{SessionID: input.SessionID, TranscriptPath: transcript})
+	})
+	<-entered
+	// Check остаётся в lock callback после жёсткого срока; освобождаем его
+	// только после того, как awaitSkillCheck уже вернул управление.
+	close(release)
+	<-checkDone
+	if time.Since(started) > 650*time.Millisecond {
+		t.Fatalf("хук ждал медленный Checker: %s", time.Since(started))
+	}
+	if len(logger.warns) != 1 || !strings.Contains(logger.warns[0], "substage lock") {
+		t.Fatalf("WARN не назвал подстадию: %q", logger.warns)
+	}
+}
+
+func TestAwaitSkillCheckSkipsWhenOptionalBudgetSpent(t *testing.T) {
+	timer, _, logger := newTestTimer(t, hookUserPromptSubmit, upsSettings)
+	timer.start = time.Now().Add(-2100 * time.Millisecond)
+	timer.now = time.Now
+	called := false
+	awaitSkillCheck(timer, logger, eventUserPromptSubmit, &core.ToolInput{SessionID: "s1"}, func() { called = true })
+	if called {
+		t.Fatal("Check запущен после срока optionalBudget")
+	}
+	if len(logger.warns) != 1 || !strings.Contains(logger.warns[0], "skill reload skipped: hook budget spent") {
+		t.Fatalf("нет WARN о пропуске: %q", logger.warns)
+	}
+}
+
+func TestFinishSkillCheckLogsScanErrorWithExpiredDeadline(t *testing.T) {
+	logger := &captureLogger{}
+	readErr := errors.New("transcript read failed")
+	finishSkillCheck(eventPostToolBatch, &core.ToolInput{SessionID: "s1"}, logger, skillreload.Result{}, errors.Join(readErr, skillreload.ErrNoTime))
+	if len(logger.warns) != 1 || !strings.Contains(logger.warns[0], readErr.Error()) {
+		t.Fatalf("ошибка чтения транскрипта потеряна: %q", logger.warns)
 	}
 }
 
@@ -175,6 +266,7 @@ func TestHookTimerHelper(t *testing.T) {
 	timer.setDurations(core.LoggerConfig{Output: "file", LogFile: os.Getenv("CHOOKS_HOOKTIMER_LOG")})
 	timer.watchTermination()
 	timer.stage("skills")
+	timer.setSubstage("notices")
 	fmt.Println("ready")
 	// Родитель держит stdin открытым: выход отсюда — только по SIGTERM
 	if _, err := io.ReadAll(os.Stdin); err != nil {
@@ -221,7 +313,7 @@ func TestHookTimer_SIGTERM(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != killedExitCode {
 		t.Fatalf("ожидался выход %d, получено %v", killedExitCode, err)
 	}
-	for _, want := range []string{"terminated by SIGTERM, killed", "stage skills", "skills(running)=", "timeout_error"} {
+	for _, want := range []string{"terminated by SIGTERM, killed", "stage skills", "skills.notices(running)=", "substage notices", "timeout_error"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("в stderr нет %q: %s", want, stderr.String())
 		}

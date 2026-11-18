@@ -47,7 +47,8 @@ tools:
 
   # Ночью при заблокированном экране (22:00–09:00, LockedHint сессии seat0)
   # кладёт агенту подсказку: пользователь спит, вопрос — тикетом админу пространства
-  # (SessionStart и UserPromptSubmit раз за ночь, PreToolUse AskUserQuestion,
+  # (SessionStart раз за ночь; UserPromptSubmit — на каждом ходе, пока не вызван
+  # скилл autonomous-work, по записи skill_reload; PreToolUse AskUserQuestion,
   # Stop с ❓; подкоманда night-hint). Включает регистрация подкоманды в
   # settings.json; без ключа включено
   night_hint:

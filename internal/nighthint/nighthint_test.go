@@ -23,6 +23,10 @@ type fakeDeps struct {
 	err    error
 	calls  int
 	store  Store
+	// skill — признак вызова autonomous-work; nil — признака нет.
+	// skillCalls считает обращения к нему
+	skill      func(sessionID string) (bool, error)
+	skillCalls int
 }
 
 func newFake(t *testing.T, now time.Time, locked bool) *fakeDeps {
@@ -31,7 +35,7 @@ func newFake(t *testing.T, now time.Time, locked bool) *fakeDeps {
 }
 
 func (f *fakeDeps) deps() Deps {
-	return Deps{
+	deps := Deps{
 		Now: func() time.Time { return f.now },
 		Locked: func(context.Context) (bool, error) {
 			f.calls++
@@ -39,6 +43,13 @@ func (f *fakeDeps) deps() Deps {
 		},
 		Store: f.store,
 	}
+	if f.skill != nil {
+		deps.SkillCalled = func(sessionID string) (bool, error) {
+			f.skillCalls++
+			return f.skill(sessionID)
+		}
+	}
+	return deps
 }
 
 func (f *fakeDeps) run(t *testing.T, event Event) Result {
@@ -445,5 +456,110 @@ func TestTextAddressesSpaceAdmin(t *testing.T) {
 	}
 	if !strings.Contains(text, "23:05") {
 		t.Errorf("в подсказке нет времени: %q", text)
+	}
+}
+
+// Сессия после /clear получила подсказку на SessionStart, первый ход будит
+// письмо другой сессии: пока autonomous-work не вызван, подсказка на каждом
+// UserPromptSubmit, после вызова — раз за ночь (тикет
+// night-hint-after-clear-first-turn)
+func TestPromptRepeatsUntilSkillCalled(t *testing.T) {
+	fake := newFake(t, at(16, 5, 6), true)
+	called := false
+	fake.skill = func(sessionID string) (bool, error) {
+		if sessionID != "s1" {
+			t.Errorf("признак спрошен для сессии %q", sessionID)
+		}
+		return called, nil
+	}
+	start := eventOf(EventSessionStart)
+	start.Source = "clear"
+	if fake.run(t, start).Context == "" {
+		t.Fatal("SessionStart(clear) ночью без подсказки")
+	}
+	for i := range 2 {
+		fake.now = fake.now.Add(time.Minute)
+		result := fake.run(t, eventOf(EventUserPromptSubmit))
+		if result.Context != Text(fake.now) || result.SkillErr != nil {
+			t.Fatalf("ход %d без вызова скилла: подсказка %q, skip %q, сбой %v", i+1, result.Context, result.Skip, result.SkillErr)
+		}
+	}
+	called = true
+	for i := range 2 {
+		fake.now = fake.now.Add(time.Minute)
+		if result := fake.run(t, eventOf(EventUserPromptSubmit)); result.Context != "" || result.SkillErr != nil {
+			t.Fatalf("ход %d после вызова скилла: подсказка %q, сбой %v", i+1, result.Context, result.SkillErr)
+		}
+	}
+	// SessionStart по-прежнему раз за ночь: resume без вызова скилла — без
+	// повтора, признак не спрашивается
+	called = false
+	asked := fake.skillCalls
+	resume := eventOf(EventSessionStart)
+	resume.Source = "resume"
+	if fake.run(t, resume).Context != "" || fake.skillCalls != asked {
+		t.Errorf("SessionStart(resume) той же ночи: повтор или признак спрошен (%d → %d)", asked, fake.skillCalls)
+	}
+}
+
+// Первый ход ночи даёт подсказку и без признака: ночь ещё не отмечена,
+// признак не спрашивается
+func TestPromptFirstOfNightSkipsSkillCheck(t *testing.T) {
+	fake := newFake(t, at(15, 23, 0), true)
+	fake.skill = func(string) (bool, error) { return true, nil }
+	if fake.run(t, eventOf(EventUserPromptSubmit)).Context == "" {
+		t.Fatal("первый ход ночи без подсказки")
+	}
+	if fake.skillCalls != 0 {
+		t.Errorf("признак спрошен %d раз на первом ходе ночи", fake.skillCalls)
+	}
+}
+
+// Признака нет (нет записи skill-reload, выключен, сбой чтения) — прежнее
+// правило «раз за ночь», причина — в SkillErr
+func TestPromptOnceWithoutSkillState(t *testing.T) {
+	noRecord := errors.New("no record")
+	for name, skill := range map[string]func(string) (bool, error){
+		"нет признака":  nil,
+		"сбой признака": func(string) (bool, error) { return false, noRecord },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := newFake(t, at(15, 23, 0), true)
+			fake.skill = skill
+			if fake.run(t, eventOf(EventSessionStart)).Context == "" {
+				t.Fatal("SessionStart ночью без подсказки")
+			}
+			for i := range 2 {
+				result := fake.run(t, eventOf(EventUserPromptSubmit))
+				if result.Context != "" {
+					t.Fatalf("ход %d: повтор подсказки без признака", i+1)
+				}
+				want := ErrSkillUnknown
+				if skill != nil {
+					want = noRecord
+				}
+				if !errors.Is(result.SkillErr, want) {
+					t.Errorf("ход %d: SkillErr = %v, ждали %v", i+1, result.SkillErr, want)
+				}
+			}
+		})
+	}
+}
+
+// Днём и при разблокированном экране подсказки нет и признак не спрашивается
+func TestPromptSkillCheckOnlyAtLockedNight(t *testing.T) {
+	for name, fake := range map[string]*fakeDeps{
+		"день":       newFake(t, at(16, 14, 0), true),
+		"не заблок.": newFake(t, at(16, 2, 0), false),
+	} {
+		fake.skill = func(string) (bool, error) { return false, nil }
+		for i := range 2 {
+			if result := fake.run(t, eventOf(EventUserPromptSubmit)); result.Context != "" {
+				t.Errorf("%s, ход %d: подсказка %q", name, i+1, result.Context)
+			}
+		}
+		if fake.skillCalls != 0 {
+			t.Errorf("%s: признак спрошен %d раз", name, fake.skillCalls)
+		}
 	}
 }

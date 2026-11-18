@@ -192,7 +192,6 @@ func TestKillGuardGaps3Allows(t *testing.T) {
 		`systemctl --user stop foo.service`,
 		`systemctl --user restart foo`,
 		`systemctl --user stop opencode`,
-		`systemctl --user stop run-sleep.scope`,
 		`systemctl --user kill -s 0 app.slice`,
 		`systemctl --user kill --signal=0 agents.slice`,
 		`systemctl --user kill --kill-whom=main -s USR1 opencode.service`,

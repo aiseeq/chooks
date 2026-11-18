@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -250,6 +251,56 @@ func readStateUnlocked(dir, name string) (sessionState, error) {
 		return sessionState{}, fmt.Errorf("state %s has schema %d, want %d", name, state.Schema, stateSchema)
 	}
 	return state, nil
+}
+
+// ErrNoState — записи сессии нет или она ещё пуста: хук skill-reload сессию не
+// встречал (выключен, не зарегистрирован или сессия только началась)
+var ErrNoState = errors.New("skill reload state not found")
+
+// SkillCalled сообщает, есть ли в записи главного агента сессии вызванный
+// скилл из names. Запись ведут UserPromptSubmit и PostToolBatch: вызов прошлого
+// хода виден по PostToolBatch того же хода; снимок, подложенный сжатием,
+// вызов не отменяет. Субагенты пишут свои записи, их вызовы не в счёт.
+// save перезаписывает файл на месте (Truncate и WriteAt), поэтому чтение —
+// под той же блокировкой, ожидая её не дольше deadline. Файл не создаётся:
+// нет записи — ErrNoState
+func SkillCalled(dir, sessionID string, names []string, deadline time.Time) (bool, error) {
+	fileName, err := stateFileName(sessionID, "")
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(dir, fileName)
+	file, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, fmt.Errorf("%s: %w", path, ErrNoState)
+	}
+	if err != nil {
+		return false, fmt.Errorf("cannot open state %s: %w", path, err)
+	}
+	defer file.Close()
+	if err := core.LockFile(file, deadline); err != nil {
+		return false, fmt.Errorf("state is locked by another hook: %w", err)
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return false, fmt.Errorf("cannot read state %s: %w", path, err)
+	}
+	if len(data) == 0 {
+		return false, fmt.Errorf("%s is empty: %w", path, ErrNoState)
+	}
+	var state sessionState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return false, fmt.Errorf("cannot decode state %s: %w", path, err)
+	}
+	if state.Schema != stateSchema {
+		return false, fmt.Errorf("state %s has schema %d, want %d", path, state.Schema, stateSchema)
+	}
+	for _, w := range state.Files {
+		if w.Kind == kindSkill && slices.Contains(names, w.Name) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // cleanupDue отвечает, пора ли чистить, и сразу двигает метку: одновременные

@@ -364,6 +364,15 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"lastpipe включён в подоболочке", "/", "(shopt -s lastpipe); S=" + good + "; true | S=" + dir + "; " + auth + "-d @$S/body.json" + url, ""},
 		{"lastpipe: первое звено", "/", "shopt -s lastpipe; S=" + good + "; S=" + dir + " | true; " + auth + "-d @$S/body.json" + url, ""},
 		{"lastpipe: конвейер в подоболочке", "/", "shopt -s lastpipe; S=" + good + "; (true | S=" + dir + "); " + auth + "-d @$S/body.json" + url, ""},
+		// ${ ; } и ${| ; } (bash 5.3) идут в текущей оболочке: присваивание
+		// внутри видно после подстановки
+		{"присвоено в ${ ; }", "/", "S=" + good + "; x=${ S=" + dir + "; }; " + auth + "-d @$S/body.json" + url, "jira_comment_style"},
+		{"присвоено в ${| ; }", "/", "S=" + good + "; x=${| S=" + dir + "; }; " + auth + "-d @$S/body.json" + url, "jira_comment_style"},
+		// Here-doc звена или coproc: команда после ; на строке с <<EOF
+		// идёт в текущей оболочке, не в звене
+		{"here-doc в первом звене, присвоено после ;", "/", "S=" + good + "; cat <<EOF | cat >/dev/null; S=" + dir + "\nx\nEOF\n" + auth + "-d @$S/body.json" + url, "jira_comment_style"},
+		{"here-doc у coproc, присвоено после ;", "/", "S=" + good + "; coproc cat <<EOF; S=" + dir + "\nx\nEOF\n" + auth + "-d @$S/body.json" + url, "jira_comment_style"},
+		{"here-doc в звене, присвоено после &&", "/", "S=" + good + "; cat <<EOF | cat >/dev/null && S=" + dir + "\nx\nEOF\n" + auth + "-d @$S/body.json" + url, "jira_comment_style"},
 		{"функция присваивает и отправляет, чистый", "/", "f() { S=" + good + "; " + auth + "-d @$S/body.json" + url + "; }; f", ""},
 		{"функция присваивает и отправляет, плохой", "/", "f() { S=" + dir + "; " + auth + "-d @$S/body.json" + url + "; }; f", "jira_comment_style"},
 		{"в теле вызов другой функции между присваиванием и отправкой", "/", "f() { S=" + good + "; g; " + auth + "-d @$S/body.json" + url + "; }; g() { S=" + dir + "; }; f", "jira_comment_payload"},

@@ -218,7 +218,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		timer.stage("state")
 		saveState(logger, input.SessionID, core.StateWorking)
 		timer.stage("skills")
-		remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget))
+		remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer)
 		return exitAllowed, nil
 	case hookPostToolBatch:
 		// Пакет инструментов — место напоминания в длинном ходе и у субагентов,
@@ -234,7 +234,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 			}
 		}
 		timer.stage("skills")
-		remindStaleSkills(eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget))
+		remindStaleSkills(eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget), timer)
 		return exitAllowed, nil
 	case hookStop:
 		runSessionEvent(core.EventStop, data, config, logger)
@@ -256,7 +256,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		runUnsentCheck(parseSessionInput(logger, hookType, data), logger, os.Stdout)
 		return exitAllowed, nil
 	case hookNightHint:
-		defaultNightHint(ctx, data, config, logger)
+		defaultNightHint(ctx, data, config, logger, timer.deadline(optionalBudget))
 		return exitAllowed, nil
 	case hookNoPrompt:
 		if err := runNoPrompt(data, logger, os.Stdout); err != nil {

@@ -55,12 +55,13 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 	}
 	text := unquoted(input.Command)
 	killText := strings.Contains(text, "kill")
-	if !killText && !sessionToolWordRe.MatchString(text) {
+	if !killText && !sessionToolWordRe.MatchString(text) && !strings.Contains(text, cgroupRoot) {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
 	scan := killScan{tool: t, command: input.Command, killText: killText,
-		signalWord: signalWordRe.MatchString(text), zsh: zshWordRe.MatchString(text)}
+		signalWord: signalWordRe.MatchString(text), zsh: zshWordRe.MatchString(text),
+		anyBus: busAddressRe.MatchString(text)}
 	if err := scan.parsedCalls(); err != nil {
 		return nil, err
 	}
@@ -126,6 +127,12 @@ type killScan struct {
 	// killText — в команде без кавычек есть подстрока kill. Без неё сторож
 	// смотрит только loginctl, systemctl и fuser, и ошибка разбора — не отказ
 	killText bool
+	// anyBus — команда задаёт адрес шины D-Bus (busAddressRe): менеджер
+	// systemd у systemctl и вызовов D-Bus проверяется по обоим
+	anyBus bool
+	// stdin — ввод участков текста, к которому отнесены места вызовов
+	// (stdinOf): команды, а за run0 и pkexec — текста за обёрткой
+	stdin *stdinScope
 }
 
 // signalWordRe отдельное слово kill, pkill, killall, killall5
@@ -278,6 +285,30 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if sudoAssignment(c, calls) {
 		return nil
 	}
+	if err := s.cgroupWrite(c); err != nil {
+		return err
+	}
+	if inner, ok := elevatedCommand(c); ok {
+		return s.elevated(c, inner)
+	}
+	feed := s.literalFeed(c, calls)
+	if reason, hint := s.systemdRunSignalReason(c, calls, feed != nil); reason != "" {
+		s.addToolReason(reason, hint, false)
+	}
+	for _, f := range feed {
+		if err := s.call(f, slices.Concat(calls, feed)); err != nil {
+			return err
+		}
+	}
+	if reason := s.parallelSystemdRunReason(c); reason != "" {
+		s.addToolReason(reason, systemdRunHiddenHint, false)
+	}
+	inner := s.parallelInnerCalls(c)
+	for _, x := range inner {
+		if err := s.call(x, slices.Concat(calls, inner)); err != nil {
+			return err
+		}
+	}
 	if !s.signalWord {
 		return s.signal(c, calls)
 	}
@@ -306,6 +337,171 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		}
 	}
 	return s.signal(c, calls)
+}
+
+// elevatedValues опции run0 и pkexec со значением отдельным словом
+var elevatedValues = map[string][]string{
+	"run0": {"u", "user", "g", "group", "nice", "D", "chdir", "setenv", "unit", "p", "property", "description",
+		"slice", "machine", "background", "shell-prompt-prefix", "area", "lightweight"},
+	"pkexec": {"user"},
+}
+
+// elevatedCommand команда, которую run0, pkexec и machinectl shell исполнят
+// от другого пользователя (как sudo, которое снимает разбор оболочки): слова
+// после их опций, собранные в текст для разбора. run0 --via-shell (и -i)
+// склеивает слова через пробел и отдаёт оболочке -c (systemd v259,
+// exec-invoke.c: strv_join(argv, " ")) — текст разбирается как sh -c
+func elevatedCommand(c shellcmd.Call) (string, bool) {
+	if c.Name == "machinectl" {
+		return machinectlCommand(c.Args)
+	}
+	values, ok := elevatedValues[c.Name]
+	if !ok {
+		return "", false
+	}
+	i, viaShell := 0, false
+	for ; i < len(c.Args); i++ {
+		a := c.Args[i]
+		if a == "--" {
+			i++
+			break
+		}
+		if !strings.HasPrefix(a, "-") {
+			break
+		}
+		name := strings.TrimLeft(a, "-")
+		viaShell = viaShell || name == "via-shell" || a == "-i"
+		if !strings.Contains(name, "=") && slices.Contains(values, name) {
+			i++
+		}
+	}
+	if i >= len(c.Args) {
+		return "", false
+	}
+	if viaShell {
+		return strings.Join(c.Args[i:], " "), true
+	}
+	return shellWords(c.Args[i:]), true
+}
+
+// shellWords слова команды текстом для разбора: слово с подстановкой — как
+// в исходнике, литеральное — в одинарных кавычках
+func shellWords(args []string) string {
+	quoted := make([]string, 0, len(args))
+	for _, a := range args {
+		if strings.ContainsAny(a, "$`") {
+			quoted = append(quoted, a)
+			continue
+		}
+		quoted = append(quoted, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
+	}
+	return strings.Join(quoted, " ")
+}
+
+// machinectlValues опции machinectl со значением (getopt systemd v259
+// "-hp:P:als:H:M:qn:o:E:V" и длинные с required_argument)
+var machinectlValues = []string{
+	"p", "P", "s", "H", "M", "n", "o", "E",
+	"property", "kill-whom", "signal", "host", "machine", "lines", "output", "verify", "runner", "format", "uid",
+	"setenv", "max-addresses",
+}
+
+// machinectlCommand команда machinectl shell [[USER]@MACHINE [COMMAND …]] на
+// этой машине (MACHINE пусто или .host, без -H и -M к другой машине):
+// machined исполняет её слова без оболочки, как sudo. Опции после имени
+// машины — уже команды (machinectl не переставляет их за глаголом shell)
+func machinectlCommand(args []string) (string, bool) {
+	var pos []string
+	remote, done := false, false
+	for i := 0; i < len(args) && len(pos) < 2; i++ {
+		a := args[i]
+		switch {
+		case done || !strings.HasPrefix(a, "-") || a == "-":
+			pos = append(pos, a)
+		case a == "--":
+			done = true
+		default:
+			name, value := machinectlOption(args, &i)
+			remote = remote || name == "H" || name == "host" || (name == "M" || name == "machine") && !localMachine(value)
+		}
+		if len(pos) == 2 {
+			args = args[i+1:]
+		}
+	}
+	if len(pos) < 2 || pos[0] != "shell" || remote || !localMachine(pos[1]) || len(args) == 0 {
+		return "", false
+	}
+	return shellWords(args), true
+}
+
+// machinectlOption опция machinectl в args[*i]: имя (длинное или буква со
+// значением) и значение; *i сдвигается за значение отдельным словом
+func machinectlOption(args []string, i *int) (name, value string) {
+	a := args[*i]
+	if strings.HasPrefix(a, "--") {
+		n, v, inline := strings.Cut(a[2:], "=")
+		if !inline && slices.Contains(machinectlValues, n) && *i+1 < len(args) {
+			*i++
+			v = args[*i]
+		}
+		return n, v
+	}
+	letter, rest, next := shortValue(a, machinectlValues)
+	if next && *i+1 < len(args) {
+		*i++
+		rest = args[*i]
+	}
+	return letter, rest
+}
+
+// localMachine — машина machinectl ([USER@]MACHINE) — эта: .host или пусто
+func localMachine(spec string) bool {
+	_, machine, found := strings.Cut(spec, "@")
+	if !found {
+		machine = spec
+	}
+	return machine == "" || machine == ".host"
+}
+
+// elevated проверяет вызовы команды inner, которую исполнит обёртка c
+// (run0, pkexec): Via у них — с обёрткой впереди. Ошибка разбора — как у
+// всей команды
+func (s *killScan) elevated(c shellcmd.Call, inner string) error {
+	calls, err := shellcmd.Calls(inner)
+	if err != nil && s.killText {
+		s.addReason(c.Name + ": разбор команды за ним не прошёл (" + err.Error() + "): проверить сигналы в ней нельзя")
+	}
+	// Via у всех вызовов — с обёрткой впереди: вызовы ищут друг друга по Via
+	// (systemd-run за run0 — systemdRunRemote). Вызовы самой команды за
+	// обёрткой (их текст — весь inner) получают её ввод и перенаправления:
+	// разбор заново их не знает (… | run0 bash, run0 systemd-run --pipe sh)
+	src := s.stdinOf(c)
+	piped := src.src == stdinPipe || src.src == stdinFile
+	for i := range calls {
+		ic := &calls[i]
+		if ic.Raw == inner {
+			ic.ScriptInput = ic.ScriptInput || piped && inputTaker(*ic)
+			if len(ic.Redirs) == 0 {
+				ic.Redirs = c.Redirs
+			}
+		}
+		ic.Via = append(append(slices.Clone(c.Via), c.Name), ic.Via...)
+	}
+	// места вызовов за обёрткой — в её тексте, ввод текста — её ввод
+	outer := s.stdinScopeOf()
+	defer func() { s.stdin = outer }()
+	s.stdin = &stdinScope{text: inner, in: src}
+	if spans, err := stdinSpans(s.tool.Logger(), inner, 0, 4); err == nil {
+		s.stdin.spans = spans
+	} else {
+		s.tool.Logger().Warn("kill_guard: ввод вызовов за обёрткой не проверен, разбор bash не прошёл", "wrapper", c.Name, "error", err)
+	}
+	for _, ic := range calls {
+		if err := s.call(ic, calls); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sudoAssignment — c не программа, а присваивание после sudo -- (sudo --
@@ -344,8 +540,23 @@ func sudoAssignment(c shellcmd.Call, calls []shellcmd.Call) bool {
 // (${X:-kill}) — то же слово kill. Имя из позиционных параметров ("$@",
 // $1) исполняет слова, переданные в другом месте команды (set -- kill -9
 // -1, f kill -9 -1, bash -c '"$@"' _ kill …): слово сигнала среди
-// аргументов любого вызова проверяется как сигнал с аргументами за ним
+// аргументов любого вызова проверяется как сигнал с аргументами за ним.
+// Прочее вычисляемое имя, связанное со средством (имя systemctl, busctl…
+// в подстановке имени или в значении, присвоенном его переменной),
+// проверяется по аргументам как это средство (computedTool)
 func (s *killScan) signal(c shellcmd.Call, calls []shellcmd.Call) error {
+	args := make([]word, 0, len(c.Args))
+	for _, a := range c.Args {
+		args = append(args, word{text: a, literal: !strings.ContainsAny(a, "$`")})
+	}
+	via := ""
+	if slices.Contains(c.Via, "xargs") {
+		via = "xargs"
+	}
+	if name := substitutedPathName(c); name != "" {
+		// $(npm bin)/pm2 kill — программа pm2, kill — её аргумент
+		c.Name = name
+	}
 	// имя без каталога от ${X-/bin/kill} — «kill}»: скобка — тоже раскрытие
 	if c.Name == "" || strings.ContainsAny(c.Name, "${}") {
 		switch {
@@ -355,16 +566,10 @@ func (s *killScan) signal(c shellcmd.Call, calls []shellcmd.Call) error {
 			s.addReason("имя команды — раскрытие переменной или массива, которым в команде присвоено слово kill (a=(kill …); \"${a[@]}\"): проверить, что исполнится, нельзя")
 		case positionalRe.MatchString(unquoted(c.Name)):
 			return s.positionalSignal(calls)
+		case !slices.Contains(c.Via, "ssh"):
+			return s.computedTool(c, args, via, computedNames(c, s.command))
 		}
 		return nil
-	}
-	args := make([]word, 0, len(c.Args))
-	for _, a := range c.Args {
-		args = append(args, word{text: a, literal: !strings.ContainsAny(a, "$`")})
-	}
-	via := ""
-	if slices.Contains(c.Via, "xargs") {
-		via = "xargs"
 	}
 	if err := s.sessionTool(c, args, via); err != nil {
 		return err
@@ -642,6 +847,32 @@ func (t *KillGuardTool) ancestors(procs []procInfo) map[int]bool {
 	return out
 }
 
+// substitutedPathName имя программы у вызова, чьё имя — путь с
+// подстановкой каталога и литеральным файлом: $(npm bin)/pm2,
+// "$(go env GOPATH)/bin/tool". Файл известен до запуска, и слово kill в
+// аргументах — аргумент этой программы, а не сигнал. Подстановка со словом
+// сигнала ($(echo kill -9 -1 x)/pm2: без кавычек вывод делится на слова) —
+// не такое имя; "" — не такое имя
+func substitutedPathName(c shellcmd.Call) string {
+	if c.Name != "" {
+		return ""
+	}
+	raw := strings.TrimPrefix(c.Raw, `"`)
+	sub := nameSubstitution(raw)
+	if sub == "" || !strings.HasPrefix(raw, sub) || signalWordRe.MatchString(unquoted(sub)) {
+		return ""
+	}
+	tail := strings.TrimPrefix(raw[len(sub):], `"`)
+	if end := strings.IndexAny(tail, " \t\n\"';|&<>()"); end >= 0 {
+		tail = tail[:end]
+	}
+	name := filepath.Base(tail)
+	if !strings.HasPrefix(tail, "/") || strings.ContainsAny(tail, "$`\\*?[") || name == "/" {
+		return ""
+	}
+	return name
+}
+
 // nameVarRe переменная, которую раскрывает имя вызова: ${a[@]}, ${a[0]},
 // $a, ${a}, $P$a
 var nameVarRe = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
@@ -653,15 +884,22 @@ var nameVarRe = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
 // Присваивание ищется в тексте всей команды: оно бывает и в теле heredoc
 // для оболочки
 func arraySignal(name, command string) bool {
+	return slices.ContainsFunc(assignedValues(name, command), func(v string) bool {
+		return signalWordRe.MatchString(unquoted(v))
+	})
+}
+
+// assignedValues значения, которые команда присваивает переменным из имени
+// вызова (a=(…), a+=(…), a[0]=…, X="…", export X=…), без снятия кавычек
+func assignedValues(name, command string) []string {
+	var out []string
 	for _, m := range nameVarRe.FindAllStringSubmatch(name, -1) {
-		assign := regexp.MustCompile(`(^|[^A-Za-z0-9_])` + m[1] + `(\[[^\]]*\])?\+?=(\([^)]*\)|\S*)`)
+		assign := regexp.MustCompile(`(^|[^A-Za-z0-9_])` + m[1] + `(\[[^\]]*\])?\+?=(\([^)]*\)|"[^"]*"|'[^']*'|\S*)`)
 		for _, a := range assign.FindAllStringSubmatch(command, -1) {
-			if signalWordRe.MatchString(unquoted(a[3])) {
-				return true
-			}
+			out = append(out, a[3])
 		}
 	}
-	return false
+	return out
 }
 
 // killOptions отделяет опции kill от целей так же, как встроенный kill

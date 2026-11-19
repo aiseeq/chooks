@@ -145,9 +145,20 @@ func applySystemdRunOption(out *systemdRunOptions, name string, value word) {
 	case "capsule":
 		out.remote = false
 	case "expand-environment":
-		out.expandEnvironmentNo = value.text == "no"
+		out.expandEnvironmentNo = systemdFalse(value.text)
 	}
 	if slices.Contains(systemdRunProperties, name) {
 		out.properties = append(out.properties, value)
 	}
+}
+
+// systemdFalse — значение ложно по parse_boolean systemd (src/basic/parse-util.c):
+// 0, no, n, false, f, off без учёта регистра. Истинное и неразборное — нет:
+// с неразборным systemd-run выходит с ошибкой
+func systemdFalse(value string) bool {
+	switch strings.ToLower(value) {
+	case "0", "no", "n", "false", "f", "off":
+		return true
+	}
+	return false
 }

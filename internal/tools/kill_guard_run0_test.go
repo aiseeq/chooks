@@ -173,6 +173,7 @@ func TestKillGuardRun0AsSystemdRun(t *testing.T) {
 		`run0 --help kill 12345`,
 		`run0 -V kill 12345`,
 		`run0 --u root kill 12345`,
+		`run0 -p x kill 12345`,
 		`run0 -M foo kill 12345`,
 		`run0 --pipe=x kill 12345`,
 		`run0 --bogus kill 12345`,
@@ -362,7 +363,7 @@ func TestRewriteRun0(t *testing.T) {
 	}
 }
 
-// Разбор опций run0 по getopt_long ("+hVu:g:D:p:i" и длинные из run0 --help)
+// Разбор опций run0 по getopt_long ("+hVu:g:D:i" и длинные из run0 --help)
 func TestParseRun0(t *testing.T) {
 	for _, tc := range []struct {
 		args    []string
@@ -390,7 +391,7 @@ func TestParseRun0(t *testing.T) {
 		{[]string{"-V"}, false, 0, false, nil},
 		{[]string{"--u", "root", "kill"}, false, 0, false, nil},
 		{[]string{"--p", "kill"}, false, 0, false, nil},
-		{[]string{"-p", "x", "kill"}, true, 2, false, nil},
+		{[]string{"-p", "x", "kill"}, false, 0, false, nil},
 		{[]string{"--pipe=x", "kill"}, false, 0, false, nil},
 		{[]string{"-u"}, false, 0, false, nil},
 		{[]string{"--user"}, false, 0, false, nil},

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"path"
 	"regexp"
 	"slices"
@@ -19,21 +20,90 @@ import (
 // под службой. Команда Exec-свойства — отдельный вызов systemd-run [--user]
 // -- команда с вводом systemd-run (serviceExecProperties)
 
-// systemdRunShellWords слова systemd-run с --shell/-S, переписанные в
-// --pipe bash: слово опции — --pipe, буква S в связке — P (тоже флаг без
-// значения), в конце -- bash. ok false — --shell нет или задана команда
-// (systemd-run с --shell и командой не запускается)
-func systemdRunShellWords(args []string) (words []string, ok bool) {
-	o := parseSystemdRunOptions(plainWords(args))
-	if !o.shell || o.start < len(args) {
-		return nil, false
+// systemdRunLevel systemd-run в словах вызова systemd-run: сам вызов или
+// systemd-run в его команде (systemdRunLevels). args — его слова после
+// имени, at — место args[0] в словах вызова, o — его опции. err — его
+// команду не разобрать на поиск systemd-run в ней (nestedSystemdRun): те же
+// слова не разберёт bareParallel, и при kill в тексте откажет serviceParallel
+type systemdRunLevel struct {
+	at   int
+	args []string
+	o    systemdRunOptions
+	err  error
+}
+
+// systemdRunLevels вызов systemd-run со словами args и systemd-run в его
+// команде, по вложенности: разбор отдаёт вызовом только внешний, а внутренний
+// (systemd-run --pipe systemd-run -S, … env systemd-run -p ExecStartPre=…)
+// — словами внешнего. Внутренний ищет nestedSystemdRun
+func systemdRunLevels(args []string) []systemdRunLevel {
+	levels := []systemdRunLevel{{args: args, o: parseSystemdRunOptions(plainWords(args))}}
+	for range maxRun0Rewrites {
+		cur := &levels[len(levels)-1]
+		if cur.o.start >= len(cur.args) {
+			break
+		}
+		cmd := cur.args[cur.o.start:]
+		inner, err := nestedSystemdRun(cmd)
+		if err != nil {
+			cur.err = err
+			break
+		}
+		if inner == nil {
+			break
+		}
+		at := cur.at + cur.o.start + len(cmd) - len(inner)
+		levels = append(levels, systemdRunLevel{at: at, args: inner, o: parseSystemdRunOptions(plainWords(inner))})
 	}
+	return levels
+}
+
+// nestedSystemdRun аргументы systemd-run, которым оказалась команда cmd
+// службы: прямо или за обёртками, которые снимает разбор (env, timeout,
+// nice, sudo); слова — хвост cmd. nil — это не systemd-run. Слова
+// разбираются литералами, как их получит exec у службы. systemd-run в
+// скрипте (sh -c '…') и за ssh — не здесь: первый разбор отдаёт вызовом,
+// второй исполнится не на этой машине. err — слова не разобраны (не UTF-8)
+func nestedSystemdRun(cmd []string) ([]string, error) {
+	if path.Base(cmd[0]) == "systemd-run" {
+		return cmd[1:], nil
+	}
+	if !slices.ContainsFunc(cmd, func(w string) bool { return path.Base(w) == "systemd-run" }) {
+		return nil, nil
+	}
+	calls, err := shellcmd.Calls(shellWords(cmd))
+	if err != nil {
+		return nil, fmt.Errorf("команда systemd-run %q: %w", cmd, err)
+	}
+	for i := range calls {
+		x := &calls[i]
+		n := len(x.Args)
+		if x.Name == "systemd-run" && len(x.Via) > 0 && !slices.Contains(x.Via, "ssh") && n < len(cmd) && slices.Equal(x.Args, cmd[len(cmd)-n:]) {
+			return cmd[len(cmd)-n:], nil
+		}
+	}
+	return nil, nil
+}
+
+// systemdRunShellWords слова вызова systemd-run, где --shell/-S последнего
+// systemd-run во вложении (systemdRunLevels: только у него нет команды)
+// переписан в --pipe bash: слово опции — --pipe, буква S в связке — P (тоже
+// флаг без значения), в конце -- bash. at — место переписанного слова. ok
+// false — --shell нет или задана команда (systemd-run с --shell и командой
+// не запускается)
+func systemdRunShellWords(args []string) (words []string, at int, ok bool) {
+	levels := systemdRunLevels(args)
+	last := &levels[len(levels)-1]
+	if !last.o.shell || last.o.start < len(last.args) {
+		return nil, 0, false
+	}
+	at = last.at + last.o.shellWord
 	words = slices.Clone(args)
-	words[o.shellWord] = systemdRunPipeWord(args[o.shellWord], o.shellLetter)
+	words[at] = systemdRunPipeWord(args[at], last.o.shellLetter)
 	if words[len(words)-1] != "--" {
 		words = append(words, "--")
 	}
-	return append(words, "bash"), true
+	return append(words, "bash"), at, true
 }
 
 // systemdRunPipeWord слово опции --shell (letter -1) или связки с S на месте
@@ -84,12 +154,11 @@ func rewriteSystemdRunShell(command string) (text string, err error) {
 // перенаправления остаются как в тексте. ok false — у c нет --shell, c нет
 // в тексте словом или новое слово требует кавычек (safeValueRe)
 func replaceSystemdRunShell(text string, c *shellcmd.Call) (string, bool, error) {
-	words, ok := systemdRunShellWords(c.Args)
+	words, shellAt, ok := systemdRunShellWords(c.Args)
 	if !ok {
 		return "", false, nil
 	}
-	o := parseSystemdRunOptions(plainWords(c.Args))
-	pipe := words[o.shellWord]
+	pipe := words[shellAt]
 	if !safeValueRe.MatchString(pipe) {
 		return "", false, nil
 	}
@@ -101,7 +170,7 @@ func replaceSystemdRunShell(text string, c *shellcmd.Call) (string, bool, error)
 	if c.Args[len(c.Args)-1] == "--" {
 		tail = " bash"
 	}
-	word := spans[1+o.shellWord]
+	word := spans[1+shellAt]
 	end := spans[len(c.Args)][1]
 	return text[:at+word[0]] + pipe + text[at+word[1]:at+end] + tail + text[at+end:], true, nil
 }
@@ -110,7 +179,7 @@ func replaceSystemdRunShell(text string, c *shellcmd.Call) (string, bool, error)
 // когда его нельзя переписать в тексте команды: systemd-run --pipe … --
 // bash со словами вызова в кавычках
 func systemdRunShellCommand(args []string) (string, bool) {
-	words, ok := systemdRunShellWords(args)
+	words, _, ok := systemdRunShellWords(args)
 	if !ok {
 		return "", false
 	}
@@ -153,21 +222,22 @@ func (s *killScan) serviceExecProperties(c shellcmd.Call, calls []shellcmd.Call)
 		return nil
 	}
 	fed := xargsReplaced(c, calls)
-	args := c.Args
-	for range maxRun0Rewrites {
-		o := parseSystemdRunOptions(plainWords(args))
-		if o.remote {
+	levels := systemdRunLevels(c.Args)
+	for i := range levels {
+		l := &levels[i]
+		if l.o.remote {
 			return nil
 		}
-		if !o.scope {
-			if err := s.unitExecProperties(c, len(args), &o, fed); err != nil {
+		if !l.o.scope {
+			if err := s.unitExecProperties(c, len(l.args), &l.o, fed); err != nil {
 				return err
 			}
 		}
-		if o.start >= len(args) || path.Base(args[o.start]) != "systemd-run" {
-			return nil
+		if l.err != nil {
+			// те же слова не разберёт и bareParallel: отказ при kill в тексте
+			// даёт serviceParallel
+			s.tool.Logger().Debug("kill_guard: команда systemd-run не разобрана на systemd-run в ней", "error", l.err)
 		}
-		args = args[o.start+1:]
 	}
 	return nil
 }
@@ -324,11 +394,14 @@ var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*`)
 
 // systemdExecWords слова командной строки systemd (без префиксов): пробелы
 // разделяют слова, кавычки ' и " держат их части вместе и снимаются, # —
-// литерал. env — раскрываются ли ${VAR} и $VAR. ok false — кавычка не
-// закрыта. Обратной косой черты в value нет (её проверяет вызывающий)
+// литерал. env — раскрывается ли окружение: ${VAR} в любом месте слова,
+// $VAR — только словом целиком (после снятия кавычек), $$ — литерал $;
+// $VAR внутри слова остаётся текстом (sh -c "echo $X" получит $X). ok
+// false — кавычка не закрыта. Обратной косой черты в value нет (её
+// проверяет вызывающий)
 func systemdExecWords(value string, env bool) (words []execWord, ok bool) {
 	var cur execWord
-	var lit strings.Builder
+	var lit, raw strings.Builder
 	inWord := false
 	var quote byte
 	flushLit := func() {
@@ -336,6 +409,17 @@ func systemdExecWords(value string, env bool) (words []execWord, ok bool) {
 			cur = append(cur, execPart{text: lit.String()})
 			lit.Reset()
 		}
+	}
+	endWord := func() {
+		flushLit()
+		if env {
+			if part, whole := systemdWholeEnvWord(raw.String()); whole {
+				cur = execWord{part}
+			}
+		}
+		words = append(words, cur)
+		cur, inWord = nil, false
+		raw.Reset()
 	}
 	for i := 0; i < len(value); i++ {
 		ch := value[i]
@@ -348,15 +432,14 @@ func systemdExecWords(value string, env bool) (words []execWord, ok bool) {
 			continue
 		case quote == 0 && strings.IndexByte(" \t\n\r", ch) >= 0:
 			if inWord {
-				flushLit()
-				words = append(words, cur)
-				cur, inWord = nil, false
+				endWord()
 			}
 			continue
 		}
 		inWord = true
 		if env && ch == '$' {
 			if part, width := systemdEnvRef(value[i:]); width > 0 {
+				raw.WriteString(value[i : i+width])
 				if part.computed {
 					flushLit()
 					cur = append(cur, part)
@@ -367,21 +450,38 @@ func systemdExecWords(value string, env bool) (words []execWord, ok bool) {
 				continue
 			}
 		}
+		raw.WriteByte(ch)
 		lit.WriteByte(ch)
 	}
 	if quote != 0 {
 		return nil, false
 	}
 	if inWord {
-		flushLit()
-		words = append(words, cur)
+		endWord()
 	}
 	return words, true
 }
 
-// systemdEnvRef ссылка на окружение в начале s (s[0] — $): $$ — литерал $,
-// ${NAME} и $NAME — вычисляемая часть с этим именем (имя не по envNameRe и
-// ${ без } — SYSTEMD_ENV). width — длина ссылки в s, 0 — за $ ссылки нет
+// systemdWholeEnvWord слово raw (кавычки сняты, $ не раскрыты) целиком —
+// ссылка $NAME: systemd заменит его значением переменной, разбитым по
+// пробелам, или уберёт, если её нет. Имя не по envNameRe — SYSTEMD_ENV.
+// whole false — слово начинается не с $ или с ${, $$ (их раскрывает
+// systemdEnvRef)
+func systemdWholeEnvWord(raw string) (part execPart, whole bool) {
+	if !strings.HasPrefix(raw, "$") || strings.HasPrefix(raw, "${") || strings.HasPrefix(raw, "$$") {
+		return execPart{}, false
+	}
+	name := raw[1:]
+	if name == "" || envNameRe.FindString(name) != name {
+		name = "SYSTEMD_ENV"
+	}
+	return execPart{name: name, computed: true}, true
+}
+
+// systemdEnvRef ссылка на окружение в начале s (s[0] — $) внутри слова: $$
+// — литерал $, ${NAME} — вычисляемая часть с этим именем (имя не по
+// envNameRe и ${ без } — SYSTEMD_ENV). width — длина ссылки в s, 0 — $
+// здесь литерал ($NAME внутри слова systemd не раскрывает)
 func systemdEnvRef(s string) (part execPart, width int) {
 	switch {
 	case strings.HasPrefix(s, "$$"):
@@ -396,9 +496,6 @@ func systemdEnvRef(s string) (part execPart, width int) {
 			name = "SYSTEMD_ENV"
 		}
 		return execPart{name: name, computed: true}, end + 1
-	}
-	if name := envNameRe.FindString(s[1:]); name != "" {
-		return execPart{name: name, computed: true}, 1 + len(name)
 	}
 	return execPart{}, 0
 }

@@ -54,6 +54,22 @@ func TestKillGuardServiceExecBypasses(t *testing.T) {
 		// systemd-run под systemd-run: свойства внутреннего — слова внешнего
 		`systemd-run --user systemd-run --user -p 'ExecStartPre=/usr/bin/kill 12345' true`,
 		`systemd-run --user --scope systemd-run --user -p 'ExecStartPre=/usr/bin/kill 12345' true`,
+		`systemd-run --user env systemd-run --user -p 'ExecStartPre=/usr/bin/kill 12345' true`,
+		`systemd-run --user timeout 60 systemd-run --user -p 'ExecStartPre=/usr/bin/kill 12345' true`,
+		// заход 5: --shell у systemd-run, которого запускает служба с вводом
+		`systemd-run --user --pipe -- systemd-run --user -S <<< 'kill 12345'`,
+		`systemd-run --user -P systemd-run --user --shell <<< 'kill 12345'`,
+		`systemd-run --user --pipe env systemd-run --user -S <<< 'kill 12345'`,
+		`systemd-run --user --pipe timeout 60 systemd-run --user -S <<< 'kill 12345'`,
+		`echo 'kill 12345' | systemd-run --user --pipe -- systemd-run --user -S`,
+		`sudo systemd-run --pipe systemd-run -S <<< 'kill 12345'`,
+		`run0 systemd-run --user -S <<< 'kill 12345'`,
+		`run0 --pipe systemd-run -S <<< 'kill 12345'`,
+		`systemd-run --user -qP systemd-run --user -P systemd-run --user -qS <<< 'kill 12345'`,
+		// слова команды службы не разобрать (не UTF-8) — отказ при kill
+		`systemd-run --user -P env A=$'\xff' systemd-run -S <<< 'kill 1'`,
+		// $VAR словом целиком — значение переменной
+		`systemd-run --user -E 'CMD=kill 1' -p "ExecStartPre=/bin/sh -c '\$CMD'" true`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -80,6 +96,11 @@ func TestKillGuardServiceExecAllowed(t *testing.T) {
 		`printf '%s\n' 1G | xargs -I{} systemd-run --user -p MemoryMax={} make # kill`,
 		`run0 --property=Nice=5 dnf update`,
 		`systemd-run --user -p MemoryMax=1G make`,
+		// заход 5: $VAR внутри слова systemd не раскрывает — оболочка службы
+		// получит текст $VAR
+		`systemd-run --user -p 'ExecStopPost=/bin/sh -c "echo $SERVICE_RESULT >> /tmp/r"' make`,
+		`systemd-run --user -E 'CMD=kill 1' -p 'ExecStartPre=/usr/bin/echo x$CMD' make`,
+		`systemd-run --user --pipe -- systemd-run --user -S <<< 'make test'`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("должно пропускаться: %s: %v", command, r)
@@ -106,6 +127,9 @@ func TestSystemdExecCommand(t *testing.T) {
 		{`/bin/sh -c ${CMD}`, `'/bin/sh' '-c' "${CMD}"`, true},
 		{`/usr/bin/env ${K}ll $X $$Y 1%`, `'/usr/bin/env' "${K}"'ll' "${X}" '$Y' '1%'`, true},
 		{`:/usr/bin/echo ${A}`, `'/usr/bin/echo' '${A}'`, true},
+		{`/usr/bin/echo $$$A ${A}$B`, `'/usr/bin/echo' '$$A' "${A}"'$B'`, true},
+		{`/bin/sh -c "echo $R >> /tmp/r"`, `'/bin/sh' '-c' 'echo $R >> /tmp/r'`, true},
+		{`/usr/bin/echo x$A "$A" '$B' $A.y $ $$A e${A}f`, `'/usr/bin/echo' 'x$A' "${A}" "${B}" "${SYSTEMD_ENV}" "${SYSTEMD_ENV}" '$A' 'e'"${A}"'f'`, true},
 		{`/usr/bin/echo ${a-b}`, `'/usr/bin/echo' "${SYSTEMD_ENV}"`, true},
 		{`/usr/bin/echo ''`, `'/usr/bin/echo' ''`, true},
 		{`/usr/bin/echo 'a`, ``, false},
@@ -159,6 +183,11 @@ func TestRewriteSystemdRunShell(t *testing.T) {
 		{`systemd-run --user "-S" -q`, `systemd-run --user -P -q -- bash`},
 		{`echo a | systemd-run -S; systemd-run --scope -S`, `echo a | systemd-run -P -- bash; systemd-run --scope -P -- bash`},
 		{`sh -c 'systemd-run -S'`, `sh -c 'systemd-run -P -- bash'`},
+		// systemd-run в команде службы: переписывается --shell внутреннего
+		{`systemd-run --user --pipe -- systemd-run --user -S <<< x`, `systemd-run --user --pipe -- systemd-run --user -P -- bash <<< x`},
+		{`systemd-run -P env A=1 systemd-run -qS`, `systemd-run -P env A=1 systemd-run -qP -- bash`},
+		{`systemd-run -P timeout 60 systemd-run --shell --`, `systemd-run -P timeout 60 systemd-run --pipe -- bash`},
+		{`systemd-run -S systemd-run make`, `systemd-run -S systemd-run make`},
 		// не переписывается: команда при --shell (systemd-run её не запустит),
 		// -p с S в значении, нет --shell
 		{`systemd-run -S kill 1`, `systemd-run -S kill 1`},
@@ -225,6 +254,34 @@ func TestXargsReplaceString(t *testing.T) {
 	} {
 		if got := xargsReplaceString(tc.opts); got != tc.want {
 			t.Errorf("xargsReplaceString(%q) = %q, ждали %q", tc.opts, got, tc.want)
+		}
+	}
+}
+
+// systemd-run в команде службы: прямо, за обёртками; в скрипте и за ssh —
+// нет; слова, которые не разобрать, — ошибка уровня
+func TestSystemdRunLevels(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		at   []int
+		err  bool
+	}{
+		{[]string{"--user", "make"}, []int{0}, false},
+		{[]string{"--pipe", "--", "systemd-run", "-S"}, []int{0, 3}, false},
+		{[]string{"-P", "env", "A=1", "systemd-run", "-q", "systemd-run", "-S"}, []int{0, 4, 6}, false},
+		{[]string{"-P", "timeout", "60", "systemd-run", "-S"}, []int{0, 4}, false},
+		{[]string{"-P", "sh", "-c", "systemd-run -S"}, []int{0}, false},
+		{[]string{"-P", "ssh", "h", "systemd-run", "-S"}, []int{0}, false},
+		{[]string{"-P", "env", "A=\xff", "systemd-run", "-S"}, []int{0}, true},
+	} {
+		levels := systemdRunLevels(tc.args)
+		var at []int
+		for i := range levels {
+			at = append(at, levels[i].at)
+		}
+		last := &levels[len(levels)-1]
+		if !slices.Equal(at, tc.at) || (last.err != nil) != tc.err {
+			t.Errorf("systemdRunLevels(%q): места %v, ошибка %v; ждали %v, %v", tc.args, at, last.err, tc.at, tc.err)
 		}
 	}
 }

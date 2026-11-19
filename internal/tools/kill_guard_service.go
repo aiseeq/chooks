@@ -22,9 +22,10 @@ import (
 
 // systemdRunLevel systemd-run в словах вызова systemd-run: сам вызов или
 // systemd-run в его команде (systemdRunLevels). args — его слова после
-// имени, at — место args[0] в словах вызова, o — его опции. err — его
-// команду не разобрать на поиск systemd-run в ней (nestedSystemdRun): те же
-// слова не разберёт bareParallel, и при kill в тексте откажет serviceParallel
+// имени, at — место args[0] в словах вызова, o — его опции. err — systemd-run
+// в его команде не найти: слова не разобрать (nestedSystemdRun) или
+// вложенность глубже предела; при kill в тексте — отказ
+// (serviceExecProperties)
 type systemdRunLevel struct {
 	at   int
 	args []string
@@ -34,52 +35,62 @@ type systemdRunLevel struct {
 
 // systemdRunLevels вызов systemd-run со словами args и systemd-run в его
 // команде, по вложенности: разбор отдаёт вызовом только внешний, а внутренний
-// (systemd-run --pipe systemd-run -S, … env systemd-run -p ExecStartPre=…)
-// — словами внешнего. Внутренний ищет nestedSystemdRun
+// (systemd-run --pipe systemd-run -S, … setsid systemd-run -p
+// ExecStartPre=…) — словами внешнего. Внутренний ищет nestedSystemdRun.
+// Уровней не больше 1+maxRun0Rewrites: глубже — err последнего
 func systemdRunLevels(args []string) []systemdRunLevel {
 	levels := []systemdRunLevel{{args: args, o: parseSystemdRunOptions(plainWords(args))}}
-	for range maxRun0Rewrites {
+	for {
 		cur := &levels[len(levels)-1]
 		if cur.o.start >= len(cur.args) {
-			break
+			return levels
 		}
 		cmd := cur.args[cur.o.start:]
 		inner, err := nestedSystemdRun(cmd)
 		if err != nil {
 			cur.err = err
-			break
+			return levels
 		}
 		if inner == nil {
-			break
+			return levels
+		}
+		if len(levels) > maxRun0Rewrites {
+			cur.err = fmt.Errorf("systemd-run в systemd-run глубже %d", maxRun0Rewrites)
+			return levels
 		}
 		at := cur.at + cur.o.start + len(cmd) - len(inner)
 		levels = append(levels, systemdRunLevel{at: at, args: inner, o: parseSystemdRunOptions(plainWords(inner))})
 	}
-	return levels
 }
 
+// nestedSystemdRunProbe имя команды, которым nestedSystemdRun заменяет
+// слово systemd-run, чтобы спросить разбор, исполнят ли его слова перед ним
+const nestedSystemdRunProbe = "chooks-nested-systemd-run"
+
 // nestedSystemdRun аргументы systemd-run, которым оказалась команда cmd
-// службы: прямо или за обёртками, которые снимает разбор (env, timeout,
-// nice, sudo); слова — хвост cmd. nil — это не systemd-run. Слова
+// службы: прямо или за обёртками; слова — хвост cmd. nil — это не
+// systemd-run. Обёртки снимает тот же разбор shellcmd, что для остальных
+// правил: слово systemd-run в cmd — команда, если в словах до него на его
+// месте разбор видит вызов (nestedSystemdRunProbe). Разбор
+// отдаёт вызовом только самую внутреннюю команду, а systemd-run без неё
+// (-S) не отдаёт и в Via — поэтому вопрос, а не поиск в вызовах cmd. Слова
 // разбираются литералами, как их получит exec у службы. systemd-run в
-// скрипте (sh -c '…') и за ssh — не здесь: первый разбор отдаёт вызовом,
-// второй исполнится не на этой машине. err — слова не разобраны (не UTF-8)
+// скрипте (sh -c '…') — не слово cmd: его отдаёт вызовом первый разбор; за
+// ssh — исполнится не на этой машине. err — слова не разобраны (не UTF-8)
 func nestedSystemdRun(cmd []string) ([]string, error) {
-	if path.Base(cmd[0]) == "systemd-run" {
-		return cmd[1:], nil
-	}
-	if !slices.ContainsFunc(cmd, func(w string) bool { return path.Base(w) == "systemd-run" }) {
-		return nil, nil
-	}
-	calls, err := shellcmd.Calls(shellWords(cmd))
-	if err != nil {
-		return nil, fmt.Errorf("команда systemd-run %q: %w", cmd, err)
-	}
-	for i := range calls {
-		x := &calls[i]
-		n := len(x.Args)
-		if x.Name == "systemd-run" && len(x.Via) > 0 && !slices.Contains(x.Via, "ssh") && n < len(cmd) && slices.Equal(x.Args, cmd[len(cmd)-n:]) {
-			return cmd[len(cmd)-n:], nil
+	for j := range cmd {
+		if path.Base(cmd[j]) != "systemd-run" {
+			continue
+		}
+		calls, err := shellcmd.Calls(shellWords(append(slices.Clone(cmd[:j]), nestedSystemdRunProbe)))
+		if err != nil {
+			return nil, fmt.Errorf("команда systemd-run %q: %w", cmd, err)
+		}
+		for i := range calls {
+			x := &calls[i]
+			if x.Name == nestedSystemdRunProbe && !slices.Contains(x.Via, "ssh") {
+				return cmd[j+1:], nil
+			}
 		}
 	}
 	return nil, nil
@@ -234,9 +245,10 @@ func (s *killScan) serviceExecProperties(c shellcmd.Call, calls []shellcmd.Call)
 			}
 		}
 		if l.err != nil {
-			// те же слова не разберёт и bareParallel: отказ при kill в тексте
-			// даёт serviceParallel
-			s.tool.Logger().Debug("kill_guard: команда systemd-run не разобрана на systemd-run в ней", "error", l.err)
+			s.tool.Logger().Debug("kill_guard: systemd-run в команде systemd-run не найти", "error", l.err)
+			if s.killText {
+				s.addReason("systemd-run: " + l.err.Error() + ": свойства и --shell systemd-run в его команде проверить нельзя")
+			}
 		}
 	}
 	return nil

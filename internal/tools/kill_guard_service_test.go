@@ -2,6 +2,7 @@ package tools
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +67,19 @@ func TestKillGuardServiceExecBypasses(t *testing.T) {
 		`run0 systemd-run --user -S <<< 'kill 12345'`,
 		`run0 --pipe systemd-run -S <<< 'kill 12345'`,
 		`systemd-run --user -qP systemd-run --user -P systemd-run --user -qS <<< 'kill 12345'`,
+		// заход 6: обёртки, которые снимает разбор, — те же, что у прямого kill
+		`systemd-run --user --pipe setsid -w systemd-run --user -S <<< 'kill 12345'`,
+		`systemd-run --user --pipe flock /run/user/1000/x systemd-run --user -S <<< 'kill 12345'`,
+		`systemd-run --user --pipe chrt -o 0 systemd-run --user -S <<< 'kill 12345'`,
+		`systemd-run --user --pipe taskset -c 0 systemd-run --user -S <<< 'kill 12345'`,
+		`systemd-run --user --pipe unshare -U systemd-run --user -S <<< 'kill 12345'`,
+		`systemd-run --user --pipe busybox env systemd-run --user -S <<< 'kill 12345'`,
+		`systemd-run --user --pipe doas systemd-run -S <<< 'kill 12345'`,
+		`systemd-run --user --pipe strace -f -o /dev/null systemd-run --user -S <<< 'kill 12345'`,
+		`systemd-run --user setsid systemd-run --user -p 'ExecStartPre=/usr/bin/kill 12345' true`,
+		`systemd-run --user flock /tmp/x systemd-run --user -p 'ExecStartPre=/usr/bin/kill 12345' true`,
+		// вложенность глубже предела
+		strings.Repeat("systemd-run --user --pipe ", maxRun0Rewrites+1) + `systemd-run --user -S <<< 'kill 12345'`,
 		// слова команды службы не разобрать (не UTF-8) — отказ при kill
 		`systemd-run --user -P env A=$'\xff' systemd-run -S <<< 'kill 1'`,
 		// $VAR словом целиком — значение переменной
@@ -261,6 +275,10 @@ func TestXargsReplaceString(t *testing.T) {
 // systemd-run в команде службы: прямо, за обёртками; в скрипте и за ssh —
 // нет; слова, которые не разобрать, — ошибка уровня
 func TestSystemdRunLevels(t *testing.T) {
+	var deepest []int // места уровней -P systemd-run … на пределе
+	for i := range maxRun0Rewrites + 1 {
+		deepest = append(deepest, 2*i)
+	}
 	for _, tc := range []struct {
 		args []string
 		at   []int
@@ -273,6 +291,14 @@ func TestSystemdRunLevels(t *testing.T) {
 		{[]string{"-P", "sh", "-c", "systemd-run -S"}, []int{0}, false},
 		{[]string{"-P", "ssh", "h", "systemd-run", "-S"}, []int{0}, false},
 		{[]string{"-P", "env", "A=\xff", "systemd-run", "-S"}, []int{0}, true},
+		{[]string{"-P", "setsid", "-w", "systemd-run", "-S"}, []int{0, 4}, false},
+		{[]string{"-P", "flock", "/tmp/x", "systemd-run", "-S"}, []int{0, 4}, false},
+		{[]string{"-P", "echo", "systemd-run", "-S"}, []int{0}, false},
+		{[]string{"-P", "systemd-cat", "systemd-run", "-S"}, []int{0}, false},
+		{[]string{"-p", "Description=systemd-run", "make"}, []int{0}, false},
+		{[]string{"-P", "flock", "systemd-run", "systemd-run", "-S"}, []int{0, 4}, false},
+		{strings.Fields(strings.Repeat("-P systemd-run ", maxRun0Rewrites) + "-S"), deepest, false},
+		{strings.Fields(strings.Repeat("-P systemd-run ", maxRun0Rewrites+1) + "-S"), nil, true},
 	} {
 		levels := systemdRunLevels(tc.args)
 		var at []int
@@ -280,7 +306,7 @@ func TestSystemdRunLevels(t *testing.T) {
 			at = append(at, levels[i].at)
 		}
 		last := &levels[len(levels)-1]
-		if !slices.Equal(at, tc.at) || (last.err != nil) != tc.err {
+		if tc.at != nil && !slices.Equal(at, tc.at) || (last.err != nil) != tc.err {
 			t.Errorf("systemdRunLevels(%q): места %v, ошибка %v; ждали %v, %v", tc.args, at, last.err, tc.at, tc.err)
 		}
 	}

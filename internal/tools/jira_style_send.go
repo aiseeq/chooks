@@ -242,7 +242,7 @@ func tildeAssignmentPath(path string, mark shellcmd.Tilde, home string) string {
 	}
 	candidate := -1
 	for i := 0; i < len(path); i++ {
-		if path[i] != '~' || i > 0 && path[i-1] != ':' || i+1 < len(path) && path[i+1] != '/' {
+		if path[i] != '~' || i > 0 && path[i-1] != ':' || i+1 < len(path) && path[i+1] != '/' && path[i+1] != ':' {
 			continue
 		}
 		if candidate >= 0 {

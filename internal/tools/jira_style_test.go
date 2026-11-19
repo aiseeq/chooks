@@ -330,6 +330,8 @@ func TestJiraStyleSendForms(t *testing.T) {
 		// tee с начальным ~ пишет в HOME, а в кавычках curl читает ./~/x.
 		{filepath.Join(home, "x", "j.json"), `{"body":"Выкатил на stage, проверь вход."}`},
 		{filepath.Join(dir, "~", "x", "j.json"), `{"body":"Готово — выкачено."}`},
+		// S=~:"~/x" и S=~:~/x: раскрыть второй ~ без первого - чистый файл не тот.
+		{filepath.Join(dir, "~:"+home, "x", "j.json"), `{"body":"Выкатил на stage, проверь вход."}`},
 	} {
 		if err := os.MkdirAll(filepath.Dir(f.path), 0o700); err != nil {
 			t.Fatal(err)
@@ -471,6 +473,8 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"S=a:~ - домашний после :", dir, "S=a:~/t; " + auth + "-d @$S/home.json" + url, "jira_comment_style"},
 		{"аргумент: раскрыть только ведущую тильду", dir, auth + "-T ~/q:~/x/j.json" + url, "jira_comment_style"},
 		{"присваивание с неясной тильдой", dir, `S=~/q:"~/x"; ` + auth + "-d @$S/j.json" + url, "jira_comment_payload"},
+		{"присваивание ~: с тильдой в кавычках - неясно", dir, `S=~:"~/x"; ` + auth + "-d @$S/j.json" + url, "jira_comment_payload"},
+		{"присваивание ~:~ - неясно", dir, "S=~:~/x; " + auth + "-d @$S/j.json" + url, "jira_comment_payload"},
 		{"tee пишет в путь с ведущей тильдой", dir, `printf '{"body":"Выкатил на stage, проверь вход."}' | tee ~/x/new.json >/dev/null && ` + auth + "-T ~/x/new.json" + url, ""},
 		{"tee HOME не маскирует литерал в curl", dir, `printf '{"body":"ok"}' | tee ~/x/j.json >/dev/null && ` + auth + `-T "~/x/j.json"` + url, "jira_comment_style"},
 		{"export S=~ - домашний", dir, "export S=~/t; " + auth + "-d @$S/home.json" + url, "jira_comment_style"},

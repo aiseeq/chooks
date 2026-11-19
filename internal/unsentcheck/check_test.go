@@ -1,6 +1,7 @@
 package unsentcheck
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -166,6 +167,53 @@ func writeTranscript(t *testing.T, lines ...string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestRun_CompletedTurnBeforeTaskNotification(t *testing.T) {
+	const duration = `{"type":"system","subtype":"turn_duration","timestamp":"2026-11-17T13:07:39Z","durationMs":1000}`
+	const midTurnNotice = `{"type":"attachment","timestamp":"2026-11-17T13:31:41Z","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>completed</task-notification>"}}`
+	const queue = `{"type":"queue-operation","operation":"dequeue","timestamp":"2026-11-17T13:31:41Z"}`
+	const answer = "**Ещё не отправлено** (чат проверил в 14:07): ответ Екатерине."
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		block bool
+	}{
+		{"прошлый ход закончился до уведомления", []string{human, history, duration, queue, midTurnNotice, otherBash}, true},
+		{"уведомление посреди хода не отменяет чтение", []string{human, duration, history, queue, midTurnNotice, otherBash}, false},
+		{"чтение после уведомления", []string{human, history, duration, queue, midTurnNotice, history}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Run(Event{TranscriptPath: writeTranscript(t, tc.lines...), LastMessage: answer})
+			if err != nil || got.Block != tc.block {
+				t.Fatalf("Run = %+v, %v; block = %v", got, err, tc.block)
+			}
+		})
+	}
+}
+
+func TestRun_ChatReopenedAfterTaskNotification(t *testing.T) {
+	const duration = `{"type":"system","subtype":"turn_duration","timestamp":"2026-11-17T13:00:00Z"}`
+	const task = `{"type":"attachment","timestamp":"2026-11-17T13:01:00Z","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>completed</task-notification>"}}`
+	for _, tc := range []struct {
+		name, command, answer string
+	}{
+		{"563ef580:2841", `D='текст'; printf '%s' "$D" | chooks style -; /home/aisee/work/reddy/bin/reddy history 2783119 --since 2026-11-17T13:20 --json | jq -r '.messages[]'`, "**Ещё не отправлено** (чат проверил в 13:27): Марии."},
+		{"563ef580:3127", `D='текст'; printf '%s' "$D" | chooks style -; /home/aisee/work/reddy/bin/reddy history 2783119 --since 2026-11-17T14:00 --json | jq -r '.messages[]'`, "**Ещё не отправлено** (чат проверил в 14:07): Екатерине."},
+		{"6ee9fbf1:668", `DRAFT='текст'; printf '%s' "$DRAFT" | chooks style -; /home/aisee/work/reddy/bin/reddy history 3019008 --since 2026-11-18T11:30 --json | jq -r '.messages[]'`, "**Ещё не отправлено:** только ответ Мойсиевичу выше."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command, err := json.Marshal(tc.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := `{"type":"assistant","timestamp":"2026-11-17T13:02:00Z","message":{"content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":` + string(command) + `}}]}}`
+			got, err := Run(Event{TranscriptPath: writeTranscript(t, human, history, duration, task, call), LastMessage: tc.answer})
+			if err != nil || got.Block || got.Claim == "" {
+				t.Fatalf("Run = %+v, %v; ожидалась найденная фраза и пропуск после чтения", got, err)
+			}
+		})
+	}
 }
 
 func TestRun(t *testing.T) {

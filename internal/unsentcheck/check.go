@@ -154,7 +154,7 @@ func blockReason(phrase string) string {
 }
 
 // ChatOpened — вызывался ли в текущем ходе Bash с `reddy … history`. Ход —
-// от последней реплики человека, письма сессии или запроса программы
+// от конца предыдущего хода, последней реплики человека, письма сессии или запроса программы
 // (`claude -p`, SDK: запись без origin); начала хода нет и в предельном
 // окне — смотрится всё окно
 func ChatOpened(path string) (bool, error) {
@@ -174,7 +174,7 @@ func scanTurn(buf []byte) (checked, turnFound bool) {
 		line := lines[i]
 		// Разбор JSON только у записей разговора: в хвосте мегабайты служебных
 		// записей (api-request-blob)
-		if !bytes.Contains(line, []byte(`"type":"assistant"`)) && !bytes.Contains(line, []byte(`"type":"user"`)) && !bytes.Contains(line, []byte(`"type":"attachment"`)) {
+		if !bytes.Contains(line, []byte(`"type":"assistant"`)) && !bytes.Contains(line, []byte(`"type":"user"`)) && !bytes.Contains(line, []byte(`"type":"attachment"`)) && !bytes.Contains(line, []byte(`"type":"system"`)) {
 			continue
 		}
 		// Нечитаемая строка — обрезанная или дописываемая — без событий
@@ -194,6 +194,8 @@ func scanEvents(events []transcript.Event) (checked, turnFound bool) {
 		event := &events[j]
 		switch {
 		case event.Sidechain:
+		case event.Role == transcript.Note && event.Who == "system" && event.Subtype == "turn_duration":
+			return false, true
 		case event.Role == transcript.User || event.Role == transcript.Peer || (event.Role == transcript.Note && event.Who == "prompt"):
 			return false, true
 		case event.Role == transcript.Cmd && event.Who == "Bash" && chatCall(event.Text):

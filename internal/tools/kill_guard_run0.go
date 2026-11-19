@@ -37,10 +37,10 @@ var run0LongFlags = []string{
 	"help", "version", "no-ask-password", "slice-inherit", "via-shell", "pty", "pty-late", "pipe", "empower",
 }
 
-// run0ShortValues, run0ShortFlags короткие опции run0 (getopt "+hVu:g:D:p:i"):
+// run0ShortValues, run0ShortFlags короткие опции run0 (getopt "+hVu:g:D:i"):
 // -u, -g, -D со значением, -h, -V, -i без
 const (
-	run0ShortValues = "ugDp"
+	run0ShortValues = "ugD"
 	run0ShortFlags  = "hVi"
 )
 
@@ -98,7 +98,7 @@ func parseRun0(args []string) (inv run0Invocation, ok bool) {
 			break
 		}
 		if !strings.HasPrefix(a, "--") {
-			via, done, ok := run0Short(args, &i, &inv)
+			via, done, ok := run0Short(args, &i)
 			if !ok || done {
 				return run0Invocation{}, false
 			}
@@ -139,7 +139,7 @@ func run0Long(args []string, i *int) (name, value string, done, ok bool) {
 // связка на ней кончается. via — в связке есть -i (--via-shell); done — -h
 // или -V (run0 печатает и выходит); ok false — неизвестная буква, нет
 // значения
-func run0Short(args []string, i *int, inv *run0Invocation) (via, done, ok bool) {
+func run0Short(args []string, i *int) (via, done, ok bool) {
 	a := args[*i]
 	for j := 1; j < len(a); j++ {
 		l := a[j : j+1]
@@ -149,16 +149,11 @@ func run0Short(args []string, i *int, inv *run0Invocation) (via, done, ok bool) 
 		case strings.Contains(run0ShortFlags, l):
 			return via, true, true
 		case strings.Contains(run0ShortValues, l):
-			value := a[j+1:]
 			if j+1 == len(a) {
 				if *i+1 >= len(args) {
 					return false, false, false
 				}
 				*i++
-				value = args[*i]
-			}
-			if l == "p" {
-				inv.properties = append(inv.properties, value)
 			}
 			return via, false, true
 		default:

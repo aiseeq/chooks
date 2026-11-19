@@ -225,7 +225,7 @@ func (s *killScan) serviceCommands(c shellcmd.Call, calls []shellcmd.Call) error
 				return err
 			}
 		}
-	} else if run, ok := s.wrappedSystemdRun(c, calls); ok {
+	} else if run, ok := s.wrappedSystemdRun(c); ok {
 		if err := s.serviceExecProperties(run, calls); err != nil {
 			return err
 		}
@@ -252,43 +252,39 @@ func run0ServiceCall(c shellcmd.Call) (shellcmd.Call, bool, error) {
 	return shellcmd.Call{}, false, nil
 }
 
-// wrappedSystemdRun берёт цепочку обёрток из Via shellcmd, затем просит тот
-// же разбор выделить systemd-run и его опции.
-func (s *killScan) wrappedSystemdRun(c shellcmd.Call, calls []shellcmd.Call) (shellcmd.Call, bool) {
-	wrapped := false
-	for i := range calls {
-		call := &calls[i]
-		if slices.Contains(call.Via, "systemd-run") {
-			wrapped = true
-			break
-		}
-	}
-	if !wrapped {
+// wrappedSystemdRun systemd-run, который вызов-обёртка c (setsid, flock,
+// chrt, nice и их цепочки) исполнит своей командой, отдельным вызовом с
+// Via c. Слово systemd-run ищет в словах самого c тот же разбор, что для
+// systemd-run в команде службы (nestedSystemdRun): systemd-run операндом
+// (echo systemd-run …) — не команда
+func (s *killScan) wrappedSystemdRun(c shellcmd.Call) (shellcmd.Call, bool) {
+	inner, err := nestedSystemdRun(append([]string{c.Name}, c.Args...))
+	if err != nil {
+		s.tool.Logger().Debug("kill_guard: обёрнутый systemd-run не найти", "error", err)
 		return shellcmd.Call{}, false
 	}
-	for i, arg := range c.Args {
-		if path.Base(arg) != "systemd-run" {
-			continue
+	if inner == nil {
+		return shellcmd.Call{}, false
+	}
+	i := len(c.Args) - len(inner) - 1
+	words := make([]string, len(c.Args)-i)
+	for j, word := range c.Args[i:] {
+		if c.ArgLiteral(i + j) {
+			words[j] = singleQuotedWord(word)
+		} else {
+			words[j] = word
 		}
-		words := make([]string, len(c.Args)-i)
-		for j, word := range c.Args[i:] {
-			if c.ArgLiteral(i + j) {
-				words[j] = singleQuotedWord(word)
-			} else {
-				words[j] = word
-			}
-		}
-		parsed, err := shellcmd.Calls(strings.Join(words, " "))
-		if err != nil {
-			s.tool.Logger().Debug("kill_guard: обёрнутый systemd-run не разобрать", "error", err)
-			continue
-		}
-		for j := range parsed {
-			call := &parsed[j]
-			if call.Name == "systemd-run" {
-				call.Via = append(slices.Clone(c.Via), c.Name)
-				return *call, true
-			}
+	}
+	parsed, err := shellcmd.Calls(strings.Join(words, " "))
+	if err != nil {
+		s.tool.Logger().Debug("kill_guard: обёрнутый systemd-run не разобрать", "error", err)
+		return shellcmd.Call{}, false
+	}
+	for j := range parsed {
+		call := &parsed[j]
+		if call.Name == "systemd-run" {
+			call.Via = append(slices.Clone(c.Via), c.Name)
+			return *call, true
 		}
 	}
 	return shellcmd.Call{}, false
@@ -333,19 +329,22 @@ func (s *killScan) unitExecProperties(c shellcmd.Call, args []string, offset int
 	if s.killText && afterXargs(c) && o.start == len(args) {
 		s.addToolReason("systemd-run за xargs или parallel без команды: слова ввода станут его опциями и командой (-p ExecStartPre=…), их не видно до запуска"+hiddenTail, systemdRunHiddenHint, false)
 	}
-	if !o.expandEnvironmentNo && s.serviceCommandHasDynamicSelector(c, args, offset+o.start) {
+	if !o.expandEnvironmentNo && s.serviceCommandHasDynamicSelector(c, args, o.start, offset) {
 		s.addToolReason("команда службы содержит литеральную подстановку systemd, которая может выбрать подкоманду", systemdRunHiddenHint, false)
 	}
 	return s.unitExecPropertyValues(c, o.properties, fed)
 }
 
-func (s *killScan) serviceCommandHasDynamicSelector(c shellcmd.Call, args []string, start int) bool {
+// serviceCommandHasDynamicSelector — в команде службы args[start:] литеральный
+// $ на месте подкоманды podman, systemctl или loginctl; args — слова уровня
+// systemd-run, offset — место args[0] в c.Args
+func (s *killScan) serviceCommandHasDynamicSelector(c shellcmd.Call, args []string, start, offset int) bool {
 	if start >= len(args) {
 		return false
 	}
 	words := make([]string, len(args)-start)
 	for i, arg := range args[start:] {
-		if c.ArgLiteral(start + i) {
+		if c.ArgLiteral(offset + start + i) {
 			words[i] = singleQuotedWord(arg)
 		} else {
 			words[i] = arg
@@ -403,8 +402,6 @@ func (s *killScan) unitExecPropertyValues(c shellcmd.Call, properties []word, fe
 	return nil
 }
 
-// execPropertyCommand разбирает Exec-свойство arg (слово -p из shellcmd).
-// Пустые inner и reason означают не Exec-свойство или сброс списка.
 // systemdExpansionChars — символы раскрытия systemd в значении Exec.
 const systemdExpansionChars = "$\x60"
 
@@ -424,7 +421,7 @@ func execPropertyCommand(arg string, fed func(string) bool) (inner, reason strin
 		return "", "", false
 	}
 	if computed || strings.ContainsAny(value, "\\"+systemdExpansionChars) {
-		return "", "значение " + key + " содержит вычисление или escape; команду нельзя проверить", true
+		return "", "значение " + key + " содержит вычисление или C-экранирование; команду нельзя проверить", true
 	}
 	inner, ok := systemdExecCommand(value)
 	if !ok {

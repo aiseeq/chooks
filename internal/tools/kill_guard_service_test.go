@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Значение Exec с escapes или вычислениями может скрыть команду от killText.
+// Значение Exec с C-экранированием или вычислениями может скрыть команду от killText.
 func TestKillGuardServiceExecBypasses(t *testing.T) {
 	for _, command := range []string{
 		`systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
@@ -39,8 +39,21 @@ func TestKillGuardServiceExecBypasses(t *testing.T) {
 		`flock /tmp/l systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true`,
 		`chrt -o 0 systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true`,
 		`setsid nice systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true`,
-		`run0 -p 'ExecStartPre=/usr/bin/\x6bill 1' true`,
-		`run0 --setenv=K=ki -p 'ExecStartPre=/bin/sh -c "${K}ll 1"' true`,
+		`run0 --property='ExecStartPre=/usr/bin/\x6bill 1' true`,
+		`run0 --setenv=K=ki --property='ExecStartPre=/bin/sh -c "${K}ll 1"' true`,
+		// подстановка systemd в команде вложенного systemd-run
+		`systemd-run --user --scope systemd-run --user -E K=st podman '${K}op' -a`,
+		`systemd-run --user --pipe -- systemd-run --user -E K=st podman '${K}op' -a`,
+		// --expand-environment — boolean systemd: истинное значение раскрывает
+		`systemd-run --user --expand-environment=yes -E K=st podman '${K}op' -a`,
+		`systemd-run --user --expand-environment=On -E K=st podman '${K}op' -a`,
+		// обёртки systemd-run
+		`setsid systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
+		`setsid -f systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
+		`flock /tmp/l systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
+		`chrt 1 systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
+		`echo x; setsid systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true`,
+		`flock /tmp/systemd-run systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true`,
 	} {
 		if r := validateKill(t, command); r.IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -55,6 +68,14 @@ func TestKillGuardServiceExecAllowed(t *testing.T) {
 		`systemd-run --user -p 'Environment=A=\x41' make`,
 		`systemd-run --user -p 'Environment=A=$A' make`,
 		`systemd-run --user --expand-environment=no podman '${K}op' -a`,
+		`systemd-run --user --expand-environment=false -E K=st podman '${K}op' -a`,
+		`systemd-run --user --expand-environment=0 -E K=st podman '${K}op' -a`,
+		`systemd-run --user --expand-environment=OFF -E K=st podman '${K}op' -a`,
+		// run0 без короткой -p (systemd 259: invalid option) ничего не запустит
+		`run0 -p 'ExecStartPre=/usr/bin/\x6bill 1' true`,
+		// systemd-run операндом echo — не обёрнутый systemd-run
+		`echo systemd-run -p 'ExecStartPre=/usr/bin/\x74rue' true; systemd-run --user make`,
+		`setsid echo systemd-run -p 'ExecStartPre=/usr/bin/\x74rue' true; setsid systemd-run --user make`,
 		`systemd-run --user echo '${X}'`,
 		`systemd-run --user make '${X}'`,
 		`systemd-run --user sh -c "$HOME/bin/tool"`,

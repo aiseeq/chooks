@@ -77,6 +77,12 @@ func TestKillGuardWrappedSystemdRunLists(t *testing.T) {
 		{`setsid systemd-run --user -E K=st podman '${K}op' -a && echo done`, true},
 		{`setsid systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true && echo done`, true},
 		{`setsid systemd-run --user make && echo done`, false},
+		// слово, ломающее склейку слов: проверка по исходным словам
+		{`setsid systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' make "a\"b" && echo done`, true},
+		{`setsid systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' make "$X" "a(b" | cat`, true},
+		{`setsid systemd-run --user make "a\"b" && echo skills`, false},
+		{"setsid systemd-run --user make \"a\\`b\" && echo skills", false},
+		{`setsid systemd-run --user make $'a"b' && echo skills`, false},
 		{`flock /tmp/l systemd-run --user make | cat`, false},
 		{`setsid systemd-run --user -E "X=$X" make && echo done`, false},
 	} {

@@ -298,8 +298,11 @@ func (s *killScan) wrappedSystemdRun(c shellcmd.Call) (shellcmd.Call, bool, erro
 		}
 	}
 	parsed, err := shellcmd.Calls(strings.Join(words, " "))
+	//nolint:error-masking // слово без признака литеральности ("a\"b" рядом с "$X") ломает склейку; исходные слова без признаков — строгая сторона: Exec-значение с \ или $ получает отказ, обычная команда проходит
 	if err != nil {
-		return shellcmd.Call{}, false, fmt.Errorf("разобрать обёрнутый systemd-run: %w", err)
+		s.tool.Logger().Debug("kill_guard: обёрнутый systemd-run не разобрать заново, проверка по исходным словам", "error", err)
+		//nolint:fallback-return // то же: проверка по исходным словам — строгая сторона
+		return fallback, true, nil
 	}
 	for j := range parsed {
 		call := &parsed[j]

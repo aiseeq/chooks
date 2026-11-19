@@ -2,6 +2,7 @@ package tools
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,32 @@ func TestKillGuardServiceExecBypasses(t *testing.T) {
 		if r := validateKill(t, command); r.IsValid {
 			t.Errorf("должно блокироваться: %s", command)
 		}
+	}
+}
+
+func TestKillGuardWrappedSystemdRunLists(t *testing.T) {
+	for i, tc := range []struct {
+		command string
+		deny    bool
+	}{
+		{`setsid systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true && echo done`, true},
+		{`setsid systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true || echo done`, true},
+		{`setsid systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true | cat`, true},
+		{`true && setsid systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true`, true},
+		{`flock /tmp/l systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true && echo done`, true},
+		{`nice systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true && echo done`, true},
+		{`setsid systemd-run --user -E "X=$X" -p 'ExecStartPre=/usr/bin/\x6bill 1' true && echo done`, true},
+		{`setsid systemd-run --user -E K=st podman '${K}op' -a && echo done`, true},
+		{`setsid systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true && echo done`, true},
+		{`setsid systemd-run --user make && echo done`, false},
+		{`flock /tmp/l systemd-run --user make | cat`, false},
+		{`setsid systemd-run --user -E "X=$X" make && echo done`, false},
+	} {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			if r := validateKill(t, tc.command); r.IsValid == tc.deny {
+				t.Errorf("deny=%v: %v", tc.deny, r)
+			}
+		})
 	}
 }
 

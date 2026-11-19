@@ -225,7 +225,14 @@ func (s *killScan) serviceCommands(c shellcmd.Call, calls []shellcmd.Call) error
 				return err
 			}
 		}
-	} else if run, ok := s.wrappedSystemdRun(c); ok {
+	} else if run, ok, err := s.wrappedSystemdRun(c); err != nil {
+		// как ошибка уровня в serviceExecProperties: вызов-обёртка — любой
+		// nice, timeout, setsid, отказ без kill в тексте задел бы обычные команды
+		s.tool.Logger().Debug("kill_guard: systemd-run за обёрткой не разобрать", "error", err)
+		if s.killText {
+			s.addReason("systemd-run за обёрткой: " + err.Error() + ": свойства и команду временной службы проверить нельзя")
+		}
+	} else if ok {
 		if err := s.serviceExecProperties(run, calls); err != nil {
 			return err
 		}
@@ -256,20 +263,35 @@ func run0ServiceCall(c shellcmd.Call) (shellcmd.Call, bool, error) {
 // chrt, nice и их цепочки) исполнит своей командой, отдельным вызовом с
 // Via c. Слово systemd-run ищет в словах самого c тот же разбор, что для
 // systemd-run в команде службы (nestedSystemdRun): systemd-run операндом
-// (echo systemd-run …) — не команда
-func (s *killScan) wrappedSystemdRun(c shellcmd.Call) (shellcmd.Call, bool) {
+// (echo systemd-run …) — не команда. err — вызов не разобрать заново
+func (s *killScan) wrappedSystemdRun(c shellcmd.Call) (shellcmd.Call, bool, error) {
 	inner, err := nestedSystemdRun(append([]string{c.Name}, c.Args...))
 	if err != nil {
-		s.tool.Logger().Debug("kill_guard: обёрнутый systemd-run не найти", "error", err)
-		return shellcmd.Call{}, false
+		return shellcmd.Call{}, false, fmt.Errorf("найти обёрнутый systemd-run: %w", err)
 	}
 	if inner == nil {
-		return shellcmd.Call{}, false
+		return shellcmd.Call{}, false, nil
 	}
 	i := len(c.Args) - len(inner) - 1
+	fallback := shellcmd.Call{Name: "systemd-run", Args: c.Args[i+1:], Via: append(slices.Clone(c.Via), c.Name)}
+	// ArgLiteral относится ко всему скрипту: в && и конвейере он не
+	// отмечает даже литеральные слова. Повторный разбор самого вызова
+	// восстанавливает эти признаки, если слово осталось тем же.
+	calls, err := shellcmd.Calls(c.Raw)
+	if err != nil {
+		return shellcmd.Call{}, false, fmt.Errorf("разобрать вызов отдельно от скрипта: %w", err)
+	}
+	var isolated shellcmd.Call
+	for j := range calls {
+		call := &calls[j]
+		if call.Name == c.Name && slices.Equal(call.Args, c.Args) {
+			isolated = *call
+			break
+		}
+	}
 	words := make([]string, len(c.Args)-i)
 	for j, word := range c.Args[i:] {
-		if c.ArgLiteral(i + j) {
+		if c.ArgLiteral(i+j) || isolated.ArgLiteral(i+j) {
 			words[j] = singleQuotedWord(word)
 		} else {
 			words[j] = word
@@ -277,17 +299,19 @@ func (s *killScan) wrappedSystemdRun(c shellcmd.Call) (shellcmd.Call, bool) {
 	}
 	parsed, err := shellcmd.Calls(strings.Join(words, " "))
 	if err != nil {
-		s.tool.Logger().Debug("kill_guard: обёрнутый systemd-run не разобрать", "error", err)
-		return shellcmd.Call{}, false
+		return shellcmd.Call{}, false, fmt.Errorf("разобрать обёрнутый systemd-run: %w", err)
 	}
 	for j := range parsed {
 		call := &parsed[j]
-		if call.Name == "systemd-run" {
-			call.Via = append(slices.Clone(c.Via), c.Name)
-			return *call, true
+		if call.Name == "systemd-run" && slices.Equal(call.Args, c.Args[i+1:]) {
+			call.Via = fallback.Via
+			return *call, true, nil
 		}
 	}
-	return shellcmd.Call{}, false
+	// При неизвестном слове ArgLiteral не гарантирован даже для отдельного
+	// вызова. Проверяем исходные аргументы, не приписывая им признаки
+	// другого разбора.
+	return fallback, true, nil
 }
 
 // serviceExecProperties проверяет команду и Exec-свойства временной службы.

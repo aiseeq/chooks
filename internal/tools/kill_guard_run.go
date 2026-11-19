@@ -52,10 +52,10 @@ func systemdRunReason(args []word) (reason, hint string) {
 // команда исполнится на другой машине (последняя из -H, -M, -C), start —
 // место первого слова команды, properties — значения -p и --*-property
 type systemdRunOptions struct {
-	user, scope, shell, remote bool
-	start                      int
-	shellWord, shellLetter     int
-	properties                 []word
+	user, scope, shell, remote, expandEnvironmentNo bool
+	start                                           int
+	shellWord, shellLetter                          int
+	properties                                      []word
 }
 
 // systemdRunShortNames короткие опции systemd-run (getopt systemd v259
@@ -144,6 +144,8 @@ func applySystemdRunOption(out *systemdRunOptions, name string, value word) {
 		out.remote = !strings.ContainsAny(value.text, "$`\"'\\") && !localMachine(value.text)
 	case "capsule":
 		out.remote = false
+	case "expand-environment":
+		out.expandEnvironmentNo = value.text == "no"
 	}
 	if slices.Contains(systemdRunProperties, name) {
 		out.properties = append(out.properties, value)

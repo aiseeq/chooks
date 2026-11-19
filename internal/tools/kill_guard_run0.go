@@ -210,16 +210,21 @@ const maxRun0Rewrites = 16
 
 // rewriteRun0 команда, где каждый вызов run0, стоящий в тексте словом
 // (и во вложенном скрипте, heredoc), заменён на systemd-run --pipe
-// (replaceRun0). rewritten — замена была. Команду, которую shellcmd не
-// разобрал, разбор всей команды (parsedCalls) потом отклонит сам; err —
-// первая ошибка разбора слов вызова run0 (run0Words): такой вызов остаётся в
-// тексте, и его проверяет текст run0Command (rewrittenCommand)
+// (replaceRun0), и run0 за обёрткой, которого разбор не отдаёт (wrappedRun0).
+// rewritten — замена была. Команду, которую shellcmd не разобрал, разбор
+// всей команды (parsedCalls) потом отклонит сам; err — первая ошибка разбора
+// слов вызова run0 (run0Words, wrappedRun0): такой вызов остаётся в тексте,
+// и его проверяет текст run0Command (rewrittenCommand)
 func rewriteRun0(command string) (text string, rewritten bool, err error) {
 	text = command
 	for range maxRun0Rewrites {
 		calls, perr := shellcmd.Calls(text)
 		if calls == nil && perr != nil {
 			return text, rewritten, err
+		}
+		calls, serr := wrappedRun0Calls(text, calls)
+		if err == nil {
+			err = serr
 		}
 		next, ok := "", false
 		for i := range calls {

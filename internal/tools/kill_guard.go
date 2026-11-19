@@ -248,6 +248,7 @@ func (s *killScan) parsedCalls() error {
 		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду со словом kill, отказ", "error", err)
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
+	calls = s.withWrappedRun0(s.command, calls)
 	if s.signalWord && s.procSubstAfterParam(s.command) {
 		s.addReason(procSubstAfterParamReason)
 	}
@@ -261,6 +262,22 @@ func (s *killScan) parsedCalls() error {
 		}
 	}
 	return nil
+}
+
+// withWrappedRun0 calls текста text и run0 за обёртками среди них
+// (wrappedRun0Calls: systemd-run, setsid, flock): run0, не заменённый в
+// тексте (--via-shell с командой, значение в кавычках), проверяется
+// вызовом, как run0 без обёртки. Слова обёртки, которые не разобрать, при
+// kill в тексте — отказ
+func (s *killScan) withWrappedRun0(text string, calls []shellcmd.Call) []shellcmd.Call {
+	out, err := wrappedRun0Calls(text, calls)
+	if err != nil {
+		s.tool.Logger().Debug("kill_guard: run0 за обёрткой не найти", "error", err)
+		if s.killText {
+			s.addReason("run0 за обёрткой: " + err.Error() + ": его опции и команду проверить нельзя")
+		}
+	}
+	return out
 }
 
 // procSubstAfterParamRe <( или >( где-либо после ${ в тексте команды.
@@ -505,6 +522,7 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 	if err != nil && s.killText {
 		s.addReason(c.Name + ": разбор команды за ним не прошёл (" + err.Error() + "): проверить сигналы в ней нельзя")
 	}
+	calls = s.withWrappedRun0(text, calls)
 	// Via у всех вызовов — с обёрткой впереди: вызовы ищут друг друга по Via
 	// (systemd-run за run0 — systemdRunRemote). Вызовы самой команды за
 	// обёрткой (их текст — весь inner) получают её ввод и перенаправления:

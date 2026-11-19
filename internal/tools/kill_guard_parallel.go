@@ -185,8 +185,8 @@ func (p parallelCommand) script() (string, error) {
 }
 
 // elevatedCalls calls и вызовы за run0, pkexec и machinectl shell среди них
-// (systemd-run --pipe run0 bash): shellcmd их не снимает, а оболочку за ними
-// ищет inputShell. Via — с обёрткой впереди, места нет
+// (parallel run0 bash): run0 — как systemd-run (rewrittenCommand), а
+// оболочку за ними ищет inputShell. Via — с обёрткой впереди, места нет
 func (s *killScan) elevatedCalls(calls []shellcmd.Call) []shellcmd.Call {
 	out := slices.Clone(calls)
 	for i := 0; i < len(out) && i < 64; i++ {

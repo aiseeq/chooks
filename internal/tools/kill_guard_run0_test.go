@@ -2,6 +2,7 @@ package tools
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/akit/shellcmd"
@@ -150,6 +151,45 @@ func TestKillGuardRun0AsSystemdRun(t *testing.T) {
 		`run0 parallel ::: 'kill -s TERM' ::: 12345`,
 		`parallel ::: nice ::: 'kill -9 -1'`,
 		"run0 -i --property=SuccessAction=poweroff true",
+		// run0 ничего не запустит: неизвестная или неоднозначная опция
+		// (getopt_long), флаг systemd-run, которого у run0 нет. shellcmd с
+		// akit v1.88 снимает run0 как обёртку, и неизвестная опция —
+		// ошибка разбора (unknown wrapper option may hide a signal): чья она,
+		// ошибка не говорит, а набор опций run0 растёт с версией systemd
+		// (опция, которой нет в таблице, у нового run0 запустит команду).
+		// Отказ при kill в тексте безвреден: такой run0 агенту не нужен
+		`run0 --u root kill 12345`,
+		`run0 -p x kill 12345`,
+		`run0 -M foo kill 12345`,
+		`run0 --bogus kill 12345`,
+		// run0 за systemd-run, setsid, flock (и за обёрткой под ними): разбор
+		// отдаёт вызовом только kill или true, а опции run0 — словами обёртки
+		// (wrappedRun0). Значение в кавычках не заменить в тексте: его
+		// проверяет текст run0Command
+		`setsid run0 --property='ExecStartPre=/usr/bin/\x6bill 1' true`,
+		`flock /tmp/l run0 --property='ExecStartPre=/usr/bin/\x6bill 1' true`,
+		`setsid run0 --property=ExecStartPre=/usr/bin/pkill true`,
+		`setsid flock /tmp/l run0 --property='ExecStartPre=/usr/bin/kill 1' true && echo done`,
+		`systemd-run --user --pipe -- run0 --property='ExecStartPre=/usr/bin/kill 1' true`,
+		`systemd-run --user --pipe -- nice run0 --property=ExecStartPre=/usr/bin/pkill true`,
+		`run0 run0 --property='ExecStartPre=/usr/bin/kill 1' true`,
+		`run0 nice run0 --property=ExecStartPre=/usr/bin/pkill true`,
+		`systemd-run --user systemd-run --user run0 --property=ExecStartPre=/usr/bin/pkill true`,
+		`systemd-run --user run0 -i 'kill 12345'`,
+		// run0 в команде службы внутри скрипта --via-shell: его видит разбор
+		// текста за run0 (elevated)
+		`run0 -i 'systemd-run --user run0 --property=ExecStartPre=/usr/bin/pkill true'`,
+		// ввод службы — ввод run0, не заменённого в тексте (значение в
+		// кавычках): его даёт участок текста, как у вызова в нём (stdinOf)
+		"systemd-run --user run0 --property='Description=a b' bash <<'EOF'\nkill 12345\nEOF",
+		"f() { systemd-run --user run0 --property='Description=a b' bash; }; f <<EOF\nkill 12345\nEOF",
+		`systemd-run --user run0 --property='Description=a b' bash < <(echo kill 12345)`,
+		// тикет kill-guard-wrappers-prlimit-inhibit: systemd-run за обёртками,
+		// которые снимает shellcmd с akit v1.88
+		`prlimit --nofile=1024 systemd-run --user pkill -u aisee`,
+		`systemd-inhibit systemd-run --user kill 1`,
+		`dbus-run-session -- systemd-run --user kill 1`,
+		`setsid ssh-agent systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
 	} {
 		if validateKill(t, command).IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -168,15 +208,19 @@ func TestKillGuardRun0AsSystemdRun(t *testing.T) {
 		`run0 systemd-run -H host kill 12345`,
 		`run0 run0 systemd-run -H host kill 12345`,
 		`systemd-run --user systemd-run -M c1 kill 12345`,
-		// run0 ничего не запустит: --help, --version, неизвестная или
-		// неоднозначная опция (getopt_long), флаг со значением, нет значения
+		// run0 в команде службы идёт в контейнер или на другую машину
+		`systemd-run --user run0 --machine=foo kill 12345`,
+		// run0 ничего не запустит: --help, --version, флаг со значением
 		`run0 --help kill 12345`,
 		`run0 -V kill 12345`,
-		`run0 --u root kill 12345`,
-		`run0 -p x kill 12345`,
-		`run0 -M foo kill 12345`,
 		`run0 --pipe=x kill 12345`,
-		`run0 --bogus kill 12345`,
+		// без kill в тексте неизвестная опция run0 — не отказ
+		`run0 --bogus true`,
+		// служба за обёртками без сигнала
+		`prlimit --nofile=1024 systemd-run --user make`,
+		`systemd-run --user --pipe -- run0 --property='ExecStartPre=/usr/bin/true' make`,
+		// ввод службы переходит к run0, не заменённому в тексте (значение в кавычках)
+		`systemd-run --user run0 --property='Description=a b' bash <<< 'echo skill'`,
 		// литеральный скрипт ввода без сигнала
 		`run0 bash <<< 'echo skill'`,
 		"run0 bash <<EOF\ngrep -c kill /var/log/messages\nEOF",
@@ -318,6 +362,65 @@ func TestServiceParallel(t *testing.T) {
 	}
 }
 
+// run0 за обёрткой: разбор (akit v1.88) за systemd-run, setsid, flock
+// отдаёт вызовом только kill с run0 в Via, а run0 wrappedRun0
+// восстанавливает вызовом — с Via до него (обёртки), его словами и местом
+// слова run0; run0, который разбор отдал сам (nice run0), — один раз. Слова
+// обёртки, которые разбор не прочёл, — ошибка и отказ при kill в тексте
+func TestWrappedRun0(t *testing.T) {
+	for text, via := range map[string][]string{
+		`systemd-run --user nice run0 -u root kill 1`: {"systemd-run", "nice"},
+		`setsid flock /tmp/l run0 -u root kill 1`:     {"setsid", "flock"},
+		`nice run0 -u root kill 1`:                    {"nice"},
+		`run0 -u root kill 1`:                         nil,
+		`sh -c 'setsid run0 -u root kill 1'`:          {"sh", "-c", "setsid"},
+	} {
+		calls, err := shellcmd.Calls(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := wrappedRun0Calls(text, calls)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var run0 []shellcmd.Call
+		for _, c := range out {
+			if c.Name == "run0" {
+				run0 = append(run0, c)
+			}
+		}
+		if len(run0) != 1 {
+			t.Fatalf("wrappedRun0Calls(%q): ждали один вызов run0, получили %+v", text, run0)
+		}
+		if x := run0[0]; !slices.Equal(x.Via, via) || !slices.Equal(x.Args, []string{"-u", "root", "kill", "1"}) || x.Offset != strings.Index(text, "run0") {
+			t.Errorf("wrappedRun0Calls(%q): run0 = %+v, ждали Via %q, слова -u root kill 1, место %d", text, x, via, strings.Index(text, "run0"))
+		}
+	}
+	// тот же вызов — совпадают имя, текст, Via и слова
+	x := shellcmd.Call{Name: "run0", Args: []string{"kill", "1"}, Via: []string{"nice"}, Raw: "nice run0 kill 1"}
+	for _, o := range []shellcmd.Call{
+		{Name: "kill", Args: x.Args, Via: x.Via, Raw: x.Raw},
+		{Name: "run0", Args: []string{"1"}, Via: x.Via, Raw: x.Raw},
+		{Name: "run0", Args: x.Args, Via: []string{"setsid"}, Raw: x.Raw},
+		{Name: "run0", Args: x.Args, Via: x.Via, Raw: "nice run0 kill 1; true"},
+	} {
+		if sameRun0(&o, &x) {
+			t.Errorf("sameRun0(%+v, %+v): ждали false", o, x)
+		}
+	}
+	if !sameRun0(&x, &x) {
+		t.Errorf("sameRun0 одного вызова: ждали true")
+	}
+	c := shellcmd.Call{Name: "systemd-run", Args: []string{"--user", "nice", "\xff", "run0", "true"}, Raw: "systemd-run --user nice", Offset: -1}
+	for _, killText := range []bool{true, false} {
+		s := &killScan{tool: newKillGuard(t), killText: killText}
+		s.withWrappedRun0("", []shellcmd.Call{c})
+		if got := len(s.reasons) > 0; got != killText {
+			t.Errorf("withWrappedRun0 с неразобранными словами обёртки, kill в тексте %v: отказ %v %q", killText, got, s.reasons)
+		}
+	}
+}
+
 // Начало команды systemd-run: за -- — следующее слово, даже с дефисом
 func TestSystemdRunCommandStart(t *testing.T) {
 	for _, tc := range []struct {
@@ -350,6 +453,15 @@ func TestRewriteRun0(t *testing.T) {
 		{`nice -n 5 run0 -u root kill 1`, `nice -n 5 systemd-run --pipe -- kill 1`},
 		{`run0 -i`, `systemd-run --pipe -- sh`},
 		{`find . -exec run0 kill 1 \;`, `find . -exec systemd-run --pipe -- kill 1 \;`},
+		// run0 в команде службы systemd-run, за обёрткой тоже (wrappedRun0)
+		{`setsid run0 -u root kill 1`, `setsid systemd-run --pipe -- kill 1`},
+		{`run0 setsid run0 kill 1`, `systemd-run --pipe -- setsid systemd-run --pipe -- kill 1`},
+		{`systemd-run --user run0 -u root kill 1`, `systemd-run --user systemd-run --pipe -- kill 1`},
+		{`systemd-run --user -- nice run0 --machine=c1 kill 1`, `systemd-run --user -- nice systemd-run --pipe --machine=c1 -- kill 1`},
+		{`systemd-run --user run0 <<< x`, `systemd-run --user systemd-run --pipe -- sh <<< x`},
+		// слово run0 из переменной в команде службы — не заменяется
+		{`R=run0; systemd-run --user $R kill 1`, `R=run0; systemd-run --user $R kill 1`},
+		{`systemd-run --user echo run0 kill 1`, `systemd-run --user echo run0 kill 1`},
 		{"run0 bash <<EOF\nkill 1\nEOF", "systemd-run --pipe -- bash <<EOF\nkill 1\nEOF"},
 		// не заменяется: run0 ничего не запустит, имя из переменной
 		{`run0 --help kill 1`, `run0 --help kill 1`},

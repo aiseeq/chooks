@@ -36,6 +36,50 @@ func TestKillGuardServiceExecBypasses(t *testing.T) {
 		// C-экранирование при kill в тексте
 		`systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 12345' true # kill`,
 		`systemd-run --user -p 'ExecStartPre=/bin/sh -c "kill\s1"' true`,
+		// Exec-значение само по себе может скрывать сигнал от killText
+		`systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 12345' true`,
+		`systemd-run --user -p 'ExecStartPre=/usr/bin/\153ill 12345' true`,
+		`systemd-run --user -p $'ExecStartPre=/usr/bin/\\x6bill 1' true`,
+		`systemd-run --user -p 'ExecStartPre=/usr/bin/p\x6bill -u aisee' true`,
+		`systemd-run --user -E K=ki -p 'ExecStartPre=/usr/bin/${K}ll 1' true`,
+		// Вычисленные shell-значения и имена Exec-свойств отклоняются без killText
+		`P='ExecStartPre=/usr/bin/\x6bill 1'; systemd-run --user -p "$P" true`,
+		`C=/usr/bin/\x6bill; systemd-run --user -p "ExecStartPre=$C 1" true`,
+		`systemd-run --user -p "$(printf '/usr/bin/\x6bill') 1" true`,
+		`printf '%s\n' 'ExecStartPre=/usr/bin/\x6bill 1' | xargs -I{} systemd-run --user -p {} true`,
+		`systemd-run --user -p "$(cat f)" true`,
+		`run0 --property="$P" true`,
+		`systemd-run --user -p "${P}=x" true`,
+		// Подстановка может выбрать команду в аргументах launcher, главной команде или shell script
+		`systemd-run --user -E K=ki -p 'ExecStartPre=/usr/bin/podman ${K}ll -a' true`,
+		`systemd-run --user -E K=stop -p 'ExecStartPre=/usr/bin/podman $K -a' true`,
+		`systemd-run --user -E K=r -p 'ExecStartPre=/usr/bin/podman ${K}m -fa' true`,
+		`systemd-run --user -E K=ki -p 'ExecStartPre=/usr/bin/loginctl ${K}ll-user aisee' true`,
+		`systemd-run --user -E K=ki -p 'ExecStartPre=/usr/bin/systemctl --user ${K}ll foo.service' true`,
+		`systemd-run --user -E K=ki -p 'ExecStartPre=/bin/sh -c "${K}ll 1"' true`,
+		`systemd-run --user -E K=ki -p 'ExecStartPre=/usr/bin/env ${K}ll 1' true`,
+		`systemd-run --user -E K=ki -p 'ExecStartPre=|${K}ll 1' true`,
+		`systemd-run --user -E K=ki -p 'ExecStartPre=@/bin/sh x -c "${K}ll 1"' true`,
+		`systemd-run --user -E K=ki -p 'ExecStartPre=/usr/bin/env -S "${K}ll 1"' true`,
+		`systemd-run --user -E A=ki -E B=ll -p 'ExecStartPre=/bin/sh -c "$A$B 1"' true`,
+		`systemd-run --user -p Environment=K=ki -p 'ExecStartPre=/bin/sh -c "${K}ll 1"' true`,
+		`systemd-run --user -p EnvironmentFile=/tmp/kgep-rv/envfile -p 'ExecStartPre=/bin/sh -c "${K} 1"' true`,
+		`systemd-run --user -E K=st podman '${K}op' -a`,
+		`systemd-run --user -E K=r podman '${K}m' -fa`,
+		`systemd-run --user -E K=ki /bin/sh -c '${K}ll 1'`,
+		`systemd-run --user sh -c '$HOME/bin/tool'`,
+		`run0 --setenv=K=ki podman '${K}ll' -a`,
+		`run0 --setenv=K=ki --property='ExecStartPre=/usr/bin/podman ${K}ll -a' true`,
+		`run0 --property='ExecStartPre=/usr/bin/\x6bill 1' true`,
+		`run0 -p 'ExecStartPre=/usr/bin/\x6bill 1' true`,
+		`run0 --setenv=K=ki -p 'ExecStartPre=/bin/sh -c "${K}ll 1"' true`,
+		`run0 --setenv=K=ki sh -c '${K}ll 1'`,
+		`systemd-run --user -p 'ExecStartPre=/usr/bin/podman stop -a' true`,
+		`systemd-run --user podman stop -a`,
+		`setsid systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
+		`setsid -f systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
+		`flock /tmp/l systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
+		`chrt -o 0 systemd-run --user -p 'ExecStartPre=/usr/bin/kill 1' true`,
 		// свойство из ввода xargs
 		`printf '%s\n' 'ExecStartPre=/usr/bin/kill 12345' | xargs -I{} systemd-run --user -p {} true`,
 		`printf '%s\n' '/usr/bin/kill 12345' | xargs -I@ systemd-run --user -p ExecStartPre=@ true`,
@@ -85,8 +129,8 @@ func TestKillGuardServiceExecBypasses(t *testing.T) {
 		// $VAR словом целиком — значение переменной
 		`systemd-run --user -E 'CMD=kill 1' -p "ExecStartPre=/bin/sh -c '\$CMD'" true`,
 	} {
-		if validateKill(t, command).IsValid {
-			t.Errorf("должно блокироваться: %s", command)
+		if r := validateKill(t, command); r.IsValid {
+			t.Errorf("должно блокироваться: %s: %+v", command, r)
 		}
 	}
 }
@@ -110,6 +154,17 @@ func TestKillGuardServiceExecAllowed(t *testing.T) {
 		`printf '%s\n' 1G | xargs -I{} systemd-run --user -p MemoryMax={} make # kill`,
 		`run0 --property=Nice=5 dnf update`,
 		`systemd-run --user -p MemoryMax=1G make`,
+		`systemd-run --user -p 'ExecStartPre=/usr/bin/true' make`,
+		`systemd-run --user -p 'Environment=A=\x41' make`,
+		`systemd-run --user -E T=x -p 'ExecStartPre=/usr/bin/podman start ${T}' true`,
+		`systemd-run --user -p 'ExecStartPre=/usr/bin/echo ${X}' true`,
+		`systemd-run --user -p 'ExecStartPre=/usr/bin/make ${X}' true`,
+		`systemd-run --user -p 'ExecStopPost=/bin/sh -c "echo ${SERVICE_RESULT} > /tmp/r"' make`,
+		`systemd-run --user -p 'ExecStopPost=/bin/sh -c "notify-send done ${EXIT_STATUS}"' make`,
+		`systemd-run --user -p 'ExecStopPost=|echo ${SERVICE_RESULT} > /tmp/r' make`,
+		`systemd-run --user make ${X}`,
+		`systemd-run --user -p 'ExecStopPost=/usr/bin/echo a\tb' make`,
+		`systemd-run --user -p 'ExecStartPre=/bin/sh -c "printf a\\nb > /tmp/x"' make`,
 		// заход 5: $VAR внутри слова systemd не раскрывает — оболочка службы
 		// получит текст $VAR
 		`systemd-run --user -p 'ExecStopPost=/bin/sh -c "echo $SERVICE_RESULT >> /tmp/r"' make`,
@@ -123,36 +178,42 @@ func TestKillGuardServiceExecAllowed(t *testing.T) {
 }
 
 // Командная строка Exec-свойства текстом оболочки (systemdExecCommand)
-func TestSystemdExecCommand(t *testing.T) {
+func TestSystemdExecCommandInfo(t *testing.T) {
 	for _, tc := range []struct {
-		in, want string
-		ok       bool
+		in, want     string
+		computed, ok bool
 	}{
-		{`/usr/bin/kill 12345`, `'/usr/bin/kill' '12345'`, true},
-		{`-+!:/usr/bin/kill 1`, `'/usr/bin/kill' '1'`, true},
-		{`@/usr/bin/env x kill 1`, `'/usr/bin/env' 'kill' '1'`, true},
-		{`@/usr/bin/env`, ``, false},
-		{`|echo a; kill 1`, `sh -c 'echo a; kill 1'`, true},
-		{`@|kill 1`, `sh -c 'kill 1'`, true},
-		{`|`, `sh`, true},
-		{`/bin/sh -c 'kill 1' "a b"`, `'/bin/sh' '-c' 'kill 1' 'a b'`, true},
-		{`/usr/bin/echo a"b c"d`, `'/usr/bin/echo' 'ab cd'`, true},
-		{`/usr/bin/env -u #x kill`, `'/usr/bin/env' '-u' '#x' 'kill'`, true},
-		{`/bin/sh -c ${CMD}`, `'/bin/sh' '-c' "${CMD}"`, true},
-		{`/usr/bin/env ${K}ll $X $$Y 1%`, `'/usr/bin/env' "${K}"'ll' "${X}" '$Y' '1%'`, true},
-		{`:/usr/bin/echo ${A}`, `'/usr/bin/echo' '${A}'`, true},
-		{`/usr/bin/echo $$$A ${A}$B`, `'/usr/bin/echo' '$$A' "${A}"'$B'`, true},
-		{`/bin/sh -c "echo $R >> /tmp/r"`, `'/bin/sh' '-c' 'echo $R >> /tmp/r'`, true},
-		{`/usr/bin/echo x$A "$A" '$B' $A.y $ $$A e${A}f`, `'/usr/bin/echo' 'x$A' "${A}" "${B}" "${SYSTEMD_ENV}" "${SYSTEMD_ENV}" '$A' 'e'"${A}"'f'`, true},
-		{`/usr/bin/echo ${a-b}`, `'/usr/bin/echo' "${SYSTEMD_ENV}"`, true},
-		{`/usr/bin/echo ''`, `'/usr/bin/echo' ''`, true},
-		{`/usr/bin/echo 'a`, ``, false},
-		{``, ``, true},
-		{`-`, ``, true},
+		{`/usr/bin/kill 12345`, `'/usr/bin/kill' '12345'`, false, true},
+		{`-+!:/usr/bin/kill 1`, `'/usr/bin/kill' '1'`, false, true},
+		{`@/usr/bin/env x kill 1`, `'/usr/bin/env' 'kill' '1'`, false, true},
+		{`@/usr/bin/env`, ``, false, false},
+		{`|echo a; kill 1`, `sh -c 'echo a; kill 1'`, false, true},
+		{`@|kill 1`, `sh -c 'kill 1'`, false, true},
+		{`|`, `sh`, false, true},
+		{`/bin/sh -c 'kill 1' "a b"`, `'/bin/sh' '-c' 'kill 1' 'a b'`, false, true},
+		{`/usr/bin/echo a"b c"d`, `'/usr/bin/echo' 'ab cd'`, false, true},
+		{`/usr/bin/env -u #x kill`, `'/usr/bin/env' '-u' '#x' 'kill'`, false, true},
+		{`/bin/sh -c ${CMD}`, `'/bin/sh' '-c' "${CMD}"`, true, true},
+		{`/usr/bin/env ${K}ll $X $$Y 1%`, `'/usr/bin/env' "${K}"'ll' "${X}" '$Y' '1%'`, true, true},
+		{`:/usr/bin/echo ${A}`, `'/usr/bin/echo' '${A}'`, false, true},
+		{`/usr/bin/echo $$$A ${A}$B`, `'/usr/bin/echo' '$$A' "${A}"'$B'`, false, true},
+		{`/bin/sh -c "echo $R >> /tmp/r"`, `'/bin/sh' '-c' 'echo $R >> /tmp/r'`, false, true},
+		{`/usr/bin/echo x$A "$A" '$B' $A.y $ $$A e${A}f`, `'/usr/bin/echo' 'x$A' "${A}" "${B}" "${SYSTEMD_ENV}" "${SYSTEMD_ENV}" '$A' 'e'"${A}"'f'`, false, true},
+		{`/usr/bin/echo ${a-b}`, `'/usr/bin/echo' "${SYSTEMD_ENV}"`, false, true},
+		{`/usr/bin/echo ''`, `'/usr/bin/echo' ''`, false, true},
+		{`/usr/bin/echo 'a`, ``, false, false},
+		{`/usr/bin/echo ${X}`, `'/usr/bin/echo' "${X}"`, false, true},
+		{`/usr/bin/podman ${K}op -a`, `'/usr/bin/podman' "${K}"'op' '-a'`, true, true},
+		{`/bin/sh -c 'echo ${X}'`, `'/bin/sh' '-c' 'echo '"${X}"`, false, true},
+		{`/bin/sh -c '${K}ll 1'`, `'/bin/sh' '-c' "${K}"'ll 1'`, true, true},
+		{`/usr/bin/kill /tmp/\x31`, `'/usr/bin/kill' '/tmp/1'`, false, true},
+		{`/usr/bin/${K}ll 1`, `'/usr/bin/'"${K}"'ll' '1'`, true, true},
+		{``, ``, false, true},
+		{`-`, ``, false, true},
 	} {
-		got, ok := systemdExecCommand(tc.in)
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("systemdExecCommand(%q) = %q, %v; ждали %q, %v", tc.in, got, ok, tc.want, tc.ok)
+		got, executableComputed, commandComputed, ok, parseErr := systemdExecCommandInfo(tc.in)
+		if got != tc.want || (executableComputed || commandComputed) != tc.computed || ok != tc.ok || parseErr != nil {
+			t.Errorf("systemdExecCommandInfo(%q) = %q, executable=%v command=%v ok=%v err=%v; ждали %q, computed=%v ok=%v err=nil", tc.in, got, executableComputed, commandComputed, ok, parseErr, tc.want, tc.computed, tc.ok)
 		}
 	}
 }
@@ -174,15 +235,15 @@ func TestExecPropertyCommand(t *testing.T) {
 		{`"$P"`, none, ``, true},
 		{`"Exec${X}=1"`, none, ``, true},
 		{`"ExecStartPre=$X"`, none, ``, true},
-		{`ExecStartPre=/usr/bin/\x6bill 1`, none, ``, true},
+		{`ExecStartPre=/usr/bin/\x6bill 1`, none, `'/usr/bin/kill' '1'`, false},
 		{`ExecStartPre=/usr/bin/echo 'a`, none, ``, true},
 		{`{}`, braces, ``, true},
 		{`ExecStartPre={}`, braces, ``, true},
 		{`ExecStartPre=`, none, ``, false},
 		{`ExecStopPre=/usr/bin/kill 1`, none, ``, false},
 	} {
-		inner, reason := execPropertyCommand(tc.arg, tc.fed)
-		if inner != tc.inner || (reason != "") != tc.hasReason {
+		inner, reason, _, parseErr := execPropertyCommand(tc.arg, tc.fed)
+		if inner != tc.inner || (reason != "") != tc.hasReason || parseErr != nil {
 			t.Errorf("execPropertyCommand(%q) = %q, %q; ждали %q, причина %v", tc.arg, inner, reason, tc.inner, tc.hasReason)
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"regexp"
 
 	"github.com/aiseeq/chooks/internal/tailscan"
@@ -30,13 +31,16 @@ var claim = regexp.MustCompile(`(?i)(?:ещё|еще) не отправлено|
 // reddy и history в тексте правки, тикета или промпта — не вызов (ложный
 // пропуск 29.10 12:15 у chooks-master)
 func chatCall(command string) bool {
-	calls, err := shellcmd.Find(command, "reddy")
+	calls, err := shellcmd.Calls(command)
 	var nested *shellcmd.NestedError
 	if err != nil && !errors.As(err, &nested) {
 		return false // shellcmd не разбирает только то, что отвергает и bash -n: такую команду оболочка не выполнила, чат не открывался
 	}
 	for i := range calls {
 		call := &calls[i]
+		if path.Base(call.Name) != "reddy" {
+			continue
+		}
 		for _, arg := range call.Args {
 			if arg != "" && arg[0] != '-' {
 				if arg == "history" {
@@ -154,9 +158,9 @@ func blockReason(phrase string) string {
 }
 
 // ChatOpened — вызывался ли в текущем ходе Bash с `reddy … history`. Ход —
-// от конца предыдущего хода, последней реплики человека, письма сессии или запроса программы
-// (`claude -p`, SDK: запись без origin); начала хода нет и в предельном
-// окне — смотрится всё окно
+// от конца предыдущего хода, последней реплики человека или запроса программы
+// (`claude -p`, SDK: запись без origin); письмо сессии посреди активного хода
+// чтение не сбрасывает. Начала хода нет и в предельном окне — смотрится всё окно
 func ChatOpened(path string) (bool, error) {
 	var checked bool
 	err := tailscan.Scan(path, func(buf []byte) bool {
@@ -196,7 +200,12 @@ func scanEvents(events []transcript.Event) (checked, turnFound bool) {
 		case event.Sidechain:
 		case event.Role == transcript.Note && event.Who == "system" && event.Subtype == "turn_duration":
 			return false, true
-		case event.Role == transcript.User || event.Role == transcript.Peer || (event.Role == transcript.Note && event.Who == "prompt"):
+		case event.Role == transcript.User || (event.Role == transcript.Note && event.Who == "prompt"):
+			return false, true
+		case event.Role == transcript.Peer && event.Queued:
+			// Очередное письмо может прийти посреди активного хода. Если оно
+			// начало новый ход, ниже встретится turn_duration предыдущего.
+		case event.Role == transcript.Peer:
 			return false, true
 		case event.Role == transcript.Cmd && event.Who == "Bash" && chatCall(event.Text):
 			return true, true

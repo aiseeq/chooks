@@ -217,12 +217,15 @@ func (s *killScan) serviceCommands(c shellcmd.Call, calls []shellcmd.Call) error
 			return err
 		}
 	} else if c.Name == "run0" {
-		if run, ok := run0ServiceCall(c); ok {
+		if run, ok, err := run0ServiceCall(c); err != nil {
+			s.tool.Logger().Debug("kill_guard: замену run0 не разобрать как systemd-run", "error", err)
+			s.addToolReason("run0: команду временной службы нельзя разобрать", run0Hint, false)
+		} else if ok {
 			if err := s.serviceExecProperties(run, calls); err != nil {
 				return err
 			}
 		}
-	} else if run, ok := wrappedSystemdRun(c, calls); ok {
+	} else if run, ok := s.wrappedSystemdRun(c, calls); ok {
 		if err := s.serviceExecProperties(run, calls); err != nil {
 			return err
 		}
@@ -230,65 +233,72 @@ func (s *killScan) serviceCommands(c shellcmd.Call, calls []shellcmd.Call) error
 	return s.serviceParallel(c, calls)
 }
 
-func run0ServiceCall(c shellcmd.Call) (shellcmd.Call, bool) {
-	inv, ok := parseRun0(c.Args)
+func run0ServiceCall(c shellcmd.Call) (shellcmd.Call, bool, error) {
+	text, ok := run0Command(c.Args)
 	if !ok {
-		return shellcmd.Call{}, false
+		return shellcmd.Call{}, false, nil
 	}
-	args := []string{"--pipe"}
-	for _, machine := range inv.machines {
-		args = append(args, "--machine="+machine)
+	converted, err := shellcmd.Calls(text)
+	if err != nil {
+		return shellcmd.Call{}, false, fmt.Errorf("разобрать замену run0: %w", err)
 	}
-	for _, property := range inv.properties {
-		args = append(args, "--property="+property)
+	for i := range converted {
+		call := &converted[i]
+		if call.Name == "systemd-run" {
+			call.Via = append(slices.Clone(c.Via), call.Via...)
+			return *call, true, nil
+		}
 	}
-	args = append(args, "--")
-	switch {
-	case len(inv.command) == 0:
-		args = append(args, "sh")
-	case inv.viaShell:
-		args = append(args, "sh", "-c", strings.Join(inv.command, " "))
-	default:
-		args = append(args, inv.command...)
-	}
-	return shellcmd.Call{Name: "systemd-run", Args: args, Raw: c.Raw, Via: c.Via, Line: c.Line, Offset: c.Offset, Redirs: c.Redirs}, true
+	return shellcmd.Call{}, false, nil
 }
 
-// wrappedSystemdRun находит systemd-run, который shellcmd показал как
-// запущенный из c. Via у вложенного вызова — источник истины для обёртки;
-// этот код не дублирует список команд-launcher.
-func wrappedSystemdRun(c shellcmd.Call, calls []shellcmd.Call) (shellcmd.Call, bool) {
-	via := append(slices.Clone(c.Via), c.Name)
-	found := false
+// wrappedSystemdRun берёт цепочку обёрток из Via shellcmd, затем просит тот
+// же разбор выделить systemd-run и его опции.
+func (s *killScan) wrappedSystemdRun(c shellcmd.Call, calls []shellcmd.Call) (shellcmd.Call, bool) {
+	wrapped := false
 	for i := range calls {
-		child := &calls[i]
-		if child.Raw == c.Raw && len(child.Via) > len(via) && slices.Equal(child.Via[:len(via)], via) && child.Via[len(via)] == "systemd-run" {
-			found = true
+		call := &calls[i]
+		if slices.Contains(call.Via, "systemd-run") {
+			wrapped = true
 			break
 		}
 	}
-	if !found {
+	if !wrapped {
 		return shellcmd.Call{}, false
 	}
 	for i, arg := range c.Args {
 		if path.Base(arg) != "systemd-run" {
 			continue
 		}
-		parsed, err := shellcmd.Calls(shellWords(c.Args[i:]))
-		if err == nil && len(parsed) > 0 && parsed[0].Name == "systemd-run" {
-			return shellcmd.Call{Name: "systemd-run", Args: c.Args[i+1:], Raw: c.Raw, Via: via, Line: c.Line, Offset: c.Offset, Redirs: c.Redirs}, true
+		words := make([]string, len(c.Args)-i)
+		for j, word := range c.Args[i:] {
+			if c.ArgLiteral(i + j) {
+				words[j] = singleQuotedWord(word)
+			} else {
+				words[j] = word
+			}
+		}
+		parsed, err := shellcmd.Calls(strings.Join(words, " "))
+		if err != nil {
+			s.tool.Logger().Debug("kill_guard: обёрнутый systemd-run не разобрать", "error", err)
+			continue
+		}
+		for j := range parsed {
+			call := &parsed[j]
+			if call.Name == "systemd-run" {
+				call.Via = append(slices.Clone(c.Via), c.Name)
+				return *call, true
+			}
 		}
 	}
 	return shellcmd.Call{}, false
 }
 
-// serviceExecProperties проверяет main-команду и Exec-свойства systemd-run c
-// общим разбором systemd Exec: служба исполнит их как потомков PID 1. Вычисляемую
-// команду или подкоманду нельзя пропускать при пустом killText. systemd-run прямо под
-// systemd-run разбор вызовом не отдаёт — его свойства берутся из слов
-// внешнего. Не проверяются --scope (свойства команды scope не запускает) и
-// systemd-run на другой машине. Вычисляемые свойства Exec, которые могут
-// задать команду, отклоняются; ошибки разбора отклоняются при killText.
+// serviceExecProperties проверяет команду и Exec-свойства временной службы.
+// Вычисляемое Exec-свойство или значение с $, обратной косой либо обратной
+// кавычкой отклоняется безусловно; литеральная команда идёт через elevated.
+// В главной команде systemd-run учитываются литеральные $ в позициях селектора.
+// --scope и удалённая служба здесь не исполняются.
 func (s *killScan) serviceExecProperties(c shellcmd.Call, calls []shellcmd.Call) error {
 	if slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
 		return nil
@@ -301,7 +311,7 @@ func (s *killScan) serviceExecProperties(c shellcmd.Call, calls []shellcmd.Call)
 			return nil
 		}
 		if !l.o.scope {
-			if err := s.unitExecProperties(c, l.args, &l.o, fed); err != nil {
+			if err := s.unitExecProperties(c, l.args, l.at, &l.o, fed); err != nil {
 				return err
 			}
 		}
@@ -315,51 +325,76 @@ func (s *killScan) serviceExecProperties(c shellcmd.Call, calls []shellcmd.Call)
 	return nil
 }
 
-// unitExecProperties проверяет main-команду и Exec-свойства одной службы
-// systemd-run тем же анализом. Непрозрачная команда или подкоманда означает
-// отказ и без killText. systemd-run за xargs/parallel без команды получает
-// опции и команду из ввода; при killText это тоже отказ.
-func (s *killScan) unitExecProperties(c shellcmd.Call, args []string, o *systemdRunOptions, fed func(string) bool) error {
+// unitExecProperties проверяет команду и Exec-свойства одной службы.
+// Литеральный $ в позиции команды или подкоманды блокируется, если systemd
+// раскроет окружение. Вызов за xargs/parallel без команды при killText
+// отклоняется, поскольку его свойства задаст ввод.
+func (s *killScan) unitExecProperties(c shellcmd.Call, args []string, offset int, o *systemdRunOptions, fed func(string) bool) error {
 	if s.killText && afterXargs(c) && o.start == len(args) {
 		s.addToolReason("systemd-run за xargs или parallel без команды: слова ввода станут его опциями и командой (-p ExecStartPre=…), их не видно до запуска"+hiddenTail, systemdRunHiddenHint, false)
 	}
-	if err := s.unitMainCommand(args, o); err != nil {
-		return err
+	if !o.expandEnvironmentNo && s.serviceCommandHasDynamicSelector(c, args, offset+o.start) {
+		s.addToolReason("команда службы содержит литеральную подстановку systemd, которая может выбрать подкоманду", systemdRunHiddenHint, false)
 	}
 	return s.unitExecPropertyValues(c, o.properties, fed)
 }
 
-func (s *killScan) unitMainCommand(args []string, o *systemdRunOptions) error {
-	if o.start < len(args) {
-		main := systemdArgsCommand(args[o.start:])
-		_, _, computedCommand, ok, parseErr := systemdExecCommandInfo(main)
-		if parseErr != nil {
-			s.tool.Logger().Warn("kill_guard: не разобрана shell-команда systemd-run", "error", parseErr)
-			s.addToolReason("команда systemd-run содержит shell-команду, которую не удалось разобрать"+hiddenTail, systemdRunHiddenHint, false)
-		} else if ok && computedCommand {
-			s.addToolReason("команда systemd-run содержит подстановку, которая может выбрать исполняемую подкоманду"+hiddenTail, systemdRunHiddenHint, false)
+func (s *killScan) serviceCommandHasDynamicSelector(c shellcmd.Call, args []string, start int) bool {
+	if start >= len(args) {
+		return false
+	}
+	words := make([]string, len(args)-start)
+	for i, arg := range args[start:] {
+		if c.ArgLiteral(start + i) {
+			words[i] = singleQuotedWord(arg)
+		} else {
+			words[i] = arg
 		}
 	}
-	return nil
+	calls, err := shellcmd.Calls(strings.Join(words, " "))
+	if err != nil {
+		s.tool.Logger().Debug("kill_guard: команду службы не разобрать для systemd-подстановок", "error", err)
+		return false
+	}
+	for i := range calls {
+		call := &calls[i]
+		base := path.Base(call.Name)
+		switch base {
+		case "podman", "podman-remote":
+			verb, _ := podmanStop(call.Args)
+			if i := slices.Index(call.Args, verb); i >= 0 && call.ArgLiteral(i) && strings.Contains(verb, "$") {
+				return true
+			}
+		case "systemctl", "loginctl":
+			values := systemctlValues
+			if base == "loginctl" {
+				values = loginctlValues
+			}
+			operands := optionOperands(serviceCallWords(call), values)
+			if len(operands) > 0 && operands[0].literal && strings.Contains(operands[0].text, "$") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func serviceCallWords(c *shellcmd.Call) []word {
+	words := make([]word, len(c.Args))
+	for i, arg := range c.Args {
+		words[i] = word{text: arg, literal: c.ArgLiteral(i)}
+	}
+	return words
 }
 
 func (s *killScan) unitExecPropertyValues(c shellcmd.Call, properties []word, fed func(string) bool) error {
 	for _, p := range properties {
-		inner, reason, unconditional, parseErr := execPropertyCommand(p.text, fed)
-		if shellANSIExecProperty(c.Raw, p.text) {
-			inner, reason, unconditional, parseErr = "", "значение Exec-свойства вычисляется ANSI-C кавычками оболочки", true, nil
-		}
-		if parseErr != nil {
-			s.tool.Logger().Warn("kill_guard: не разобрана shell-команда Exec-свойства", "error", parseErr)
-			reason, unconditional = "команда "+p.text+" не разбирается: "+parseErr.Error(), true
-		}
-		switch {
-		case reason != "" && (s.killText || unconditional):
+		inner, reason, reject := execPropertyCommand(p.text, fed)
+		if reject {
 			s.addToolReason("systemd-run -p "+p.text+": "+reason+hiddenTail, systemdRunHiddenHint, false)
-		case reason == "" && inner != "":
-			if !s.killText && systemdGeneratedShellHasDynamic(inner) {
-				continue
-			}
+			continue
+		}
+		if inner != "" {
 			if err := s.elevated(c, inner); err != nil {
 				return err
 			}
@@ -368,80 +403,39 @@ func (s *killScan) unitExecPropertyValues(c shellcmd.Call, properties []word, fe
 	return nil
 }
 
-func shellANSIExecProperty(raw, property string) bool {
-	key, _, found := strings.Cut(unquoted(property), "=")
-	return found && execPropertyKey(key) && strings.Contains(raw, "$'") && strings.Contains(property, `\`)
-}
-
-func systemdArgsCommand(args []string) string {
-	quoted := make([]string, len(args))
-	for i, arg := range args {
-		quoted[i] = singleQuotedWord(unquoted(arg))
-	}
-	return strings.Join(quoted, " ")
-}
-
-func systemdGeneratedShellHasDynamic(inner string) bool {
-	for _, command := range []string{"sh", "bash", "dash", "zsh", "/bin/sh", "/bin/bash", "/usr/bin/sh", "/usr/bin/bash"} {
-		for _, flag := range []string{"'-c'", "'--command'"} {
-			prefix := singleQuotedWord(command) + " " + flag + " "
-			if strings.HasPrefix(inner, prefix) && strings.ContainsAny(strings.TrimPrefix(inner, prefix), "$`") {
-				return true
-			}
-		}
-	}
-	if strings.HasPrefix(inner, "sh -c ") && strings.ContainsAny(strings.TrimPrefix(inner, "sh -c "), "$`") {
-		return true
-	}
-	return false
-}
+// execPropertyCommand разбирает Exec-свойство arg (слово -p из shellcmd).
+// Пустые inner и reason означают не Exec-свойство или сброс списка.
+// systemdExpansionChars — символы раскрытия systemd в значении Exec.
+const systemdExpansionChars = "$\x60"
 
 // execPropertyCommand разбирает Exec-свойство arg (слово -p из shellcmd).
-// Пустые inner и reason означают не Exec-свойство или сброс списка. computed
-// означает, что значение или имя может задать неизвестную Exec-команду.
-func execPropertyCommand(arg string, fed func(string) bool) (inner, reason string, unconditional bool, parseErr error) {
+// Пустые inner и reason означают не Exec-свойство или сброс списка.
+func execPropertyCommand(arg string, fed func(string) bool) (inner, reason string, reject bool) {
 	computed := computedArg(arg) || fed(arg)
 	text := arg
 	if computedArg(arg) {
 		text = unquoted(arg)
 	}
 	key, value, found := strings.Cut(text, "=")
-	if computed && (strings.ContainsAny(key, "$`") || fed(key)) {
-		return "", "имя свойства вычисляется при запуске: оно может задать Exec-команду, проверить её нельзя", true, nil
+	if computed && (!found || strings.ContainsAny(key, systemdExpansionChars) || fed(key)) {
+		return "", "имя свойства вычисляется при запуске и может задать Exec-команду", true
 	}
 	if !found || !execPropertyKey(key) {
-		return "", "", false, nil
+		return "", "", false
 	}
-	if computed {
-		return "", "команда " + key + " вычисляется оболочкой при запуске: проверить её нельзя", true, nil
+	if computed || strings.ContainsAny(value, "\\"+systemdExpansionChars) {
+		return "", "значение " + key + " содержит вычисление или escape; команду нельзя проверить", true
 	}
-	inner, computedExecutable, computedCommand, ok, parseErr := systemdExecCommandInfo(value)
-	if parseErr != nil {
-		return "", "", false, parseErr
-	}
-	if computedCommand || computedExecutable {
-		return "", "команда " + key + " содержит подстановку выбора исполняемой команды или подкоманды", true, nil
-	}
+	inner, ok := systemdExecCommand(value)
 	if !ok {
-		return "", "команда " + key + " не разбирается (незакрытая кавычка, @ без argv[0])", false, nil
+		return "", "команда " + key + " не разбирается", true
 	}
-	return inner, "", false, nil
+	return inner, "", false
 }
 
-// systemdExecCommandInfo командная строка Exec-свойства (man systemd.service,
-// «Command lines») текстом оболочки. Префиксы -@:+!| перед путём: @ —
-// второе слово становится argv[0] и выбрасывается (с | — нет: он делает
-// оболочку login); | — команда идёт оболочке -c словами через пробел, | без
-// команды — оболочка, читающая ввод; : — без подстановки окружения. Слова —
-// по кавычкам ' и " (systemd.syntax), # — литерал. ${VAR} и $VAR (их
-// раскрывает systemd из окружения службы, -E и Environment=) — вычисляемые
-// слова: в тексте — "${VAR}"; $VAR внутри слова systemd оставляет литералом,
-// здесь он тоже вычисляемый. $$ — литеральный $. Спецификаторы %n, %N у
-// временной службы systemd 259 не раскрывает (проба 19.11): % — литерал.
-// Текст без команды — "". computedExecutable — вычисляемый путь argv[0];
-// computedCommand — вычисляемая подкоманда или shell-команда; ok false —
-// ошибка синтаксиса или у @ нет argv[0].
-func systemdExecCommandInfo(value string) (inner string, computedExecutable, computedCommand, ok bool, parseErr error) {
+// systemdExecCommand разбирает командную строку Exec-свойства по правилам
+// systemd.service («Command lines») и возвращает её для общей проверки.
+func systemdExecCommand(value string) (string, bool) {
 	i := 0
 	var at, viaShell, noEnv bool
 	for ; i < len(value) && strings.ContainsRune("-@:+!|", rune(value[i])); i++ {
@@ -455,17 +449,24 @@ func systemdExecCommandInfo(value string) (inner string, computedExecutable, com
 		}
 	}
 	words, ok := systemdExecWords(value[i:], !noEnv)
-	if !ok {
-		return "", false, false, false, nil
-	}
-	if viaShell {
-		return systemdExecShellCommand(words)
-	}
 	switch {
+	case !ok:
+		return "", false
+	case viaShell && len(words) == 0:
+		return "sh", true
+	case viaShell:
+		var script execWord
+		for k, w := range words {
+			if k > 0 {
+				script = append(script, execPart{text: " "})
+			}
+			script = append(script, w...)
+		}
+		return "sh -c " + script.shell(), true
 	case len(words) == 0:
-		return "", false, false, true, nil
+		return "", true
 	case at && len(words) < 2:
-		return "", false, false, false, nil
+		return "", false
 	case at:
 		words = slices.Delete(words, 1, 2)
 	}
@@ -473,217 +474,7 @@ func systemdExecCommandInfo(value string) (inner string, computedExecutable, com
 	for _, w := range words {
 		out = append(out, w.shell())
 	}
-	inner = strings.Join(out, " ")
-	scriptComputed, err := systemdShellScriptComputedCommand(words)
-	if err != nil {
-		return inner, false, false, true, err
-	}
-	return inner, execWordComputed(words[0]), systemdExecSubcommand(words) || scriptComputed, true, nil
-}
-
-func systemdExecShellCommand(words []execWord) (inner string, computedExecutable, computedCommand, ok bool, parseErr error) {
-	if len(words) == 0 {
-		return "sh", false, false, true, nil
-	}
-	var script execWord
-	for i, word := range words {
-		if i > 0 {
-			script = append(script, execPart{text: " "})
-		}
-		script = append(script, word...)
-	}
-	inner = "sh -c " + script.shell()
-	scriptComputed, err := systemdShellScriptComputedText(execWordRaw(script))
-	if err != nil {
-		return inner, false, false, true, err
-	}
-	return inner, false, systemdExecSubcommand(words) || scriptComputed, true, nil
-}
-
-// systemdShellScriptComputedCommand detects substitutions in shell scripts
-// when they choose the command word or a subcommand selected by a launcher.
-// Substitutions in ordinary arguments (for example echo ${X}) remain allowed.
-func systemdShellScriptComputedCommand(words []execWord) (bool, error) {
-	if len(words) < 3 {
-		return false, nil
-	}
-	command, literal := execWordText(words[0])
-	if !literal || !slices.Contains([]string{"sh", "bash", "dash", "zsh"}, path.Base(command)) {
-		return false, nil
-	}
-	args := words[1:]
-	for i := range args {
-		arg, ok := execWordText(args[i])
-		if !ok {
-			continue
-		}
-		if arg == "-c" || arg == "--command" {
-			if i+1 >= len(args) {
-				return false, nil
-			}
-			return systemdShellScriptComputedText(execWordRaw(args[i+1]))
-		}
-	}
-	return false, nil
-}
-
-func execWordRaw(word execWord) string {
-	var b strings.Builder
-	for _, part := range word {
-		if part.computed {
-			b.WriteString("${")
-			b.WriteString(part.name)
-			b.WriteByte('}')
-		} else {
-			b.WriteString(part.text)
-		}
-	}
-	return b.String()
-}
-
-func systemdShellScriptComputedText(script string) (bool, error) {
-	calls, err := shellcmd.Calls(script)
-	if err != nil {
-		return false, fmt.Errorf("разбор shell-команды systemd Exec: %w", err)
-	}
-	for i := range calls {
-		call := &calls[i]
-		if strings.ContainsAny(call.Name, "$`") {
-			return true, nil
-		}
-		launcher := path.Base(call.Name)
-		words := make([]execWord, 1, len(call.Args)+1)
-		words[0] = execWord{{text: call.Name}}
-		for _, arg := range call.Args {
-			part := execPart{text: arg, computed: strings.ContainsAny(arg, "$`")}
-			words = append(words, execWord{part})
-		}
-		if launcher == "eval" || launcher == "exec" || launcher == "command" {
-			if slices.ContainsFunc(words[1:], execWordComputed) {
-				return true, nil
-			}
-		} else if systemdExecSubcommand(words) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func execWordComputed(w execWord) bool {
-	return slices.ContainsFunc(w, func(p execPart) bool { return p.computed })
-}
-
-// systemdExecSubcommand сообщает, может ли переменная окружения выбрать
-// исполняемую команду после мультикомандного launcher. Обычные аргументы
-// echo/make не считаются командой.
-func systemdExecSubcommand(words []execWord) bool {
-	if len(words) == 0 {
-		return false
-	}
-	command, _ := execWordText(words[0])
-	base := path.Base(command)
-	args := words[1:]
-	switch base {
-	case "podman", "podman-remote":
-		return systemdPodmanSubcommand(args)
-	case "systemctl", "loginctl":
-		values := systemctlValues
-		if base == "loginctl" {
-			values = loginctlValues
-		}
-		return systemdSelectedOperandComputed(args, values)
-	case "env":
-		return systemdEnvSubcommand(args)
-	case "xargs":
-		values := []string{"a", "arg-file", "d", "delimiter", "E", "eof", "I", "L", "max-lines", "n", "max-args", "P", "max-procs", "s", "max-chars"}
-		return systemdSelectedOperandComputed(args, values)
-	}
-	return false
-}
-
-func systemdPodmanSubcommand(args []execWord) bool {
-	for i := 0; i < len(args); i++ {
-		arg, literal := execWordText(args[i])
-		if !literal {
-			return true
-		}
-		if arg == "--" {
-			continue
-		}
-		if strings.HasPrefix(arg, "-") {
-			name := strings.TrimLeft(arg, "-")
-			if !strings.Contains(name, "=") && slices.Contains(podmanValues, name) {
-				i++
-			}
-			continue
-		}
-		if arg == "container" || arg == "pod" {
-			continue
-		}
-		return execWordComputed(args[i])
-	}
-	return false
-}
-
-func systemdSelectedOperandComputed(args []execWord, values []string) bool {
-	if i := systemdOperandIndex(args, values); i < len(args) {
-		return execWordComputed(args[i])
-	}
-	return false
-}
-
-func systemdEnvSubcommand(args []execWord) bool {
-	for i := 0; i < len(args); i++ {
-		arg, literal := execWordText(args[i])
-		if !literal {
-			return true
-		}
-		if arg == "-S" || arg == "--split-string" || strings.HasPrefix(arg, "-S") || strings.HasPrefix(arg, "--split-string=") {
-			return execWordComputed(args[i]) || i+1 < len(args) && execWordComputed(args[i+1])
-		}
-		if strings.HasPrefix(arg, "-") {
-			if arg == "-u" || arg == "--unset" || arg == "-C" || arg == "--chdir" || strings.HasPrefix(arg, "--unset=") || strings.HasPrefix(arg, "--chdir=") {
-				i++
-			}
-			continue
-		}
-		if strings.Contains(arg, "=") {
-			continue
-		}
-		return execWordComputed(args[i])
-	}
-	return false
-}
-
-func systemdOperandIndex(args []execWord, values []string) int {
-	for i := 0; i < len(args); i++ {
-		arg, literal := execWordText(args[i])
-		if !literal {
-			return i
-		}
-		if arg == "--" {
-			return i + 1
-		}
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			return i
-		}
-		name, _, inline := strings.Cut(strings.TrimLeft(arg, "-"), "=")
-		if !inline && slices.Contains(values, name) && i+1 < len(args) {
-			i++
-		}
-	}
-	return len(args)
-}
-
-func execWordText(w execWord) (string, bool) {
-	var b strings.Builder
-	for _, p := range w {
-		if p.computed {
-			return b.String(), false
-		}
-		b.WriteString(p.text)
-	}
-	return b.String(), true
+	return strings.Join(out, " "), true
 }
 
 // execPart часть слова командной строки systemd: литерал text или
@@ -755,25 +546,14 @@ func systemdExecWords(value string, env bool) (words []execWord, ok bool) {
 	}
 	for i := 0; i < len(value); i++ {
 		ch := value[i]
-		if ch == '\\' {
-			decoded, width, ok := systemdCUnescape(value[i:])
-			if !ok {
-				return nil, false
-			}
-			raw.WriteString(decoded)
-			lit.WriteString(decoded)
-			i += width - 1
-			inWord = true
+		switch {
+		case quote != 0 && ch == quote:
+			quote = 0
 			continue
-		}
-		if nextQuote, handled := systemdExecQuote(quote, ch); handled {
-			quote = nextQuote
-			if quote != 0 {
-				inWord = true
-			}
+		case quote == 0 && (ch == '\'' || ch == '"'):
+			quote, inWord = ch, true
 			continue
-		}
-		if quote == 0 && strings.IndexByte(" \t\n\r", ch) >= 0 {
+		case quote == 0 && strings.IndexByte(" \t\n\r", ch) >= 0:
 			if inWord {
 				endWord()
 			}
@@ -803,82 +583,6 @@ func systemdExecWords(value string, env bool) (words []execWord, ok bool) {
 		endWord()
 	}
 	return words, true
-}
-
-func systemdExecQuote(quote, ch byte) (next byte, handled bool) {
-	if quote != 0 && ch == quote {
-		return 0, true
-	}
-	if quote == 0 && (ch == '\'' || ch == '"') {
-		return ch, true
-	}
-	return quote, false
-}
-
-func systemdCUnescape(s string) (decoded string, width int, ok bool) {
-	if len(s) < 2 || s[0] != '\\' {
-		return "", 0, false
-	}
-	if decoded, found := systemdSimpleCEscapes[s[1]]; found {
-		return decoded, 2, true
-	}
-	switch s[1] {
-	case 'x':
-		if len(s) < 4 {
-			return "", 0, false
-		}
-		n, digits, ok := systemdEscapeNumber(s[2:4], 16, 2)
-		return string(rune(n)), digits + 2, ok && digits == 2
-	case 'u', 'U':
-		length := 4
-		if s[1] == 'U' {
-			length = 8
-		}
-		if len(s) < length+2 {
-			return "", 0, false
-		}
-		n, digits, ok := systemdEscapeNumber(s[2:length+2], 16, length)
-		if !ok || digits != length || n > 0x10ffff || n >= 0xd800 && n <= 0xdfff {
-			return "", 0, false
-		}
-		return string(rune(n)), length + 2, true
-	default:
-		if s[1] < '0' || s[1] > '7' {
-			return "", 0, false
-		}
-		n, digits, ok := systemdEscapeNumber(s[1:], 8, 3)
-		return string(rune(n)), digits + 1, ok && n <= 0xff
-	}
-}
-
-var systemdSimpleCEscapes = map[byte]string{
-	'a': "\a", 'b': "\b", 'f': "\f", 'n': "\n", 'r': "\r", 't': "\t",
-	'v': "\v", '\\': `\`, '"': `"`, '\'': `'`, 's': " ",
-}
-
-func systemdEscapeNumber(s string, base, limit int) (uint32, int, bool) {
-	var n uint32
-	for i := 0; i < len(s) && i < limit; i++ {
-		digit, ok := systemdEscapeDigit(s[i])
-		if !ok || digit >= base {
-			return n, i, i > 0
-		}
-		n = n*uint32(base) + uint32(digit)
-	}
-	return n, min(len(s), limit), true
-}
-
-func systemdEscapeDigit(ch byte) (int, bool) {
-	switch {
-	case ch >= '0' && ch <= '9':
-		return int(ch - '0'), true
-	case ch >= 'a' && ch <= 'f':
-		return int(ch-'a') + 10, true
-	case ch >= 'A' && ch <= 'F':
-		return int(ch-'A') + 10, true
-	default:
-		return 0, false
-	}
 }
 
 // systemdWholeEnvWord слово raw (кавычки сняты, $ не раскрыты) целиком —

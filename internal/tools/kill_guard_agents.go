@@ -101,32 +101,10 @@ func podmanStop(args []string) (string, bool) {
 			}
 		case a == "container" || a == "pod":
 		default:
-			return a, slices.Contains(podmanStopVerbs, a) || a == "stop" && podmanStopsAllStrings(args[i+1:])
+			return a, slices.Contains(podmanStopVerbs, a)
 		}
 	}
 	return "", false
-}
-
-func podmanStopsAllStrings(args []string) bool {
-	for _, arg := range args {
-		if arg == "-a" || arg == "--all" {
-			return true
-		}
-		if arg == "--" {
-			return false
-		}
-	}
-	return false
-}
-
-func podmanStopAll(args []string) bool {
-	verb, stops := podmanStop(args)
-	return stops && verb == "stop" && podmanStopsAllStrings(args)
-}
-
-func podmanStopAllCall(c shellcmd.Call) bool {
-	return (c.Name == "podman" || c.Name == "podman-remote") &&
-		!slices.Contains(c.Via, "systemd-run") && podmanStopAll(c.Args)
 }
 
 // systemdRunSignalReason отказ на сигнал из-под systemd-run (в том числе

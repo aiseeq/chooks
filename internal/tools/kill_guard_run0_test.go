@@ -362,7 +362,7 @@ func TestRewriteRun0(t *testing.T) {
 	}
 }
 
-// Разбор опций run0 по getopt_long ("+hVu:g:D:i" и длинные из run0 --help)
+// Разбор опций run0 по getopt_long ("+hVu:g:D:p:i" и длинные из run0 --help)
 func TestParseRun0(t *testing.T) {
 	for _, tc := range []struct {
 		args    []string
@@ -390,6 +390,7 @@ func TestParseRun0(t *testing.T) {
 		{[]string{"-V"}, false, 0, false, nil},
 		{[]string{"--u", "root", "kill"}, false, 0, false, nil},
 		{[]string{"--p", "kill"}, false, 0, false, nil},
+		{[]string{"-p", "x", "kill"}, true, 2, false, nil},
 		{[]string{"--pipe=x", "kill"}, false, 0, false, nil},
 		{[]string{"-u"}, false, 0, false, nil},
 		{[]string{"--user"}, false, 0, false, nil},

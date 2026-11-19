@@ -55,7 +55,9 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 	}
 	text := unquoted(input.Command)
 	killText := strings.Contains(text, "kill")
-	if !killText && !sessionToolWordRe.MatchString(text) && !run0WordRe.MatchString(text) && !strings.Contains(text, cgroupRoot) {
+	podmanStopAllText := strings.Contains(text, "podman") && strings.Contains(text, "stop") &&
+		(strings.Contains(text, "-a") || strings.Contains(text, "--all"))
+	if !killText && !sessionToolWordRe.MatchString(text) && !run0WordRe.MatchString(text) && !strings.Contains(text, cgroupRoot) && !podmanStopAllText {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
@@ -316,6 +318,7 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if err := s.serviceCommands(c, calls); err != nil {
 		return err
 	}
+	s.podmanStopAllReason(c)
 	feed := s.literalFeed(c, calls)
 	if reason, hint := s.systemdRunSignalReason(c, calls, feed != nil); reason != "" {
 		s.addToolReason(reason, hint, false)
@@ -364,6 +367,12 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		}
 	}
 	return s.signal(c, calls)
+}
+
+func (s *killScan) podmanStopAllReason(c shellcmd.Call) {
+	if podmanStopAllCall(c) {
+		s.addToolReason("podman stop --all остановит контейнеры и их процессы, включая чужих агентов", "Останови отдельный контейнер по имени: podman stop ИМЯ", false)
+	}
 }
 
 // pkexecValues опции pkexec со значением отдельным словом

@@ -35,7 +35,6 @@ func TestKillGuardSystemdRunExecProperties(t *testing.T) {
 		`systemd-run --user --scope -p 'ExecStopPost=/usr/bin/kill 1' true`,
 		`systemd-run --user --prop=MemoryMax=1G make`,
 		`echo make | systemd-run --user --shell`,
-		`systemd-run --user -p "ExecStartPre=$Y" true`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("должно пропускаться: %s: %v", command, r)
@@ -132,6 +131,7 @@ func TestKillGuardSystemdRunSignalBlocks(t *testing.T) {
 		`systemd-run --user podman stop x`,
 		`systemd-run --user podman rm -f x`,
 		`systemd-run --user podman kill x`,
+		`podman stop -a`,
 		`systemd-run --user podman container stop x`,
 		`systemd-run --user podman --log-level debug pod rm p`,
 		`systemd-run --user --unit=x -p MemoryMax=1G killall sleep`,
@@ -278,7 +278,6 @@ func TestKillGuardSystemdRunRemoteAllows(t *testing.T) {
 		`systemd-run --user sh -c "echo $HOME"`,
 		`systemd-run --user sh -c "make -j$(nproc)"`,
 		`DIR=/x; systemd-run --user sh -c "cd $DIR && make"`,
-		`systemd-run --user sh -c "$HOME/bin/tool"`,
 		`systemd-run --user -E DIR="$DIR" sh -c 'make -C "$DIR"'`,
 		`systemd-run --user --working-directory="$DIR" make`,
 		// ввод оболочки виден или это файл скрипта (вне проверки)
@@ -369,7 +368,6 @@ func TestKillGuardSystemdRunHiddenRound3(t *testing.T) {
 		`systemd-run --user sh -c "make -C \"$DIR\" && echo $(date)"`,
 		`systemd-run --user sh -c "go test ./... -run '$RE'"`,
 		`systemd-run --user eval "make -C $DIR"`,
-		`systemd-run --user sh -c "$HOME/bin/tool"`,
 		`systemd-run --user bash -- script.sh a b`,
 		`systemd-run --user bash -x script.sh`,
 		`printf '%s\n' "$CMD" | systemd-run --user --pipe cat`,

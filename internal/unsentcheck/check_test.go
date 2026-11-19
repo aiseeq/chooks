@@ -216,8 +216,35 @@ func TestRun_ChatReopenedAfterTaskNotification(t *testing.T) {
 	}
 }
 
+func TestRun_HistoryCallVariantsInTurn(t *testing.T) {
+	const answer = "Ещё не отправлено: ответ Оле."
+	for _, tc := range []struct {
+		name    string
+		command string
+		block   bool
+	}{
+		{"путь reddy через переменную", `R=/home/aisee/work/reddy/bin/reddy; $R history 2783119 --since review --json`, false},
+		{"путь через переменную в цикле", `R=/home/aisee/work/reddy/bin/reddy; for id in 2783119 1851664; do $R history $id --since review --json; done`, false},
+		{"путь reddy в цикле", `for id in 2783119 1851664; do /home/aisee/work/reddy/bin/reddy history $id; done`, false},
+		{"без history", `R=/home/aisee/work/reddy/bin/reddy; $R unread`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command, err := json.Marshal(tc.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := `{"type":"assistant","timestamp":"2026-11-19T11:45:52Z","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":` + string(command) + `}}]}}`
+			got, err := Run(Event{TranscriptPath: writeTranscript(t, human, call), LastMessage: answer})
+			if err != nil || got.Block != tc.block {
+				t.Fatalf("Run = %+v, %v; block = %v", got, err, tc.block)
+			}
+		})
+	}
+}
+
 func TestRun(t *testing.T) {
 	const answer = "Ответ Ане ещё не отправлен, текст выше."
+	const turnDuration = `{"type":"system","subtype":"turn_duration","timestamp":"2026-10-29T10:01:00Z"}`
 	cases := []struct {
 		name      string
 		event     Event
@@ -228,7 +255,8 @@ func TestRun(t *testing.T) {
 		{name: "чат открыт в ходе", event: Event{LastMessage: answer}, lines: []string{human, history, otherBash, toolResult, notice}},
 		{name: "чат не открыт", event: Event{LastMessage: answer}, lines: []string{human, otherBash, toolResult, notice}, wantBlock: true},
 		{name: "чат открыт в прошлом ходе", event: Event{LastMessage: answer}, lines: []string{history, human, otherBash}, wantBlock: true},
-		{name: "письмо сессии начинает ход", event: Event{LastMessage: answer}, lines: []string{human, history, peer, otherBash}, wantBlock: true},
+		{name: "письмо посреди хода не отменяет чтение", event: Event{LastMessage: answer}, lines: []string{human, history, peer, otherBash}},
+		{name: "письмо после конца хода начинает ход", event: Event{LastMessage: answer}, lines: []string{human, history, turnDuration, peer, otherBash}, wantBlock: true},
 		{name: "начала хода нет", event: Event{LastMessage: answer}, lines: []string{history, otherBash}},
 		{name: "запрос программы начинает ход", event: Event{LastMessage: answer}, lines: []string{program, history, program, otherBash}, wantBlock: true},
 		{name: "чат открыт в ходе программы", event: Event{LastMessage: answer}, lines: []string{program, history, otherBash}},

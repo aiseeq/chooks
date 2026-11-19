@@ -66,6 +66,12 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 			t.Logger().Warn("kill_guard: вызов run0 не заменён в тексте, проверен текстом run0Command", "error", err)
 		}
 	}
+	if strings.Contains(unquoted(command), "systemd-run") {
+		var err error
+		if command, err = rewriteSystemdRunShell(command); err != nil {
+			t.Logger().Warn("kill_guard: systemd-run --shell не переписан в тексте, проверен текстом systemdRunShellCommand", "error", err)
+		}
+	}
 	scan := killScan{tool: t, command: command, source: input.Command, run0: rewritten, killText: killText,
 		signalWord: signalWordRe.MatchString(text), zsh: zshWordRe.MatchString(text),
 		anyBus: busAddressRe.MatchString(text)}
@@ -119,7 +125,8 @@ const maxScriptNesting = 4
 type killScan struct {
 	tool *KillGuardTool
 	// command — команда целиком, где run0 заменён на systemd-run
-	// (rewriteRun0): её разбирают правила; source — как её прислал агент:
+	// (rewriteRun0), а systemd-run --shell — на systemd-run --pipe bash
+	// (rewriteSystemdRunShell): её разбирают правила; source — как её прислал агент:
 	// этот текст стоит в cmdline оболочки, и pkill -f по нему убьёт эту
 	// оболочку; run0 — в команде есть run0, проверенный как systemd-run
 	// (заменой в тексте или текстом run0Command)
@@ -306,7 +313,7 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if inner, ok := rewrittenCommand(c); ok {
 		return s.elevated(c, inner)
 	}
-	if err := s.serviceParallel(c, calls); err != nil {
+	if err := s.serviceCommands(c, calls); err != nil {
 		return err
 	}
 	feed := s.literalFeed(c, calls)

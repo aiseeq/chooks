@@ -45,17 +45,27 @@ func systemdRunReason(args []word) (reason, hint string) {
 	return "", ""
 }
 
+// systemdRunOptions опции systemd-run, от которых зависит проверка: user —
+// менеджер пользователя, scope — --scope (команда остаётся потомком
+// агента), shell — --shell/-S (оболочка с ввода вместо команды: слово
+// shellWord, буква shellLetter в связке, -1 — длинная опция), remote —
+// команда исполнится на другой машине (последняя из -H, -M, -C), start —
+// место первого слова команды, properties — значения -p и --*-property
 type systemdRunOptions struct {
-	user, scope, shell bool
-	start              int
-	properties         []word
-	remote             bool
+	user, scope, shell, remote bool
+	start                      int
+	shellWord, shellLetter     int
+	properties                 []word
 }
 
+// systemdRunShortNames короткие опции systemd-run (getopt systemd v259
+// "+hrC:H:M:E:p:tTPqvGdSu:") и их длинные имена. -R (--same-root-dir) в
+// systemd-run --help есть, а в getopt нет: systemd-run -R отвечает invalid
+// option и ничего не запускает
 var systemdRunShortNames = map[string]string{
-	"C": "capsule", "H": "host", "M": "machine", "E": "setenv", "p": "property", "u": "unit",
-	"h": "help", "r": "remain-after-exit", "t": "tty", "T": "pty", "P": "pty-late",
-	"q": "quiet", "v": "verbose", "G": "no-pager", "d": "same-dir", "S": "shell",
+	"h": "help", "r": "remain-after-exit", "C": "capsule", "H": "host", "M": "machine", "E": "setenv",
+	"p": "property", "t": "pty", "T": "pty-late", "P": "pipe", "q": "quiet", "v": "verbose",
+	"G": "collect", "d": "same-dir", "S": "shell", "u": "unit",
 }
 
 // parseSystemdRunOptions разбирает все интересующие опции одним проходом,
@@ -84,6 +94,9 @@ func parseSystemdRunOptions(args []word) systemdRunOptions {
 				value = optionValue(args, &i, "")
 			}
 			applySystemdRunOption(&out, name, value)
+			if name == "shell" {
+				out.shellWord, out.shellLetter = i, -1
+			}
 			continue
 		}
 		for j := 1; j < len(t); j++ {
@@ -103,6 +116,9 @@ func parseSystemdRunOptions(args []word) systemdRunOptions {
 				}
 			}
 			applySystemdRunOption(&out, name, value)
+			if name == "shell" {
+				out.shellWord, out.shellLetter = i, j
+			}
 			if slices.Contains(systemdRunValues, letter) {
 				break
 			}

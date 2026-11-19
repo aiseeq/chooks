@@ -403,11 +403,14 @@ func parallelShell(args []string) (string, bool) {
 // run0 — systemd-run в режиме службы (run0Command); pkexec и machinectl
 // shell с командой — их команда (elevatedCommand); программа, которая
 // запускает оболочку на своём вводе (script без -c, machinectl shell без
-// команды, parallel без команды), — эта оболочка (sh)
+// команды, parallel без команды), — эта оболочка (sh); systemd-run --shell,
+// не переписанный в тексте, — systemd-run --pipe bash (systemdRunShellCommand)
 func rewrittenCommand(c shellcmd.Call) (string, bool) {
 	switch c.Name {
 	case "run0":
 		return run0Command(c.Args)
+	case "systemd-run":
+		return systemdRunShellCommand(c.Args)
 	case "script":
 		if scriptShell(c.Args) {
 			return "sh", true
@@ -485,7 +488,7 @@ func redirWord(target string) (string, error) {
 // systemdRunCommandStart место первого слова команды в словах systemd-run
 // (опции до первого операнда или --, "+" в getopt); len(args) — команды нет
 func systemdRunCommandStart(args []string) int {
-	return parseSystemdRunOptions(toWords(args)).start
+	return parseSystemdRunOptions(plainWords(args)).start
 }
 
 // bareParallel вызов parallel без команды под systemd-run (systemd-run

@@ -212,10 +212,25 @@ func (s *killScan) unreadInput(c shellcmd.Call, calls []shellcmd.Call) bool {
 // цепочки c впереди и местом за c в тексте
 func inputCallsParsed(c shellcmd.Call, calls []shellcmd.Call) bool {
 	chain := append(slices.Clone(c.Via), c.Name)
-	return slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
-		after := x.Offset < 0 || c.Offset < 0 || x.Offset > c.Offset
-		return len(x.Via) >= len(chain) && slices.Equal(x.Via[:len(chain)], chain) && after
-	})
+	return callsInScript(c, calls, chain, false)
+}
+
+// callsInScript finds calls belonging to c's script or input stream. When
+// withinRaw is set, the nested call must also fall inside c's source text.
+func callsInScript(c shellcmd.Call, calls []shellcmd.Call, chain []string, withinRaw bool) bool {
+	for i := range calls {
+		x := &calls[i]
+		if len(x.Via) < len(chain) || !slices.Equal(x.Via[:len(chain)], chain) {
+			continue
+		}
+		if !withinRaw && (x.Offset < 0 || c.Offset < 0 || x.Offset > c.Offset) {
+			return true
+		}
+		if withinRaw && (x.Offset < 0 || c.Offset >= 0 && x.Offset > c.Offset && x.Offset < c.Offset+len(c.Raw)) {
+			return true
+		}
+	}
+	return false
 }
 
 // systemdRunInputReason оболочка c под systemd-run читает скрипт из ввода,
@@ -247,10 +262,7 @@ func (s *killScan) systemdRunInputReason(c shellcmd.Call, calls []shellcmd.Call,
 // одного — скрипт не разобран (sh -c "$CMD"x, "$A$B")
 func scriptCallsParsed(c shellcmd.Call, calls []shellcmd.Call) bool {
 	via := append(slices.Clone(c.Via), c.Name)
-	return slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
-		inside := x.Offset < 0 || c.Offset >= 0 && x.Offset > c.Offset && x.Offset < c.Offset+len(c.Raw)
-		return len(x.Via) >= len(via) && slices.Equal(x.Via[:len(via)], via) && inside
-	})
+	return callsInScript(c, calls, via, true)
 }
 
 // shellReadsInput — оболочка без -c с аргументами args читает скрипт со
@@ -303,10 +315,11 @@ func scriptBodyParsed(c shellcmd.Call, calls []shellcmd.Call) bool {
 	chain := append(slices.Clone(c.Via), c.Name)
 	for j := range chain {
 		via := slices.Concat(chain[:j], []string{"pipe"}, chain[j:])
-		if slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
-			return len(x.Via) >= len(via) && slices.Equal(x.Via[len(x.Via)-len(via):], via)
-		}) {
-			return true
+		for i := range calls {
+			x := &calls[i]
+			if len(x.Via) >= len(via) && slices.Equal(x.Via[len(x.Via)-len(via):], via) {
+				return true
+			}
 		}
 	}
 	return false
@@ -329,7 +342,15 @@ func systemdRunRemote(c shellcmd.Call, calls []shellcmd.Call, k int) bool {
 	if own {
 		return systemdRunHostOption(runs[0].Args)
 	}
-	return len(runs) > 0 && !slices.ContainsFunc(runs, func(x shellcmd.Call) bool { return !systemdRunHostOption(x.Args) })
+	if len(runs) == 0 {
+		return false
+	}
+	for i := range runs {
+		if !systemdRunHostOption(runs[i].Args) {
+			return false
+		}
+	}
+	return true
 }
 
 // systemdRunElsewhere — какой-то systemd-run над c исполнит его на другой
@@ -414,12 +435,13 @@ func systemdRunScopeOption(args []string) bool {
 // него (k — его место в c.Via). own — найден тот самый (тот же текст, что
 // у c): он один в ответе
 func systemdRunCalls(c shellcmd.Call, calls []shellcmd.Call, k int) (runs []shellcmd.Call, own bool) {
-	for _, x := range calls {
+	for i := range calls {
+		x := &calls[i]
 		if x.Name == "systemd-run" && slices.Equal(x.Via, c.Via[:k]) {
 			if x.Raw == c.Raw {
-				return []shellcmd.Call{x}, true
+				return []shellcmd.Call{*x}, true
 			}
-			runs = append(runs, x)
+			runs = append(runs, *x)
 		}
 	}
 	return runs, false

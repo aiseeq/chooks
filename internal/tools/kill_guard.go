@@ -244,11 +244,12 @@ func (s *killScan) parsedCalls() error {
 	if s.signalWord && s.procSubstAfterParam(s.command) {
 		s.addReason(procSubstAfterParamReason)
 	}
-	for _, c := range calls {
+	for i := range calls {
+		c := &calls[i]
 		if s.signalWord && s.procSubstAfterParam(c.Raw) {
 			s.addReason(procSubstAfterParamReason)
 		}
-		if err := s.call(c, calls); err != nil {
+		if err := s.call(*c, calls); err != nil {
 			return err
 		}
 	}
@@ -312,8 +313,9 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if reason, hint := s.systemdRunSignalReason(c, calls, feed != nil); reason != "" {
 		s.addToolReason(reason, hint, false)
 	}
-	for _, f := range feed {
-		if err := s.call(f, slices.Concat(calls, feed)); err != nil {
+	for i := range feed {
+		f := &feed[i]
+		if err := s.call(*f, slices.Concat(calls, feed)); err != nil {
 			return err
 		}
 	}
@@ -321,8 +323,9 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		s.addToolReason(reason, systemdRunHiddenHint, false)
 	}
 	inner := s.parallelInnerCalls(c)
-	for _, x := range inner {
-		if err := s.call(x, slices.Concat(calls, inner)); err != nil {
+	for i := range inner {
+		x := &inner[i]
+		if err := s.call(*x, slices.Concat(calls, inner)); err != nil {
 			return err
 		}
 	}
@@ -520,8 +523,9 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 	} else {
 		s.tool.Logger().Warn("kill_guard: ввод вызовов за обёрткой не проверен, разбор bash не прошёл", "wrapper", c.Name, "error", err)
 	}
-	for _, ic := range calls {
-		if err := s.call(ic, calls); err != nil {
+	for i := range calls {
+		ic := &calls[i]
+		if err := s.call(*ic, calls); err != nil {
 			return err
 		}
 	}
@@ -565,9 +569,13 @@ func sudoAssignment(c shellcmd.Call, calls []shellcmd.Call) bool {
 	if len(args) == 0 {
 		return false
 	}
-	return slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
-		return x.Raw == c.Raw && slices.Equal(x.Via, c.Via) && x.Name == filepath.Base(args[0]) && slices.Equal(x.Args, args[1:])
-	})
+	for i := range calls {
+		x := &calls[i]
+		if x.Raw == c.Raw && slices.Equal(x.Via, c.Via) && x.Name == filepath.Base(args[0]) && slices.Equal(x.Args, args[1:]) {
+			return true
+		}
+	}
+	return false
 }
 
 // signal проверяет вызов как сигнал: kill, pkill, killall или имя,
@@ -635,7 +643,8 @@ var positionalRe = regexp.MustCompile(`^\$\{?[@*0-9]`)
 // killall в аргументах вызовов команды: их исполнит имя из позиционных
 // параметров
 func (s *killScan) positionalSignal(calls []shellcmd.Call) error {
-	for _, x := range calls {
+	for i := range calls {
+		x := &calls[i]
 		i := slices.IndexFunc(x.Args, func(a string) bool { return slices.Contains(signalNames, filepath.Base(a)) })
 		if i < 0 {
 			continue
@@ -683,9 +692,10 @@ func xargsOptions(c shellcmd.Call, calls []shellcmd.Call) []string {
 		next = c.Via[k+1]
 	}
 	head := c
-	for _, x := range calls {
+	for i := range calls {
+		x := &calls[i]
 		if x.Raw == c.Raw && len(x.Via) < len(head.Via) {
-			head = x
+			head = *x
 		}
 	}
 	args := head.Args

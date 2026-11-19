@@ -381,6 +381,45 @@ func TestModelGuardSettingsFile(t *testing.T) {
 	}
 }
 
+func TestModelGuardSettingsTildeForms(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	cwd, home := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	write := func(path, model string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"model":"`+model+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(home, "x"), "opus")
+	write(filepath.Join(cwd, "~", "x"), "sonnet")
+	write(filepath.Join(home, "q:~", "x", "m.json"), "sonnet")
+	write(filepath.Join(home, "q:"+home, "x", "m.json"), "opus")
+	for _, tc := range []struct {
+		name, command string
+		reject        bool
+	}{
+		{"expanded", "claude --settings ~/x", false},
+		{"quoted literal", `claude --settings "~/x"`, true},
+		{"escaped literal", `claude --settings \~/x`, true},
+		{"only leading tilde expands", `claude --settings ~/q:~/x/m.json -p hi`, true},
+		{"неизвестный пользователь", "claude --settings ~root/x", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: cwd})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.IsValid == tc.reject {
+				t.Fatalf("valid=%v violations=%v, want reject=%v", got.IsValid, got.Violations, tc.reject)
+			}
+		})
+	}
+}
+
 // wantModelGuardHint ожидаемая подсказка отказа: раздел и первые слова
 // правила о моделях в ~/.claude/CLAUDE.md (номер строки плавает)
 const wantModelGuardHint = `Правило ~/.claude/CLAUDE.md, раздел «Что разрешает «да»»: «Модели бери только из ~/.config/models/approved» (кому какая — в шапке файла); бойцы GPT — через worker; новая модель — только через бенчмарк llmark и одобрение пользователя`

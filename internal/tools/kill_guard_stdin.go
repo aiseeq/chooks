@@ -313,8 +313,10 @@ func (s *killScan) feedCalls(in stdinSpan, shells []shellcmd.Call) []shellcmd.Ca
 		return nil
 	}
 	var body []shellcmd.Call
-	for _, sh := range shells {
-		for _, x := range parsed {
+	for si := range shells {
+		sh := &shells[si]
+		for xi := range parsed {
+			x := parsed[xi]
 			if len(x.Via) >= len(in.feedVia) && slices.Equal(x.Via[:len(in.feedVia)], in.feedVia) {
 				x.Via = slices.Concat(sh.Via, []string{sh.Name, "pipe"}, x.Via[len(in.feedVia):])
 				x.Offset = -1

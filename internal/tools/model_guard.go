@@ -91,8 +91,13 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		// ~ в пути --settings не раскроется: файл не читается, остальное проверяется
 		logger.Warn("model_guard: домашний каталог неизвестен", "error", err)
 	}
-	readSettings := func(path string) []byte {
-		abs := absPath(path, input.CWD, home)
+	unresolvedTildeSettings := false
+	readSettings := func(path string, tilde shellcmd.Tilde) []byte {
+		if tilde&shellcmd.TildeHome != 0 && home == "" {
+			unresolvedTildeSettings = true
+			return nil
+		}
+		abs := absPath(tildePath(path, tilde, home), input.CWD)
 		if abs == "" {
 			return nil
 		}
@@ -108,7 +113,11 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		}
 		return data
 	}
-	return bashModelCandidates(input.Command, readSettings, logger)
+	candidates := bashModelCandidates(input.Command, readSettings, logger)
+	if unresolvedTildeSettings {
+		candidates = append(candidates, modelCandidate{value: "settings path with unknown home", dynamic: true})
+	}
+	return candidates
 }
 
 // maxSettingsSize — предел файла --settings: настройки — килобайты
@@ -137,7 +146,7 @@ var modelClients = []string{"claude", "codex", "opencode"}
 // присваивание переменной модели), чтобы ошибка разбора akit не пропустила
 // неодобренную. readSettings читает файл --settings по пути из команды, nil —
 // не прочесть; файла нет — текст команды, которая может его написать
-func bashModelCandidates(command string, readSettings func(string) []byte, logger core.Logger) []modelCandidate {
+func bashModelCandidates(command string, readSettings func(string, shellcmd.Tilde) []byte, logger core.Logger) []modelCandidate {
 	calls, err := shellcmd.Calls(command)
 	if calls == nil && err != nil {
 		logger.Warn("model_guard: shellcmd не разобрал команду, модели ищутся в тексте", "error", err)
@@ -145,13 +154,14 @@ func bashModelCandidates(command string, readSettings func(string) []byte, logge
 	}
 	var found []modelCandidate
 	claude := false
-	for _, call := range calls {
+	for i := range calls {
+		call := &calls[i]
 		if !slices.Contains(modelClients, call.Name) {
 			continue
 		}
 		args := make([]word, len(call.Args))
 		for i, a := range call.Args {
-			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`")}
+			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`"), tilde: call.ArgTilde(i)}
 		}
 		found = append(found, candidatesFromArgs(call.Name, args, readSettings)...)
 		if call.Name == "claude" {
@@ -275,11 +285,19 @@ func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger
 	// тело here-doc, в котором shellcmd нашёл claude, исполняет оболочка;
 	// снятая обёртка несёт те же перенаправления — тело читается один раз
 	bodies := map[int]bool{}
-	for _, c := range calls {
+	claudeOffsets := make([]int, 0, len(calls))
+	for i := range calls {
+		if calls[i].Name == "claude" {
+			claudeOffsets = append(claudeOffsets, calls[i].Offset)
+		}
+	}
+	slices.Sort(claudeOffsets)
+	for i := range calls {
+		c := &calls[i]
 		for _, r := range c.Redirs {
-			if r.BodyStart < 0 || bodies[r.BodyStart] || !slices.ContainsFunc(calls, func(cl shellcmd.Call) bool {
-				return cl.Name == "claude" && r.BodyStart <= cl.Offset && cl.Offset < r.BodyEnd
-			}) {
+			j, _ := slices.BinarySearch(claudeOffsets, r.BodyStart)
+			foundBody := j < len(claudeOffsets) && claudeOffsets[j] < r.BodyEnd
+			if r.BodyStart < 0 || bodies[r.BodyStart] || !foundBody {
 				continue
 			}
 			bodies[r.BodyStart] = true
@@ -296,22 +314,37 @@ func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger
 // обёртки
 func callEnvModels(script string, n *syntax.CallExpr, calls []shellcmd.Call, logger core.Logger) []modelCandidate {
 	start, end := int(n.Args[0].Pos().Offset()), int(n.End().Offset())
-	head := slices.IndexFunc(calls, func(c shellcmd.Call) bool { return c.Offset == start })
+	head := -1
+	for i := range calls {
+		if calls[i].Offset == start {
+			head = i
+			break
+		}
+	}
 	if head < 0 {
 		return nil
 	}
 	var chain []shellcmd.Call
-	for _, c := range calls {
+	for i := range calls {
+		c := &calls[i]
 		if c.Raw == calls[head].Raw && start <= c.Offset && c.Offset < end {
-			chain = append(chain, c)
+			chain = append(chain, *c)
 		}
 	}
 	var found []modelCandidate
-	runs := slices.ContainsFunc(chain, func(c shellcmd.Call) bool { return c.Name == "claude" || isShellName(c.Name) })
+	runs := false
+	for i := range chain {
+		c := &chain[i]
+		if c.Name == "claude" || isShellName(c.Name) {
+			runs = true
+			break
+		}
+	}
 	if runs {
 		found = append(found, assignedModels(script, n.Assigns)...)
 	}
-	for i, c := range chain {
+	for i := range chain {
+		c := &chain[i]
 		switch {
 		case isShellName(c.Name):
 			for _, a := range c.Args {
@@ -392,7 +425,7 @@ func splitValueFlags(args []word) []word {
 	return out
 }
 
-func candidatesFromArgs(name string, args []word, readSettings func(string) []byte) []modelCandidate {
+func candidatesFromArgs(name string, args []word, readSettings func(string, shellcmd.Tilde) []byte) []modelCandidate {
 	var found []modelCandidate
 	if name == "claude" {
 		args = splitValueFlags(args)
@@ -441,7 +474,7 @@ var writtenModel = regexp.MustCompile(`"(?:model|ANTHROPIC_MODEL|ANTHROPIC_DEFAU
 // или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
 // Файла --settings ещё нет — модели в тексте команды, которая его пишет.
 // Не JSON — моделей нет: такой запуск claude сам не начнётся
-func jsonModelCandidates(flag string, arg word, readSettings func(string) []byte) []modelCandidate {
+func jsonModelCandidates(flag string, arg word, readSettings func(string, shellcmd.Tilde) []byte) []modelCandidate {
 	if !arg.literal {
 		// Путь файла из переменной не прочесть, а JSON с подстановкой — модель
 		// переменной, если в нём есть поле модели
@@ -455,7 +488,10 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string) []byte
 		if flag != "--settings" {
 			return nil
 		}
-		if raw = readSettings(arg.text); raw == nil {
+		if arg.tilde&(shellcmd.TildeOther|shellcmd.TildeModeUnknown) != 0 {
+			return []modelCandidate{{value: arg.text, dynamic: true}}
+		}
+		if raw = readSettings(arg.text, arg.tilde); raw == nil {
 			return nil
 		}
 	}

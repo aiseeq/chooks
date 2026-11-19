@@ -64,7 +64,8 @@ func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*
 	}
 	gits, ctx := gitCalls(input, calls, home)
 	var reasons []string
-	for i, c := range calls {
+	for i := range calls {
+		c := &calls[i]
 		if c.Name != "git" {
 			continue
 		}
@@ -99,12 +100,13 @@ func gitCalls(input *core.ToolInput, calls []shellcmd.Call, home string) ([]gitC
 	}
 	gits := make([]gitCall, len(calls))
 	plan := planCommand(input.Command, input.CWD, home, calls)
-	for i, c := range calls {
+	for i := range calls {
+		c := &calls[i]
 		switch c.Name {
 		case "ln":
 			ctx.links = true
 		case "git":
-			g := parseGit(c.Args, plan.cwds[i], home, func(p string) string { return plan.path(p, i) })
+			g := parseGit(c.Args, plan.cwds[i], home, c.ArgTilde, func(p string) string { return plan.path(p, i, 0) })
 			g.config = g.config || envConfig
 			if envRepo {
 				g.dir = ""
@@ -236,14 +238,15 @@ func riskyConfig(setting string) bool {
 // parseGit снимает глобальные опции git: -C меняет каталог, --git-dir и
 // --work-tree делают его неизвестным (своё дерево не опознать). expand
 // подставляет в слово переменные, присвоенные в команде раньше вызова
-func parseGit(args []string, cwd, home string, expand func(string) string) gitCall {
+func parseGit(args []string, cwd, home string, tilde func(int) shellcmd.Tilde, expand func(string) string) gitCall {
 	g := gitCall{dir: cwd}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "-C" && i+1 < len(args):
 			i++
-			g.dir = absPath(expand(args[i]), g.dir, home)
+			path := tildePath(args[i], tilde(i), home)
+			g.dir = absPath(expand(path), g.dir)
 		case a == "--git-dir" || a == "--work-tree":
 			i++
 			g.dir = ""

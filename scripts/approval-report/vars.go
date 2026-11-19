@@ -252,7 +252,8 @@ func collectVars(cmd, home string, calls []shellcmd.Call) (shellVars, error) {
 		return sv, nil
 	}
 	shells := map[int]bool{}
-	for _, c := range calls {
+	for i := range calls {
+		c := &calls[i]
 		if c.Offset >= 0 && shellcmd.IsShell(c.Name) {
 			shells[c.Offset] = true
 		}

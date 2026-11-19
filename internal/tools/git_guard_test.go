@@ -357,6 +357,10 @@ func TestPlanCommandScopes(t *testing.T) {
 		{"cd /a && pushd -n /b && git x", "/a"},
 		{"pushd /a && popd && git x", ""},
 		{"cd /a && cd - && git x", ""},
+		// ~ bash раскрывает только без кавычек
+		{"cd ~/a && git x", "/h/a"},
+		{`cd "~/a" && git x`, "/w/~/a"},
+		{`cd \~/a && git x`, "/w/~/a"},
 	}
 	for _, tc := range cases {
 		calls, err := shellcmd.Calls(tc.command)
@@ -373,5 +377,70 @@ func TestPlanCommandScopes(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%q: каталог git %q, нужен %q", tc.command, got, tc.want)
 		}
+	}
+}
+
+func TestGitGuardTildeDirectoryForms(t *testing.T) {
+	cwd, home := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	for _, tc := range []struct {
+		name, command string
+		want          string
+	}{
+		{"expanded", "git -C ~/x reset --hard", filepath.Join(home, "x")},
+		{"quoted literal", `git -C "~/x" reset --hard`, filepath.Join(cwd, "~", "x")},
+		{"escaped literal", `git -C \~/x reset --hard`, filepath.Join(cwd, "~", "x")},
+		{"only leading tilde expands", `git -C ~/q:~/x reset --hard`, filepath.Join(home, "q:~", "x")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, err := shellcmd.Calls(tc.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(calls) != 1 || calls[0].Name != "git" {
+				t.Fatalf("calls=%+v", calls)
+			}
+			g := parseGit(calls[0].Args, cwd, home, calls[0].ArgTilde, func(path string) string { return path })
+			if g.dir != tc.want {
+				t.Fatalf("dir=%q, want %q", g.dir, tc.want)
+			}
+		})
+	}
+}
+
+func TestGitGuardTildeDirectoryDecision(t *testing.T) {
+	shared, own := gitGuardTree(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.Symlink(own, filepath.Join(home, "x")); err != nil {
+		t.Fatal(err)
+	}
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewGitGuardTool(core.ToolConfig{Enabled: true}, logger)
+	tool.tempRoots = []string{filepath.Join(t.TempDir(), "outside")}
+	transcript := agentTranscript(t, "a1", time.Now().Add(-time.Hour))
+	for _, tc := range []struct {
+		name, command string
+		reject        bool
+	}{
+		{"expanded home", "git -C ~/x reset --hard", false},
+		{"quoted literal", `git -C "~/x" reset --hard`, true},
+		{"escaped literal", `git -C \~/x reset --hard`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tool.ValidateTool(context.Background(), &core.ToolInput{
+				ToolName: "Bash", Command: tc.command, CWD: shared,
+				AgentID: "a1", AgentType: "fighter", TranscriptPath: transcript,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.IsValid == tc.reject {
+				t.Fatalf("valid=%v violations=%v, want reject=%v", got.IsValid, got.Violations, tc.reject)
+			}
+		})
 	}
 }

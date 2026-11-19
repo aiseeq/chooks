@@ -213,12 +213,13 @@ func rewriteRun0(command string) (text string, rewritten bool, err error) {
 			return text, rewritten, err
 		}
 		next, ok := "", false
-		for _, c := range calls {
+		for i := range calls {
+			c := &calls[i]
 			if c.Name != "run0" {
 				continue
 			}
 			var werr error
-			if next, ok, werr = replaceRun0(text, c); ok {
+			if next, ok, werr = replaceRun0(text, *c); ok {
 				break
 			}
 			if err == nil {
@@ -510,7 +511,8 @@ func bareParallel(c shellcmd.Call) (shellcmd.Call, bool, error) {
 	if err != nil {
 		return shellcmd.Call{}, false, fmt.Errorf("команда systemd-run %q: %w", c.Args[start:], err)
 	}
-	for _, x := range inner {
+	for i := range inner {
+		x := &inner[i]
 		if x.Name == "parallel" {
 			return shellcmd.Call{Name: "parallel", Args: x.Args, Via: slices.Concat(c.Via, []string{"systemd-run"}, x.Via),
 				Raw: c.Raw, Offset: c.Offset, Redirs: c.Redirs, ScriptInput: c.ScriptInput}, true, nil

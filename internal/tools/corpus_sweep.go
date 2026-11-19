@@ -37,7 +37,8 @@ func CheckCorpusSweep(command, home string) CorpusSweepVerdict {
 	if err != nil {
 		verdict.ParseError = err.Error()
 	}
-	for _, call := range calls {
+	for i := range calls {
+		call := &calls[i]
 		if corpusSearchTools[call.Name] {
 			hasSearch = true
 		}

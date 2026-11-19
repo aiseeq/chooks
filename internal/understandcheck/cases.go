@@ -130,7 +130,8 @@ func parsedBashRuleFile(command string) (string, bool, error) {
 		return "", false, nil
 	}
 	cwd := ""
-	for i, call := range calls {
+	for i := range calls {
+		call := &calls[i]
 		if file := massEdit(calls, i, cwd); file != "" {
 			return file, true, nil
 		}
@@ -147,11 +148,11 @@ func parsedBashRuleFile(command string) (string, bool, error) {
 			continue
 		}
 		if call.Name == "git" {
-			if file := gitRuleWrite(call, cwd); file != "" {
+			if file := gitRuleWrite(*call, cwd); file != "" {
 				return file, true, nil
 			}
 		}
-		if file := shellWrite(call, cwd); file != "" {
+		if file := shellWrite(*call, cwd); file != "" {
 			return file, true, nil
 		}
 	}
@@ -168,7 +169,8 @@ func knownReadOnlyShellCommand(calls []shellcmd.Call) bool {
 		return false
 	}
 	seen := false
-	for _, call := range calls {
+	for i := range calls {
+		call := &calls[i]
 		if len(call.Via) != 0 || (call.Name != "cat" && call.Name != "grep" && call.Name != "head" && call.Name != "tail" && call.Name != "tee") {
 			return false
 		}
@@ -208,7 +210,8 @@ func massEdit(calls []shellcmd.Call, index int, cwd string) string {
 		}
 		search = c.Args[:exec]
 	case slices.Contains(c.Via, "xargs") && editsInPlace(append([]string{c.Name}, c.Args...)):
-		for _, prev := range calls[:index] {
+		for i := range calls[:index] {
+			prev := &calls[i]
 			search = append(search, prev.Args...)
 		}
 	default:
@@ -512,7 +515,8 @@ func opaqueShellWrite(command string, calls []shellcmd.Call) bool {
 	if opaqueWrite.MatchString(command) {
 		return true
 	}
-	for _, c := range calls {
+	for i := range calls {
+		c := &calls[i]
 		if c.Name == "" || c.Offset < 0 {
 			return true
 		}

@@ -36,6 +36,7 @@ type curlRequest struct {
 type curlData struct {
 	option string
 	value  string
+	arg    int
 }
 
 // parseCurl разбирает аргументы curl: опции тела и метода, связки коротких
@@ -53,20 +54,36 @@ func parseCurl(args []string, expand func(string) string) curlRequest {
 			return ""
 		}
 		switch {
+		case strings.HasPrefix(arg, "--") && strings.Contains(arg, "="):
+			option, value, _ := strings.Cut(arg, "=")
+			switch {
+			case curlDataOptions[option]:
+				req.data = append(req.data, curlData{option: option, value: value, arg: i})
+				req.write = true
+			case option == "--upload-file":
+				req.data = append(req.data, curlData{option: option, value: "@" + value, arg: i})
+				req.write = true
+			case option == "--request":
+				req.write = req.write || curlWriteMethods[strings.ToUpper(value)]
+			case option == "--form":
+				req.write = true
+			}
 		case curlDataOptions[arg]:
-			req.data = append(req.data, curlData{option: arg, value: next()})
+			value := next()
+			req.data = append(req.data, curlData{option: arg, value: value, arg: i})
 			req.write = true
 		case arg == "--request":
 			req.write = req.write || curlWriteMethods[strings.ToUpper(next())]
 		case arg == "--upload-file":
 			// файл уходит телом как есть, как -d @f; - значит вход
-			req.data = append(req.data, curlData{option: arg, value: "@" + next()})
+			value := next()
+			req.data = append(req.data, curlData{option: arg, value: "@" + value, arg: i})
 			req.write = true
 		case arg == "--form":
 			next()
 			req.write = true
 		case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 1:
-			req.shortCluster(arg, next)
+			req.shortCluster(arg, next, func() int { return i })
 		default:
 			req.url = req.url || jiraCommentEndpoint.MatchString(arg) || jiraCommentEndpoint.MatchString(expand(arg))
 		}
@@ -75,24 +92,26 @@ func parseCurl(args []string, expand func(string) string) curlRequest {
 }
 
 // shortCluster разбирает связку коротких опций: -sSX POST, -d@f, -XPOST
-func (req *curlRequest) shortCluster(arg string, next func() string) {
+func (req *curlRequest) shortCluster(arg string, next func() string, nextIndex func() int) {
 	for j := 1; j < len(arg); j++ {
 		letter := arg[j]
 		if !strings.ContainsRune(curlShortValued, rune(letter)) {
 			continue
 		}
 		value := arg[j+1:]
+		argIndex := -1
 		if value == "" {
 			value = next()
+			argIndex = nextIndex()
 		}
 		switch letter {
 		case 'd':
-			req.data = append(req.data, curlData{option: "-d", value: value})
+			req.data = append(req.data, curlData{option: "-d", value: value, arg: argIndex})
 			req.write = true
 		case 'X':
 			req.write = req.write || curlWriteMethods[strings.ToUpper(value)]
 		case 'T':
-			req.data = append(req.data, curlData{option: "-T", value: "@" + value})
+			req.data = append(req.data, curlData{option: "-T", value: "@" + value, arg: argIndex})
 			req.write = true
 		case 'F':
 			req.write = true
@@ -150,7 +169,7 @@ func planCommand(command, cwd, home string, calls []shellcmd.Call) commandPlan {
 		case "cd", "pushd", "popd":
 			changes = append(changes, dirChange{offset: c.Offset, dir: plan.newDir(i, here), within: scopes.around(c)})
 		case "curl":
-			expand := func(arg string) string { return plan.path(arg, i) }
+			expand := func(arg string) string { return plan.path(arg, i, 0) }
 			if req := parseCurl(c.Args, expand); req.url && req.write {
 				plan.sends = append(plan.sends, commentSend{index: i, call: c, req: req, cwd: here})
 			}
@@ -165,7 +184,7 @@ func (p *commandPlan) addWrites(index int, cwd string) {
 	c := &p.calls[index]
 	for _, r := range c.Redirs {
 		if r.Op == ">" || r.Op == ">>" || r.Op == ">|" || r.Op == "&>" || r.Op == "&>>" {
-			p.addWritten(index, r.Target, cwd)
+			p.addWritten(index, r.Target, r.Tilde, cwd)
 		}
 	}
 	inPlace := slices.ContainsFunc(c.Args, func(a string) bool {
@@ -173,15 +192,17 @@ func (p *commandPlan) addWrites(index int, cwd string) {
 			(c.Name == "perl" && perlInPlace.MatchString(a))
 	})
 	if c.Name == "tee" || ((c.Name == "sed" || c.Name == "perl") && inPlace) {
-		for _, a := range operands(c.Args) {
-			p.addWritten(index, a, cwd)
+		for ai, a := range c.Args {
+			if !strings.HasPrefix(a, "-") {
+				p.addWritten(index, a, c.ArgTilde(ai), cwd)
+			}
 		}
 	}
 }
 
-func (p *commandPlan) addWritten(index int, raw, cwd string) {
-	raw = p.path(raw, index)
-	p.written = append(p.written, writtenFile{index: index, raw: raw, abs: absPath(raw, cwd, p.home)})
+func (p *commandPlan) addWritten(index int, raw string, tilde shellcmd.Tilde, cwd string) {
+	raw = p.path(raw, index, tilde)
+	p.written = append(p.written, writtenFile{index: index, raw: raw, abs: absPath(raw, cwd)})
 }
 
 // perlInPlace связка ключей perl с правкой на месте: -pi, -0pi, -i.bak
@@ -189,8 +210,50 @@ var perlInPlace = regexp.MustCompile(`^-[0-9alnp]*i`)
 
 // path путь из слова вызова index без кавычек, с переменными, присвоенными
 // в команде раньше вызова. Неизвестная переменная остаётся в пути как $NAME
-func (p *commandPlan) path(raw string, index int) string {
-	return p.vars.expand(normalizeShellPath(raw), p.callOffset(index))
+func (p *commandPlan) path(raw string, index int, tilde shellcmd.Tilde) string {
+	raw = tildePath(normalizeShellPath(raw), tilde, p.home)
+	return p.vars.expand(raw, p.callOffset(index))
+}
+
+// tildePath applies only the expansions identified by shellcmd. Other or
+// mode-dependent forms become an unresolvable path so callers fail closed.
+func tildePath(path string, mark shellcmd.Tilde, home string) string {
+	if mark&(shellcmd.TildeOther|shellcmd.TildeModeUnknown) != 0 || (mark&shellcmd.TildeHome != 0 && home == "") {
+		return "$__akit_tilde_unknown"
+	}
+	if mark&shellcmd.TildeHome == 0 {
+		return path
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		return home + path[1:]
+	}
+	return path
+}
+
+// tildeAssignmentPath expands a single assignment-value tilde whose position
+// is recoverable from the shellcmd bitmask. Multiple candidates are
+// ambiguous because Assign.Tilde does not identify which occurrence expanded.
+func tildeAssignmentPath(path string, mark shellcmd.Tilde, home string) string {
+	if mark&(shellcmd.TildeOther|shellcmd.TildeModeUnknown) != 0 || mark&shellcmd.TildeHome != 0 && home == "" {
+		return "$__akit_tilde_unknown"
+	}
+	if mark&shellcmd.TildeHome == 0 {
+		return path
+	}
+	candidate := -1
+	for i := 0; i < len(path); i++ {
+		if path[i] != '~' || i > 0 && path[i-1] != ':' || i+1 < len(path) && path[i+1] != '/' {
+			continue
+		}
+		if candidate >= 0 {
+			return "$__akit_tilde_unknown"
+		}
+		candidate = i
+	}
+	if candidate < 0 {
+		return "$__akit_tilde_unknown"
+	}
+	return path[:candidate] + home + path[candidate+1:]
 }
 
 // callOffset место вызова в тексте команды: у имени из переменной ($C -X
@@ -221,6 +284,15 @@ func operands(args []string) []string {
 	return out
 }
 
+func firstOperandIndex(args []string) int {
+	for i, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return i
+		}
+	}
+	return -1
+}
+
 // changeDir каталог после cd в вызове index; "" - не раскрыть до запуска
 func (p *commandPlan) changeDir(index int, cwd string) string {
 	args := p.calls[index].Args
@@ -232,7 +304,7 @@ func (p *commandPlan) changeDir(index int, cwd string) string {
 	case len(dirs) == 0:
 		return p.home
 	}
-	return absPath(p.path(dirs[0], index), cwd, p.home)
+	return absPath(p.path(dirs[0], index, p.calls[index].ArgTilde(firstOperandIndex(args))), cwd)
 }
 
 // newDir — каталог после cd, pushd или popd вызова index. pushd -n и
@@ -268,15 +340,9 @@ func unexpanded(path string) bool {
 }
 
 // absPath абсолютный путь от каталога cwd; "" - не раскрыть до запуска
-func absPath(path, cwd, home string) string {
+func absPath(path, cwd string) string {
 	if path == "" || unexpanded(path) {
 		return ""
-	}
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		if home == "" {
-			return ""
-		}
-		path = home + path[1:]
 	}
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path)
@@ -313,7 +379,11 @@ func (p *commandPlan) payloadFiles(send *commentSend) []payloadSource {
 		case isFile && path == "-":
 			files = append(files, p.stdinFiles(send)...)
 		case isFile:
-			files = append(files, payloadSource{raw: p.path(path, send.index), cwd: send.cwd, at: send.index})
+			mark := shellcmd.Tilde(0)
+			if d.arg >= 0 {
+				mark = send.call.ArgTilde(d.arg)
+			}
+			files = append(files, payloadSource{raw: p.path(path, send.index, mark), cwd: send.cwd, at: send.index})
 		case strings.Contains(value, "$(") || strings.Contains(value, "`"):
 			files = append(files, p.substitutedFiles(send, value)...)
 		}
@@ -324,12 +394,16 @@ func (p *commandPlan) payloadFiles(send *commentSend) []payloadSource {
 // substitutedFiles файлы, которые cat читает в подстановке -d "$(cat f)"
 func (p *commandPlan) substitutedFiles(send *commentSend, value string) []payloadSource {
 	var files []payloadSource
-	for i, c := range p.calls {
+	for i := range p.calls {
+		c := &p.calls[i]
 		if c.Name != "cat" || i <= send.index || !strings.Contains(value, c.Raw) {
 			continue
 		}
-		for _, a := range operands(c.Args) {
-			files = append(files, payloadSource{raw: p.path(a, send.index), cwd: send.cwd, at: send.index})
+		for ai, a := range c.Args {
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			files = append(files, payloadSource{raw: p.path(a, send.index, c.ArgTilde(ai)), cwd: send.cwd, at: send.index})
 		}
 	}
 	return files
@@ -347,7 +421,7 @@ func (p *commandPlan) stdinFiles(send *commentSend) []payloadSource {
 		}
 		if r := stdinRedir(p.calls[stage].Redirs); r != nil {
 			if r.Op == "<" {
-				files = append(files, payloadSource{raw: p.path(r.Target, stage), cwd: p.cwds[stage], at: stage})
+				files = append(files, payloadSource{raw: p.path(r.Target, stage, r.Tilde), cwd: p.cwds[stage], at: stage})
 			}
 			// вход из файла или heredoc: конвейер выше на этот вызов не идёт
 			break
@@ -372,8 +446,11 @@ func stdinRedir(redirs []shellcmd.Redir) *shellcmd.Redir {
 func (p *commandPlan) argFiles(index int) []payloadSource {
 	c := p.calls[index]
 	var files []payloadSource
-	for _, a := range operands(c.Args) {
-		files = append(files, payloadSource{raw: p.path(a, index), cwd: p.cwds[index], at: index, optional: c.Name != "cat"})
+	for ai, a := range c.Args {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		files = append(files, payloadSource{raw: p.path(a, index, c.ArgTilde(ai)), cwd: p.cwds[index], at: index, optional: c.Name != "cat"})
 	}
 	return files
 }
@@ -404,7 +481,7 @@ func (p *commandPlan) pipedFrom(index int) int {
 // readSource читает файл тела. Файл, записанный раньше в этой же команде,
 // не читается: его текст в команде (written), а на диске - прежний
 func (p *commandPlan) readSource(src payloadSource) (body string, written bool, err error) {
-	abs := absPath(src.raw, src.cwd, p.home)
+	abs := absPath(src.raw, src.cwd)
 	if p.writtenBefore(src.at, src.raw, abs) {
 		return "", true, nil
 	}
@@ -470,10 +547,7 @@ func commandVars(command, home string, calls []shellcmd.Call) (shellVars, error)
 			sv.vars = append(sv.vars, shellVar{assign: a, name: a.Name})
 			continue
 		}
-		value := sv.expand(normalizeShellPath(a.Value), a.Offset)
-		if (value == "~" || strings.HasPrefix(value, "~/")) && home != "" {
-			value = home + value[1:]
-		}
+		value := sv.expand(tildeAssignmentPath(normalizeShellPath(a.Value), a.Tilde, home), a.Offset)
 		if a.Append {
 			value = sv.expand("${"+a.Name+"}", a.Offset) + value
 		}
@@ -530,8 +604,9 @@ func (sv *shellVars) lastVisible(name string, at int) (shellVar, bool) {
 func (sv *shellVars) unsettled(name string, at int) bool {
 	// Встроенные команды меняют переменные, но Assigns их не возвращает.
 	// Учитываем даже вызовы после ссылки: они могут быть в цикле или функции.
-	for _, c := range sv.calls {
-		if builtinMayWrite(c, name) {
+	for i := range sv.calls {
+		c := &sv.calls[i]
+		if builtinMayWrite(*c, name) {
 			return true
 		}
 	}
@@ -604,9 +679,16 @@ func (sv *shellVars) selfCalls(name string, at int, around []shellcmd.Scope) fun
 	}
 	fn := around[i].Name
 	return func(a shellcmd.Assign) bool {
-		return a.Unknown && slices.ContainsFunc(sv.calls, func(c shellcmd.Call) bool {
-			return c.Name == fn && c.Offset == a.Offset
-		})
+		if !a.Unknown {
+			return false
+		}
+		for i := range sv.calls {
+			c := &sv.calls[i]
+			if c.Name == fn && c.Offset == a.Offset {
+				return true
+			}
+		}
+		return false
 	}
 }
 

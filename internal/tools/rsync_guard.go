@@ -57,7 +57,8 @@ func (t *RsyncGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 	}
 	var violations []core.Violation
 	var suggestions []string
-	for _, call := range calls {
+	for i := range calls {
+		call := &calls[i]
 		if call.Name != "rsync" {
 			continue
 		}

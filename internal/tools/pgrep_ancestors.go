@@ -55,7 +55,8 @@ func RewritePgrepAncestors(command string) (string, bool, error) {
 // вызовов во вложенных скриптах shellcmd даёт в координатах command
 func pgrepPositions(command string, calls []shellcmd.Call) []int {
 	var positions []int
-	for _, call := range calls {
+	for i := range calls {
+		call := &calls[i]
 		if call.Name != "pgrep" || call.Offset < 0 || call.Offset >= len(command) || !needsAncestors(call.Args) || slices.Contains(call.Via, "ssh") {
 			continue
 		}

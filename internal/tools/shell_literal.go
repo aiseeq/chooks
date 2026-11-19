@@ -3,6 +3,7 @@ package tools
 import (
 	"strings"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -10,6 +11,7 @@ import (
 type word struct {
 	text    string
 	literal bool
+	tilde   shellcmd.Tilde
 }
 
 // computedArg — слово из shellcmd.Call.Args вычисляется при запуске.

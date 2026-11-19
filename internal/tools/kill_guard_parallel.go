@@ -128,7 +128,14 @@ func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script stri
 	}
 	// systemd-run и за run0, pkexec (parallel run0 systemd-run --pipe bash)
 	expanded := s.elevatedCalls(calls)
-	if !slices.ContainsFunc(expanded, func(x shellcmd.Call) bool { return x.Name == "systemd-run" }) {
+	hasSystemdRun := false
+	for i := range expanded {
+		if expanded[i].Name == "systemd-run" {
+			hasSystemdRun = true
+			break
+		}
+	}
+	if !hasSystemdRun {
 		return "", nil
 	}
 	if r, found := p.replacedName(expanded); found {
@@ -138,7 +145,13 @@ func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script stri
 	if in.src != stdinPipe && in.src != stdinFile {
 		return "", calls
 	}
-	shells := slices.DeleteFunc(slices.Clone(expanded), func(x shellcmd.Call) bool { return !inputShell(x, expanded) })
+	shells := make([]shellcmd.Call, 0, len(expanded))
+	for i := range expanded {
+		x := &expanded[i]
+		if inputShell(*x, expanded) {
+			shells = append(shells, *x)
+		}
+	}
 	switch {
 	case len(shells) == 0:
 		return "", calls
@@ -187,7 +200,8 @@ func (s *killScan) elevatedCalls(calls []shellcmd.Call) []shellcmd.Call {
 			s.tool.Logger().Debug("kill_guard: команда за обёрткой в parallel не разобрана", "wrapper", out[i].Name, "error", err)
 			continue
 		}
-		for _, x := range parsed {
+		for i := range parsed {
+			x := parsed[i]
 			x.Via = slices.Concat(out[i].Via, []string{out[i].Name}, x.Via)
 			x.Offset = -1
 			out = append(out, x)
@@ -206,10 +220,11 @@ func (p parallelCommand) replaced(script string) bool {
 // подстановки (systemdRunHiddenReason)
 func (p parallelCommand) replacedName(calls []shellcmd.Call) (string, bool) {
 	for _, r := range p.replaces {
-		if slices.ContainsFunc(calls, func(x shellcmd.Call) bool {
-			return strings.Contains(x.Name, r) && slices.Contains(x.Via, "systemd-run")
-		}) {
-			return r, true
+		for i := range calls {
+			x := &calls[i]
+			if strings.Contains(x.Name, r) && slices.Contains(x.Via, "systemd-run") {
+				return r, true
+			}
 		}
 	}
 	return "", false

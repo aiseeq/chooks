@@ -160,8 +160,9 @@ func classifyShell(ev Event, v *Verdict) {
 	v.VarsUnparsed = err != nil
 	start := dirMark{path: ev.Cwd, temp: ev.cwdRecorded() && ev.Cwd != "" && tempDir(ev.Cwd)}
 	w := shellWalk{ev: ev, v: v, home: homeVar(ev), cwd: ev.Cwd, dirs: dirState{cur: start, allTemp: start.temp}, vars: vars}
-	for _, c := range calls {
-		w.call(c)
+	for i := range calls {
+		c := &calls[i]
+		w.call(*c)
 	}
 }
 

@@ -497,33 +497,30 @@ func systemdRunCommandStart(args []string) int {
 }
 
 // bareParallel вызов parallel без команды под systemd-run (systemd-run
-// --pipe parallel <<< 'kill 1', systemd-run nice parallel ::: 'kill 1'):
-// разбор shellcmd под systemd-run отдаёт только самый внутренний вызов, а у
-// parallel без команды его нет, хотя parallel исполнит строки ввода или
-// списка ::: оболочкой (parallelShell). Его ищет разбор команды systemd-run
-// отдельно: слова — литералами, как их получит exec у systemd-run;
-// parallel с командой проверяется ещё и вызовом её самой. Вызов — с Via до
-// systemd-run и обёрток, местом, вводом и перенаправлениями systemd-run.
-// err — слова не разобраны (не UTF-8)
+// --pipe parallel <<< 'kill 1', systemd-run setsid parallel ::: 'kill 1'):
+// разбирает команду службы отдельно, поскольку основной разбор shellcmd
+// отдаёт только самый внутренний вызов, а у parallel без команды его нет,
+// хотя parallel исполнит строки ввода или списка ::: оболочкой
+// (parallelShell). nestedCommand находит parallel за обёртками тем же
+// разбором, которым восстанавливаются systemd-run и run0. Вызов — с Via до
+// systemd-run и внутренних обёрток, местом, вводом и перенаправлениями
+// systemd-run. err — слова не разобраны (не UTF-8)
 func bareParallel(c shellcmd.Call) (shellcmd.Call, bool, error) {
 	start := systemdRunCommandStart(c.Args)
 	if c.Name != "systemd-run" || start >= len(c.Args) {
 		return shellcmd.Call{}, false, nil
 	}
-	words := make([]string, 0, len(c.Args)-start)
-	for _, a := range c.Args[start:] {
-		words = append(words, singleQuotedWord(a))
+	words := c.Args[start:]
+	if _, err := shellcmd.Calls(literalShellWords(words)); err != nil {
+		return shellcmd.Call{}, false, fmt.Errorf("команда systemd-run %q: %w", words, err)
 	}
-	inner, err := shellcmd.Calls(strings.Join(words, " "))
+	j, via, err := nestedCommand(words, "parallel")
 	if err != nil {
-		return shellcmd.Call{}, false, fmt.Errorf("команда systemd-run %q: %w", c.Args[start:], err)
+		return shellcmd.Call{}, false, fmt.Errorf("команда systemd-run %q: %w", words, err)
 	}
-	for i := range inner {
-		x := &inner[i]
-		if x.Name == "parallel" {
-			return shellcmd.Call{Name: "parallel", Args: x.Args, Via: slices.Concat(c.Via, []string{"systemd-run"}, x.Via),
-				Raw: c.Raw, Offset: c.Offset, Redirs: c.Redirs, ScriptInput: c.ScriptInput}, true, nil
-		}
+	if j >= 0 {
+		return shellcmd.Call{Name: "parallel", Args: words[j+1:], Via: slices.Concat(c.Via, []string{"systemd-run"}, via),
+			Raw: c.Raw, Offset: c.Offset, Redirs: c.Redirs, ScriptInput: c.ScriptInput}, true, nil
 	}
 	return shellcmd.Call{}, false, nil
 }

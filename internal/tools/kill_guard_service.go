@@ -90,13 +90,15 @@ func nestedSystemdRun(cmd []string) ([]string, error) {
 
 // nestedCommand место первого слова cmd с программой name, которое разбор
 // видит командой (nestedSystemdRun), и Via до него внутри cmd (обёртки:
-// nice, systemd-run). j -1 — такого нет. err — слова не разобраны
+// nice, systemd-run). Все слова — уже значения аргументов exec, поэтому при
+// склейке каждое берётся целиком в кавычки: $ и # внутри слова — литералы.
+// j -1 — такого нет. err — слова не разобраны
 func nestedCommand(cmd []string, name string) (j int, via []string, err error) {
 	for j := range cmd {
 		if path.Base(cmd[j]) != name {
 			continue
 		}
-		calls, err := shellcmd.Calls(shellWords(append(slices.Clone(cmd[:j]), nestedSystemdRunProbe)))
+		calls, err := shellcmd.Calls(literalShellWords(append(slices.Clone(cmd[:j]), nestedSystemdRunProbe)))
 		if err != nil {
 			return -1, nil, fmt.Errorf("слова %q: %w", cmd, err)
 		}
@@ -108,6 +110,17 @@ func nestedCommand(cmd []string, name string) (j int, via []string, err error) {
 		}
 	}
 	return -1, nil, nil
+}
+
+// literalShellWords — слова, полученные программой после разбора внешней
+// команды, как буквальные операнды для shellcmd. shellWords оставляет $ и `
+// активными для вызовов, где нужно сохранить семантику исходной оболочки.
+func literalShellWords(args []string) string {
+	words := make([]string, len(args))
+	for i, arg := range args {
+		words[i] = singleQuotedWord(arg)
+	}
+	return strings.Join(words, " ")
 }
 
 // wrappedRun0Calls calls и вызовы run0 в словах вызовов-обёрток среди них
@@ -285,6 +298,7 @@ func execPropertyKey(key string) bool {
 // тексте, сюда не доходит: его проверяет rewrittenCommand вместе со
 // свойствами
 func (s *killScan) serviceCommands(c shellcmd.Call, calls []shellcmd.Call) error {
+	service := c
 	if c.Name == "systemd-run" {
 		if err := s.serviceExecProperties(c, calls); err != nil {
 			return err
@@ -297,11 +311,12 @@ func (s *killScan) serviceCommands(c shellcmd.Call, calls []shellcmd.Call) error
 			s.addReason("systemd-run за обёрткой: " + err.Error() + ": свойства и команду временной службы проверить нельзя")
 		}
 	} else if ok {
+		service = run
 		if err := s.serviceExecProperties(run, calls); err != nil {
 			return err
 		}
 	}
-	return s.serviceParallel(c, calls)
+	return s.serviceParallel(service, calls)
 }
 
 // wrappedSystemdRun systemd-run, который вызов-обёртка c (setsid, flock,

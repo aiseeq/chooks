@@ -57,7 +57,7 @@ func TestKillGuardServiceExecBypasses(t *testing.T) {
 		`flock /tmp/systemd-run systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 1' true`,
 	} {
 		if r := validateKill(t, command); r.IsValid {
-			t.Errorf("должно блокироваться: %s", command)
+			t.Errorf("должно блокироваться: %s: %v", command, r)
 		}
 	}
 }
@@ -91,6 +91,66 @@ func TestKillGuardWrappedSystemdRunLists(t *testing.T) {
 				t.Errorf("deny=%v: %v", tc.deny, r)
 			}
 		})
+	}
+}
+
+func TestKillGuardParallelBehindServiceWrappers(t *testing.T) {
+	for _, command := range []string{
+		`setsid systemd-run --user parallel ::: nice ::: 'kill -9 -1'`,
+		`setsid systemd-run --user parallel ::: 'pkill -u aisee'`,
+		`flock /tmp/l systemd-run --user parallel ::: 'kill 12345'`,
+		`setsid run0 parallel ::: 'kill 12345'`,
+		`flock /tmp/l run0 parallel ::: 'kill 12345'`,
+		`setsid run0 parallel <<< 'kill 12345'`,
+		`setsid systemd-run --user --pipe parallel <<< 'kill 12345'`,
+		`systemd-run --user setsid parallel ::: 'kill 12345'`,
+		`run0 setsid parallel ::: 'kill 12345'`,
+		`systemd-run --user flock /tmp/l parallel ::: 'kill 12345'`,
+		`setsid flock /tmp/l systemd-run --user setsid parallel ::: 'kill 12345'`,
+		`echo ok && setsid systemd-run --user parallel ::: 'kill 12345'`,
+		`setsid systemd-run --user parallel kill ::: 12345`,
+		`setsid -f systemd-run --user parallel ::: 'kill 12345'`,
+		`systemd-run --user env 'A=$x #' parallel ::: 'kill 12345'`,
+		`run0 env 'A=$x #' parallel ::: 'kill 12345'`,
+		`echo 'kill 12345' | systemd-run --user --pipe env 'A=$x #' parallel`,
+		`systemd-run --user systemd-inhibit --why='$x #' parallel ::: 'kill 12345'`,
+		`systemd-run --user env -u '$x #' parallel ::: 'kill 12345'`,
+		`systemd-run --user nice -n 5 env 'A=$x #' parallel ::: 'kill -9 -1'`,
+		`systemd-run --user env 'A=${x} #' parallel ::: 'kill 12345'`,
+		`true && systemd-run --user env 'A=$x #' parallel ::: 'kill 12345'`,
+		`x=$(systemd-run --user env 'A=$x #' parallel ::: 'kill 12345')`,
+		`setsid systemd-run --user env 'A=$x #' parallel ::: 'kill 12345'`,
+		`systemd-run --user env 'A=$x #' setsid parallel ::: 'kill 12345'`,
+		`systemd-run --user flock '$x #' parallel ::: 'kill 12345'`,
+		`systemd-run --user env 'A=$x;' parallel ::: 'kill 12345'`,
+		"systemd-run --user env 'A=`x' parallel ::: 'kill 12345'",
+		`systemd-run --user env 'A=$(x' parallel ::: 'kill 12345'`,
+		`systemd-run --user env 'A=$x|' parallel ::: 'kill 12345'`,
+		`setsid env 'A=$x #' systemd-run --user -p 'ExecStartPre=/usr/bin/kill 12345' true`,
+		`systemd-run --user env 'A=$x #' systemd-run --user -p 'ExecStartPre=/usr/bin/\x6bill 12345' true`,
+		`setsid env 'A=$x #' run0 '--property=ExecStartPre=/usr/bin/\x6bill 1' true`,
+	} {
+		if r := validateKill(t, command); r.IsValid {
+			t.Errorf("должно блокироваться: %s: %v", command, r)
+		}
+	}
+	for _, command := range []string{
+		`setsid systemd-run --user parallel ::: true`,
+		`setsid systemd-run --user parallel ::: 'make -j2' 'echo skills'`,
+		`flock /tmp/l systemd-run --user parallel echo ::: a b`,
+		`systemd-run --user setsid parallel ::: 'echo done'`,
+		`setsid run0 parallel ::: 'dnf update'`,
+		`setsid parallel ::: 'echo kill'`,
+		`setsid systemd-run -H host parallel ::: 'kill 12345'`,
+		`ssh host systemd-run --user parallel ::: 'kill 12345'`,
+		`systemd-run --user env 'A=$x #' parallel ::: 'echo done'`,
+		`setsid env 'A=$x #' systemd-run --user -p MemoryMax=1G true`,
+		// без кавычек bash снимает \ и run0 получает /usr/bin/x6bill
+		`setsid run0 --property=ExecStartPre=/usr/bin/\x6bill true`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("должно пропускаться: %s: %v", command, r)
+		}
 	}
 }
 

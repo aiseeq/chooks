@@ -561,6 +561,10 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 // (bareParallel) как вызов. Команда systemd-run, которую разбор не прочёл, —
 // отказ при kill в тексте: исполнит ли parallel в ней ввод оболочкой, не видно
 func (s *killScan) serviceParallel(c shellcmd.Call, calls []shellcmd.Call) error {
+	if c.Name == "systemd-run" && systemdRunHostOption(c.Args) ||
+		systemdRunElsewhere(c, calls) {
+		return nil
+	}
 	x, ok, err := bareParallel(c)
 	if err != nil {
 		s.tool.Logger().Warn("kill_guard: команда systemd-run не разобрана отдельно", "error", err)

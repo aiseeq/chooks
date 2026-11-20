@@ -459,6 +459,17 @@ func TestModelGuardUserOnly(t *testing.T) {
 		{"worker luna", "Bash", "", "worker run --brief b.md --dir d --class c --model luna", false},
 		{"worker без модели", "Bash", "", "worker run --diff DO --brief b.md --dir d --class c", false},
 		{"worker --msg -m", "Bash", "", "worker continue 1 --msg -m hello", false},
+		// обходы приёмки 20.11: переменные модели вне прежнего списка
+		{"ANTHROPIC_DEFAULT_MODEL", "Bash", "", "ANTHROPIC_DEFAULT_MODEL=claude-fable-5-2 claude -p hi", true},
+		{"WORKFLOW_SUBAGENT_MODEL", "Bash", "", "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=fable claude -p hi", true},
+		{"DEFAULT_FABLE_MODEL", "Bash", "", "env ANTHROPIC_DEFAULT_FABLE_MODEL=fable claude -p hi", true},
+		{"HAIKU fable", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-fable-5-2 claude -p hi", true},
+		{"SMALL_FAST fable", "Bash", "", "ANTHROPIC_SMALL_FAST_MODEL=fable claude -p hi", true},
+		{"HAIKU в settings env", "Bash", "", `claude -p --settings '{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}' hi`, true},
+		{"HAIKU своя модель", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5 claude -p hi", false},
+		{"HAIKU из переменной", "Bash", "", `ANTHROPIC_SMALL_FAST_MODEL="$H" claude -p hi`, false},
+		{"присваивание, потом export", "Bash", "", "ANTHROPIC_MODEL=fable; export ANTHROPIC_MODEL; claude -p hi", true},
+		{"присваивание opus, потом export", "Bash", "", "ANTHROPIC_MODEL=opus; export ANTHROPIC_MODEL; claude -p hi", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

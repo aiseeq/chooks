@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -55,12 +56,20 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 	}
 	var reasons []string
 	for _, c := range candidates {
+		if c.fast {
+			// быстрая модель одобрения не требует, но модель «только
+			// пользователь» агент не задаёт и сюда
+			if name, ok := t.userOnlyModel(c.value, models); ok {
+				reasons = append(reasons, userOnlyReason(c.value, name))
+			}
+			continue
+		}
 		if c.dynamic {
 			reasons = append(reasons, "модель задана переменной, назови её литералом")
 		} else if !isApproved(c.value, models) {
 			reasons = append(reasons, fmt.Sprintf("модель %q не одобрена", c.value))
 		} else if name, ok := t.userOnlyModel(c.value, models); ok {
-			reasons = append(reasons, fmt.Sprintf("модель %q (%s) запускает только пользователь: агент её не задаёт; в сессии, которую пользователь поднял на ней, поле model не задавай — суб-агент унаследует модель", c.value, name))
+			reasons = append(reasons, userOnlyReason(c.value, name))
 		}
 	}
 	if len(reasons) == 0 {
@@ -69,9 +78,16 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 	return t.reject(strings.Join(reasons, "; "), models), nil
 }
 
+func userOnlyReason(value, name string) string {
+	return fmt.Sprintf("модель %q (%s) запускает только пользователь: агент её не задаёт; в сессии, которую пользователь поднял на ней, поле model не задавай — суб-агент унаследует модель", value, name)
+}
+
 type modelCandidate struct {
 	value   string
 	dynamic bool
+	// fast — модель быстрых запросов (переменные haiku): проверяется только
+	// на модель «только пользователь»
+	fast bool
 }
 
 func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate {
@@ -209,7 +225,7 @@ var modelClientWord = regexp.MustCompile(`(^|[^[:alnum:]_.-])(claude|cl|codex|op
 
 // envModelMention — присваивание переменной модели в тексте команды: A=x
 // или set -x A x (fish)
-var envModelMention = regexp.MustCompile(`\b(?:(ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)=|set(?:\s+-\w+)*\s+(?:ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)\s+)["']?([^\s"';&|]*)`)
+var envModelMention = regexp.MustCompile(`\b(?:(` + modelEnvPattern() + `)=|set(?:\s+-\w+)*\s+(` + modelEnvPattern() + `)\s+)["']?([^\s"';&|]*)`)
 
 // textModelCandidates — модели в тексте команды, которую не разобрала
 // оболочка: --model, -m у агента и присваивания переменных модели, если в
@@ -255,18 +271,39 @@ func printedMention(text string, at int) bool {
 func envTextCandidates(script string) []modelCandidate {
 	var found []modelCandidate
 	for _, m := range envModelMention.FindAllStringSubmatch(script, -1) {
-		if m[2] != "" {
-			found = append(found, modelCandidate{value: m[2], dynamic: strings.ContainsAny(m[2], "$`")})
+		if c, ok := envCandidate(m[1]+m[2], m[3], strings.ContainsAny(m[3], "$`")); ok {
+			found = append(found, c)
 		}
 	}
 	return found
 }
 
-// modelEnvNames — переменные, задающие модель Claude Code. Переменные быстрой
-// модели (haiku) Claude Code задаёт сам, они не проверяются
+// modelEnvNames — переменные, задающие модель Claude Code (имена — из
+// бинаря claude 2.1.330, приёмка 20.11). true — модель проверяется целиком;
+// false — модель быстрых запросов (haiku): её Claude Code задаёт сам, она не
+// одобряется списком и проверяется только на модель «только пользователь»
 var modelEnvNames = map[string]bool{
-	"ANTHROPIC_MODEL": true, "ANTHROPIC_DEFAULT_OPUS_MODEL": true,
-	"ANTHROPIC_DEFAULT_SONNET_MODEL": true, "CLAUDE_CODE_SUBAGENT_MODEL": true,
+	"ANTHROPIC_MODEL": true, "ANTHROPIC_DEFAULT_MODEL": true,
+	"ANTHROPIC_DEFAULT_OPUS_MODEL": true, "ANTHROPIC_DEFAULT_SONNET_MODEL": true,
+	"ANTHROPIC_DEFAULT_FABLE_MODEL": true, "CLAUDE_CODE_SUBAGENT_MODEL": true,
+	"CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL": true,
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":       false, "ANTHROPIC_SMALL_FAST_MODEL": false,
+}
+
+// modelEnvPattern — имена modelEnvNames альтернативой регулярного выражения
+func modelEnvPattern() string {
+	names := slices.Sorted(maps.Keys(modelEnvNames))
+	return strings.Join(names, "|")
+}
+
+// envCandidate — кандидат из присваивания value переменной name; не
+// переменная модели или пустое значение — нет кандидата
+func envCandidate(name, value string, dynamic bool) (modelCandidate, bool) {
+	full, ok := modelEnvNames[name]
+	if !ok || value == "" {
+		return modelCandidate{}, false
+	}
+	return modelCandidate{value: value, dynamic: dynamic, fast: !full}, true
 }
 
 // envModelCandidates — модели из присваиваний переменных modelEnvNames, что
@@ -296,6 +333,10 @@ func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger
 		case *syntax.CallExpr:
 			if len(n.Args) > 0 {
 				found = append(found, callEnvModels(script, n, calls, logger)...)
+			} else {
+				// A=x; export A — присваивание без команды уходит в окружение
+				// после export
+				found = append(found, assignedModels(script, n.Assigns)...)
 			}
 		}
 		return true
@@ -403,15 +444,15 @@ func isShellName(name string) bool {
 func assignedModels(script string, assigns []*syntax.Assign) []modelCandidate {
 	var found []modelCandidate
 	for _, a := range assigns {
-		if a.Name == nil || !modelEnvNames[a.Name.Value] || a.Value == nil {
+		if a.Name == nil || a.Value == nil {
 			continue
 		}
 		value, literal := literalValue(a.Value)
 		if !literal {
 			value = script[a.Value.Pos().Offset():a.Value.End().Offset()]
 		}
-		if value != "" {
-			found = append(found, modelCandidate{value: value, dynamic: !literal})
+		if c, ok := envCandidate(a.Name.Value, value, !literal); ok {
+			found = append(found, c)
 		}
 	}
 	return found
@@ -421,10 +462,13 @@ func assignedModels(script string, assigns []*syntax.Assign) []modelCandidate {
 // аргументов shellcmd (env A=x)
 func assignedModelWord(w string) []modelCandidate {
 	name, value, ok := strings.Cut(w, "=")
-	if !ok || !modelEnvNames[name] || value == "" {
+	if !ok {
 		return nil
 	}
-	return []modelCandidate{{value: value, dynamic: strings.ContainsAny(value, "$`")}}
+	if c, ok := envCandidate(name, value, strings.ContainsAny(value, "$`")); ok {
+		return []modelCandidate{c}
+	}
+	return nil
 }
 
 // valueFlags — флаги claude со значением, которые пишутся и через «=»
@@ -443,6 +487,20 @@ func splitValueFlags(args []word) []word {
 	return out
 }
 
+// modelValueFlag — флаг клиента name, значение которого в следующем слове —
+// модель
+func modelValueFlag(name, flag string) bool {
+	switch flag {
+	case "--model":
+		return true
+	case "-m":
+		return name == "codex" || name == "opencode"
+	case "--fallback-model":
+		return name == "claude"
+	}
+	return false
+}
+
 func candidatesFromArgs(name string, args []word, readSettings func(string, shellcmd.Tilde) []byte) []modelCandidate {
 	var found []modelCandidate
 	if name == "claude" {
@@ -450,32 +508,27 @@ func candidatesFromArgs(name string, args []word, readSettings func(string, shel
 	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		switch {
-		case a.text == "--model" || ((name == "codex" || name == "opencode") && a.text == "-m"):
-			if i+1 < len(args) {
-				i++
-				found = append(found, modelCandidate{value: args[i].text, dynamic: !args[i].literal})
-			}
-		case strings.HasPrefix(a.text, "--model="):
-			found = append(found, modelCandidate{value: strings.TrimPrefix(a.text, "--model="), dynamic: !a.literal})
-		case name == "claude" && a.text == "--fallback-model":
-			if i+1 < len(args) {
-				i++
-				found = append(found, modelCandidate{value: args[i].text, dynamic: !args[i].literal})
-			}
-		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
-			if i+1 < len(args) {
-				i++
-				found = append(found, jsonModelCandidates(a.text, args[i], readSettings)...)
-			}
-		case name == "codex" && (a.text == "-c" || a.text == "--config"):
-			if i+1 < len(args) {
-				i++
-				if candidate, ok := codexConfigCandidate(args[i]); ok {
-					found = append(found, candidate)
-				}
-			}
+		if after, ok := strings.CutPrefix(a.text, "--model="); ok {
+			found = append(found, modelCandidate{value: after, dynamic: !a.literal})
+			continue
 		}
+		if i+1 >= len(args) {
+			continue
+		}
+		next := args[i+1]
+		switch {
+		case modelValueFlag(name, a.text):
+			found = append(found, modelCandidate{value: next.text, dynamic: !next.literal})
+		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
+			found = append(found, jsonModelCandidates(a.text, next, readSettings)...)
+		case name == "codex" && (a.text == "-c" || a.text == "--config"):
+			if candidate, ok := codexConfigCandidate(next); ok {
+				found = append(found, candidate)
+			}
+		default:
+			continue
+		}
+		i++
 	}
 	return found
 }
@@ -486,7 +539,7 @@ var jsonModelKey = regexp.MustCompile(`\b(?:model|[A-Z_]+_MODEL)\\*"\s*:`)
 
 // writtenModel — модель в тексте команды, которая пишет файл настроек:
 // "model":"x" и "ANTHROPIC_MODEL":"x"
-var writtenModel = regexp.MustCompile(`"(?:model|ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)"\s*:\s*"([^"]*)"`)
+var writtenModel = regexp.MustCompile(`"(model|` + modelEnvPattern() + `)"\s*:\s*"([^"]*)"`)
 
 // jsonModelCandidates — модели в JSON флага claude: --settings (строка JSON
 // или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
@@ -513,45 +566,63 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string, shellc
 			return nil
 		}
 	}
-	var found []modelCandidate
-	add := func(model string) {
-		// inherit — модель агента из основного вызова, она проверена отдельно
-		if strings.TrimSpace(model) != "" && model != "inherit" {
-			found = append(found, modelCandidate{value: model})
-		}
-	}
+	var found jsonModels
 	if flag == "--agents" {
 		var agents map[string]struct {
 			Model string `json:"model"`
 		}
 		if json.Unmarshal(raw, &agents) == nil {
 			for _, a := range agents {
-				add(a.Model)
+				found.add(a.Model)
 			}
 		}
 		return found
 	}
+	return found.settings(raw)
+}
+
+// jsonModels — модели из JSON флага claude
+type jsonModels []modelCandidate
+
+func (found *jsonModels) add(model string) {
+	// inherit — модель агента из основного вызова, она проверена отдельно
+	if strings.TrimSpace(model) != "" && model != "inherit" {
+		*found = append(*found, modelCandidate{value: model})
+	}
+}
+
+// addField — поле настроек: model или переменная модели из env
+func (found *jsonModels) addField(field, value string) {
+	if field == "model" {
+		found.add(value)
+	} else if c, ok := envCandidate(field, value, false); ok {
+		*found = append(*found, c)
+	}
+}
+
+// settings — модели настроек --settings: model и переменные модели в env
+func (found jsonModels) settings(raw []byte) []modelCandidate {
 	// Поля разбираются по одному: поле не того типа рядом не прячет модель
 	var settings map[string]json.RawMessage
 	if json.Unmarshal(raw, &settings) != nil {
 		if !json.Valid(raw) {
 			// Текст команды вместо файла, которого ещё нет
 			for _, m := range writtenModel.FindAllSubmatch(raw, -1) {
-				add(string(m[1]))
+				found.addField(string(m[1]), string(m[2]))
 			}
 		}
 		return found
 	}
 	var model string
 	if json.Unmarshal(settings["model"], &model) == nil {
-		add(model)
+		found.add(model)
 	}
 	var env map[string]json.RawMessage
 	if json.Unmarshal(settings["env"], &env) == nil {
 		for name, raw := range env {
 			var value string
-			if modelEnvNames[name] && json.Unmarshal(raw, &value) == nil {
-				add(value)
+			if json.Unmarshal(raw, &value) == nil {
+				found.addField(name, value)
 			}
 		}
 	}

@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/aiseeq/akit/shellcmd"
 )
 
 // Значение Exec с C-экранированием или вычислениями может скрыть команду от killText.
@@ -162,6 +164,7 @@ func TestKillGuardParallelArgFileStdin(t *testing.T) {
 		{"-a", "/dev/fd/0"},
 		{"-a", "/proc/self/fd/0"},
 		{"--arg-file-sep", "ZZ", "ZZ", "-"},
+		{"--arg-file-sep", "ZZ", "ZZ+", "-"},
 	} {
 		p := parseParallel(args)
 		if !p.argInput {
@@ -171,14 +174,39 @@ func TestKillGuardParallelArgFileStdin(t *testing.T) {
 	if p := parseParallel([]string{"--arg-file-sep", "ZZ", "ZZ", "-"}); !p.sourceWord("ZZ") {
 		t.Error("--arg-file-sep не распознан как разделитель списка")
 	}
+	if p := parseParallel([]string{"--arg-file-sep", "ZZ", "ZZ+", "-"}); !p.fileSource("ZZ+") || !p.argInput {
+		t.Error("--arg-file-sep не распознал файловый источник с +")
+	}
+	if p := parseParallel([]string{"--arg-file-sep", "ZZ", "::::", "-"}); p.fileSource("::::") || p.argInput {
+		t.Error(":::: ошибочно остался разделителем при --arg-file-sep")
+	}
+	if p := parseParallel([]string{"-a", "-", ":::", "12345"}); !p.argInputFirst {
+		t.Error("stdin arg-file должен идти перед источником :::")
+	}
 	for _, args := range [][]string{
 		{":::", "kill", "::::", "-"},
 		{"--colsep", ",", "::::", "-"},
+		{"-a", "-", ":::", "12345"},
 	} {
 		got, ok := parallelShell(args)
 		if !ok || got != "kill $PARALLEL_ARG" {
 			t.Errorf("parallelShell(%#v) = %q, %v; нужен анализ вычисляемой команды/цели", args, got, ok)
 		}
+	}
+	input := shellcmd.Call{Redirs: []shellcmd.Redir{{Op: "<<<", Target: "kill"}}}
+	if got, ok := parallelShellCall([]string{"-a", "-", ":::", "12345"}, &input); !ok || got != "kill 12345" {
+		t.Errorf("источники stdin и ::: в неверном порядке: %q, %v", got, ok)
+	}
+	input.Redirs[0].Target = "echo,done"
+	if got, ok := parallelShellCall([]string{"--colsep", ",", "-a", "-"}, &input); !ok || got != "echo done" {
+		t.Errorf("--colsep не разрезал известный ввод: %q, %v", got, ok)
+	}
+	input.Redirs[0].Target = "kill 12345"
+	if got, ok := parallelShellCall([]string{"-q", "-a", "-"}, &input); !ok || got != "'kill 12345'" {
+		t.Errorf("-q не сохранил строку одним словом: %q, %v", got, ok)
+	}
+	if got, ok := parallelShellCall([]string{"--semaphore", "--wait", "kill", "12345"}, nil); !ok || got != "true" {
+		t.Errorf("sem --wait должен проверяться как true: %q, %v", got, ok)
 	}
 	for _, command := range []string{
 		`systemd-run --user --pipe parallel :::: - <<< 'kill 12345'`,
@@ -200,6 +228,11 @@ func TestKillGuardParallelArgFileStdin(t *testing.T) {
 		`systemd-run --user --pipe parallel ::: 'kill 12345' ::::+ - <<< 'x'`,
 		`systemd-run --user setsid parallel ::: kill :::: - <<< '12345'`,
 		`run0 parallel ::: 'kill 12345' :::: - <<< 'echo'`,
+		`systemd-run --user --pipe parallel -a - ::: 12345 <<< kill`,
+		`run0 parallel -a - ::: 12345 <<< kill`,
+		`systemd-run --user --pipe parallel -a - ::: 12345 :::: - <<< kill`,
+		`systemd-run --user --pipe parallel --arg-file-sep ZZ ZZ+ - <<< 'kill 12345'`,
+		`run0 parallel --arg-file-sep ZZ ZZ+ - <<< 'kill 12345'`,
 		`systemd-run --user --pipe parallel :::: /etc/hostname - <<< 'kill 12345'`,
 		`systemd-run --user --pipe parallel -a /dev/fd/0 <<< 'kill 12345'`,
 		`systemd-run --user --pipe parallel -a /proc/self/fd/0 <<< 'kill 12345'`,
@@ -229,6 +262,10 @@ func TestKillGuardParallelArgFileStdin(t *testing.T) {
 		`systemd-run --user --pipe parallel :::: /etc/hostname - <<< 'make'`,
 		`systemd-run --user parallel -a list.txt make`,
 		`systemd-run --user sem --wait`,
+		`systemd-run --user --pipe parallel --colsep , -a - <<< 'echo,done'`,
+		`systemd-run --user sem --wait kill 12345`,
+		`systemd-run --user --pipe parallel --arg-file-sep ZZ :::: - <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel -q -a - <<< 'kill 12345'`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("должно пропускаться: %s: %v", command, r.Suggestions)

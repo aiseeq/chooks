@@ -10,24 +10,23 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// parallelSources разделители списков аргументов: аргументы из них, не из
-// ввода
-var parallelSources = []string{":::", ":::+", "::::", "::::+"}
-
 // replacementRe строка замены parallel ({}, {.}, {/}, {1}, {#}, {%}, {=…=}):
 // аргумент встаёт на её место, а не в конец команды
 var replacementRe = regexp.MustCompile(`\{[0-9]*[./#%]*[./]*\}|\{=`)
 
 // parallelCommand команда parallel: words — слова после опций; pipe — ввод
 // идёт в stdin команды; quote — слова в кавычках; listed — заданы списки
-// аргументов; argInput — список читает stdin; semaphore — режим sem/
-// --semaphore; remote — все машины удалённые; failed — опции не разобраны,
+// аргументов; argInput — список читает stdin, argInputFirst — stdin-файл
+// стоит до списков в words; semaphore/wait — режим sem и --wait; remote —
+// все машины удалённые; failed — опции не разобраны,
 // parallel выйдет, ничего не запустив. argFileSep и colsep — разделители,
 // заданные опциями.
 type parallelCommand struct {
 	words                       []string
 	pipe, quote, listed, remote bool
-	argInput, semaphore         bool
+	argInput, argInputFirst     bool
+	argInputFromWords           bool
+	semaphore, wait             bool
 	argFileSep, colsep          string
 	failed                      bool
 	replaces                    []string
@@ -65,29 +64,37 @@ func parseParallel(args []string) parallelCommand {
 			logins = append(logins, o.value)
 		case o.name == "sshloginfile":
 			files = true
+		case o.name == "arg-file" && parallelStdinFile(o.value):
+			p.argInputFirst = true
 		case o.name == "arg-file-sep":
 			p.argFileSep = o.value
 		case o.name == "col-sep":
 			p.colsep = o.value
+		case o.name == "wait":
+			p.wait = true
 		}
 	}
 	local, hosts := parallelLocalLogins(logins)
 	p.remote = !local && (hosts || files)
 	p.listed = slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "arg-file" }) ||
 		slices.ContainsFunc(p.words, p.sourceWord)
-	p.argInput = parallelArgInput(sets, p.words)
+	p.argInputFromWords = parallelArgInput(p, p.words)
+	p.argInput = p.argInputFirst || p.argInputFromWords
 	p.semaphore = slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "semaphore" })
 	return p
 }
 
 // sourceWord разделитель списка parallel, включая --arg-file-sep
 func (p parallelCommand) sourceWord(w string) bool {
-	return slices.Contains(parallelSources, w) || p.argFileSep != "" && w == p.argFileSep
+	return w == ":::" || w == ":::+" || p.fileSource(w)
 }
 
 // fileSource разделитель файлов аргументов parallel
 func (p parallelCommand) fileSource(w string) bool {
-	return w == "::::" || w == "::::+" || p.argFileSep != "" && w == p.argFileSep
+	if p.argFileSep != "" {
+		return w == p.argFileSep || w == p.argFileSep+"+"
+	}
+	return w == "::::" || w == "::::+"
 }
 
 // parallelStdinFile путь, которым parallel читает аргументы из stdin
@@ -103,25 +110,13 @@ func parallelStdinFile(path string) bool {
 // parallelArgInput показывает, читает ли parallel список аргументов из stdin.
 // После разделителя файла могут идти несколько имён файлов до следующего
 // разделителя списка; stdin может быть указан любым из поддержанных путей.
-func parallelArgInput(sets []parallelSet, words []string) bool {
-	argFileSep := ""
-	for _, o := range sets {
-		if o.name == "arg-file" {
-			if parallelStdinFile(o.value) {
-				return true
-			}
-		}
-		if o.name == "arg-file-sep" {
-			argFileSep = o.value
-		}
-	}
+func parallelArgInput(p parallelCommand, words []string) bool {
 	for i, w := range words {
-		fileSource := w == "::::" || w == "::::+" || argFileSep != "" && w == argFileSep
-		if !fileSource {
+		if !p.fileSource(w) {
 			continue
 		}
 		for _, path := range words[i+1:] {
-			if slices.Contains(parallelSources, path) || argFileSep != "" && path == argFileSep {
+			if p.sourceWord(path) {
 				break
 			}
 			if parallelStdinFile(path) {

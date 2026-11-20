@@ -370,24 +370,81 @@ func scriptShell(args []string) bool {
 // списка. В semaphore-режиме sem исполняет переданную команду напрямую.
 // Файл аргументов из stdin без списка ::: читается как команды оболочки.
 func parallelShell(args []string) (string, bool) {
+	return parallelShellCall(args, nil)
+}
+
+// parallelShellCall учитывает статический ввод heredoc/here-string, который
+// parallel читает как файл аргументов.
+func parallelShellCall(args []string, call *shellcmd.Call) (string, bool) {
 	p := parseParallel(args)
-	switch {
-	case p.failed || p.remote:
-		return "", false
-	case p.semaphore:
-		return strings.Join(p.words, " "), len(p.words) > 0
-	case p.argInput && (len(p.words) == 0 || p.fileSource(p.words[0])):
-		if p.colsep != "" {
-			// При colsep stdin разбивается на поля, из которых parallel
-			// собирает вызов оболочки. Имена и цели полей заранее неизвестны.
-			return "kill $PARALLEL_ARG", true
-		}
-		return "sh", true
-	case len(p.words) == 0 && !p.listed:
-		return "sh", true
-	case len(p.words) == 0 || p.words[0] != ":::":
+	input, inputKnown := "", false
+	if call != nil {
+		input, inputKnown = parallelLiteralInput(*call)
+	}
+	if p.failed || p.remote {
 		return "", false
 	}
+	if p.semaphore {
+		return parallelSemaphoreShell(p)
+	}
+	if p.argInputFirst && len(p.words) > 0 && p.sourceWord(p.words[0]) {
+		return parallelFirstArgInputShell(p, input, inputKnown)
+	}
+	if p.argInput && (len(p.words) == 0 || p.fileSource(p.words[0])) {
+		return parallelStdinArgInputShell(p, input, inputKnown)
+	}
+	if len(p.words) == 0 && !p.listed {
+		return "sh", true
+	}
+	if len(p.words) == 0 || p.words[0] != ":::" {
+		return "", false
+	}
+	return parallelListedShell(p)
+}
+
+func parallelSemaphoreShell(p parallelCommand) (string, bool) {
+	if p.wait {
+		return "true", true
+	}
+	return strings.Join(p.words, " "), len(p.words) > 0
+}
+
+func parallelFirstArgInputShell(p parallelCommand, input string, inputKnown bool) (string, bool) {
+	if inputKnown && !p.argInputFromWords {
+		script, err := parallelFirstArgInputScript(p, input)
+		if err == nil {
+			return script, true
+		}
+	}
+	// stdin стоит источником раньше ::: и может задавать имя команды;
+	// проверяем, как вычисляемый сигнал, сохраняя консервативный отказ.
+	return "kill $PARALLEL_ARG", true
+}
+
+func parallelStdinArgInputShell(p parallelCommand, input string, inputKnown bool) (string, bool) {
+	if (p.colsep != "" || p.quote) && inputKnown {
+		script, err := parallelInputScript(p, input)
+		//nolint:error-masking,silent-error-handling // Ошибка парсинга ведёт к fail-closed проверке: ввод нельзя надёжно разрезать или процитировать.
+		if err != nil {
+			//nolint:fallback-return // Неизвестный разбор ввода консервативно проверяется как kill с неизвестной целью.
+			return "kill $PARALLEL_ARG", true
+		}
+		return script, true
+	}
+	if p.colsep != "" {
+		// Без видимого содержимого нельзя знать, какое поле станет
+		// именем команды или целью.
+		return "kill $PARALLEL_ARG", true
+	}
+	if p.quote {
+		// -q оставляет каждую запись одним словом-командой: без
+		// аргументов она не может быть вызовом сигнала.
+		return "true", true
+	}
+	return "sh", true
+}
+
+func parallelListedShell(p parallelCommand) (string, bool) {
 	items := p.words[1:]
 	end := slices.IndexFunc(items, p.sourceWord)
 	if end < 0 {
@@ -418,6 +475,103 @@ func parallelShell(args []string) (string, bool) {
 	return strings.Join(lines, "\n"), end > 0
 }
 
+// parallelLiteralInput возвращает статическое содержимое here-string;
+// вычисляемый ввод и heredoc остаются неизвестными.
+func parallelLiteralInput(c shellcmd.Call) (string, bool) {
+	for _, r := range c.Redirs {
+		if r.Op == "<<<" {
+			if strings.ContainsAny(r.Target, "$`\\") {
+				return "", false
+			}
+			return r.Target, true
+		}
+	}
+	return "", false
+}
+
+// parallelInputScript превращает известные строки/поля в текст, который
+// parallel без команды отдаёт оболочке; -q сохраняет каждую запись одним
+// словом, а --colsep разделяет поля регулярным выражением.
+func parallelInputScript(p parallelCommand, input string) (string, error) {
+	var sep *regexp.Regexp
+	if p.colsep != "" {
+		var err error
+		sep, err = regexp.Compile(p.colsep)
+		if err != nil {
+			return "", fmt.Errorf("compile parallel --colsep %q: %w", p.colsep, err)
+		}
+	}
+	input = strings.TrimSuffix(input, "\n")
+	if input == "" {
+		return "", nil
+	}
+	var lines []string
+	for row := range strings.SplitSeq(input, "\n") {
+		fields := []string{row}
+		if sep != nil {
+			fields = sep.Split(row, -1)
+		}
+		if p.quote {
+			for i, field := range fields {
+				quoted, err := syntax.Quote(field, syntax.LangBash)
+				if err != nil {
+					return "", fmt.Errorf("quote parallel input field: %w", err)
+				}
+				fields[i] = quoted
+			}
+		}
+		lines = append(lines, strings.Join(fields, " "))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// parallelFirstArgInputScript сохраняет порядок источников: слова из stdin
+// идут командой, а значения последующих источников добавляются аргументами.
+func parallelFirstArgInputScript(p parallelCommand, input string) (string, error) {
+	first, err := parallelInputScript(p, input)
+	if err != nil {
+		return "", err
+	}
+	items := p.words[1:]
+	end := slices.IndexFunc(items, p.sourceWord)
+	if end < 0 {
+		end = len(items)
+	}
+	args := slices.Clone(items[:end])
+	var tail []string
+	from := ""
+	for _, w := range items[end:] {
+		switch {
+		case p.sourceWord(w):
+			from = w
+		case from == ":::" || from == ":::+":
+			tail = append(tail, w)
+		}
+	}
+	args = append(args, tail...)
+	if p.quote {
+		for i, arg := range args {
+			quoted, err := syntax.Quote(arg, syntax.LangBash)
+			if err != nil {
+				return "", fmt.Errorf("quote parallel argument: %w", err)
+			}
+			args[i] = quoted
+		}
+	}
+	var lines []string
+	for row := range strings.SplitSeq(first, "\n") {
+		if row == "" {
+			continue
+		}
+		line := append([]string{row}, args...)
+		if p.argInputFromWords {
+			line = append(line, "$PARALLEL_ARG")
+		}
+		lines = append(lines, strings.Join(line, " "))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
 // rewrittenCommand текст, которым проверяется вызов c вместо него самого:
 // run0 — systemd-run в режиме службы (run0Command); pkexec и machinectl
 // shell с командой — их команда (elevatedCommand); программа, которая
@@ -437,9 +591,9 @@ func rewrittenCommand(c shellcmd.Call) (string, bool) {
 		}
 		return "", false
 	case "parallel":
-		return parallelShell(c.Args)
+		return parallelShellCall(c.Args, &c)
 	case "sem":
-		return parallelShell(append([]string{"--semaphore"}, c.Args...))
+		return parallelShellCall(append([]string{"--semaphore"}, c.Args...), &c)
 	}
 	return elevatedCommand(c)
 }

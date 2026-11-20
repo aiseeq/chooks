@@ -157,7 +157,7 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 		return "", nil
 	}
 	p := parseParallel(c.Args)
-	if p.failed || p.listed && !p.argInput || p.remote || len(p.words) == 0 {
+	if p.failed || p.remote || len(p.words) == 0 {
 		return "", nil
 	}
 	script, err := p.script()
@@ -165,6 +165,12 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 		var calls []shellcmd.Call
 		calls, err = shellcmd.Calls(script)
 		if err == nil {
+			if p.listed && !p.argInput {
+				expanded := s.elevatedCalls(calls)
+				if !parallelHasSystemdRun(expanded) && !parallelHasElevatedScript(expanded) {
+					return "", nil
+				}
+			}
 			return s.parallelCalls(c, p, script, calls)
 		}
 	}
@@ -181,7 +187,10 @@ func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script stri
 	// systemd-run и за run0, pkexec (parallel run0 systemd-run --pipe bash)
 	expanded := s.elevatedCalls(calls)
 	if !parallelHasSystemdRun(expanded) {
-		if pipeInput {
+		// Без --pipe строки stdin и ::: становятся аргументами команды. Если
+		// оболочка с -c находится за обёрткой, последняя строка становится
+		// текстом скрипта; fedIntoScript применит ту же проверку, что и для {}.
+		if pipeInput || parallelHasElevatedScript(expanded) && (p.listed || in.src == stdinPipe || in.src == stdinFile) {
 			return "", calls
 		}
 		return "", nil
@@ -211,14 +220,58 @@ func (s *killScan) parallelCallsInput(c shellcmd.Call, p parallelCommand, calls 
 	for i := range calls {
 		calls[i].Via = slices.Concat(c.Via, []string{"parallel"}, calls[i].Via)
 		calls[i].Offset = -1
+	}
+	expanded := s.elevatedCalls(calls)
+	for i := range calls {
 		// У вызовов parallel нет своего места в исходном тексте. Пометка
 		// передаёт ввод --pipe в обычную проверку elevated оболочки.
-		readsPipe := inputTaker(calls[i]) || shellcmd.IsShell(calls[i].Name) && shellReadsInput(calls[i].Args)
-		wrapperOwnsInput := calls[i].Name == "systemd-run" || calls[i].Name == "run0" ||
-			slices.Contains(calls[i].Via, "systemd-run") || slices.Contains(calls[i].Via, "run0")
-		calls[i].ScriptInput = calls[i].ScriptInput || pipeInput && readsPipe && !wrapperOwnsInput
+		calls[i].ScriptInput = calls[i].ScriptInput || pipeInput && parallelReadsPipe(calls[i]) &&
+			!parallelInputOwnedByService(calls[i], expanded)
 	}
 	return in, pipeInput
+}
+
+func parallelReadsPipe(c shellcmd.Call) bool {
+	return inputTaker(c) || shellcmd.IsShell(c.Name) && shellReadsInput(c.Args) ||
+		c.Name == "parallel" && parseParallel(c.Args).pipe
+}
+
+func parallelInputOwnedByService(c shellcmd.Call, expanded []shellcmd.Call) bool {
+	if c.Name == "systemd-run" || c.Name == "run0" ||
+		slices.Contains(c.Via, "systemd-run") || slices.Contains(c.Via, "run0") {
+		return true
+	}
+	for i := range expanded {
+		x := &expanded[i]
+		if x.Raw == c.Raw && (x.Name == "systemd-run" || x.Name == "run0" ||
+			slices.Contains(x.Via, "systemd-run") || slices.Contains(x.Via, "run0")) {
+			return true
+		}
+	}
+	return false
+}
+
+// parallelHasElevatedScript — в команде parallel есть оболочка с -c за
+// обёрткой, которая запускает её с правами или как команду script -c.
+func parallelHasElevatedScript(calls []shellcmd.Call) bool {
+	for i := range calls {
+		x := &calls[i]
+		if x.Name == "script" && scriptCommandMissing(x.Args) {
+			return true
+		}
+		if !shellcmd.IsShell(x.Name) || !slices.ContainsFunc(x.Via, func(v string) bool {
+			return v == "pkexec" || v == "sudo" || v == "run0" || v == "script"
+		}) {
+			continue
+		}
+		if shellCommandMissing(x.Args) {
+			return true
+		}
+		if _, runner := scriptArgs(*x); runner {
+			return true
+		}
+	}
+	return false
 }
 
 // parallelHasSystemdRun reports whether the expanded call tree contains systemd-run.
@@ -259,11 +312,17 @@ func parallelInputReason(p parallelCommand, script string, in stdinSpan, shells 
 // script строка команды для оболочки: слова через пробел, с -q — каждое в
 // кавычках
 func (p parallelCommand) script() (string, error) {
-	if !p.quote {
-		return strings.Join(p.words, " "), nil
+	words := p.words
+	if p.listed && !p.argInput {
+		if i := slices.IndexFunc(words, p.sourceWord); i >= 0 {
+			words = words[:i]
+		}
 	}
-	out := make([]string, 0, len(p.words))
-	for _, w := range p.words {
+	if !p.quote {
+		return strings.Join(words, " "), nil
+	}
+	out := make([]string, 0, len(words))
+	for _, w := range words {
 		q, err := syntax.Quote(w, syntax.LangBash)
 		if err != nil {
 			return "", fmt.Errorf("parallel -q: слово в кавычки: %w", err)

@@ -200,6 +200,17 @@ func shellScript(args []string) (string, bool) {
 	return "", false
 }
 
+// shellCommandMissing reports a trailing -c option whose script can be
+// supplied by parallel as an implicit final argument.
+func shellCommandMissing(args []string) bool {
+	for i, a := range args {
+		if (strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+")) && len(a) > 1 && shellCommandOption(a) {
+			return i+1 == len(args)
+		}
+	}
+	return false
+}
+
 // envSplitOption опция env -S (--split-string): значение исполняется как
 // командная строка; -S бывает в связке после -i, -0, -v (env -iS'…')
 func envSplitOption(arg string) bool {
@@ -216,9 +227,16 @@ func scriptArgs(c shellcmd.Call) ([]string, bool) {
 		return c.Args, true
 	case c.Name == "env" && slices.ContainsFunc(c.Args, envSplitOption):
 		return c.Args, true
+	case c.Name == "script" && scriptCommandMissing(c.Args) && slices.Contains(c.Via, "parallel"):
+		return []string{""}, true
 	case shellcmd.IsShell(c.Name):
 		if script, ok := shellScript(c.Args); ok {
 			return []string{script}, true
+		}
+		if slices.Contains(c.Via, "parallel") && slices.ContainsFunc(c.Via, func(v string) bool {
+			return v == "pkexec" || v == "sudo" || v == "run0"
+		}) && shellCommandMissing(c.Args) {
+			return []string{""}, true
 		}
 	}
 	return nil, false
@@ -543,7 +561,8 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 	for i := range calls {
 		ic := &calls[i]
 		if ic.Raw == inner {
-			ic.ScriptInput = ic.ScriptInput || piped && inputTaker(*ic)
+			ic.ScriptInput = ic.ScriptInput || piped && (inputTaker(*ic) ||
+				slices.Contains(c.Via, "parallel") && shellcmd.IsShell(ic.Name) && shellReadsInput(ic.Args))
 			if len(ic.Redirs) == 0 {
 				ic.Redirs = c.Redirs
 			}
@@ -704,7 +723,15 @@ func (s *killScan) positionalSignal(calls []shellcmd.Call) error {
 // parallel всегда ({} или ввод в конце), xargs — с -I, -i или --replace
 func fedIntoScript(c shellcmd.Call, calls []shellcmd.Call) string {
 	if slices.Contains(c.Via, "parallel") {
-		return "parallel"
+		if slices.ContainsFunc(c.Via, func(v string) bool {
+			return v == "pkexec" || v == "sudo" || v == "run0" || v == "script"
+		}) || c.Name == "script" && scriptCommandMissing(c.Args) {
+			return "parallel"
+		}
+		if script, runner := scriptArgs(c); runner && replacementRe.MatchString(strings.Join(script, " ")) {
+			return "parallel"
+		}
+		return ""
 	}
 	if slices.ContainsFunc(xargsOptions(c, calls), replaceOption) {
 		return "xargs"

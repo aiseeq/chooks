@@ -364,6 +364,25 @@ func scriptShell(args []string) bool {
 	return true
 }
 
+// scriptCommandMissing says that script has -c/--command but no command
+// operand yet; parallel can supply that operand as its implicit last argument.
+func scriptCommandMissing(args []string) bool {
+	for i, a := range args {
+		if a == "--command" {
+			return i+1 == len(args)
+		}
+		if after, ok := strings.CutPrefix(a, "--command="); ok {
+			return after == ""
+		}
+		if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && a != "-" {
+			if k := strings.IndexByte(a[1:], 'c'); k >= 0 {
+				return k+2 == len(a) && i+1 == len(args)
+			}
+		}
+	}
+	return false
+}
+
 // parallelShell текст, который parallel без команды исполнит оболочкой:
 // строки ввода (parallel <<< 'kill 1') — как sh, читающая ввод; аргументы
 // списка ::: становятся строками скрипта, включая аргументы из файлового

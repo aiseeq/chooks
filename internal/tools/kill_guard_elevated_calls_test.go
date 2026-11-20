@@ -72,3 +72,38 @@ func TestKillGuardParallelElevatedInput(t *testing.T) {
 		})
 	}
 }
+
+func TestKillGuardParallelImplicitArgShell(t *testing.T) {
+	for _, command := range []string{
+		`echo 'kill 1' | parallel 'pkexec bash -c'`,
+		`parallel 'pkexec bash -c' ::: 'kill 1'`,
+		`parallel 'pkexec sh -c' ::: 'kill 1'`,
+		`parallel 'sudo bash -c' ::: 'kill 1'`,
+		`parallel 'script -qc' ::: 'kill 1'`,
+		`echo 'kill 1' | parallel 'systemd-run --user true; pkexec bash -c'`,
+		`echo 'kill 1' | parallel --pipe 'parallel --pipe pkexec bash'`,
+		`parallel pkexec bash -c ::: 'kill 1'`,
+		`parallel 'pkexec bash -c {}' ::: 'kill 1'`,
+		`echo 'kill 1' | parallel bash -c {}`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if result := validateKill(t, command); result.IsValid {
+				t.Errorf("должно блокироваться: %s", command)
+			}
+		})
+	}
+	for _, command := range []string{
+		`echo make | parallel 'pkexec bash -c'`,
+		`parallel 'pkexec bash -c' ::: 'make -j2'`,
+		`parallel 'bash -c' ::: 'echo done'`,
+		`echo make | parallel --pipe 'pkexec systemd-run --user --pipe bash'`,
+		`echo make | parallel --pipe 'pkexec run0 bash'`,
+		`parallel --pipe 'pkexec systemd-run --user --pipe bash' <<< make`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if result := validateKill(t, command); !result.IsValid {
+				t.Errorf("не должно блокироваться: %s: %v", command, result.Suggestions)
+			}
+		})
+	}
+}

@@ -26,11 +26,17 @@ type approvedModel struct{ name, id string }
 type ModelGuardTool struct {
 	*BaseTool
 	path string
+	// userOnly — имена одобренных моделей, которые запускает только
+	// пользователь (core.ToolConfig.UserOnly)
+	userOnly []string
 }
 
 // NewModelGuardTool создаёт проверку выбранной модели.
 func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardTool, error) {
-	return &ModelGuardTool{BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent"}, core.ShellTools...), logger)}, nil
+	return &ModelGuardTool{
+		BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent"}, core.ShellTools...), logger),
+		userOnly: config.UserOnly,
+	}, nil
 }
 
 // ValidateTool проверяет модель лишь у вызовов, которые её явно задают.
@@ -53,6 +59,8 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 			reasons = append(reasons, "модель задана переменной, назови её литералом")
 		} else if !isApproved(c.value, models) {
 			reasons = append(reasons, fmt.Sprintf("модель %q не одобрена", c.value))
+		} else if name, ok := t.userOnlyModel(c.value, models); ok {
+			reasons = append(reasons, fmt.Sprintf("модель %q (%s) запускает только пользователь: агент её не задаёт; в сессии, которую пользователь поднял на ней, поле model не задавай — суб-агент унаследует модель", c.value, name))
 		}
 	}
 	if len(reasons) == 0 {
@@ -136,8 +144,17 @@ func readSettingsFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// modelClients — программы, которым модель задают в командной строке
-var modelClients = []string{"claude", "codex", "opencode"}
+// modelClients — программы, которым модель задают в командной строке: cl
+// передаёт флаги claude, worker run|ask|continue берёт --model
+var modelClients = []string{"claude", "cl", "codex", "opencode", "worker"}
+
+// clientDialect — по чьим правилам разбирать флаги клиента: cl — обёртка claude
+func clientDialect(name string) string {
+	if name == "cl" {
+		return "claude"
+	}
+	return name
+}
 
 // bashModelCandidates — модели вызовов агентов в команде оболочки. Вызовы
 // ищет akit shellcmd: он видит и вложенные скрипты (bash -c, ssh, here-doc на
@@ -163,8 +180,9 @@ func bashModelCandidates(command string, readSettings func(string, shellcmd.Tild
 		for i, a := range call.Args {
 			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`"), tilde: call.ArgTilde(i)}
 		}
-		found = append(found, candidatesFromArgs(call.Name, args, readSettings)...)
-		if call.Name == "claude" {
+		dialect := clientDialect(call.Name)
+		found = append(found, candidatesFromArgs(dialect, args, readSettings)...)
+		if dialect == "claude" {
 			claude = true
 		}
 	}
@@ -186,8 +204,8 @@ func bashModelCandidates(command string, readSettings func(string, shellcmd.Tild
 	return found
 }
 
-// modelClientWord — отдельное слово claude, codex или opencode (не .claude/ и не claude-hooks)
-var modelClientWord = regexp.MustCompile(`(^|[^[:alnum:]_.-])(claude|codex|opencode)([^[:alnum:]_.-]|$)`)
+// modelClientWord — отдельное слово клиента из modelClients (не .claude/ и не claude-hooks)
+var modelClientWord = regexp.MustCompile(`(^|[^[:alnum:]_.-])(claude|cl|codex|opencode|worker)([^[:alnum:]_.-]|$)`)
 
 // envModelMention — присваивание переменной модели в тексте команды: A=x
 // или set -x A x (fish)
@@ -287,7 +305,7 @@ func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger
 	bodies := map[int]bool{}
 	claudeOffsets := make([]int, 0, len(calls))
 	for i := range calls {
-		if calls[i].Name == "claude" {
+		if clientDialect(calls[i].Name) == "claude" {
 			claudeOffsets = append(claudeOffsets, calls[i].Offset)
 		}
 	}
@@ -335,7 +353,7 @@ func callEnvModels(script string, n *syntax.CallExpr, calls []shellcmd.Call, log
 	runs := false
 	for i := range chain {
 		c := &chain[i]
-		if c.Name == "claude" || isShellName(c.Name) {
+		if clientDialect(c.Name) == "claude" || isShellName(c.Name) {
 			runs = true
 			break
 		}
@@ -433,7 +451,7 @@ func candidatesFromArgs(name string, args []word, readSettings func(string, shel
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
-		case a.text == "--model" || (name != "claude" && a.text == "-m"):
+		case a.text == "--model" || ((name == "codex" || name == "opencode") && a.text == "-m"):
 			if i+1 < len(args) {
 				i++
 				found = append(found, modelCandidate{value: args[i].text, dynamic: !args[i].literal})
@@ -577,6 +595,18 @@ func readApprovedModels(path string) ([]approvedModel, string) {
 		models = append(models, approvedModel{m.Name, m.ID})
 	}
 	return models, ""
+}
+
+// userOnlyModel — имя модели из userOnly, которой отвечает кандидат: по имени
+// или id её строки в списке одобренных
+func (t *ModelGuardTool) userOnlyModel(candidate string, models []approvedModel) (string, bool) {
+	for _, m := range models {
+		if slices.ContainsFunc(t.userOnly, func(name string) bool { return strings.EqualFold(name, m.name) }) &&
+			isApproved(candidate, []approvedModel{m}) {
+			return m.name, true
+		}
+	}
+	return "", false
 }
 
 func isApproved(candidate string, models []approvedModel) bool {

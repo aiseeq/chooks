@@ -423,3 +423,59 @@ func TestModelGuardSettingsTildeForms(t *testing.T) {
 // wantModelGuardHint ожидаемая подсказка отказа: раздел и первые слова
 // правила о моделях в ~/.claude/CLAUDE.md (номер строки плавает)
 const wantModelGuardHint = `Правило ~/.claude/CLAUDE.md, раздел «Что разрешает «да»»: «Модели бери только из ~/.config/models/approved» (кому какая — в шапке файла); бойцы GPT — через worker; новая модель — только через бенчмарк llmark и одобрение пользователя`
+
+// TestModelGuardUserOnly — модель из user_only (Fable) агент не задаёт ни
+// Agent, ни клиенту в команде; без поля model суб-агент наследует модель
+// сессии (тикет model-guard-fable-user-only)
+func TestModelGuardUserOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "approved")
+	if err := os.WriteFile(path, []byte("opus claude-opus-5-5\nfable claude-fable-5-2\nluna gpt-6-luna\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MODELS_APPROVED", path)
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	cases := []struct {
+		name, tool, raw, command string
+		reject                   bool
+	}{
+		{"Agent fable", "Agent", `{"model":"fable","subagent_type":"fighter"}`, "", true},
+		{"Agent id fable", "Agent", `{"model":"claude-fable-5-2"}`, "", true},
+		{"Agent fable [1m]", "Agent", `{"model":"claude-fable-5-2[1m]"}`, "", true},
+		{"Agent opus", "Agent", `{"model":"opus"}`, "", false},
+		{"Agent без модели", "Agent", `{"subagent_type":"fighter"}`, "", false},
+		{"claude -p fable", "Bash", "", "claude -p --model fable hi", true},
+		{"cl id fable", "Bash", "", "cl --model claude-fable-5-2", true},
+		{"cl --model=fable", "Bash", "", "cl --model=fable", true},
+		{"cl opus", "Bash", "", "cl --model opus", false},
+		{"cl без модели", "Bash", "", "cl", false},
+		{"переменная модели", "Bash", "", "ANTHROPIC_MODEL=fable claude -p hi", true},
+		{"переменная у cl", "Bash", "", "CLAUDE_CODE_SUBAGENT_MODEL=claude-fable-5-2 cl", true},
+		{"worker ask fable", "Bash", "", "worker ask --model fable --class x --msg hi", true},
+		{"worker run fable", "Bash", "", "worker run --brief b.md --dir d --class c --model fable", true},
+		{"worker luna", "Bash", "", "worker run --brief b.md --dir d --class c --model luna", false},
+		{"worker без модели", "Bash", "", "worker run --diff DO --brief b.md --dir d --class c", false},
+		{"worker --msg -m", "Bash", "", "worker continue 1 --msg -m hello", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			input := &core.ToolInput{ToolName: c.tool, ToolInput: []byte(c.raw), Command: c.command}
+			if c.tool == "Agent" {
+				input.Command = ""
+			}
+			result, err := tool.ValidateTool(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid == c.reject {
+				t.Fatalf("reject=%v, want %v: %+v", !result.IsValid, c.reject, result.Violations)
+			}
+			if c.reject && c.name == "Agent fable" && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+				t.Fatalf("причина: %s", result.Violations[0].Message)
+			}
+		})
+	}
+}

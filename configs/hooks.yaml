@@ -64,6 +64,9 @@ tools:
   # Блокирует явный выбор модели, отсутствующей в ~/.config/models/approved
   model_guard:
     enabled: false
+    # имена из approved, которые запускает только пользователь: агенту
+    # (Agent model, claude/cl --model, переменные модели, worker --model) — отказ
+    # user_only: [fable]
 
   # Отклоняет rm/rmdir, на которые Claude Code сам спросит пользователя
   # («Dangerous rm operation on possibly-empty variable path», даже в bypass):

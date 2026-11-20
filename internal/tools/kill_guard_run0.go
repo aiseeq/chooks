@@ -406,19 +406,16 @@ func parallelShellCall(args []string, call *shellcmd.Call) (string, bool) {
 	if p.semaphore {
 		return parallelSemaphoreShell(p)
 	}
-	if p.argInputFirst && len(p.words) > 0 && p.sourceWord(p.words[0]) {
-		return parallelFirstArgInputShell(p, input, inputKnown)
-	}
-	if p.argInput && (len(p.words) == 0 || p.fileSource(p.words[0])) {
-		return parallelStdinArgInputShell(p, input, inputKnown)
-	}
 	if len(p.words) == 0 && !p.listed {
 		return "sh", true
 	}
-	if len(p.words) == 0 || p.words[0] != ":::" {
+	if len(p.words) > 0 && !p.sourceWord(p.words[0]) {
+		// A regular command is analyzed by parallelSystemdRun and the normal
+		// call scanner; this rewrite is only for jobs whose command comes from
+		// a source value.
 		return "", false
 	}
-	return parallelListedShell(p)
+	return parallelSourcesShell(p, input, inputKnown)
 }
 
 func parallelSemaphoreShell(p parallelCommand) (string, bool) {
@@ -428,70 +425,154 @@ func parallelSemaphoreShell(p parallelCommand) (string, bool) {
 	return strings.Join(p.words, " "), len(p.words) > 0
 }
 
-func parallelFirstArgInputShell(p parallelCommand, input string, inputKnown bool) (string, bool) {
-	if inputKnown && !p.argInputFromWords {
-		script, err := parallelFirstArgInputScript(p, input)
-		if err == nil {
-			return script, true
-		}
-	}
-	// stdin стоит источником раньше ::: и может задавать имя команды;
-	// проверяем, как вычисляемый сигнал, сохраняя консервативный отказ.
-	return "kill $PARALLEL_ARG", true
-}
-
-func parallelStdinArgInputShell(p parallelCommand, input string, inputKnown bool) (string, bool) {
-	if (p.colsep != "" || p.quote) && inputKnown {
-		script, err := parallelInputScript(p, input)
-		//nolint:error-masking,silent-error-handling // Ошибка парсинга ведёт к fail-closed проверке: ввод нельзя надёжно разрезать или процитировать.
-		if err != nil {
-			//nolint:fallback-return // Неизвестный разбор ввода консервативно проверяется как kill с неизвестной целью.
-			return "kill $PARALLEL_ARG", true
-		}
-		return script, true
-	}
-	if p.colsep != "" {
-		// Без видимого содержимого нельзя знать, какое поле станет
-		// именем команды или целью.
-		return "kill $PARALLEL_ARG", true
-	}
-	if p.quote {
-		// -q оставляет каждую запись одним словом-командой: без
-		// аргументов она не может быть вызовом сигнала.
+// parallelSourcesShell builds candidate command lines from the parsed source
+// model. Each source is one column; a row from every source is appended after
+// the command words in GNU parallel source order.
+func parallelSourcesShell(p parallelCommand, input string, inputKnown bool) (string, bool) {
+	base := parallelCommandWords(p)
+	if len(base) == 0 && parallelOpaqueCommandFirst(p, input, inputKnown) {
 		return "true", true
 	}
-	return "sh", true
+	columns := make([]parallelSourceColumn, 0, len(p.sources))
+	unknownStdin := false
+	for _, src := range p.sources {
+		rows, unknown := parallelSourceRows(p, src, input, inputKnown)
+		unknownStdin = unknownStdin || unknown
+		if len(rows) > 0 {
+			columns = append(columns, parallelSourceColumn{rows: rows, linked: src.linked})
+		}
+	}
+	if unknownStdin {
+		// Unknown stdin can occupy the command name or an argument position.
+		return strings.Join(append(slices.Clone(base), "kill $PARALLEL_ARG"), " "), true
+	}
+	if len(columns) == 0 {
+		return strings.Join(base, " "), len(base) > 0
+	}
+	candidates, bounded := parallelSourceCandidates(base, columns)
+	if !bounded {
+		return parallelUnknownSourceCommand(base), true
+	}
+	var lines []string
+	for _, candidate := range candidates {
+		line := candidate.words
+		if p.quote {
+			for j := range line {
+				line[j] = parallelShellQuote(line[j])
+			}
+		}
+		if len(line) > 0 {
+			lines = append(lines, strings.Join(line, " "))
+		}
+	}
+	if len(base) == 0 && len(lines) > 0 {
+		return strings.Join(lines, "\n"), true
+	}
+	return strings.Join(lines, "\n"), len(lines) > 0
 }
 
-func parallelListedShell(p parallelCommand) (string, bool) {
-	items := p.words[1:]
-	end := slices.IndexFunc(items, p.sourceWord)
-	if end < 0 {
-		end = len(items)
+type parallelSourceColumn struct {
+	rows   [][]string
+	linked bool
+}
+
+type parallelSourceCandidate struct {
+	words []string
+	index int
+}
+
+func parallelCommandWords(p parallelCommand) []string {
+	words := p.words
+	if i := slices.IndexFunc(words, p.sourceWord); i >= 0 {
+		words = words[:i]
 	}
-	// следующие списки ::: дописывают к строке свои аргументы (parallel :::
-	// kill ::: 12345 исполнит kill 12345): к каждой строке первого списка —
-	// все их аргументы, больше целей, чем у любого задания. Аргументы из
-	// файлов (::::) не видны, как -a
-	var tail []string
-	from := ""
-	for _, w := range items[end:] {
-		switch {
-		case p.sourceWord(w):
-			from = w
-		case from == ":::" || from == ":::+":
-			tail = append(tail, w)
+	return words
+}
+
+func parallelOpaqueCommandFirst(p parallelCommand, input string, inputKnown bool) bool {
+	for _, src := range p.sources {
+		if src.kind == 'f' {
+			return true
+		}
+		if src.kind == 'l' && len(src.values) > 0 {
+			return false
+		}
+		if src.kind == 'i' && (!inputKnown || input != "") {
+			return false
 		}
 	}
-	lines := make([]string, 0, end)
-	for _, item := range items[:end] {
-		args := append([]string{item}, tail...)
-		if p.argInput {
-			args = append(args, "$PARALLEL_ARG")
+	return false
+}
+
+func parallelSourceRows(p parallelCommand, src parallelSource, input string, inputKnown bool) ([][]string, bool) {
+	var values []string
+	switch src.kind {
+	case 'l':
+		values = src.values
+	case 'i':
+		if !inputKnown {
+			return nil, true
 		}
-		lines = append(lines, strings.Join(args, " "))
+		for row := range strings.SplitSeq(strings.TrimSuffix(input, "\n"), "\n") {
+			if row != "" {
+				values = append(values, row)
+			}
+		}
 	}
-	return strings.Join(lines, "\n"), end > 0
+	rows := make([][]string, 0, len(values))
+	for _, value := range values {
+		rows = append(rows, parallelFields(p, value))
+	}
+	return rows, false
+}
+
+func parallelSourceCandidates(base []string, columns []parallelSourceColumn) ([]parallelSourceCandidate, bool) {
+	candidates := []parallelSourceCandidate{{words: slices.Clone(base)}}
+	for i, col := range columns {
+		candidates = parallelExtendSourceCandidates(candidates, col, i > 0)
+		if len(candidates) > 256 {
+			return nil, false
+		}
+	}
+	return candidates, true
+}
+
+func parallelExtendSourceCandidates(previous []parallelSourceCandidate, column parallelSourceColumn, hasPrevious bool) []parallelSourceCandidate {
+	var next []parallelSourceCandidate
+	for _, candidate := range previous {
+		if column.linked && hasPrevious {
+			if candidate.index < len(column.rows) {
+				words := append(slices.Clone(candidate.words), column.rows[candidate.index]...)
+				next = append(next, parallelSourceCandidate{words: words, index: candidate.index})
+			}
+			continue
+		}
+		for row, values := range column.rows {
+			words := append(slices.Clone(candidate.words), values...)
+			next = append(next, parallelSourceCandidate{words: words, index: row})
+		}
+	}
+	return next
+}
+
+func parallelUnknownSourceCommand(base []string) string {
+	return strings.Join(append(slices.Clone(base), "kill $PARALLEL_ARG"), " ")
+}
+
+func parallelShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func parallelFields(p parallelCommand, value string) []string {
+	fields := []string{value}
+	if p.colsep != "" {
+		if sep, err := regexp.Compile(p.colsep); err == nil {
+			fields = sep.Split(value, -1)
+		} else {
+			return []string{"$PARALLEL_ARG"}
+		}
+	}
+	return fields
 }
 
 // parallelLiteralInput возвращает статическое содержимое here-string;
@@ -506,89 +587,6 @@ func parallelLiteralInput(c shellcmd.Call) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// parallelInputScript превращает известные строки/поля в текст, который
-// parallel без команды отдаёт оболочке; -q сохраняет каждую запись одним
-// словом, а --colsep разделяет поля регулярным выражением.
-func parallelInputScript(p parallelCommand, input string) (string, error) {
-	var sep *regexp.Regexp
-	if p.colsep != "" {
-		var err error
-		sep, err = regexp.Compile(p.colsep)
-		if err != nil {
-			return "", fmt.Errorf("compile parallel --colsep %q: %w", p.colsep, err)
-		}
-	}
-	input = strings.TrimSuffix(input, "\n")
-	if input == "" {
-		return "", nil
-	}
-	var lines []string
-	for row := range strings.SplitSeq(input, "\n") {
-		fields := []string{row}
-		if sep != nil {
-			fields = sep.Split(row, -1)
-		}
-		if p.quote {
-			for i, field := range fields {
-				quoted, err := syntax.Quote(field, syntax.LangBash)
-				if err != nil {
-					return "", fmt.Errorf("quote parallel input field: %w", err)
-				}
-				fields[i] = quoted
-			}
-		}
-		lines = append(lines, strings.Join(fields, " "))
-	}
-	return strings.Join(lines, "\n"), nil
-}
-
-// parallelFirstArgInputScript сохраняет порядок источников: слова из stdin
-// идут командой, а значения последующих источников добавляются аргументами.
-func parallelFirstArgInputScript(p parallelCommand, input string) (string, error) {
-	first, err := parallelInputScript(p, input)
-	if err != nil {
-		return "", err
-	}
-	items := p.words[1:]
-	end := slices.IndexFunc(items, p.sourceWord)
-	if end < 0 {
-		end = len(items)
-	}
-	args := slices.Clone(items[:end])
-	var tail []string
-	from := ""
-	for _, w := range items[end:] {
-		switch {
-		case p.sourceWord(w):
-			from = w
-		case from == ":::" || from == ":::+":
-			tail = append(tail, w)
-		}
-	}
-	args = append(args, tail...)
-	if p.quote {
-		for i, arg := range args {
-			quoted, err := syntax.Quote(arg, syntax.LangBash)
-			if err != nil {
-				return "", fmt.Errorf("quote parallel argument: %w", err)
-			}
-			args[i] = quoted
-		}
-	}
-	var lines []string
-	for row := range strings.SplitSeq(first, "\n") {
-		if row == "" {
-			continue
-		}
-		line := append([]string{row}, args...)
-		if p.argInputFromWords {
-			line = append(line, "$PARALLEL_ARG")
-		}
-		lines = append(lines, strings.Join(line, " "))
-	}
-	return strings.Join(lines, "\n"), nil
 }
 
 // rewrittenCommand текст, которым проверяется вызов c вместо него самого:

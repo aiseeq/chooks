@@ -366,13 +366,17 @@ func scriptShell(args []string) bool {
 
 // parallelShell текст, который parallel без команды исполнит оболочкой:
 // строки ввода (parallel <<< 'kill 1') — как sh, читающая ввод; аргументы
-// первого списка ::: (parallel ::: 'kill 1') с аргументами следующих — строки скрипта. Файлы
-// команд (::::, -a) — как файл скрипта, вне проверки
+// первого списка ::: (parallel ::: 'kill 1') с аргументами следующих — строки скрипта.
+// Файл аргументов из stdin без команды parallel читает как строки оболочки.
 func parallelShell(args []string) (string, bool) {
 	p := parseParallel(args)
 	switch {
 	case p.failed || p.remote:
 		return "", false
+	case p.semaphore:
+		return strings.Join(p.words, " "), len(p.words) > 0
+	case p.argInput && (len(p.words) == 0 || slices.Contains(parallelSources, p.words[0])):
+		return "sh", true
 	case len(p.words) == 0 && !p.listed:
 		return "sh", true
 	case len(p.words) == 0 || p.words[0] != ":::":
@@ -423,6 +427,8 @@ func rewrittenCommand(c shellcmd.Call) (string, bool) {
 		return "", false
 	case "parallel":
 		return parallelShell(c.Args)
+	case "sem":
+		return parallelShell(append([]string{"--semaphore"}, c.Args...))
 	}
 	return elevatedCommand(c)
 }
@@ -518,8 +524,20 @@ func bareParallel(c shellcmd.Call) (shellcmd.Call, bool, error) {
 	if err != nil {
 		return shellcmd.Call{}, false, fmt.Errorf("команда systemd-run %q: %w", words, err)
 	}
+	sem := false
+	if j < 0 {
+		j, via, err = nestedCommand(words, "sem")
+		if err != nil {
+			return shellcmd.Call{}, false, fmt.Errorf("команда systemd-run %q: %w", words, err)
+		}
+		sem = j >= 0
+	}
 	if j >= 0 {
-		return shellcmd.Call{Name: "parallel", Args: words[j+1:], Via: slices.Concat(c.Via, []string{"systemd-run"}, via),
+		args := words[j+1:]
+		if sem {
+			args = append([]string{"--semaphore"}, args...)
+		}
+		return shellcmd.Call{Name: "parallel", Args: args, Via: slices.Concat(c.Via, []string{"systemd-run"}, via),
 			Raw: c.Raw, Offset: c.Offset, Redirs: c.Redirs, ScriptInput: c.ScriptInput}, true, nil
 	}
 	return shellcmd.Call{}, false, nil

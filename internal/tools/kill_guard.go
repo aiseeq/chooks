@@ -327,8 +327,8 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if err := s.cgroupWrite(c); err != nil {
 		return err
 	}
-	if inner, ok := rewrittenCommand(c); ok {
-		return s.elevated(c, inner)
+	if rewritten, err := s.rewrittenCall(c, calls); rewritten {
+		return err
 	}
 	if err := s.serviceCommands(c, calls); err != nil {
 		return err
@@ -381,6 +381,17 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		}
 	}
 	return s.signal(c, calls)
+}
+
+func (s *killScan) rewrittenCall(c shellcmd.Call, calls []shellcmd.Call) (bool, error) {
+	if c.Name == "sem" && systemdRunElsewhere(c, calls) {
+		return true, nil
+	}
+	inner, ok := rewrittenCommand(c)
+	if !ok {
+		return false, nil
+	}
+	return true, s.elevated(c, inner)
 }
 
 // pkexecValues опции pkexec со значением отдельным словом

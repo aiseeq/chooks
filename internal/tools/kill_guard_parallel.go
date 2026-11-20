@@ -26,6 +26,7 @@ var replacementRe = regexp.MustCompile(`\{[0-9]*[./#%]*[./]*\}|\{=`)
 type parallelCommand struct {
 	words                       []string
 	pipe, quote, listed, remote bool
+	argInput, semaphore         bool
 	failed                      bool
 	replaces                    []string
 }
@@ -51,8 +52,6 @@ func parseParallel(args []string) parallelCommand {
 			p.pipe = true
 		case o.name == "quote":
 			p.quote = true
-		case o.name == "arg-file":
-			p.listed = true
 		case o.name == "rpl":
 			// --rpl 'XX perl': строка замены — первое слово
 			if f := strings.Fields(o.value); len(f) > 0 {
@@ -68,8 +67,28 @@ func parseParallel(args []string) parallelCommand {
 	}
 	local, hosts := parallelLocalLogins(logins)
 	p.remote = !local && (hosts || files)
-	p.listed = p.listed || slices.ContainsFunc(p.words, func(w string) bool { return slices.Contains(parallelSources, w) })
+	p.listed = p.listed || slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "arg-file" }) ||
+		slices.ContainsFunc(p.words, func(w string) bool { return slices.Contains(parallelSources, w) })
+	p.argInput = parallelArgInput(sets, p.words)
+	p.semaphore = slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "semaphore" })
 	return p
+}
+
+func parallelArgInput(sets []parallelSet, words []string) bool {
+	for _, o := range sets {
+		if o.name == "arg-file" {
+			if o.value == "-" || o.value == "/dev/stdin" {
+				return true
+			}
+		}
+	}
+	for i, w := range words {
+		if (w == "::::" || w == "::::+") && i+1 < len(words) &&
+			(words[i+1] == "-" || words[i+1] == "/dev/stdin") {
+			return true
+		}
+	}
+	return false
 }
 
 // parallelSystemdRunReason причина отказа на systemd-run в команде parallel

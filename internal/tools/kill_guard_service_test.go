@@ -154,6 +154,42 @@ func TestKillGuardParallelBehindServiceWrappers(t *testing.T) {
 	}
 }
 
+func TestKillGuardParallelArgFileStdin(t *testing.T) {
+	for _, command := range []string{
+		`systemd-run --user --pipe parallel :::: - <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel -a - <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel --arg-file=- <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel --arg-file - <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel :::: /dev/stdin <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel -a /dev/stdin <<< 'kill 12345'`,
+		`echo 'kill -9 -1' | setsid systemd-run --user --pipe parallel :::: -`,
+		`run0 parallel :::: - <<< 'kill 12345'`,
+		`systemd-run --user sem 'kill 12345'`,
+		`systemd-run --user sem kill 12345`,
+		`systemd-run --user sem --id x 'kill 12345'`,
+		`setsid systemd-run --user sem 'kill 12345'`,
+	} {
+		if r := validateKill(t, command); r.IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+		}
+	}
+	for _, command := range []string{
+		`systemd-run --user --pipe parallel :::: - <<< 'echo done'`,
+		`systemd-run --user --pipe parallel -a - <<< 'make -j2'`,
+		`systemd-run --user sem 'make -j2'`,
+		`systemd-run --user sem --wait`,
+		`parallel :::: - <<< 'echo done'`,
+		`parallel :::: - <<< 'kill 12345'`,
+		`sem 'kill 12345'`,
+		`systemd-run -H host sem 'kill 12345'`,
+		`sem 'make -j2'`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("должно пропускаться: %s: %v", command, r.Suggestions)
+		}
+	}
+}
+
 func TestKillGuardServiceExecAllowed(t *testing.T) {
 	for _, command := range []string{
 		`systemd-run --user -p 'ExecStartPre=/usr/bin/true' make`,

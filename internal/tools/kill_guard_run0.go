@@ -366,8 +366,9 @@ func scriptShell(args []string) bool {
 
 // parallelShell текст, который parallel без команды исполнит оболочкой:
 // строки ввода (parallel <<< 'kill 1') — как sh, читающая ввод; аргументы
-// первого списка ::: (parallel ::: 'kill 1') с аргументами следующих — строки скрипта.
-// Файл аргументов из stdin без команды parallel читает как строки оболочки.
+// списка ::: становятся строками скрипта, включая аргументы из файлового
+// списка. В semaphore-режиме sem исполняет переданную команду напрямую.
+// Файл аргументов из stdin без списка ::: читается как команды оболочки.
 func parallelShell(args []string) (string, bool) {
 	p := parseParallel(args)
 	switch {
@@ -375,7 +376,12 @@ func parallelShell(args []string) (string, bool) {
 		return "", false
 	case p.semaphore:
 		return strings.Join(p.words, " "), len(p.words) > 0
-	case p.argInput && (len(p.words) == 0 || slices.Contains(parallelSources, p.words[0])):
+	case p.argInput && (len(p.words) == 0 || p.fileSource(p.words[0])):
+		if p.colsep != "" {
+			// При colsep stdin разбивается на поля, из которых parallel
+			// собирает вызов оболочки. Имена и цели полей заранее неизвестны.
+			return "kill $PARALLEL_ARG", true
+		}
 		return "sh", true
 	case len(p.words) == 0 && !p.listed:
 		return "sh", true
@@ -383,7 +389,7 @@ func parallelShell(args []string) (string, bool) {
 		return "", false
 	}
 	items := p.words[1:]
-	end := slices.IndexFunc(items, func(w string) bool { return slices.Contains(parallelSources, w) })
+	end := slices.IndexFunc(items, p.sourceWord)
 	if end < 0 {
 		end = len(items)
 	}
@@ -395,7 +401,7 @@ func parallelShell(args []string) (string, bool) {
 	from := ""
 	for _, w := range items[end:] {
 		switch {
-		case slices.Contains(parallelSources, w):
+		case p.sourceWord(w):
 			from = w
 		case from == ":::" || from == ":::+":
 			tail = append(tail, w)
@@ -403,7 +409,11 @@ func parallelShell(args []string) (string, bool) {
 	}
 	lines := make([]string, 0, end)
 	for _, item := range items[:end] {
-		lines = append(lines, strings.Join(append([]string{item}, tail...), " "))
+		args := append([]string{item}, tail...)
+		if p.argInput {
+			args = append(args, "$PARALLEL_ARG")
+		}
+		lines = append(lines, strings.Join(args, " "))
 	}
 	return strings.Join(lines, "\n"), end > 0
 }
@@ -413,7 +423,8 @@ func parallelShell(args []string) (string, bool) {
 // shell с командой — их команда (elevatedCommand); программа, которая
 // запускает оболочку на своём вводе (script без -c, machinectl shell без
 // команды, parallel без команды), — эта оболочка (sh); systemd-run --shell,
-// не переписанный в тексте, — systemd-run --pipe bash (systemdRunShellCommand)
+// не переписанный в тексте, — systemd-run --pipe bash; sem — parallel
+// --semaphore.
 func rewrittenCommand(c shellcmd.Call) (string, bool) {
 	switch c.Name {
 	case "run0":

@@ -18,15 +18,17 @@ var parallelSources = []string{":::", ":::+", "::::", "::::+"}
 // аргумент встаёт на её место, а не в конец команды
 var replacementRe = regexp.MustCompile(`\{[0-9]*[./#%]*[./]*\}|\{=`)
 
-// parallelCommand команда parallel: слова после опций, режим --pipe (ввод
-// идёт в stdin команды, аргументов нет), -q (слова в кавычках), аргументы
-// из списка (:::, -a), строки замены (-I, --er, --rpl…) и машины -S: remote —
-// все на другой машине (--sshlogin : — эта); failed — опции не разобраны,
-// parallel выйдет, ничего не запустив
+// parallelCommand команда parallel: words — слова после опций; pipe — ввод
+// идёт в stdin команды; quote — слова в кавычках; listed — заданы списки
+// аргументов; argInput — список читает stdin; semaphore — режим sem/
+// --semaphore; remote — все машины удалённые; failed — опции не разобраны,
+// parallel выйдет, ничего не запустив. argFileSep и colsep — разделители,
+// заданные опциями.
 type parallelCommand struct {
 	words                       []string
 	pipe, quote, listed, remote bool
 	argInput, semaphore         bool
+	argFileSep, colsep          string
 	failed                      bool
 	replaces                    []string
 }
@@ -63,29 +65,68 @@ func parseParallel(args []string) parallelCommand {
 			logins = append(logins, o.value)
 		case o.name == "sshloginfile":
 			files = true
+		case o.name == "arg-file-sep":
+			p.argFileSep = o.value
+		case o.name == "col-sep":
+			p.colsep = o.value
 		}
 	}
 	local, hosts := parallelLocalLogins(logins)
 	p.remote = !local && (hosts || files)
-	p.listed = p.listed || slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "arg-file" }) ||
-		slices.ContainsFunc(p.words, func(w string) bool { return slices.Contains(parallelSources, w) })
+	p.listed = slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "arg-file" }) ||
+		slices.ContainsFunc(p.words, p.sourceWord)
 	p.argInput = parallelArgInput(sets, p.words)
 	p.semaphore = slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "semaphore" })
 	return p
 }
 
+// sourceWord разделитель списка parallel, включая --arg-file-sep
+func (p parallelCommand) sourceWord(w string) bool {
+	return slices.Contains(parallelSources, w) || p.argFileSep != "" && w == p.argFileSep
+}
+
+// fileSource разделитель файлов аргументов parallel
+func (p parallelCommand) fileSource(w string) bool {
+	return w == "::::" || w == "::::+" || p.argFileSep != "" && w == p.argFileSep
+}
+
+// parallelStdinFile путь, которым parallel читает аргументы из stdin
+func parallelStdinFile(path string) bool {
+	switch path {
+	case "-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0":
+		return true
+	default:
+		return false
+	}
+}
+
+// parallelArgInput показывает, читает ли parallel список аргументов из stdin.
+// После разделителя файла могут идти несколько имён файлов до следующего
+// разделителя списка; stdin может быть указан любым из поддержанных путей.
 func parallelArgInput(sets []parallelSet, words []string) bool {
+	argFileSep := ""
 	for _, o := range sets {
 		if o.name == "arg-file" {
-			if o.value == "-" || o.value == "/dev/stdin" {
+			if parallelStdinFile(o.value) {
 				return true
 			}
 		}
+		if o.name == "arg-file-sep" {
+			argFileSep = o.value
+		}
 	}
 	for i, w := range words {
-		if (w == "::::" || w == "::::+") && i+1 < len(words) &&
-			(words[i+1] == "-" || words[i+1] == "/dev/stdin") {
-			return true
+		fileSource := w == "::::" || w == "::::+" || argFileSep != "" && w == argFileSep
+		if !fileSource {
+			continue
+		}
+		for _, path := range words[i+1:] {
+			if slices.Contains(parallelSources, path) || argFileSep != "" && path == argFileSep {
+				break
+			}
+			if parallelStdinFile(path) {
+				return true
+			}
 		}
 	}
 	return false
@@ -121,7 +162,7 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 		return "", nil
 	}
 	p := parseParallel(c.Args)
-	if p.failed || p.listed || p.remote || len(p.words) == 0 {
+	if p.failed || p.listed && !p.argInput || p.remote || len(p.words) == 0 {
 		return "", nil
 	}
 	script, err := p.script()

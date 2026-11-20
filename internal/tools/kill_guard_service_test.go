@@ -155,6 +155,31 @@ func TestKillGuardParallelBehindServiceWrappers(t *testing.T) {
 }
 
 func TestKillGuardParallelArgFileStdin(t *testing.T) {
+	for _, args := range [][]string{
+		{"::::", "/etc/hostname", "-"},
+		{"::::", "/dev/fd/0"},
+		{"::::", "/proc/self/fd/0"},
+		{"-a", "/dev/fd/0"},
+		{"-a", "/proc/self/fd/0"},
+		{"--arg-file-sep", "ZZ", "ZZ", "-"},
+	} {
+		p := parseParallel(args)
+		if !p.argInput {
+			t.Errorf("stdin не найден в arg-file: %#v", args)
+		}
+	}
+	if p := parseParallel([]string{"--arg-file-sep", "ZZ", "ZZ", "-"}); !p.sourceWord("ZZ") {
+		t.Error("--arg-file-sep не распознан как разделитель списка")
+	}
+	for _, args := range [][]string{
+		{":::", "kill", "::::", "-"},
+		{"--colsep", ",", "::::", "-"},
+	} {
+		got, ok := parallelShell(args)
+		if !ok || got != "kill $PARALLEL_ARG" {
+			t.Errorf("parallelShell(%#v) = %q, %v; нужен анализ вычисляемой команды/цели", args, got, ok)
+		}
+	}
 	for _, command := range []string{
 		`systemd-run --user --pipe parallel :::: - <<< 'kill 12345'`,
 		`systemd-run --user --pipe parallel -a - <<< 'kill 12345'`,
@@ -168,6 +193,23 @@ func TestKillGuardParallelArgFileStdin(t *testing.T) {
 		`systemd-run --user sem kill 12345`,
 		`systemd-run --user sem --id x 'kill 12345'`,
 		`setsid systemd-run --user sem 'kill 12345'`,
+		`systemd-run --user --pipe parallel ::: kill :::: - <<< '12345'`,
+		`systemd-run --user --pipe parallel ::: 'kill 12345' :::: - <<< 'echo'`,
+		`systemd-run --user --pipe parallel ::: kill :::: /dev/stdin <<< '12345'`,
+		`systemd-run --user parallel ::: 'kill 12345' :::: /dev/stdin <<< x`,
+		`systemd-run --user --pipe parallel ::: 'kill 12345' ::::+ - <<< 'x'`,
+		`systemd-run --user setsid parallel ::: kill :::: - <<< '12345'`,
+		`run0 parallel ::: 'kill 12345' :::: - <<< 'echo'`,
+		`systemd-run --user --pipe parallel :::: /etc/hostname - <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel -a /dev/fd/0 <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel -a /proc/self/fd/0 <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel :::: /dev/fd/0 <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel :::: /proc/self/fd/0 <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel --arg-file /dev/fd/0 <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel --arg-file-sep ZZ ZZ - <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel --colsep , :::: - <<< 'kill,12345'`,
+		`parallel -a - systemd-run --user sh -c <<< 'kill 12345'`,
+		`parallel -a /dev/stdin systemd-run --user sh -c <<< 'kill 12345'`,
 	} {
 		if r := validateKill(t, command); r.IsValid {
 			t.Errorf("должно блокироваться: %s", command)
@@ -183,6 +225,10 @@ func TestKillGuardParallelArgFileStdin(t *testing.T) {
 		`sem 'kill 12345'`,
 		`systemd-run -H host sem 'kill 12345'`,
 		`sem 'make -j2'`,
+		`systemd-run --user --pipe parallel ::: echo :::: - <<< 'done'`,
+		`systemd-run --user --pipe parallel :::: /etc/hostname - <<< 'make'`,
+		`systemd-run --user parallel -a list.txt make`,
+		`systemd-run --user sem --wait`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("должно пропускаться: %s: %v", command, r.Suggestions)

@@ -165,11 +165,8 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 		var calls []shellcmd.Call
 		calls, err = shellcmd.Calls(script)
 		if err == nil {
-			if p.listed && !p.argInput {
-				expanded := s.elevatedCalls(calls)
-				if !parallelHasSystemdRun(expanded) && !parallelHasElevatedScript(expanded) {
-					return "", nil
-				}
+			if p.listed && !p.argInput && !parallelHasListInput(p) {
+				return "", nil
 			}
 			return s.parallelCalls(c, p, script, calls)
 		}
@@ -190,7 +187,7 @@ func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script stri
 		// Без --pipe строки stdin и ::: становятся аргументами команды. Если
 		// оболочка с -c находится за обёрткой, последняя строка становится
 		// текстом скрипта; fedIntoScript применит ту же проверку, что и для {}.
-		if pipeInput || parallelHasElevatedScript(expanded) && (p.listed || in.src == stdinPipe || in.src == stdinFile) {
+		if pipeInput || parallelHasElevatedScript(expanded) && parallelHasImplicitInput(c, p, in) {
 			return "", calls
 		}
 		return "", nil
@@ -256,22 +253,43 @@ func parallelInputOwnedByService(c shellcmd.Call, expanded []shellcmd.Call) bool
 func parallelHasElevatedScript(calls []shellcmd.Call) bool {
 	for i := range calls {
 		x := &calls[i]
-		if x.Name == "script" && scriptCommandMissing(x.Args) {
+		if inputScriptArgumentMissing(*x) && inputScriptWrapper(*x) {
 			return true
 		}
-		if !shellcmd.IsShell(x.Name) || !slices.ContainsFunc(x.Via, func(v string) bool {
-			return v == "pkexec" || v == "sudo" || v == "run0" || v == "script"
-		}) {
-			continue
+		if shellcmd.IsShell(x.Name) && inputScriptWrapper(*x) {
+			if _, runner := scriptArgs(*x); runner {
+				return true
+			}
 		}
-		if shellCommandMissing(x.Args) {
-			return true
-		}
-		if _, runner := scriptArgs(*x); runner {
+	}
+	return false
+}
+
+func parallelHasListInput(p parallelCommand) bool {
+	if slices.ContainsFunc(p.words, p.fileSource) {
+		return false
+	}
+	for _, w := range p.words {
+		if w == ":::" || w == ":::+" {
 			return true
 		}
 	}
 	return false
+}
+
+func parallelHasImplicitInput(c shellcmd.Call, p parallelCommand, in stdinSpan) bool {
+	if p.argInput || parallelHasListInput(p) || in.src == stdinPipe || in.src == stdinFile {
+		return true
+	}
+	if in.src != stdinRedirect {
+		return false
+	}
+	if in.feed != "" {
+		return true
+	}
+	return slices.ContainsFunc(c.Redirs, func(r shellcmd.Redir) bool {
+		return strings.HasPrefix(r.Op, "<<")
+	})
 }
 
 // parallelHasSystemdRun reports whether the expanded call tree contains systemd-run.

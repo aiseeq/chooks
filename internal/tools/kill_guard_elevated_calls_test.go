@@ -107,3 +107,36 @@ func TestKillGuardParallelImplicitArgShell(t *testing.T) {
 		})
 	}
 }
+
+func TestKillGuardParallelImplicitArgShellSecondRound(t *testing.T) {
+	for _, command := range []string{
+		`parallel 'pkexec bash -c' <<< 'kill 1'`,
+		`parallel 'sudo bash -c' <<< 'kill 1'`,
+		`parallel 'pkexec sh -ec' <<< 'kill 1'`,
+		`parallel 'pkexec bash -c' <<'EOF'
+kill 1
+EOF`,
+		`echo 'kill 1' | parallel 'doas bash -c'`,
+		`echo 'kill 1' | parallel 'su -c'`,
+		`xargs pkexec bash -c <<< 'kill 1'`,
+		`echo 'kill 1' | xargs doas bash -c`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if result := validateKill(t, command); result.IsValid {
+				t.Errorf("должно блокироваться: %s", command)
+			}
+		})
+	}
+	for _, command := range []string{
+		`parallel 'pkexec bash -c "echo safe"' ::: 'kill 1'`,
+		`parallel 'sudo bash -c "echo safe"' ::: 'kill 1'`,
+		`parallel 'pkexec bash -c' <<< make`,
+		`echo make | parallel 'doas bash -c'`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if result := validateKill(t, command); !result.IsValid {
+				t.Errorf("не должно блокироваться: %s: %v", command, result.Suggestions)
+			}
+		})
+	}
+}

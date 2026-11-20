@@ -233,9 +233,8 @@ func scriptArgs(c shellcmd.Call) ([]string, bool) {
 		if script, ok := shellScript(c.Args); ok {
 			return []string{script}, true
 		}
-		if slices.Contains(c.Via, "parallel") && slices.ContainsFunc(c.Via, func(v string) bool {
-			return v == "pkexec" || v == "sudo" || v == "run0"
-		}) && shellCommandMissing(c.Args) {
+		if shellCommandMissing(c.Args) && inputScriptWrapper(c) &&
+			(slices.Contains(c.Via, "parallel") || slices.Contains(c.Via, "xargs")) {
 			return []string{""}, true
 		}
 	}
@@ -723,9 +722,7 @@ func (s *killScan) positionalSignal(calls []shellcmd.Call) error {
 // parallel всегда ({} или ввод в конце), xargs — с -I, -i или --replace
 func fedIntoScript(c shellcmd.Call, calls []shellcmd.Call) string {
 	if slices.Contains(c.Via, "parallel") {
-		if slices.ContainsFunc(c.Via, func(v string) bool {
-			return v == "pkexec" || v == "sudo" || v == "run0" || v == "script"
-		}) || c.Name == "script" && scriptCommandMissing(c.Args) {
+		if inputScriptArgumentMissing(c) && inputScriptWrapper(c) {
 			return "parallel"
 		}
 		if script, runner := scriptArgs(c); runner && replacementRe.MatchString(strings.Join(script, " ")) {
@@ -736,7 +733,52 @@ func fedIntoScript(c shellcmd.Call, calls []shellcmd.Call) string {
 	if slices.ContainsFunc(xargsOptions(c, calls), replaceOption) {
 		return "xargs"
 	}
+	if inputScriptArgumentMissing(c) && inputScriptWrapper(c) {
+		return "xargs"
+	}
 	return ""
+}
+
+// inputScriptArgumentMissing reports that the input appended by xargs/parallel
+// will fill a missing script operand rather than become $0 or a later argument.
+func inputScriptArgumentMissing(c shellcmd.Call) bool {
+	if shellcmd.IsShell(c.Name) {
+		return shellCommandMissing(c.Args)
+	}
+	if c.Name == "script" {
+		return scriptCommandMissing(c.Args)
+	}
+	return c.Name == "su" && suCommandMissing(c.Args)
+}
+
+// inputScriptWrapper identifies commands that execute the appended operand
+// with elevated privileges or as a script command.
+func inputScriptWrapper(c shellcmd.Call) bool {
+	if c.Name == "su" || c.Name == "script" {
+		return true
+	}
+	return slices.ContainsFunc(c.Via, func(v string) bool {
+		switch v {
+		case "pkexec", "sudo", "doas", "run0", "su", "script", "machinectl":
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+func suCommandMissing(args []string) bool {
+	for i, a := range args {
+		switch {
+		case a == "-c" || a == "--command":
+			return i+1 == len(args)
+		case strings.HasPrefix(a, "--command="):
+			return strings.TrimPrefix(a, "--command=") == ""
+		case strings.HasPrefix(a, "-c") && a != "-c":
+			return false
+		}
+	}
+	return false
 }
 
 // replaceOption опция xargs, подставляющая ввод в аргументы команды

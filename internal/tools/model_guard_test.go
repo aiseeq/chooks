@@ -470,6 +470,12 @@ func TestModelGuardUserOnly(t *testing.T) {
 		{"HAIKU из переменной", "Bash", "", `ANTHROPIC_SMALL_FAST_MODEL="$H" claude -p hi`, false},
 		{"присваивание, потом export", "Bash", "", "ANTHROPIC_MODEL=fable; export ANTHROPIC_MODEL; claude -p hi", true},
 		{"присваивание opus, потом export", "Bash", "", "ANTHROPIC_MODEL=opus; export ANTHROPIC_MODEL; claude -p hi", false},
+		{"классификатор fable", "Bash", "", "CLAUDE_CODE_AUTO_MODE_MODEL=fable claude -p hi", true},
+		{"фоновый классификатор fable", "Bash", "", "CLAUDE_CODE_BG_CLASSIFIER_MODEL=claude-fable-5-2 claude -p hi", true},
+		{"HAIKU в пишущемся settings", "Bash", "", `echo '{"env":{"ANTHROPIC_DEFAULT_HAIKU_MODEL":"claude-haiku-5-5"}}' > /tmp/mg-absent-h.json; claude --settings /tmp/mg-absent-h.json -p hi`, false},
+		{"fable в пишущемся settings env", "Bash", "", `echo '{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}' > /tmp/mg-absent-f.json; claude --settings /tmp/mg-absent-f.json -p hi`, true},
+		{"--fallback-model у codex", "Bash", "", "codex exec --fallback-model fable hi", false},
+		{"--fallback-model у claude", "Bash", "", "claude -p --fallback-model fable hi", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

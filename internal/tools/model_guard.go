@@ -288,6 +288,7 @@ var modelEnvNames = map[string]bool{
 	"ANTHROPIC_DEFAULT_FABLE_MODEL": true, "CLAUDE_CODE_SUBAGENT_MODEL": true,
 	"CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL": true,
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL":       false, "ANTHROPIC_SMALL_FAST_MODEL": false,
+	"CLAUDE_CODE_AUTO_MODE_MODEL": false, "CLAUDE_CODE_BG_CLASSIFIER_MODEL": false,
 }
 
 // modelEnvPattern — имена modelEnvNames альтернативой регулярного выражения

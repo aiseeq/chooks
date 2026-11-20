@@ -122,49 +122,83 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 
 // parallelCalls проверка разобранной команды parallel (parallelSystemdRun)
 func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script string, calls []shellcmd.Call) (string, []shellcmd.Call) {
-	for i := range calls {
-		calls[i].Via = slices.Concat(c.Via, []string{"parallel"}, calls[i].Via)
-		calls[i].Offset = -1
-	}
+	in, pipeInput := s.parallelCallsInput(c, p, calls)
 	// systemd-run и за run0, pkexec (parallel run0 systemd-run --pipe bash)
 	expanded := s.elevatedCalls(calls)
-	hasSystemdRun := false
-	for i := range expanded {
-		if expanded[i].Name == "systemd-run" {
-			hasSystemdRun = true
-			break
+	if !parallelHasSystemdRun(expanded) {
+		if pipeInput {
+			return "", calls
 		}
-	}
-	if !hasSystemdRun {
 		return "", nil
 	}
 	if r, found := p.replacedName(expanded); found {
 		return "systemd-run за parallel запускает команду, имя которой придёт из ввода (строка замены " + r + "): текст команды станет известен только при запуске" + hiddenTail, calls
 	}
-	in := s.inputOf(c)
 	if in.src != stdinPipe && in.src != stdinFile {
 		return "", calls
 	}
-	shells := make([]shellcmd.Call, 0, len(expanded))
-	for i := range expanded {
-		x := &expanded[i]
-		if inputShell(*x, expanded) {
-			shells = append(shells, *x)
-		}
-	}
-	switch {
-	case len(shells) == 0:
-		return "", calls
-	case !p.pipe && !p.replaced(script):
-		return "systemd-run за parallel (… | parallel systemd-run --pipe bash): строки ввода станут аргументами оболочки (-c и скрипт), их не видно до запуска" + hiddenTail, calls
-	case !p.pipe || in.src == stdinFile:
-		return "", calls
+	shells := parallelInputShells(expanded)
+	if reason, done := parallelInputReason(p, script, in, shells); done {
+		return reason, calls
 	}
 	feed := s.feedCalls(in, shells)
 	if feed == nil {
 		return "systemd-run за parallel --pipe: оболочка читает скрипт из ввода parallel (… | parallel --pipe systemd-run --pipe bash), текст не виден до запуска" + hiddenTail, calls
 	}
 	return "", append(calls, feed...)
+}
+
+// parallelCallsInput отмечает поток, который parallel --pipe передаёт читающей
+// оболочке. У systemd-run/run0 вход проверяет их собственная логика.
+func (s *killScan) parallelCallsInput(c shellcmd.Call, p parallelCommand, calls []shellcmd.Call) (stdinSpan, bool) {
+	in := s.inputOf(c)
+	pipeInput := p.pipe && (in.src == stdinPipe || in.src == stdinFile || in.src == stdinRedirect)
+	for i := range calls {
+		calls[i].Via = slices.Concat(c.Via, []string{"parallel"}, calls[i].Via)
+		calls[i].Offset = -1
+		// У вызовов parallel нет своего места в исходном тексте. Пометка
+		// передаёт ввод --pipe в обычную проверку elevated оболочки.
+		readsPipe := inputTaker(calls[i]) || shellcmd.IsShell(calls[i].Name) && shellReadsInput(calls[i].Args)
+		wrapperOwnsInput := calls[i].Name == "systemd-run" || calls[i].Name == "run0" ||
+			slices.Contains(calls[i].Via, "systemd-run") || slices.Contains(calls[i].Via, "run0")
+		calls[i].ScriptInput = calls[i].ScriptInput || pipeInput && readsPipe && !wrapperOwnsInput
+	}
+	return in, pipeInput
+}
+
+// parallelHasSystemdRun reports whether the expanded call tree contains systemd-run.
+func parallelHasSystemdRun(calls []shellcmd.Call) bool {
+	for i := range calls {
+		if calls[i].Name == "systemd-run" {
+			return true
+		}
+	}
+	return false
+}
+
+// parallelInputShells returns input-reading shells that run under systemd-run.
+func parallelInputShells(calls []shellcmd.Call) []shellcmd.Call {
+	shells := make([]shellcmd.Call, 0, len(calls))
+	for i := range calls {
+		x := &calls[i]
+		if inputShell(*x, calls) {
+			shells = append(shells, *x)
+		}
+	}
+	return shells
+}
+
+// parallelInputReason reports when input to a systemd-run shell cannot be checked.
+func parallelInputReason(p parallelCommand, script string, in stdinSpan, shells []shellcmd.Call) (string, bool) {
+	switch {
+	case len(shells) == 0:
+		return "", true
+	case !p.pipe && !p.replaced(script):
+		return "systemd-run за parallel (… | parallel systemd-run --pipe bash): строки ввода станут аргументами оболочки (-c и скрипт), их не видно до запуска" + hiddenTail, true
+	case !p.pipe || in.src == stdinFile:
+		return "", true
+	}
+	return "", false
 }
 
 // script строка команды для оболочки: слова через пробел, с -q — каждое в
@@ -200,8 +234,8 @@ func (s *killScan) elevatedCalls(calls []shellcmd.Call) []shellcmd.Call {
 			s.tool.Logger().Debug("kill_guard: команда за обёрткой в parallel не разобрана", "wrapper", out[i].Name, "error", err)
 			continue
 		}
-		for i := range parsed {
-			x := parsed[i]
+		for j := range parsed {
+			x := parsed[j]
 			x.Via = slices.Concat(out[i].Via, []string{out[i].Name}, x.Via)
 			x.Offset = -1
 			out = append(out, x)
@@ -230,9 +264,9 @@ func (p parallelCommand) replacedName(calls []shellcmd.Call) (string, bool) {
 	return "", false
 }
 
-// inputShell оболочка под systemd-run на этой машине (на любой глубине),
+// inputShell оболочка под systemd-run в команде parallel (на любой глубине),
 // которая читает скрипт из ввода или из слов, добавленных в конец (bash,
-// bash -s, bash -c)
+// bash -s, bash -c); systemd-run на другой машине исключается.
 func inputShell(x shellcmd.Call, calls []shellcmd.Call) bool {
 	k := slices.Index(x.Via, "systemd-run")
 	if k < 0 || !shellcmd.IsShell(x.Name) || systemdRunRemote(x, calls, k) {

@@ -40,11 +40,6 @@ type GitGuardTool struct {
 	tempRoots []string
 }
 
-// NewGitGuardTool создаёт запрет разрушительных git-команд суб-агентам
-func NewGitGuardTool(config core.ToolConfig, logger core.Logger) (*GitGuardTool, error) {
-	return &GitGuardTool{BaseTool: NewBaseTool("git_guard", config.Enabled, core.ShellTools, logger), tempRoots: tempRoots()}, nil
-}
-
 // NewGitGuardToolForRequest uses the hook's temporary directories.
 func NewGitGuardToolForRequest(config core.ToolConfig, logger core.Logger, request hookctx.Context) (*GitGuardTool, error) {
 	tmp := request.Getenv("TMPDIR")
@@ -523,18 +518,6 @@ func gitOperands(args []string) []string {
 		}
 	}
 	return out
-}
-
-// tempRoots — временные каталоги: репо в них — клон или проба суб-агента
-// (scratchpad Claude Code — в CLAUDE_CODE_TMPDIR), деревья мастеров там не
-// лежат. Сухой прогон 12.11: 112 из 122 отказов суб-агентам — их клоны в
-// scratchpad
-func tempRoots() []string {
-	roots := []string{os.TempDir(), "/tmp"}
-	if dir := os.Getenv("CLAUDE_CODE_TMPDIR"); dir != "" {
-		roots = append(roots, dir)
-	}
-	return roots
 }
 
 // inTemp — каталог во временном: репо там — клон или проба суб-агента

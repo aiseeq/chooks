@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os"
 	"path"
 	"regexp"
 	"strings"
@@ -40,11 +39,6 @@ type RmGuardTool struct {
 	lookupEnv func(string) (string, bool)
 	// addDirs дополнительные рабочие папки сессии по CLAUDE_PID
 	addDirs func(pid string) ([]string, error)
-}
-
-// NewRmGuardTool создает проверку rm по переменной
-func NewRmGuardTool(config core.ToolConfig, logger core.Logger) (*RmGuardTool, error) {
-	return newRmGuardTool(config, logger, os.LookupEnv)
 }
 
 // NewRmGuardToolForRequest uses only the hook's environment.

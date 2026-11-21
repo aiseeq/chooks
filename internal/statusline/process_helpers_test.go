@@ -30,7 +30,8 @@ func build(input Input, used float64, bar weekBar, now time.Time, visible func()
 }
 
 func terminalTitle(dir string, state core.SessionState) string {
-	return state.Marker() + " " + core.ProjectNameForDir(dir)
+	home, _ := os.UserHomeDir()
+	return state.Marker() + " " + core.ProjectNameForDirWithHome(dir, home)
 }
 
 func projectBadge(dir string, state core.SessionState) string {

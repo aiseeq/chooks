@@ -199,11 +199,14 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	if store != nil && len(store.Accounts) > 0 {
 		bar.pool = poolPace(ctx, store, snapshot, now, logger)
 	}
+	// Плашка и заголовок сравнивают каталог с HOME как есть (как
+	// UserHomeDir из пакета os), файлы читаются от cwd запроса
 	home := request.Getenv("HOME")
-	if home != "" {
-		home = request.Abs(home)
+	homeDir := home
+	if homeDir != "" {
+		homeDir = request.Abs(homeDir)
 	}
-	bar.unit = store.PlanUnitForHome(now, home)
+	bar.unit = store.PlanUnitForHome(now, homeDir)
 	visible := func() (bool, error) { return desktop.TabVisible(ctx) }
 	if input.Workspace.ProjectDir == "" && input.CWD == "" && input.Workspace.CurrentDir == "" {
 		input.CWD = request.Cwd

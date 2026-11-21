@@ -314,7 +314,7 @@ func DenyReason(verdict Verdict) string {
 // начат ли ход репликой пользователя и после какого ответа агента она идёт
 func ReadTurn(path string, request hookctx.Context) (Turn, error) {
 	var turn Turn
-	err := tailscan.Scan(path, func(buf []byte) bool {
+	err := tailscan.ScanFrom(request.Cwd, path, func(buf []byte) bool {
 		turn = scanTurn(buf, request)
 		return turn.Decided
 	})

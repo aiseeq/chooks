@@ -158,7 +158,7 @@ func visible() (bool, error) { return true, nil }
 func TestBuildMarksTurnSeen(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	input := Input{CWD: "/home/user/work/demo", SessionID: "s1"}
-	if err := core.SaveSessionState("s1", core.StateDone); err != nil {
+	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StateDone); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,11 +171,11 @@ func TestBuildMarksTurnSeen(t *testing.T) {
 	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "✅ demo" {
 		t.Errorf("вкладку видно — посмотрел: %q", title)
 	}
-	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StateIdle {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s1"); err != nil || state != core.StateIdle {
 		t.Errorf("состояние = %q, %v", state, err)
 	}
 	// Работу вид вкладки не трогает
-	if err := core.SaveSessionState("s1", core.StateWorking); err != nil {
+	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "🔄 demo" {
@@ -192,10 +192,10 @@ func TestBuildFreshSessionIdle(t *testing.T) {
 	if _, title := build(input, 10, weekBar{}, time.Now(), hidden, testLogger(t)); title != "✅ demo" {
 		t.Errorf("сессия без записи: %q", title)
 	}
-	if _, recorded, err := core.LookupSessionState("s1"); err != nil || recorded {
+	if _, recorded, err := core.LookupSessionStateIn(core.RuntimeDir(), "s1"); err != nil || recorded {
 		t.Errorf("строка статуса записала состояние: %v, %v", recorded, err)
 	}
-	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StateWorking {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s1"); err != nil || state != core.StateWorking {
 		t.Errorf("хукам сессия без записи — работа: %q, %v", state, err)
 	}
 }
@@ -206,10 +206,10 @@ func TestBuildShowsBackground(t *testing.T) {
 	input := Input{CWD: "/home/user/work/demo", SessionID: "s1"}
 	start := time.Now()
 	tasks := []core.BackgroundTask{{ID: "b1", Type: "shell", Description: "Luna на честном наборе"}}
-	if _, err := core.RecordBackground("s1", tasks, nil, start); err != nil {
+	if _, err := core.RecordBackgroundIn(core.RuntimeDir(), "s1", tasks, nil, start); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.SaveSessionState("s1", core.StatePaused); err != nil {
+	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StatePaused); err != nil {
 		t.Fatal(err)
 	}
 
@@ -222,12 +222,12 @@ func TestBuildShowsBackground(t *testing.T) {
 	if title != "❇️ demo" || !strings.Contains(plain(line), "Luna на честном наборе 3 ч 28 мин брошена") {
 		t.Errorf("брошенная задача — готово: %q, %q", title, plain(line))
 	}
-	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StateDone {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s1"); err != nil || state != core.StateDone {
 		t.Errorf("состояние = %q, %v", state, err)
 	}
 
 	// Пока ход идёт, список задач устарел и не показывается
-	if err := core.SaveSessionState("s1", core.StateWorking); err != nil {
+	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if line, _ := build(input, 10, weekBar{}, start, hidden, testLogger(t)); strings.Contains(plain(line), "фон:") {
@@ -245,10 +245,10 @@ func TestBuildShowsAgentsWorking(t *testing.T) {
 		{ID: "m1", Type: "monitor", Description: "live updates"},
 		{ID: "a1", Type: "subagent", Description: "Sleep page"},
 	}
-	if _, err := core.RecordBackground("s1", tasks, nil, start); err != nil {
+	if _, err := core.RecordBackgroundIn(core.RuntimeDir(), "s1", tasks, nil, start); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.SaveSessionState("s1", core.StatePaused); err != nil {
+	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StatePaused); err != nil {
 		t.Fatal(err)
 	}
 
@@ -256,14 +256,14 @@ func TestBuildShowsAgentsWorking(t *testing.T) {
 	if title != "▶️ demo" || !strings.HasPrefix(line, badgeBlue) || !strings.Contains(plain(line), "фон: Sleep page 5 мин +1") {
 		t.Errorf("агенты работают: %q, %q", title, plain(line))
 	}
-	if state, err := core.LoadSessionState("s1"); err != nil || state != core.StatePaused {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s1"); err != nil || state != core.StatePaused {
 		t.Errorf("показ агентов не пишется в состояние: %q, %v", state, err)
 	}
 
-	if err := core.SaveSessionState("s1", core.StatePaused); err != nil {
+	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StatePaused); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.RecordBackground("s1", []core.BackgroundTask{{ID: "a1", Type: "subagent"}, {ID: "b1", Type: "shell"}}, nil, start.Add(3*time.Hour)); err != nil {
+	if _, err := core.RecordBackgroundIn(core.RuntimeDir(), "s1", []core.BackgroundTask{{ID: "a1", Type: "subagent"}, {ID: "b1", Type: "shell"}}, nil, start.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, title := build(input, 10, weekBar{}, start.Add(3*time.Hour), hidden, testLogger(t)); title != "⏸️ demo" {

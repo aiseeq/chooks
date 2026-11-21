@@ -53,9 +53,8 @@ func runUnderstandCheck(ctx context.Context, data []byte, config *core.Config, l
 		logger.Warn("understand check input unreadable, call let through", "error", err)
 		return
 	}
-	if request, ok := hookctx.Request(ctx); ok {
-		resolveHookInput(input, request)
-	}
+	// transcript_path остаётся как его дал запрос: он пишется в журнал и в
+	// текст ошибки, а открывается от cwd запроса (ReadTurn)
 	hook, err := newUnderstandHook(ctx, logger)
 	if err != nil {
 		logger.Warn("understand check unavailable", "error", err)

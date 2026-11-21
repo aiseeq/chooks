@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// PrintModeSession сообщает, что хук вызвала неинтерактивная сессия `claude -p`.
+// PrintModeSessionForPID сообщает, что хук вызвала неинтерактивная сессия `claude -p`.
 //
 // Такие сессии порождает автоматика: пост-пасс hedwig гоняет через `claude -p`
 // арбитра расшифровки партиями, и каждая партия — отдельная сессия, которая
@@ -15,14 +15,9 @@ import (
 // это середина работы, которую он запустил одной командой.
 //
 // Режим определяется по командной строке процесса claude — его pid Claude Code
-// кладёт в CLAUDE_PID. Отсутствие терминала признаком не годится: в IDE его
+// кладёт в CLAUDE_PID запроса. Отсутствие терминала признаком не годится: в IDE его
 // нет и у интерактивной сессии. Ошибка означает, что командную строку прочитать
 // не удалось и режим неизвестен
-func PrintModeSession() (bool, error) {
-	return printModeCmdline(os.Getenv("CLAUDE_PID"))
-}
-
-// PrintModeSessionForPID reads the Claude process identified by the request.
 func PrintModeSessionForPID(pid string) (bool, error) {
 	return printModeCmdline(pid)
 }

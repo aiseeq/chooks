@@ -33,11 +33,6 @@ type KillGuardTool struct {
 	selfPID  int
 }
 
-// NewKillGuardTool создает защиту от убийства сессии
-func NewKillGuardTool(config core.ToolConfig, logger core.Logger) (*KillGuardTool, error) {
-	return NewKillGuardToolForPID(config, logger, os.Getpid())
-}
-
 // NewKillGuardToolForPID protects the process tree of this hook request.
 func NewKillGuardToolForPID(config core.ToolConfig, logger core.Logger, pid int) (*KillGuardTool, error) {
 	return &KillGuardTool{

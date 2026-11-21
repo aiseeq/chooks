@@ -20,7 +20,7 @@ const (
 	konsoleDisplayedTitle = int32(1)
 )
 
-// SetTerminalTitle меняет заголовок окна терминала.
+// SetTerminalTitleForRequest меняет заголовок окна терминала запроса.
 //
 // Konsole собирает заголовок по шаблону («%d : %n» по умолчанию) и escape-
 // последовательность OSC при этом игнорирует, поэтому шаблон заменяется целиком
@@ -30,29 +30,8 @@ const (
 //
 // Адрес вкладки в окружении наследуется, поэтому сессия claude, запущенная
 // внутри tmux или другого claude, видит адрес чужой вкладки. Такая сессия идёт
-// путём прочих терминалов, OSC в stderr: вкладку родителя он не трогает
-func SetTerminalTitle(title string) error {
-	title = sanitizeTitle(title)
-	if title == "" {
-		return nil
-	}
-
-	if service, session, ok := konsoleSession(); ok {
-		names, err := processNames(os.Getpid())
-		if err != nil {
-			return fmt.Errorf("konsole tab owner unknown: %w", err)
-		}
-		if ownsKonsoleTab(names) {
-			return setKonsoleTitle(service, session, title)
-		}
-	}
-
-	// Заголовок ставится через stderr: stdout у хука и строки статуса занят данными
-	fmt.Fprintf(os.Stderr, "\033]0;%s\007", title)
-	return nil
-}
-
-// SetTerminalTitleForRequest uses the hook's terminal and process tree.
+// путём прочих терминалов, OSC в stderr: вкладку родителя он не трогает.
+// Окружение, дерево процессов (от PID) и stderr — запроса
 func SetTerminalTitleForRequest(title string, request hookctx.Context) error {
 	title = sanitizeTitle(title)
 	if title == "" {
@@ -84,16 +63,6 @@ func konsoleSession() (service, session string, ok bool) {
 	service = os.Getenv("KONSOLE_DBUS_SERVICE")
 	session = os.Getenv("KONSOLE_DBUS_SESSION")
 	return service, session, service != "" && session != ""
-}
-
-// setKonsoleTitle задаёт заголовок сессии Konsole через D-Bus
-func setKonsoleTitle(service, session, title string) error {
-	conn, err := dbus.SessionBus()
-	if err != nil {
-		return fmt.Errorf("session bus unavailable: %w", err)
-	}
-
-	return setKonsoleTitleOn(conn, service, session, title)
 }
 
 func setKonsoleTitleOn(conn *dbus.Conn, service, session, title string) error {

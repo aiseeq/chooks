@@ -14,20 +14,6 @@ const (
 	VerdictError = "error"
 )
 
-// StateDir — $XDG_STATE_HOME/chooks: журналы судей рядом с
-// limits-history.jsonl и skill-reload
-func StateDir() (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("cannot resolve home dir: %w", err)
-		}
-		base = filepath.Join(home, ".local", "state")
-	}
-	return filepath.Join(base, "chooks"), nil
-}
-
 // AppendJSONL дописывает запись строкой JSON в журнал, создавая каталог
 func AppendJSONL(path string, entry any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

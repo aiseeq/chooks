@@ -70,7 +70,7 @@ func TestRunSessionEvent_StopDoesNotReadTranscript(t *testing.T) {
 		t.Fatal("Stop-хук ждёт транскрипт")
 	}
 
-	state, err := core.LoadSessionState("s1")
+	state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s1")
 	if err != nil || state != core.StateDone {
 		t.Errorf("состояние после остановки: %q, %v", state, err)
 	}
@@ -83,10 +83,10 @@ func TestRunSessionEvent_PauseThenDone(t *testing.T) {
 	shell := []map[string]any{{"id": "b1", "type": "shell", "status": "running", "description": "sleep 40", "command": "sleep 40"}}
 
 	runSessionEvent(core.EventStop, stopInput(t, "s2", "/nonexistent.jsonl", shell, []map[string]any{}), config, logger)
-	if state, err := core.LoadSessionState("s2"); err != nil || state != core.StatePaused {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s2"); err != nil || state != core.StatePaused {
 		t.Fatalf("при живой задаче ожидалась пауза: %q, %v", state, err)
 	}
-	if background, err := core.LoadBackground("s2"); err != nil || len(background.Tasks) != 1 || background.Tasks[0].Description != "sleep 40" {
+	if background, err := core.LoadBackgroundIn(core.RuntimeDir(), "s2"); err != nil || len(background.Tasks) != 1 || background.Tasks[0].Description != "sleep 40" {
 		t.Fatalf("строке статуса нужно описание задачи: %+v, %v", background, err)
 	}
 
@@ -95,12 +95,12 @@ func TestRunSessionEvent_PauseThenDone(t *testing.T) {
 		t.Fatal(err)
 	}
 	runSessionEvent(core.EventNotification, idle, config, logger)
-	if state, err := core.LoadSessionState("s2"); err != nil || state != core.StatePaused {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s2"); err != nil || state != core.StatePaused {
 		t.Fatalf("напоминание при паузе не меняет состояние: %q, %v", state, err)
 	}
 
 	runSessionEvent(core.EventStop, stopInput(t, "s2", "/nonexistent.jsonl", []map[string]any{}, []map[string]any{}), config, logger)
-	if state, err := core.LoadSessionState("s2"); err != nil || state != core.StateDone {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s2"); err != nil || state != core.StateDone {
 		t.Errorf("после последней задачи ожидалось «готово»: %q, %v", state, err)
 	}
 }
@@ -120,7 +120,7 @@ func TestRunSessionEvent_BrokenTaskBookkeepingKeepsPause(t *testing.T) {
 
 	shell := []map[string]any{{"id": "b1", "type": "shell", "status": "running"}}
 	runSessionEvent(core.EventStop, stopInput(t, "s3", "/nonexistent.jsonl", shell, []map[string]any{}), config, logger)
-	if state, err := core.LoadSessionState("s3"); err != nil || state != core.StatePaused {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s3"); err != nil || state != core.StatePaused {
 		t.Errorf("при сбое учёта ожидалась пауза: %q, %v", state, err)
 	}
 }

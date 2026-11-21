@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,18 +68,23 @@ func LoadConfig(configPath string) (*Config, error) {
 	return finishConfig(config, configPath)
 }
 
-// LoadConfigForRequest resolves config and log paths using the hook's environment.
+// LoadConfigForRequest загружает конфигурацию по окружению запроса. Путь к
+// файлу в ошибках — как его дал запрос (флаг или $XDG_CONFIG_HOME по правилам
+// UserConfigDir из пакета os), а открывается он от cwd запроса
 func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, error) {
-	defaultPath := func() (string, error) {
+	if configPath == "" {
 		dir := request.Getenv("XDG_CONFIG_HOME")
-		if dir == "" {
+		switch {
+		case dir == "":
 			home := request.Getenv("HOME")
 			if home == "" {
-				return "", fmt.Errorf("failed to resolve default config path: neither $XDG_CONFIG_HOME nor $HOME are defined")
+				return nil, fmt.Errorf("failed to resolve default config path: neither $XDG_CONFIG_HOME nor $HOME are defined")
 			}
 			dir = filepath.Join(home, ".config")
+		case !filepath.IsAbs(dir):
+			return nil, fmt.Errorf("failed to resolve default config path: path in $XDG_CONFIG_HOME is relative")
 		}
-		return request.Abs(filepath.Join(dir, "chooks", "config.yaml")), nil
+		configPath = filepath.Join(dir, "chooks", "config.yaml")
 	}
 	expand := func(config *Config) error {
 		path := config.Logger.LogFile
@@ -95,17 +101,7 @@ func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, 
 		config.Logger.LogFile = path
 		return nil
 	}
-	if configPath != "" {
-		configPath = request.Abs(configPath)
-	}
-	if configPath == "" {
-		var err error
-		configPath, err = defaultPath()
-		if err != nil {
-			return nil, err
-		}
-	}
-	config, present, err := loadConfig(configPath)
+	config, present, err := loadConfigAt(request.Abs(configPath), configPath)
 	if err != nil || !present {
 		return config, err
 	}
@@ -116,13 +112,22 @@ func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, 
 }
 
 func loadConfig(configPath string) (*Config, bool, error) {
+	return loadConfigAt(configPath, configPath)
+}
 
-	data, err := os.ReadFile(configPath)
+// loadConfigAt читает файл path; в ошибках он назван shown
+func loadConfigAt(path, shown string) (*Config, bool, error) {
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return DefaultConfig(), false, nil
 		}
-		return nil, false, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			pathErr.Path = shown
+		}
+		return nil, false, fmt.Errorf("failed to read config file %s: %w", shown, err)
 	}
 
 	// Неизвестные ключи — ошибка: молча проигнорированная опечатка в имени поля
@@ -132,7 +137,7 @@ func loadConfig(configPath string) (*Config, bool, error) {
 	decoder.KnownFields(true)
 	// io.EOF означает пустой файл — работаем на значениях по умолчанию
 	if err := decoder.Decode(&config); err != nil && !errors.Is(err, io.EOF) {
-		return nil, false, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+		return nil, false, fmt.Errorf("failed to parse config file %s: %w", shown, err)
 	}
 
 	applyLoggerDefaults(&config.Logger)

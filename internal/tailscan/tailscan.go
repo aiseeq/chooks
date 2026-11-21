@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 const (
@@ -29,8 +31,22 @@ var ErrNotRegular = errors.New("not a regular file")
 // — без обрезанной первой строки. Не обычный файл — ошибка: у каталога на
 // btrfs размер 0, и чтение пустого окна ошибки не дало бы
 func Scan(path string, fn func(buf []byte) (done bool)) error {
-	file, err := os.Open(path)
+	return ScanFrom("", path, fn)
+}
+
+// ScanFrom — Scan с относительным path от каталога dir (cwd запроса), а не
+// от cwd процесса. В текстах ошибок path остаётся таким, как его дали
+func ScanFrom(dir, path string, fn func(buf []byte) (done bool)) error {
+	open := path
+	if dir != "" && !filepath.IsAbs(path) {
+		open = filepath.Join(dir, path)
+	}
+	file, err := os.Open(open)
 	if err != nil {
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			pathErr.Path = path
+		}
 		return fmt.Errorf("open transcript: %w", err)
 	}
 	defer file.Close()

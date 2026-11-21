@@ -17,9 +17,10 @@ const WideSearchHintText = "дерево большое: код — `git grep` �
 // wideRoots — большие деревья относительно домашнего каталога; обход их
 // самих или их предков (~, /) — широкий, обход внутри одного репо или
 // своего scratchpad — нет. claude-1000 — все scratchpad сессий сразу,
-// .local/state/worker и транскрипты .claude/projects — из обходов 20–21.11
+// .local/state/worker, транскрипты .claude/projects и прогоны Сна
+// .claude/improve/runs (1,4 ГБ) — из обходов 20–21.11
 var wideRoots = []string{"", ".cache", ".cache/claude-tmp", ".cache/claude-tmp/claude-1000", "git", "work",
-	".local/state", ".local/state/worker", ".claude/projects"}
+	".local/state", ".local/state/worker", ".claude/projects", ".claude/improve/runs"}
 
 // WideSearch — первый в команде рекурсивный обход большого дерева: grep -r,
 // rg, find, du, ls -R по пути из wideRoots или его предку. Относительный

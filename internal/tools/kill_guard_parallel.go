@@ -418,12 +418,12 @@ func (s *killScan) parallelCallsInput(c shellcmd.Call, p parallelCommand, calls 
 		via = "parallel-args"
 	}
 	for i := range calls {
-		markParallelInputCall(&calls[i], c, p, via, canIgnoreImplicitInput, harmlessInput, pipeInput)
+		s.markParallelInputCall(&calls[i], c, p, via, canIgnoreImplicitInput, harmlessInput, pipeInput)
 	}
 	return in, pipeInput
 }
 
-func markParallelInputCall(call *shellcmd.Call, parallel shellcmd.Call, p parallelCommand, via string, canIgnoreImplicitInput, harmlessInput, pipeInput bool) {
+func (s *killScan) markParallelInputCall(call *shellcmd.Call, parallel shellcmd.Call, p parallelCommand, via string, canIgnoreImplicitInput, harmlessInput, pipeInput bool) {
 	call.Via = slices.Concat(parallel.Via, []string{via}, call.Via)
 	if harmlessInput {
 		call.Via = append(call.Via, "parallel-safe-input")
@@ -435,9 +435,44 @@ func markParallelInputCall(call *shellcmd.Call, parallel shellcmd.Call, p parall
 	// У вызовов parallel нет своего места в исходном тексте. Пометка
 	// передаёт ввод --pipe в обычную проверку elevated оболочки.
 	readsPipe := inputTaker(*call) || shellcmd.IsShell(call.Name) && shellReadsInput(call.Args) ||
-		call.Name == "parallel" && p.pipe
+		call.Name == "parallel" && p.pipe && s.parallelReadsInputAsScript(*call, 0)
 	call.ScriptInput = call.ScriptInput || pipeInput && readsPipe && !parallelWrapperOwnsInput(*call)
 	call.ScriptInput = call.ScriptInput || !p.pipe && parallelArgumentAffectsScript(p, *call) && !harmlessInput
+}
+
+func (s *killScan) parallelReadsInputAsScript(c shellcmd.Call, depth int) bool {
+	if depth >= maxScriptNesting {
+		return false
+	}
+	p := parseParallel(c.Args)
+	if p.failed || !p.pipe || len(p.words) == 0 {
+		return false
+	}
+	command := p
+	if end := slices.IndexFunc(p.words, p.sourceWord); end >= 0 {
+		command.words = p.words[:end]
+	}
+	script, err := command.script()
+	if err != nil {
+		s.tool.Logger().Warn("kill_guard: nested parallel command is not parseable", "error", err)
+		return false
+	}
+	calls, err := shellcmd.Calls(script)
+	if err != nil {
+		s.tool.Logger().Warn("kill_guard: nested parallel shell calls are not parseable", "error", err)
+		return false
+	}
+	expanded := s.elevatedCalls(calls)
+	for i := range expanded {
+		call := expanded[i]
+		if shellcmd.IsShell(call.Name) && shellReadsInput(call.Args) {
+			return true
+		}
+		if call.Name == "parallel" && s.parallelReadsInputAsScript(call, depth+1) {
+			return true
+		}
+	}
+	return false
 }
 
 func parallelHasSiblingSignal(command string, p parallelCommand) (bool, error) {

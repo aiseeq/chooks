@@ -12,6 +12,8 @@ func TestKillGuardParallelImplicitShellInput(t *testing.T) {
 		`echo 'kill 1' | parallel 'systemd-run --user true; pkexec bash -c'`,
 		`echo make | parallel --pipe 'pkexec systemd-run --user --pipe bash'`,
 		`echo 'kill 1' | parallel --pipe 'parallel --pipe pkexec bash'`,
+		`echo 'kill -9 -1' | parallel --pipe 'parallel sudo bash -c'`,
+		`echo 'kill -9 -1' | parallel --pipe 'parallel bash -c'`,
 		`parallel pkexec bash -c ::: 'kill 1'`,
 		`parallel 'pkexec bash -c' <<< 'kill 1'`,
 		`parallel 'sudo bash -c' <<< 'kill 1'`,
@@ -134,6 +136,15 @@ func TestKillGuardParallelImplicitAllowsUnusedScriptArgument(t *testing.T) {
 		`sem sudo bash -c make # kill`,
 		`sem 'sudo bash -c' ::: make # kill`,
 		`parallel echo ::: a; kill -L`,
+		`cat log | parallel --pipe 'parallel --pipe wc -l'; kill 1234`,
+		`grep kill log | parallel --pipe 'parallel --pipe wc -l'`,
+		`cat files | parallel --pipe 'parallel gzip'; kill %1`,
+		`cat files | parallel --pipe 'parallel sudo gzip'; kill 1234`,
+		`cat files | parallel --pipe 'sudo parallel gzip'; kill 1234`,
+		`ps aux | grep kill | parallel --pipe 'parallel --pipe grep -c x'`,
+		`cat urls | parallel --pipe -N100 'parallel -j4 curl -sO'; kill 1234`,
+		`parallel --pipe 'parallel --pipe gzip' < big.txt; kill 1234`,
+		`grep kill log | parallel --pipe 'sudo parallel --pipe wc -l'`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if r := validateKill(t, command); !r.IsValid {

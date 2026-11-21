@@ -173,6 +173,40 @@ func TestNeedsUsageEmptyWeek(t *testing.T) {
 	}
 }
 
+func TestInspectAccountReasons(t *testing.T) {
+	now := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
+	week := func(used float64) map[string]Usage {
+		return map[string]Usage{"a@example.com": {Week: Window{Used: used, ResetsAt: now.Add(day)}}}
+	}
+	broken := Account{UUID: "a", Email: "a@example.com", OAuth: json.RawMessage(`{"accessToken":`)}
+	cleared := Account{UUID: "a", Email: "a@example.com", OAuth: json.RawMessage(`{"accessToken":"","refreshToken":"","expiresAt":null}`)}
+	dead := account("a", 20*day, now)
+	dead.Dead = "invalid_grant"
+	tests := []struct {
+		name        string
+		account     Account
+		usage       map[string]Usage
+		want        accountReason
+		loginUsable bool
+	}{
+		{name: "dead", account: dead, want: accountDead},
+		{name: "broken oauth", account: broken, want: accountBroken},
+		{name: "cleared", account: cleared, want: accountCleared},
+		{name: "login expires inside margin", account: account("a", 30*time.Minute, now), want: accountLoginExpiring},
+		{name: "unknown week", account: account("a", 20*day, now), want: accountWeekUnknown, loginUsable: true},
+		{name: "usable week", account: account("a", 20*day, now), usage: week(40), want: accountAvailable, loginUsable: true},
+		{name: "full week", account: account("a", 20*day, now), usage: week(100), want: accountWeekFull, loginUsable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := inspectAccount(&tt.account, tt.usage, now)
+			if got.reason != tt.want || got.loginUsable != tt.loginUsable {
+				t.Errorf("inspectAccount = reason %v, loginUsable %t; want %v, %t", got.reason, got.loginUsable, tt.want, tt.loginUsable)
+			}
+		})
+	}
+}
+
 // needUUIDs — учётки через пробел
 func needUUIDs(accounts []*Account) string {
 	ids := make([]string, len(accounts))

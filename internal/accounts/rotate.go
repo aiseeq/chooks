@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/aiseeq/chooks/internal/core"
@@ -82,9 +83,15 @@ func (r *Rotator) Rotate(ctx context.Context, opts Options) (bool, error) {
 	// Замер недель — и при выключенном автопереключении: после ручного
 	// switch и /login на учётку со сброшенной неделей запись иначе остаётся
 	// на старой доле (13.11)
-	if len(s.Accounts) > 1 && syncErr == nil {
-		if usage, ok := r.measure(ctx, s); ok && !s.AutoOff {
-			r.autoSwitch(ctx, s, usage)
+	if syncErr == nil {
+		if len(s.Accounts) < 2 {
+			r.Log.Info("accounts: no switch", "reason", "нужны минимум две сохранённые учётки")
+		} else if usage, ok := r.measure(ctx, s); ok {
+			if s.AutoOff {
+				r.Log.Info("accounts: no switch", "reason", "автопереключение выключено")
+			} else {
+				r.autoSwitch(ctx, s, usage)
+			}
 		}
 	}
 	if err := saveStore(r.Paths, s); err != nil {
@@ -125,12 +132,23 @@ func (r *Rotator) autoSwitch(ctx context.Context, s *Store, usage map[string]Usa
 		activeAlive = eligible(active, now)
 	}
 	if activeAlive && now.Sub(s.LastSwitch) < switchCooldown {
+		r.Log.Info("accounts: no switch", "reason", fmt.Sprintf("кулдаун после переключения до %s", s.LastSwitch.Add(switchCooldown).Format(time.RFC3339)))
 		return
 	}
 	// Цель может оказаться мёртвой при обновлении — тогда выбор повторяется
 	for range s.Accounts {
-		target, reason := choose(s, usage, now)
-		if target == nil || target.UUID == s.Active {
+		choice := chooseResult(s, usage, now)
+		target, reason := choice.account, choice.reason
+		if target == nil {
+			r.Log.Warn("accounts: no switch", "reasons", strings.Join(noSwitchReasons(s, usage, now), "; "))
+			return
+		}
+		if target.UUID == s.Active {
+			if choice.outcome == chooseAllEmpty {
+				r.Log.Warn("accounts: no switch", "reasons", strings.Join(noSwitchReasons(s, usage, now), "; "))
+			} else {
+				r.Log.Info("accounts: no switch", "reason", reason)
+			}
 			return
 		}
 		err := r.switchTo(ctx, s, target, reason)
@@ -265,27 +283,72 @@ func (r *Rotator) fresh(ctx context.Context, s *Store, a *Account, margin time.D
 	got, err := r.Client.Refresh(ctx, o, now)
 	if errors.Is(err, errDeadLogin) {
 		a.Dead = "обновление отклонено (invalid_grant), нужен /login"
-		r.Log.Warn("accounts: login is dead", "account", a.Email)
+		r.Log.Warn("accounts: inactive login refresh failed", "account", a.Email, "error", err)
 		return oauth{}, err
 	}
 	if err != nil {
+		r.Log.Warn("accounts: inactive login refresh failed", "account", a.Email, "error", err)
 		return oauth{}, err
 	}
 	if got.AccountUUID != "" && got.AccountUUID != a.UUID {
 		// Токен обновления оказался чужим: сохранять ответ некуда
 		a.Dead = "токен обновления выдан другой учётке, нужен /login"
-		return oauth{}, fmt.Errorf("refresh for %s answered for another account", a.Email)
+		err := fmt.Errorf("refresh answered for another account")
+		r.Log.Warn("accounts: inactive login refresh failed", "account", a.Email, "error", err)
+		return oauth{}, err
 	}
 	updated, err := applyRefreshed(a.OAuth, got)
 	if err != nil {
+		r.Log.Warn("accounts: inactive login refresh failed", "account", a.Email, "error", err)
 		return oauth{}, err
 	}
 	a.OAuth, a.SavedAt = updated, now
 	if err := saveStore(r.Paths, s); err != nil {
-		return oauth{}, fmt.Errorf("refreshed tokens not saved: %w", err)
+		err = fmt.Errorf("refreshed tokens not saved: %w", err)
+		r.Log.Warn("accounts: inactive login refresh failed", "account", a.Email, "error", err)
+		return oauth{}, err
 	}
 	r.Log.Info("accounts: inactive login refreshed", "account", a.Email)
 	return a.oauth()
+}
+
+// noSwitchReasons описывает причину, по которой каждая учётка не может
+// стать целью текущего выбора.
+func noSwitchReasons(s *Store, usage map[string]Usage, now time.Time) []string {
+	unit := s.PlanUnit(now)
+	reasons := make([]string, 0, len(s.Accounts))
+	for i := range s.Accounts {
+		a := &s.Accounts[i]
+		label := a.Email
+		if label == "" {
+			label = a.UUID
+		}
+		st := inspectAccount(a, usage, now)
+		switch st.reason {
+		case accountDead:
+			reasons = append(reasons, fmt.Sprintf("%s: мёртвая (%s)", label, st.detail))
+		case accountBroken:
+			reasons = append(reasons, fmt.Sprintf("%s: токены не разобраны (%s)", label, st.detail))
+		case accountCleared:
+			reasons = append(reasons, fmt.Sprintf("%s: вход очищен", label))
+		case accountLoginExpiring:
+			reasons = append(reasons, fmt.Sprintf("%s: вход истекает раньше чем через час (до %s)", label, st.loginEnds.Format(time.RFC3339)))
+		case accountWeekFull:
+			reasons = append(reasons, fmt.Sprintf("%s: неделя заполнена (%s)", label, unit.Percent(st.week.Used)))
+		case accountAvailable:
+			if a.UUID == s.Active {
+				reasons = append(reasons, fmt.Sprintf("%s: остаётся активной по правилу выбора", label))
+			} else {
+				reasons = append(reasons, fmt.Sprintf("%s: неделя доступна (%s), сброс %s", label, unit.Percent(st.week.Used), ShortTime(st.resets)))
+			}
+		case accountWeekUnknown:
+			reasons = append(reasons, fmt.Sprintf("%s: неделя неизвестна или не начата", label))
+		}
+	}
+	if len(reasons) == 0 {
+		return []string{"нет сохранённых учёток"}
+	}
+	return reasons
 }
 
 // fetchUsage спрашивает у API расход учётки и пишет его в снимок

@@ -31,6 +31,11 @@ type Usage struct {
 type state struct {
 	account *Account
 	week    Window
+	// reason — общий диагноз годности входа и недельного лимита.
+	reason      accountReason
+	detail      string
+	loginEnds   time.Time
+	loginUsable bool
 	// weekKnown — сброс недели известен и ещё не прошёл
 	weekKnown bool
 	// resets — сброс для сравнения: неизвестная неделя считается
@@ -39,47 +44,64 @@ type state struct {
 	empty  bool
 }
 
+type accountReason uint8
+
+const (
+	accountAvailable accountReason = iota
+	accountDead
+	accountBroken
+	accountCleared
+	accountLoginExpiring
+	accountWeekUnknown
+	accountWeekFull
+)
+
+// inspectAccount вычисляет состояние входа и недели единым правилом для
+// выбора, замеров и объяснения отказа переключения.
+func inspectAccount(a *Account, usage map[string]Usage, now time.Time) state {
+	st := state{account: a, resets: now.Add(weekWindow)}
+	if a.Dead != "" {
+		st.reason = accountDead
+		st.detail = a.Dead
+	} else if o, err := a.oauth(); err != nil {
+		st.reason = accountBroken
+		st.detail = err.Error()
+	} else if o.cleared() {
+		st.reason = accountCleared
+	} else {
+		st.loginUsable = true
+		if family := o.family(); family > 0 {
+			st.loginEnds = time.UnixMilli(family)
+			if !st.loginEnds.After(now.Add(loginMargin)) {
+				st.loginUsable = false
+				st.reason = accountLoginExpiring
+			}
+		}
+	}
+	if u := usage[a.Email].Week; u.ResetsAt.After(now) {
+		st.week, st.weekKnown, st.resets = u, true, u.ResetsAt
+		if u.Used >= WeekEmptyPercent {
+			st.empty = true
+			if st.loginUsable {
+				st.reason = accountWeekFull
+			}
+		} else if st.loginUsable {
+			st.reason = accountAvailable
+		}
+	} else if st.loginUsable {
+		st.reason = accountWeekUnknown
+	}
+	return st
+}
+
 // eligible — вход учётки жив и не истекает в ближайший час
 func eligible(a *Account, now time.Time) bool {
-	return loginOf(a).usableAt(now)
-}
-
-// login — что о входе учётки нужно правилу выбора
-type login struct {
-	alive bool
-	// broken — токены учётки не разобрать
-	broken error
-	// ends — конец цепочки токенов, ноль — неизвестен
-	ends time.Time
-}
-
-func loginOf(a *Account) login {
-	if a.Dead != "" {
-		return login{}
-	}
-	o, err := a.oauth()
-	if err != nil {
-		// Токены не разобрать: вход не годится, причина — при сверке хранилища
-		return login{broken: err}
-	}
-	if o.cleared() {
-		return login{}
-	}
-	l := login{alive: true}
-	if o.family() > 0 {
-		l.ends = time.UnixMilli(o.family())
-	}
-	return l
-}
-
-// usableAt — вход жив и не истекает в ближайший час после now
-func (l login) usableAt(now time.Time) bool {
-	return l.broken == nil && l.alive && (l.ends.IsZero() || l.ends.After(now.Add(loginMargin)))
+	return inspectAccount(a, nil, now).loginUsable
 }
 
 // states собирает состояние живых учёток в порядке хранилища
 func states(s *Store, usage map[string]Usage, now time.Time) []state {
-	return statesWith(s, usage, now, func(a *Account) bool { return eligible(a, now) })
+	return statesWith(s, usage, now, nil)
 }
 
 // statesWith — states с проверкой входа от вызывающего
@@ -87,16 +109,13 @@ func statesWith(s *Store, usage map[string]Usage, now time.Time, usable func(*Ac
 	var out []state
 	for i := range s.Accounts {
 		a := &s.Accounts[i]
-		if !usable(a) {
+		st := inspectAccount(a, usage, now)
+		if usable == nil {
+			if !st.loginUsable {
+				continue
+			}
+		} else if !usable(a) {
 			continue
-		}
-		u := usage[a.Email]
-		st := state{account: a, resets: now.Add(weekWindow)}
-		if u.Week.ResetsAt.After(now) {
-			st.week, st.weekKnown, st.resets = u.Week, true, u.Week.ResetsAt
-		}
-		if st.weekKnown && st.week.Used >= WeekEmptyPercent {
-			st.empty = true
 		}
 		out = append(out, st)
 	}
@@ -108,15 +127,34 @@ func statesWith(s *Store, usage map[string]Usage, now time.Time, usable func(*Ac
 // остаётся активная. Все пусты — остаётся активная: лучше нет.
 // Возвращает выбранную учётку (nil — выбрать не из чего) и причину
 func choose(s *Store, usage map[string]Usage, now time.Time) (*Account, string) {
+	result := chooseResult(s, usage, now)
+	return result.account, result.reason
+}
+
+type chooseOutcome uint8
+
+const (
+	chooseOrdinary chooseOutcome = iota
+	chooseAllEmpty
+	chooseNoLiveAccounts
+)
+
+type chooseResultValue struct {
+	account *Account
+	reason  string
+	outcome chooseOutcome
+}
+
+func chooseResult(s *Store, usage map[string]Usage, now time.Time) chooseResultValue {
 	best, all := pick(s, usage, now)
 	if best == nil {
 		if active := s.byUUID(s.Active); active != nil {
-			return active, "все учётки пусты"
+			return chooseResultValue{account: active, reason: "все учётки пусты", outcome: chooseAllEmpty}
 		}
-		return nil, "нет живых учёток"
+		return chooseResultValue{reason: "нет живых учёток", outcome: chooseNoLiveAccounts}
 	}
 	if best.account.UUID == s.Active {
-		return best.account, "активная — ближайший сброс"
+		return chooseResultValue{account: best.account, reason: "активная — ближайший сброс"}
 	}
 	// Доли в причине — в % недели подписки за $100, как в строке статуса и
 	// chooks limits (лид 12.11 17:39 по слову пользователя «вот прям везде»)
@@ -126,16 +164,21 @@ func choose(s *Store, usage map[string]Usage, now time.Time) (*Account, string) 
 		reason = fmt.Sprintf("сброс %s, неделя %s", ShortTime(best.resets), unit.Percent(best.week.Used))
 	}
 	if active := s.byUUID(s.Active); active != nil {
-		for _, st := range all {
-			if st.account == active && st.empty {
-				return best.account, fmt.Sprintf("%s пуста (неделя %s); %s", active.Email, unit.Percent(st.week.Used), reason)
+		var activeState *state
+		for i := range all {
+			if all[i].account == active {
+				activeState = &all[i]
+				break
 			}
 		}
-		if !eligible(active, now) {
-			return best.account, fmt.Sprintf("вход %s не годится; %s", active.Email, reason)
+		if activeState == nil {
+			return chooseResultValue{account: best.account, reason: fmt.Sprintf("вход %s не годится; %s", active.Email, reason)}
+		}
+		if activeState.empty {
+			return chooseResultValue{account: best.account, reason: fmt.Sprintf("%s пуста (неделя %s); %s", active.Email, unit.Percent(activeState.week.Used), reason)}
 		}
 	}
-	return best.account, "ближе сброс: " + reason
+	return chooseResultValue{account: best.account, reason: "ближе сброс: " + reason}
 }
 
 // pick — правило выбора без причины: из непустых живых учёток — с ближайшим

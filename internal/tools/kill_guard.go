@@ -513,10 +513,13 @@ func harmlessImplicitXargsScriptInput(c shellcmd.Call, s *killScan) bool {
 
 func (s *killScan) rewrittenCall(c shellcmd.Call, calls []shellcmd.Call) (bool, error) {
 	if c.Name == "sem" && s.signalWord {
-		if script, ok := parallelShellCall(append([]string{"--semaphore"}, c.Args...), &c); ok {
-			if inner, err := shellcmd.Calls(script); err == nil && parallelHasElevatedScript(inner) {
-				s.addReason("sem передаёт неявный аргумент команде оболочки за привилегированной обёрткой")
-				return true, nil
+		in := s.inputOf(c)
+		if in.src == stdinPipe || in.src == stdinFile || in.src == stdinRedirect {
+			if script, ok := parallelShellCall(append([]string{"--semaphore"}, c.Args...), &c); ok {
+				if inner, err := shellcmd.Calls(script); err == nil && parallelHasElevatedScript(inner) {
+					s.addReason("sem получает stdin рядом со скриптом оболочки за привилегированной обёрткой")
+					return true, nil
+				}
 			}
 		}
 	}

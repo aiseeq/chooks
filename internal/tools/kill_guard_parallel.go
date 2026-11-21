@@ -215,13 +215,18 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 // parallelCalls проверка разобранной команды parallel (parallelSystemdRun)
 func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script string, calls []shellcmd.Call) (string, []shellcmd.Call) {
 	in, pipeInput := s.parallelCallsInput(c, p, calls)
-	hasSiblingSignal, parseErr := parallelHasSiblingSignal(s.command, p)
-	if parseErr != nil {
-		s.tool.Logger().Warn("kill_guard: соседние вызовы parallel не разобраны", "error", parseErr)
-		return "parallel в команде с неразбираемым соседним вызовом; проверить сигнал нельзя", calls
-	}
-	if hasSiblingSignal {
-		return "parallel находится в команде с отдельным вызовом сигнала процесса; отказ сохраняется", calls
+	// Keep the fail-closed fallback only for an unknown listed value delivered
+	// to an elevated shell script. A neighboring kill command is otherwise
+	// checked on its own, as it is for commands without parallel.
+	if p.listed && !parallelSourcesHarmless(p) && parallelHasElevatedScript(s.elevatedCalls(calls)) {
+		hasSiblingSignal, parseErr := parallelHasSiblingSignal(s.command, p)
+		if parseErr != nil {
+			s.tool.Logger().Warn("kill_guard: соседние вызовы parallel не разобраны", "error", parseErr)
+			return "parallel в команде с неразбираемым соседним вызовом; проверить сигнал нельзя", calls
+		}
+		if hasSiblingSignal {
+			return "parallel с неизвестным значением за привилегированной оболочкой находится рядом с вызовом сигнала процесса", calls
+		}
 	}
 	// systemd-run и за run0, pkexec (parallel run0 systemd-run --pipe bash)
 	expanded := s.elevatedCalls(calls)
@@ -457,7 +462,7 @@ func parallelHasSiblingSignal(command string, p parallelCommand) (bool, error) {
 		if !slices.Contains(signalNames, call.Name) {
 			continue
 		}
-		if call.Name == "kill" && (slices.Contains(call.Args, "-l") || slices.Contains(call.Args, "--list")) {
+		if call.Name == "kill" && (slices.Contains(call.Args, "-l") || slices.Contains(call.Args, "-L") || slices.Contains(call.Args, "--list")) {
 			continue
 		}
 		if call.Name == "pkill" && (slices.Contains(call.Args, "-l") || slices.Contains(call.Args, "--list-name")) {

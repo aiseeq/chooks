@@ -118,6 +118,22 @@ func TestKillGuardParallelImplicitAllowsUnusedScriptArgument(t *testing.T) {
 		`echo 'kill 1' | parallel 'sudo bash -c "echo hi"'`,
 		`echo make | parallel 'sudo bash -c'; ps aux | grep kill`,
 		`echo make | parallel 'sudo bash -c' && echo done; kill -l`,
+		`parallel 'sudo bash -c' ::: make; ps aux | grep kill`,
+		`echo make | parallel 'sudo bash -c {}'; ps aux | grep kill`,
+		`parallel echo ::: a; kill 1234`,
+		`kill 1234; parallel echo ::: a`,
+		`parallel echo ::: a && kill 1234`,
+		`kill 1234 && parallel 'gzip {}' ::: a.log`,
+		`cat urls | parallel -j8 curl -s; kill 1234`,
+		`parallel -j4 'gzip {}' ::: *.log; kill %1`,
+		`pgrep -f foo | parallel 'echo {}'; kill 1234`,
+		`parallel 'sudo bash -c "make {}"' ::: a b; kill 1234`,
+		`parallel 'sudo bash -c "true"' ::: a; kill 1234`,
+		`parallel 'sudo bash -c "true"' ::: $(pgrep claude); kill -L`,
+		`ls | parallel sudo make; kill 1234`,
+		`sem sudo bash -c make # kill`,
+		`sem 'sudo bash -c' ::: make # kill`,
+		`parallel echo ::: a; kill -L`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if r := validateKill(t, command); !r.IsValid {

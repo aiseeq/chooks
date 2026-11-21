@@ -368,9 +368,9 @@ func TestModelGuardSettingsFile(t *testing.T) {
 	}
 	for command, reject := range map[string]bool{
 		"claude -p hi --settings " + settings:              true,
-		"claude -p hi --settings " + dir + "/missing.json": false,
+		"claude -p hi --settings " + dir + "/missing.json": true,
 		// FIFO не читается: чтение повесило бы хук (ревью 12.11)
-		"claude -p hi --settings " + fifo: false,
+		"claude -p hi --settings " + fifo: true,
 	} {
 		got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: command})
 		if err != nil {
@@ -589,6 +589,8 @@ func TestModelGuardRoundTwo(t *testing.T) {
 	write(filepath.Join(agentProject, ".claude/agents/other.md"), "---\nname: other\nmodel: opus\n---\n")
 	agentFile := filepath.Join(t.TempDir(), "agents.json")
 	write(agentFile, `{"rev":{"description":"review","prompt":"inspect","model":"fable"}}`)
+	agentNoModelFile := filepath.Join(t.TempDir(), "agents-no-model.json")
+	write(agentNoModelFile, `{"zz":{"description":"d","prompt":"p"}}`)
 	cases := []struct {
 		name, tool, cwd, command, raw string
 		reject                        bool
@@ -648,12 +650,14 @@ func TestModelGuardRoundTwo(t *testing.T) {
 		{"inline agents opus", "Bash", outside, `claude --agents '{"rev":{"model":"opus"}}' --agent rev -p hi`, "", false},
 		{"inline agents fable", "Bash", outside, `claude --agents '{"rev":{"model":"fable"}}' --agent rev -p hi`, "", true},
 		{"inline agents unapproved model", "Bash", outside, `claude --agents '{"rev":{"model":"haiku"}}' --agent rev -p hi`, "", true},
+		{"inline agent without model inherits session", "Bash", outside, `claude -p --agents '{"zz":{"description":"d","prompt":"p"}}' --agent zz hi`, "", false},
 		{"inline opus cannot mask project agent fable", "Bash", agentProject, `claude --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
 		{"inline fable is accumulated with file agent", "Bash", agentProject, `claude --agents '{"other":{"description":"review","prompt":"inspect","model":"fable"}}' --agent other -p hi`, "", true},
 		{"invalid inline agents cannot hide project agent", "Bash", agentProject, `claude --agents '{"rev":{"description":"","prompt":"inspect","effort":"impossible","model":"opus"}}' --agent rev -p hi`, "", true},
 		{"first repeated agents definition is retained", "Bash", agentProject, `claude --agents '{"rev":{"description":"review","prompt":"inspect","model":"fable"}}' --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
 		{"safe mode does not hide project agent", "Bash", agentProject, `claude --safe-mode --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
 		{"agents file fable model", "Bash", outside, "claude --agents " + agentFile + " -p hi", "", true},
+		{"agents file without model inherits session", "Bash", outside, "claude --agents " + agentNoModelFile + " --agent zz -p hi", "", false},
 		{"unreadable agents file is refused", "Bash", outside, "claude --agents " + filepath.Join(t.TempDir(), "missing-agents.json") + " -p hi", "", true},
 		{"dynamic agents file is refused", "Bash", outside, `claude --agents "$AGENTS_FILE" -p hi`, "", true},
 		{"plugin-dir opus", "Bash", outside, "claude --plugin-dir " + plugOpus + " --agent myplug:rev -p hi", "", false},
@@ -726,7 +730,7 @@ func TestModelGuardRoundThree(t *testing.T) {
 		{"cd literal assignment", "Bash", "D=" + cwd + `; cd $D && claude -p --model opus hi`, false},
 		{"cd quoted assignment", "Bash", "P=" + cwd + `; cd "$P" && claude -p --model opus hi`, false},
 		{"cd variable prefix", "Bash", "P=" + cwd + `; cd $P/proj && claude -p --model opus hi`, false},
-		{"dynamic cd skips stale project settings", "Bash", "P=" + dynamicProject + `; cd $P && claude -p --model opus hi`, false},
+		{"dynamic cd keeps session project settings candidate", "Bash", "P=" + dynamicProject + `; cd $P && claude -p --model opus hi`, false},
 		{"mktemp empty cwd", "Bash", `bash -c 'd=$(mktemp -d); cd $d && claude -p --model opus hi'`, false},
 		{"prompt mentions settings redirection elsewhere", "Bash", `claude -p "проверь .claude/settings.json" > /tmp/out.txt`, false},
 		{"settings source with output redirection", "Bash", `claude --settings ` + filepath.Join(cwd, ".claude/settings.json") + ` -p hi > /tmp/out.txt`, false},
@@ -747,13 +751,13 @@ func TestModelGuardRoundThree(t *testing.T) {
 			}
 		})
 	}
-	t.Run("dynamic cd does not inspect stale project settings", func(t *testing.T) {
+	t.Run("dynamic cd includes session project settings", func(t *testing.T) {
 		result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", CWD: dynamicProject, Command: `cd $P && claude -p --model opus hi`})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !result.IsValid {
-			t.Fatalf("dynamic cwd should leave project settings unchecked: %+v", result.Violations)
+		if result.IsValid {
+			t.Fatalf("session project settings were not checked: %+v", result.Violations)
 		}
 	})
 }
@@ -764,40 +768,43 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	approvedPath := filepath.Join(home, "approved")
 	files := map[string]string{
 		approvedPath: "opus claude-opus-5-5\nfable claude-fable-5-2\n",
-		filepath.Join(home, ".claude/agents/fx.md"):                                "---\nname: fx\nmodel: fable\n---\nтело\n",
-		filepath.Join(home, ".claude/agents/sub/fy.md"):                            "---\nname: other-name\nmodel: \"claude-fable-5-2\"\n---\n",
-		filepath.Join(home, ".claude/agents/ok.md"):                                "---\nname: ok\nmodel: opus\n---\nmodel: fable\n",
-		filepath.Join(home, ".claude/agents/hk.md"):                                "---\r\nname: hk\r\nmodel: haiku\r\n---\r\n",
-		filepath.Join(home, ".claude/agents/in.md"):                                "---\nname: in\nmodel: inherit\n---\n",
-		filepath.Join(home, ".claude/agents/nofm.md"):                              "model: fable\n",
-		filepath.Join(project, ".claude/agents/px.md"):                             "---\nname: px\nmodel: fable\n---\n",
-		filepath.Join(project, ".claude/agents/general-purpose.md"):                "---\nname: general-purpose\nmodel: haiku\n---\n",
-		filepath.Join(project, ".claude/agents/settings-agent.md"):                 "---\nname: settings-agent\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/byfile.md"):                            "---\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/notes.txt"):                            "---\nname: txt\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/unclosed.md"):                          "---\nname: unclosed\nmodel: fable\n",
-		filepath.Join(home, ".claude/agents/noprefix.md"):                          "name: noprefix\n---\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/emptyname.md"):                         "---\nname: \"\"\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/nokey.md"):                             "---\njust text\nname: nokey\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/spaced.md"):                            "---\nname:   spaced-x  \nmodel:  'fable' \n---\n",
-		filepath.Join(home, ".claude/agents/badyaml.md"):                           "---\nname : fb\nmodel: fable\nbad: [unclosed\n  name: other\n---\n",
-		filepath.Join(home, ".claude/agents/norm.md"):                              "---\nname: f-dash\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/comment.md"):                           "---\nname: fcomment\nmodel: fable # by user\n---\n",
-		filepath.Join(home, ".claude/agents/bom.md"):                               "\xef\xbb\xbf---\nname: fbom\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/trail.md"):                             "---  \nname: ftrail\nmodel: fable\n---  \n",
-		filepath.Join(home, ".claude/agents/block.md"):                             "---\nname: fblock\nmodel: >-\n  fable\n---\n",
-		filepath.Join(home, ".claude/agents/nested.md"):                            "---\nname: fnn\nmetadata:\n  name: other\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/nestmodel.md"):                         "---\nname: fnm\nmodel: opus\nsrv:\n  model: fable\n---\n",
-		filepath.Join(home, ".claude/agents/big.md"):                               "---\nname: fbig\ndescription: " + strings.Repeat("д", 3000) + "\nmodel: fable\n---\n" + strings.Repeat("тело\n", 300000),
-		filepath.Join(project, "outside/fl.md"):                                    "---\nname: flink\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/long.md"):                              "---\nname: flong\nmodel: fable\ndescription: " + strings.Repeat("д", 100000) + "\n---\n",
-		filepath.Join(home, ".claude/agents", strings.Repeat("d/", 20), "deep.md"): "---\nname: fdeep\nmodel: fable\n---\n",
-		filepath.Join(project, "cfg/agents/fc.md"):                                 "---\nname: fconfig\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/plugins/cache/market/plugin/agents/pa.md"):    "---\nname: plug-agent\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/crlf.md"):                              "---\r\nname: crlf\r\nmodel: fable\r\n---\r\n",
-		filepath.Join(home, ".claude/agents/override.md"):                          "---\nname: override\nmodel: opus\n---\n",
-		filepath.Join(home, ".claude/agents/caseupper.md"):                         "---\nname: caseupper\nmodel: FABLE\n---\n",
-		filepath.Join(home, ".claude/agents/onemillion.md"):                        "---\nname: onemillion\nmodel: claude-fable-5-2[1m]\n---\n",
+		filepath.Join(home, ".claude/agents/fx.md"):                                        "---\nname: fx\nmodel: fable\n---\nтело\n",
+		filepath.Join(home, ".claude/agents/sub/fy.md"):                                    "---\nname: other-name\nmodel: \"claude-fable-5-2\"\n---\n",
+		filepath.Join(home, ".claude/agents/ok.md"):                                        "---\nname: ok\nmodel: opus\n---\nmodel: fable\n",
+		filepath.Join(home, ".claude/agents/hk.md"):                                        "---\r\nname: hk\r\nmodel: haiku\r\n---\r\n",
+		filepath.Join(home, ".claude/agents/in.md"):                                        "---\nname: in\nmodel: inherit\n---\n",
+		filepath.Join(home, ".claude/agents/inupper.md"):                                   "---\nname: inupper\nmodel: Inherit\n---\n",
+		filepath.Join(home, ".claude/agents/nofm.md"):                                      "model: fable\n",
+		filepath.Join(project, ".claude/agents/px.md"):                                     "---\nname: px\nmodel: fable\n---\n",
+		filepath.Join(project, ".claude/agents/general-purpose.md"):                        "---\nname: general-purpose\nmodel: haiku\n---\n",
+		filepath.Join(project, ".claude/agents/settings-agent.md"):                         "---\nname: settings-agent\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/byfile.md"):                                    "---\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/notes.txt"):                                    "---\nname: txt\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/unclosed.md"):                                  "---\nname: unclosed\nmodel: fable\n",
+		filepath.Join(home, ".claude/agents/noprefix.md"):                                  "name: noprefix\n---\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/emptyname.md"):                                 "---\nname: \"\"\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/nokey.md"):                                     "---\njust text\nname: nokey\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/spaced.md"):                                    "---\nname:   spaced-x  \nmodel:  'fable' \n---\n",
+		filepath.Join(home, ".claude/agents/badyaml.md"):                                   "---\nname : fb\nmodel: fable\nbad: [unclosed\n  name: other\n---\n",
+		filepath.Join(home, ".claude/agents/norm.md"):                                      "---\nname: f-dash\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/comment.md"):                                   "---\nname: fcomment\nmodel: fable # by user\n---\n",
+		filepath.Join(home, ".claude/agents/bom.md"):                                       "\xef\xbb\xbf---\nname: fbom\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/trail.md"):                                     "---  \nname: ftrail\nmodel: fable\n---  \n",
+		filepath.Join(home, ".claude/agents/block.md"):                                     "---\nname: fblock\nmodel: >-\n  fable\n---\n",
+		filepath.Join(home, ".claude/agents/nested.md"):                                    "---\nname: fnn\nmetadata:\n  name: other\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/nestmodel.md"):                                 "---\nname: fnm\nmodel: opus\nsrv:\n  model: fable\n---\n",
+		filepath.Join(home, ".claude/agents/big.md"):                                       "---\nname: fbig\ndescription: " + strings.Repeat("д", 3000) + "\nmodel: fable\n---\n" + strings.Repeat("тело\n", 300000),
+		filepath.Join(project, "outside/fl.md"):                                            "---\nname: flink\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/long.md"):                                      "---\nname: flong\nmodel: fable\ndescription: " + strings.Repeat("д", 100000) + "\n---\n",
+		filepath.Join(home, ".claude/agents", strings.Repeat("d/", 20), "deep.md"):         "---\nname: fdeep\nmodel: fable\n---\n",
+		filepath.Join(project, "cfg/agents/fc.md"):                                         "---\nname: fconfig\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/plugins/cache/market/plugin/agents/pa.md"):            "---\nname: plug-agent\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/plugins/marketplaces/market/agents/code-reviewer.md"): "---\nname: code-reviewer\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/plugins/installed_plugins.json"):                      fmt.Sprintf(`{"plugins":{"test@market":[{"installPath":%q}]}}`, filepath.Join(home, ".claude/plugins/cache/market/plugin")),
+		filepath.Join(home, ".claude/agents/crlf.md"):                                      "---\r\nname: crlf\r\nmodel: fable\r\n---\r\n",
+		filepath.Join(home, ".claude/agents/override.md"):                                  "---\nname: override\nmodel: opus\n---\n",
+		filepath.Join(home, ".claude/agents/caseupper.md"):                                 "---\nname: caseupper\nmodel: FABLE\n---\n",
+		filepath.Join(home, ".claude/agents/onemillion.md"):                                "---\nname: onemillion\nmodel: claude-fable-5-2[1m]\n---\n",
 	}
 	for path, text := range files {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -837,6 +844,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent opus в frontmatter, fable в теле", "Agent", `{"subagent_type":"ok"}`, "", home, false},
 		{"Agent haiku CRLF is not approved", "Agent", `{"subagent_type":"hk"}`, "", home, true},
 		{"Agent inherit", "Agent", `{"subagent_type":"in"}`, "", home, false},
+		{"Agent Inherit case insensitive", "Agent", `{"subagent_type":"inupper"}`, "", home, false},
 		{"Agent без frontmatter", "Agent", `{"subagent_type":"nofm"}`, "", home, false},
 		{"Agent не .md", "Agent", `{"subagent_type":"txt"}`, "", home, false},
 		{"Agent незакрытый frontmatter", "Agent", `{"subagent_type":"unclosed"}`, "", home, false},
@@ -865,6 +873,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent fable [1m]", "Agent", `{"subagent_type":"onemillion"}`, "", home, true},
 		{"Agent нет такого", "Agent", `{"subagent_type":"absent"}`, "", home, false},
 		{"Agent встроенный", "Agent", `{"subagent_type":"general-purpose"}`, "", home, false},
+		{"Agent uninstalled plugin definition is ignored", "Agent", `{"subagent_type":"code-reviewer"}`, "", home, false},
 		{"Agent project definition overrides builtin name", "Agent", `{"subagent_type":"general-purpose"}`, "", project, true},
 		{"Agent fx с model opus", "Agent", `{"subagent_type":"fx","model":"opus"}`, "", home, false},
 		{"Agent fx с пустым model", "Agent", `{"subagent_type":"fx","model":""}`, "", home, true},
@@ -874,6 +883,8 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"claude --agent fx", "Bash", "", "claude -p --agent fx hi", home, true},
 		{"cl --agent=fx", "Bash", "", "cl --agent=fx", home, true},
 		{"claude --agent ok", "Bash", "", "claude -p --agent ok hi", home, false},
+		{"claude --agent web-fetch builtin", "Bash", "", "claude -p --agent web-fetch hi", home, false},
+		{"claude --agent explore builtin case insensitive", "Bash", "", "claude -p --agent explore hi", home, false},
 		{"claude --agent hk model is not approved", "Bash", "", "claude -p --agent hk hi", home, true},
 		{"claude --agent из переменной", "Bash", "", `claude -p --agent "$A" hi`, home, true},
 		{"claude --agent проекта из подкаталога", "Bash", "", "claude -p --agent px hi", deep, true},
@@ -955,5 +966,63 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	}
 	if !strings.Contains(managedResult.Violations[0].Message, "запускает только пользователь") {
 		t.Fatalf("managed settings reason: %+v", managedResult.Violations)
+	}
+}
+
+func TestModelGuardRoundTenPaths(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	decoyHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	oldManaged := managedSettingsPath
+	managedSettingsPath = filepath.Join(t.TempDir(), "managed-settings.json")
+	t.Cleanup(func() { managedSettingsPath = oldManaged })
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(cwd, ".claude/settings.json"), `{"model":"opus"}`)
+	write(filepath.Join(cwd, "sub/.claude/settings.json"), `{"model":"haiku"}`)
+	write(filepath.Join(cwd, "s.json"), `{"model":"opus"}`)
+	write(filepath.Join(cwd, "sub/s.json"), `{"model":"haiku"}`)
+	badCWD := t.TempDir()
+	write(filepath.Join(badCWD, ".claude/settings.json"), `{"model":"haiku"}`)
+	write(filepath.Join(home, "s.json"), `{"model":"opus"}`)
+	write(filepath.Join(decoyHome, "s.json"), `{"model":"haiku"}`)
+	cases := []struct {
+		name, command string
+		cwd           string
+		reject        bool
+	}{
+		{"failed cd preserves session settings candidate", "cd /nonexistent; claude -p hi", badCWD, true},
+		{"cd target contributes relative settings", "cd sub || true; claude --settings s.json -p hi", cwd, true},
+		{"subshell cd contributes settings", "(cd sub); claude -p hi", cwd, true},
+		{"conditional cd contributes settings", "cd sub || true; claude -p hi", cwd, true},
+		{"short circuited cd contributes settings", "false && cd sub; claude -p hi", cwd, true},
+		{"command substitution cd contributes settings", "x=$(cd sub); claude -p hi", cwd, true},
+		{"function cd contributes settings", "f(){ cd sub; }; claude -p hi", cwd, true},
+		{"pushd target remains candidate", "pushd sub; popd; claude -p hi", cwd, true},
+		{"env chdir target contributes settings", "env -C sub true; claude -p hi", cwd, true},
+		{"HOME assignment adds second tilde root", "HOME=" + decoyHome + " claude --settings ~/s.json -p hi", cwd, true},
+		{"echo HOME text is not assignment", "echo HOME=" + decoyHome + "; claude --settings ~/s.json -p hi", cwd, false},
+		{"comment HOME text is not assignment", "claude --settings ~/s.json -p hi # HOME=" + decoyHome, cwd, false},
+		{"prompt HOME text is not assignment", `claude --settings ~/s.json -p 'explain HOME=$PATH'`, cwd, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", CWD: tc.cwd, Command: tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid == tc.reject {
+				t.Fatalf("reject=%v want=%v violations=%+v", !result.IsValid, tc.reject, result.Violations)
+			}
+		})
 	}
 }

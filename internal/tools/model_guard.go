@@ -75,6 +75,10 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 			reasons = append(reasons, "файл --agents не прочитать: модель агента не проверить")
 			continue
 		}
+		if c.unknownSettings {
+			reasons = append(reasons, "файл --settings не прочитать: модель не проверить")
+			continue
+		}
 		if c.userOnlyCheck {
 			if c.dynamic {
 				reasons = append(reasons, "модель задана переменной, назови её литералом")
@@ -106,11 +110,12 @@ func userOnlyReason(value, name string) string {
 }
 
 type modelCandidate struct {
-	value         string
-	dynamic       bool
-	unknownAgent  bool
-	unknownWrite  bool
-	unknownAgents bool
+	value           string
+	dynamic         bool
+	unknownAgent    bool
+	unknownWrite    bool
+	unknownAgents   bool
+	unknownSettings bool
 	// userOnlyCheck — переменные модели быстрых запросов проверяются только
 	// на ограничение user_only.
 	userOnlyCheck bool
@@ -127,9 +132,11 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		// ~ в пути --settings не раскроется, определения агентов в ~ не
-		// читаются: остальное проверяется
 		logger.Warn("model_guard: домашний каталог неизвестен", "error", err)
+		home = os.Getenv("HOME")
+		if home == "" {
+			return []modelCandidate{{value: "HOME", dynamic: true}}
+		}
 	}
 	agentModels := func(name string) []modelCandidate {
 		return agentDefinitionModels(name, input.CWD, home, nil, logger, false)
@@ -137,55 +144,55 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 	if input.ToolName == "Agent" {
 		return agentToolCandidates(input, agentModels, logger)
 	}
+	cwdCandidates := commandCWDs(input.Command, input.CWD, []string{home})
+	homes := commandPathCandidates(input.Command, "HOME", cwdCandidates, []string{home}, home, logger)
+	cwdCandidates = commandCWDs(input.Command, input.CWD, homes.paths)
+	homes = commandPathCandidates(input.Command, "HOME", cwdCandidates, []string{home}, home, logger)
+	configs := commandPathCandidates(input.Command, "CLAUDE_CONFIG_DIR", cwdCandidates, nonEmpty(os.Getenv("CLAUDE_CONFIG_DIR")), home, logger)
 	unresolvedTildeSettings := false
-	readSettings := func(path string, tilde shellcmd.Tilde, cwd string) []byte {
-		commandHome, _, homeDynamic := commandHomeDir(input.Command, cwd, home)
-		if homeDynamic {
+	readSettings := func(path string, tilde shellcmd.Tilde, _ string) [][]byte {
+		var contents [][]byte
+		for _, dir := range cwdCandidates {
+			for _, commandHome := range homes.paths {
+				abs := absPath(tildePath(path, tilde, commandHome), dir)
+				if abs == "" {
+					continue
+				}
+				data, err := readSettingsFile(abs)
+				if err == nil {
+					contents = append(contents, data)
+				} else if !errors.Is(err, os.ErrNotExist) {
+					logger.Warn("model_guard: файл --settings не читается, модель из него не проверена", "path", abs, "error", err)
+				}
+			}
+		}
+		if len(contents) == 0 {
+			if writtenModel.Match([]byte(input.Command)) {
+				return [][]byte{[]byte(input.Command)}
+			}
 			unresolvedTildeSettings = true
 			return nil
 		}
-		if tilde&shellcmd.TildeHome != 0 && commandHome == "" {
-			unresolvedTildeSettings = true
-			return nil
-		}
-		abs := absPath(tildePath(path, tilde, commandHome), cwd)
-		if abs == "" {
-			return nil
-		}
-		data, err := readSettingsFile(abs)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			// Файл настроек пишет та же команда: до её запуска его нет, и
-			// модель ищется в тексте самой команды
-			return []byte(input.Command)
-		case err != nil:
-			logger.Warn("model_guard: файл --settings не читается, модель из него не проверена", "path", abs, "error", err)
-			return nil
-		}
-		return data
+		return contents
 	}
 	settingsAt := func(cwd string, includeProject bool) []modelCandidate {
-		commandHome, _, dynamic := commandHomeDir(input.Command, cwd, home)
-		if dynamic {
-			return []modelCandidate{{value: "HOME", dynamic: true}}
-		}
-		return settingsForCWD(cwd, input.Command, commandHome, logger, includeProject)
+		return settingsForCWD(cwd, homes, configs, logger, includeProject)
 	}
-	candidates := bashModelCandidatesAt(input.Command, input.CWD, modelFiles{settings: readSettings, agent: agentModels}, settingsAt, func(name, cwd string, extra []string) []modelCandidate {
-		commandHome, _, homeDynamic := commandHomeDir(input.Command, cwd, home)
-		if homeDynamic {
-			return []modelCandidate{{value: "HOME", dynamic: true}}
-		}
-		if configDir, found, dynamic := commandConfigDir(input.Command, cwd, commandHome); found {
-			if dynamic {
-				return []modelCandidate{{value: "CLAUDE_CONFIG_DIR", dynamic: true}}
+	candidates := bashModelCandidatesAt(input.Command, input.CWD, cwdCandidates, homes, configs, modelFiles{settings: readSettings, agent: agentModels}, settingsAt, func(name, cwd string, extra []string) []modelCandidate {
+		var found []modelCandidate
+		for _, commandHome := range homes.paths {
+			agentExtra := append([]string(nil), extra...)
+			for _, configDir := range configs.paths {
+				agentExtra = append(agentExtra, filepath.Join(configDir, "agents"))
+				agentExtra = append(agentExtra, installedPluginAgentDirs(filepath.Join(configDir, "plugins", "installed_plugins.json"), logger)...)
 			}
-			extra = append(extra, filepath.Join(configDir, "agents"))
-		} else if configDir := os.Getenv("CLAUDE_CONFIG_DIR"); configDir != "" {
-			extra = append(extra, filepath.Join(configDir, "agents"))
+			agentExtra = append(agentExtra, filepath.Join(commandHome, ".claude", "agents"))
+			found = append(found, agentDefinitionModels(name, cwd, commandHome, agentExtra, logger, true)...)
 		}
-		extra = append(extra, filepath.Join(commandHome, ".claude", "agents"))
-		return agentDefinitionModels(name, cwd, commandHome, extra, logger, true)
+		if homes.dynamic || configs.dynamic {
+			found = append(found, modelCandidate{value: "HOME or CLAUDE_CONFIG_DIR", dynamic: true})
+		}
+		return found
 	}, logger)
 	if unresolvedTildeSettings {
 		candidates = append(candidates, modelCandidate{value: "settings path with unknown home", dynamic: true})
@@ -193,33 +200,39 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 	return candidates
 }
 
-func settingsForCWD(cwd, command, home string, logger core.Logger, includeProject bool) []modelCandidate {
-	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
-	if value, found, dynamic := commandConfigDir(command, cwd, home); found {
-		if dynamic {
-			return []modelCandidate{{value: "CLAUDE_CONFIG_DIR", dynamic: true}}
-		}
-		configDir = value
-	}
+func settingsForCWD(cwd string, homes, configs pathSet, logger core.Logger, includeProject bool) []modelCandidate {
 	var paths []string
 	if includeProject {
 		paths = append(paths, projectSettingsPaths(cwd)...)
 	}
-	paths = append(paths, filepath.Join(home, ".claude", "settings.json"), managedSettingsPath)
+	for _, home := range homes.paths {
+		paths = append(paths, filepath.Join(home, ".claude", "settings.json"))
+	}
+	paths = append(paths, managedSettingsPath)
 	var agentDirsForSettings []string
-	if configDir != "" {
+	for _, configDir := range configs.paths {
 		paths = append(paths, filepath.Join(configDir, "settings.json"))
 		agentDirsForSettings = append(agentDirsForSettings, filepath.Join(configDir, "agents"))
+		agentDirsForSettings = append(agentDirsForSettings, installedPluginAgentDirs(filepath.Join(configDir, "plugins", "installed_plugins.json"), logger)...)
 	}
-	agentDirsForSettings = append(agentDirsForSettings, filepath.Join(home, ".claude", "agents"))
-	lookupCWD := cwd
-	if !includeProject {
-		lookupCWD = ""
+	for _, home := range homes.paths {
+		agentDirsForSettings = append(agentDirsForSettings, filepath.Join(home, ".claude", "agents"))
 	}
 	lookupAgent := func(name string) []modelCandidate {
-		return agentDefinitionModels(name, lookupCWD, home, agentDirsForSettings, logger, true)
+		var found []modelCandidate
+		for _, home := range homes.paths {
+			lookupCWD := cwd
+			if !includeProject {
+				lookupCWD = ""
+			}
+			found = append(found, agentDefinitionModels(name, lookupCWD, home, agentDirsForSettings, logger, true)...)
+		}
+		return found
 	}
 	var candidates []modelCandidate
+	if homes.dynamic || configs.dynamic {
+		candidates = append(candidates, modelCandidate{value: "HOME or CLAUDE_CONFIG_DIR", dynamic: true})
+	}
 	for _, path := range paths {
 		raw, err := readSettingsFile(path)
 		if err == nil {
@@ -249,39 +262,112 @@ func projectSettingsPaths(cwd string) []string {
 	return paths
 }
 
-var commandEnvAssignment = regexp.MustCompile(`(?:^|[;|&\n\s])(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;|&]+)`)
+type pathSet struct {
+	paths   []string
+	dynamic bool
+}
 
-func commandEnvPath(command, name, cwd, home string) (string, bool, bool) {
-	matches := commandEnvAssignment.FindAllStringSubmatch(command, -1)
-	var value string
-	found := false
-	for _, match := range matches {
-		if match[1] == name {
-			value, found = strings.Trim(match[2], "'\""), true
+func nonEmpty(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return []string{value}
+}
+
+func commandPathCandidates(command, name string, cwds, defaults []string, defaultHome string, logger core.Logger) pathSet {
+	set := pathSet{}
+	add := func(path string) {
+		if path != "" && !slices.Contains(set.paths, path) {
+			set.paths = append(set.paths, path)
 		}
 	}
-	if !found {
-		return "", false, false
+	for _, value := range defaults {
+		add(filepath.Clean(value))
 	}
-	if strings.ContainsAny(value, "$`*?[") {
-		return "", true, true
+	values, dynamic := shellEnvValues(command, name, logger)
+	set.dynamic = dynamic
+	for _, value := range values {
+		if strings.ContainsAny(value, "$`*?[") {
+			set.dynamic = true
+			continue
+		}
+		for _, cwd := range cwds {
+			if after, ok := strings.CutPrefix(value, "~/"); ok {
+				value = filepath.Join(defaultHome, after)
+			}
+			add(resolvePath(value, 0, cwd, defaultHome))
+		}
 	}
-	if after, ok := strings.CutPrefix(value, "~/"); ok {
-		value = filepath.Join(home, after)
-	}
-	return resolvePath(value, 0, cwd, home), true, false
+	return set
 }
 
-func commandConfigDir(command, cwd, home string) (string, bool, bool) {
-	return commandEnvPath(command, "CLAUDE_CONFIG_DIR", cwd, home)
-}
-
-func commandHomeDir(command, cwd, defaultHome string) (string, bool, bool) {
-	value, found, dynamic := commandEnvPath(command, "HOME", cwd, defaultHome)
-	if !found {
-		return defaultHome, false, false
+func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		logger.Warn("model_guard: присваивания пути не разобраны", "name", name, "error", err)
+		return nil, false
 	}
-	return value, true, dynamic
+	var values []string
+	dynamic := false
+	add := func(key, value string, literal bool) {
+		if key != name {
+			return
+		}
+		if !literal {
+			dynamic = true
+			return
+		}
+		values = append(values, value)
+	}
+	addAssign := func(assign *syntax.Assign) {
+		if assign == nil || assign.Name == nil {
+			return
+		}
+		if assign.Value == nil {
+			add(assign.Name.Value, "", false)
+			return
+		}
+		value, literal := literalValue(assign.Value)
+		add(assign.Name.Value, value, literal)
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.CallExpr:
+			for _, assign := range n.Assigns {
+				addAssign(assign)
+			}
+			if len(n.Args) == 0 {
+				return true
+			}
+			cmd, ok := literalValue(n.Args[0])
+			if !ok || !declarers[cmd] || cmd == "local" {
+				return true
+			}
+			for _, arg := range n.Args[1:] {
+				value, literal := literalValue(arg)
+				if !literal {
+					start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
+					if start >= 0 && end >= start && end <= len(command) && strings.HasPrefix(command[start:end], name+"=") {
+						dynamic = true
+					}
+					continue
+				}
+				key, val, assigned := strings.Cut(value, "=")
+				if assigned {
+					add(key, val, true)
+				}
+			}
+		case *syntax.DeclClause:
+			if !declarers[n.Variant.Value] {
+				return true
+			}
+			for _, assign := range n.Args {
+				addAssign(assign)
+			}
+		}
+		return true
+	})
+	return values, dynamic
 }
 
 // maxSettingsSize — предел файла --settings: настройки — килобайты
@@ -323,7 +409,7 @@ func agentFlagCandidates(agent word, files modelFiles) []modelCandidate {
 // modelFiles — файлы, откуда клиент берёт модель: --settings по пути и
 // определение агента по имени
 type modelFiles struct {
-	settings func(path string, tilde shellcmd.Tilde, cwd string) []byte
+	settings func(path string, tilde shellcmd.Tilde, cwd string) [][]byte
 	agent    func(name string) []modelCandidate
 }
 
@@ -336,10 +422,10 @@ func agentDefinitionModels(name, cwd, home string, extra []string, logger core.L
 	var found []modelCandidate
 	definitionFound := false
 	walk := agentWalk{seen: map[string]bool{}, logger: logger}
-	dirs := append(agentDirs(cwd, home), extra...)
+	dirs := append(agentDirs(cwd, home, logger), extra...)
 	if builtinAgent(name) {
-		pluginDir := filepath.Join(home, ".claude", "plugins")
-		dirs = slices.DeleteFunc(dirs, func(dir string) bool { return filepath.Clean(dir) == pluginDir })
+		pluginDirs := installedPluginAgentDirs(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), logger)
+		dirs = slices.DeleteFunc(dirs, func(dir string) bool { return slices.Contains(pluginDirs, filepath.Clean(dir)) })
 	}
 	for _, dir := range dirs {
 		// срок — каждому корню, как в Claude Code: большое дерево одного
@@ -357,7 +443,7 @@ func agentDefinitionModels(name, cwd, home string, extra []string, logger core.L
 		// не задаёт отдельную модель и проверку проходит.
 		if defName, model := agentFrontmatter(data, path); ok && agentNameMatches(defName, name) {
 			definitionFound = true
-			if model != "" && model != "inherit" {
+			if model != "" && !strings.EqualFold(model, "inherit") {
 				found = append(found, modelCandidate{value: model})
 			}
 		}
@@ -372,9 +458,19 @@ var managedSettingsPath = "/etc/claude-code/managed-settings.json"
 
 // names confirmed in Claude Code 2.1.330 strings; Explore and Plan may be
 // disabled by environment, but treating their names as built in is safe.
-var builtinAgents = map[string]bool{"general-purpose": true, "Explore": true, "Plan": true, "claude-code-guide": true, "statusline-setup": true, "claude": true, "fork": true}
+var builtinAgents = map[string]bool{"general-purpose": true, "Explore": true, "Plan": true, "claude-code-guide": true, "statusline-setup": true, "web-fetch": true, "claude": true, "fork": true}
 
-func builtinAgent(name string) bool { return builtinAgents[name] }
+func builtinAgent(name string) bool {
+	if builtinAgents[name] {
+		return true
+	}
+	for builtin := range builtinAgents {
+		if strings.EqualFold(name, builtin) {
+			return true
+		}
+	}
+	return false
+}
 
 func agentNameMatches(defName, name string) bool {
 	if sameAgentName(defName, name) {
@@ -384,11 +480,9 @@ func agentNameMatches(defName, name string) bool {
 	return ok && sameAgentName(defName, pluginName)
 }
 
-// agentDirs — каталоги определений агентов: пользовательские первыми
-// ($CLAUDE_CONFIG_DIR/agents и ~/.claude/agents), затем .claude/agents в
-// cwd и всех его предках (Claude Code собирает их вверх до корня
-// репозитория или ~, хук — до /, это шире)
-func agentDirs(cwd, home string) []string {
+// agentDirs — каталоги пользовательских и проектных определений, а также
+// установленных плагинов из их реестра.
+func agentDirs(cwd, home string, logger core.Logger) []string {
 	var dirs []string
 	if cwd != "" {
 		cwd = filepath.Clean(cwd)
@@ -398,7 +492,7 @@ func agentDirs(cwd, home string) []string {
 	}
 	if home != "" {
 		dirs = append(dirs, filepath.Join(home, ".claude", "agents"))
-		dirs = append(dirs, filepath.Join(home, ".claude", "plugins"))
+		dirs = append(dirs, installedPluginAgentDirs(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), logger)...)
 	}
 	if cwd != "" {
 		for dir := cwd; dir != ""; {
@@ -410,6 +504,40 @@ func agentDirs(cwd, home string) []string {
 			dir = parent
 		}
 	}
+	return dirs
+}
+
+func installedPluginAgentDirs(registry string, logger core.Logger) []string {
+	raw, err := os.ReadFile(registry)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		logger.Warn("model_guard: реестр установленных плагинов не читается", "path", registry, "error", err)
+		return nil
+	}
+	if len(raw) > maxSettingsSize {
+		logger.Warn("model_guard: реестр установленных плагинов превышает лимит", "path", registry, "size", len(raw))
+		return nil
+	}
+	var installed struct {
+		Plugins map[string][]struct {
+			InstallPath string `json:"installPath"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(raw, &installed); err != nil {
+		logger.Warn("model_guard: реестр установленных плагинов имеет неверный JSON", "path", registry, "error", err)
+		return nil
+	}
+	var dirs []string
+	for _, entries := range installed.Plugins {
+		for _, entry := range entries {
+			if entry.InstallPath != "" && filepath.IsAbs(entry.InstallPath) {
+				dirs = append(dirs, filepath.Join(entry.InstallPath, "agents"))
+			}
+		}
+	}
+	slices.Sort(dirs)
 	return dirs
 }
 
@@ -575,14 +703,50 @@ func clientDialect(name string) string {
 	return name
 }
 
+// commandCWDs возвращает cwd сессии и все известные цели cd, pushd и env -C.
+func commandCWDs(command, initial string, homes []string) []string {
+	paths := []string{}
+	add := func(path string) {
+		if path != "" && !slices.Contains(paths, path) {
+			paths = append(paths, path)
+		}
+	}
+	add(initial)
+	calls, err := shellcmd.Calls(command)
+	if calls == nil && err != nil {
+		return paths
+	}
+	cwd := initial
+	for i := range calls {
+		call := &calls[i]
+		if call.Name == "cd" || call.Name == "pushd" {
+			for _, home := range homes {
+				dir, known := changeDirKnown(call, cwd, home)
+				if known {
+					add(dir)
+					cwd = dir
+					break
+				}
+			}
+		} else if call.Name == "env" {
+			for _, home := range homes {
+				if dir, found, known := envChdir(call.Args, cwd, home); found && known {
+					add(dir)
+					cwd = dir
+					break
+				}
+			}
+		}
+	}
+	return paths
+}
+
 // bashModelCandidatesAt — модели вызовов агентов в команде оболочки. Вызовы
 // ищет akit shellcmd: он видит и вложенные скрипты (bash -c, ssh, here-doc на
-// вход оболочке). Команду, которую shellcmd не разобрал, оболочка не
-// исполнит, если ошибка настоящая: модели ищутся в её тексте (--model, -m,
-// присваивание переменной модели), чтобы ошибка разбора akit не пропустила
-// неодобренную. readSettings читает файл --settings по пути из команды, nil —
-// не прочесть; файла нет — текст команды, которая может его написать
-func bashModelCandidatesAt(command, initialCWD string, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) []modelCandidate {
+// вход оболочке). Если shellcmd не разобрал команду, модели ищутся в её тексте
+// (--model, -m, присваивание переменной модели). readSettings возвращает все
+// прочитанные варианты файла --settings.
+func bashModelCandidatesAt(command, initialCWD string, cwdCandidates []string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) []modelCandidate {
 	calls, err := shellcmd.Calls(command)
 	if calls == nil && err != nil {
 		logger.Warn("model_guard: shellcmd не разобрал команду, модели ищутся в тексте", "error", err)
@@ -591,23 +755,19 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 	var found []modelCandidate
 	claude := false
 	cwd := initialCWD
-	cwdKnown := cwd != ""
 	for i := range calls {
 		call := &calls[i]
 		if call.Name == "cd" || call.Name == "pushd" {
-			var known bool
-			previousKnown := cwdKnown
-			cwd, known = changeDirKnown(call, cwd, homeForPaths())
-			cwdKnown = known && (previousKnown || absoluteChangePath(call))
+			if next, known := changeDirKnown(call, cwd, homeForPaths()); known {
+				cwd = next
+			}
 			continue
 		}
 		if call.Name == "env" {
 			if dir, found, known := envChdir(call.Args, cwd, homeForPaths()); found {
-				previousKnown := cwdKnown
 				if known {
 					cwd = dir
 				}
-				cwdKnown = known && (previousKnown || envChdirAbsolute(call.Args))
 			}
 			continue
 		}
@@ -640,21 +800,28 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		}
 		callExtraDirs := []string{}
 		localFiles := files
-		lookupCWD := cwd
-		if !cwdKnown {
-			lookupCWD = initialCWD
-		}
 		if localFiles.settings != nil {
 			read := localFiles.settings
-			localFiles.settings = func(path string, tilde shellcmd.Tilde, _ string) []byte { return read(path, tilde, cwd) }
+			localFiles.settings = func(path string, tilde shellcmd.Tilde, cwd string) [][]byte { return read(path, tilde, cwd) }
 		}
 		if agentAt != nil {
-			localFiles.agent = func(name string) []modelCandidate { return agentAt(name, lookupCWD, callExtraDirs) }
+			localFiles.agent = func(name string) []modelCandidate {
+				var candidates []modelCandidate
+				for _, candidateCWD := range cwdCandidates {
+					candidates = append(candidates, agentAt(name, candidateCWD, callExtraDirs)...)
+				}
+				return candidates
+			}
 		}
 		if dialect == "claude" {
 			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
 			if settingsAt != nil {
-				found = append(found, settingsAt(cwd, cwdKnown)...)
+				for _, candidateCWD := range cwdCandidates {
+					found = append(found, settingsAt(candidateCWD, true)...)
+				}
+				if homes.dynamic || configs.dynamic {
+					found = append(found, modelCandidate{value: "HOME or CLAUDE_CONFIG_DIR", dynamic: true})
+				}
 			}
 		}
 		callCandidates := candidatesFromArgs(dialect, args, localFiles)
@@ -824,39 +991,6 @@ func envChdir(args []string, cwd, home string) (string, bool, bool) {
 		return resolvePath(path, 0, cwd, home), true, true
 	}
 	return "", false, false
-}
-
-func envChdirAbsolute(args []string) bool {
-	for i := 0; i < len(args); i++ {
-		var value string
-		if args[i] == "-C" || args[i] == "--chdir" {
-			if i+1 < len(args) {
-				i++
-				value = args[i]
-			}
-		} else if after, ok := strings.CutPrefix(args[i], "--chdir="); ok {
-			value = after
-		}
-		if value != "" {
-			return filepath.IsAbs(value) || strings.HasPrefix(value, "~") || strings.HasPrefix(value, "$HOME")
-		}
-	}
-	return false
-}
-
-func absoluteChangePath(call *shellcmd.Call) bool {
-	i := 0
-	for i < len(call.Args) && (call.Args[i] == "-P" || call.Args[i] == "-L") {
-		i++
-	}
-	if i < len(call.Args) && call.Args[i] == "--" {
-		i++
-	}
-	if i >= len(call.Args) {
-		return call.Name == "cd"
-	}
-	path := call.Args[i]
-	return filepath.IsAbs(path) || strings.HasPrefix(path, "~") || strings.HasPrefix(path, "$HOME") || strings.HasPrefix(path, "${HOME}")
 }
 
 func npxClaudeCode(args []string) bool {
@@ -1266,9 +1400,12 @@ func modelValueFlag(name, flag string) bool {
 
 func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandidate {
 	var found []modelCandidate
-	inlineAgents := inlineAgentModels(args)
 	if name == "claude" {
 		args = splitValueFlags(args)
+	}
+	var agentOverrides map[string]bool
+	if name == "claude" {
+		agentOverrides = agentOverrideNames(args, files.settings)
 	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -1308,9 +1445,9 @@ func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandi
 		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
 			found = append(found, jsonModelCandidates(a.text, next, files.settings, files.agent)...)
 		case name == "claude" && a.text == "--agent":
-			found = append(found, inlineAgents[next.text]...)
+			found = append(found, agentOverrideModels(args, next.text, files.settings)...)
 			definitions := agentFlagCandidates(next, files)
-			if len(inlineAgents[next.text]) > 0 {
+			if agentOverrides[next.text] {
 				definitions = slices.DeleteFunc(definitions, func(candidate modelCandidate) bool { return candidate.unknownAgent })
 			}
 			found = append(found, definitions...)
@@ -1326,20 +1463,52 @@ func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandi
 	return found
 }
 
-func inlineAgentModels(args []word) map[string][]modelCandidate {
-	models := map[string][]modelCandidate{}
-	args = splitValueFlags(args)
+func agentOverrideNames(args []word, readSettings func(string, shellcmd.Tilde, string) [][]byte) map[string]bool {
+	names := map[string]bool{}
 	for i := 0; i+1 < len(args); i++ {
-		if args[i].text != "--agents" || !args[i+1].literal {
+		if args[i].text != "--agents" {
 			continue
 		}
-		if parsed, ok := parseAgentsJSON([]byte(args[i+1].text)); ok {
-			for name, candidates := range parsed {
-				models[name] = append(models[name], candidates...)
+		arg := args[i+1]
+		raws := [][]byte{[]byte(arg.text)}
+		if !strings.HasPrefix(strings.TrimSpace(arg.text), "{") {
+			if !arg.literal || !claudeArgIsLiteral(arg) || arg.tilde&(shellcmd.TildeOther|shellcmd.TildeModeUnknown) != 0 {
+				continue
+			}
+			raws = readSettings(arg.text, arg.tilde, "")
+		}
+		for _, raw := range raws {
+			if parsed, ok := parseAgentsJSON(raw); ok {
+				for name := range parsed {
+					names[name] = true
+				}
 			}
 		}
 	}
-	return models
+	return names
+}
+
+func agentOverrideModels(args []word, name string, readSettings func(string, shellcmd.Tilde, string) [][]byte) []modelCandidate {
+	var found []modelCandidate
+	for i := 0; i+1 < len(args); i++ {
+		if args[i].text != "--agents" {
+			continue
+		}
+		arg := args[i+1]
+		raws := [][]byte{[]byte(arg.text)}
+		if !strings.HasPrefix(strings.TrimSpace(arg.text), "{") {
+			if readSettings == nil || !arg.literal || !claudeArgIsLiteral(arg) {
+				continue
+			}
+			raws = readSettings(arg.text, arg.tilde, "")
+		}
+		for _, raw := range raws {
+			if parsed, ok := parseAgentsJSON(raw); ok {
+				found = append(found, parsed[name]...)
+			}
+		}
+	}
+	return found
 }
 
 func parseAgentsJSON(raw []byte) (map[string][]modelCandidate, bool) {
@@ -1349,10 +1518,11 @@ func parseAgentsJSON(raw []byte) (map[string][]modelCandidate, bool) {
 	}
 	models := make(map[string][]modelCandidate, len(agents))
 	for name, rawAgent := range agents {
+		models[name] = nil
 		var agent struct {
 			Model string `json:"model"`
 		}
-		if json.Unmarshal(rawAgent, &agent) == nil && strings.TrimSpace(agent.Model) != "" && agent.Model != "inherit" {
+		if json.Unmarshal(rawAgent, &agent) == nil && strings.TrimSpace(agent.Model) != "" && !strings.EqualFold(agent.Model, "inherit") {
 			models[name] = append(models[name], modelCandidate{value: agent.Model})
 		}
 	}
@@ -1379,27 +1549,31 @@ var writtenModel = regexp.MustCompile(`"(model|` + modelEnvPattern() + `)"\s*:\s
 // или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
 // Файла --settings ещё нет — модели в тексте команды, которая его пишет.
 // Не JSON — моделей нет: такой запуск claude сам не начнётся
-func jsonModelCandidates(flag string, arg word, readSettings func(string, shellcmd.Tilde, string) []byte, agent func(string) []modelCandidate) []modelCandidate {
+func jsonModelCandidates(flag string, arg word, readSettings func(string, shellcmd.Tilde, string) [][]byte, agent func(string) []modelCandidate) []modelCandidate {
 	if flag == "--agents" {
 		inlineJSON := strings.HasPrefix(strings.TrimSpace(arg.text), "{")
 		if !arg.literal || (!inlineJSON && !claudeArgIsLiteral(arg)) {
 			return []modelCandidate{{value: arg.text, unknownAgents: true}}
 		}
-		raw := []byte(arg.text)
+		raws := [][]byte{[]byte(arg.text)}
 		if !inlineJSON {
 			if arg.tilde&(shellcmd.TildeOther|shellcmd.TildeModeUnknown) != 0 {
 				return []modelCandidate{{value: arg.text, unknownAgents: true}}
 			}
-			raw = readSettings(arg.text, arg.tilde, "")
-			if raw == nil {
+			raws = readSettings(arg.text, arg.tilde, "")
+			if len(raws) == 0 {
 				return []modelCandidate{{value: arg.text, unknownAgents: true}}
 			}
 		}
-		models, ok := parseAgentsJSON(raw)
-		if !ok && !inlineJSON {
-			return []modelCandidate{{value: arg.text, unknownAgents: true}}
+		var found []modelCandidate
+		for _, raw := range raws {
+			models, ok := parseAgentsJSON(raw)
+			if !ok && !inlineJSON {
+				return []modelCandidate{{value: arg.text, unknownAgents: true}}
+			}
+			found = append(found, flattenAgentModels(models)...)
 		}
-		return flattenAgentModels(models)
+		return found
 	}
 	if !arg.literal {
 		// Путь файла из переменной не прочесть, а JSON с подстановкой — модель
@@ -1409,7 +1583,7 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string, shellc
 		}
 		return nil
 	}
-	raw := []byte(arg.text)
+	raws := [][]byte{[]byte(arg.text)}
 	if !strings.HasPrefix(strings.TrimSpace(arg.text), "{") {
 		if flag != "--settings" {
 			return nil
@@ -1417,11 +1591,16 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string, shellc
 		if arg.tilde&(shellcmd.TildeOther|shellcmd.TildeModeUnknown) != 0 {
 			return []modelCandidate{{value: arg.text, dynamic: true}}
 		}
-		if raw = readSettings(arg.text, arg.tilde, ""); raw == nil {
-			return nil
+		raws = readSettings(arg.text, arg.tilde, "")
+		if len(raws) == 0 {
+			return []modelCandidate{{value: arg.text, unknownSettings: true}}
 		}
 	}
-	return settingsCandidates(raw, agent)
+	var found []modelCandidate
+	for _, raw := range raws {
+		found = append(found, settingsCandidates(raw, agent)...)
+	}
+	return found
 }
 
 func settingsCandidates(raw []byte, agent func(string) []modelCandidate) []modelCandidate {

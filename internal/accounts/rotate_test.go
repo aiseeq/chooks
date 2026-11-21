@@ -36,6 +36,10 @@ func TestSaveNewLogin(t *testing.T) {
 	if f.profiles != 1 {
 		t.Errorf("запросов профиля %d, ожидался 1", f.profiles)
 	}
+	first := readJournal(t, f)[0]
+	if first.NotBefore != nil || first.NotAfter == nil {
+		t.Fatalf("границы первого входа: %+v", first)
+	}
 }
 
 // Claude Code обновил токен активной учётки: новый токен уходит в
@@ -65,8 +69,13 @@ func TestExternalLoginJournal(t *testing.T) {
 			}
 			f.save("work")
 			before := len(readJournal(t, f))
+			lower := f.store().SyncedMtime
 			f.now = f.now.Add(time.Minute)
 			f.writeCreds(f.login("personal", 1, 8*time.Hour))
+			info, err := os.Stat(f.p.Credentials())
+			if err != nil {
+				t.Fatal(err)
+			}
 			if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err != nil {
 				t.Fatal(err)
 			}
@@ -77,6 +86,9 @@ func TestExternalLoginJournal(t *testing.T) {
 			last := journal[len(journal)-1]
 			if last.From != work.email || last.To != personal.email || last.Source != "external" || !last.TimeUncertain || !last.At.Equal(f.now) || f.store().ActiveEmail() != personal.email {
 				t.Fatalf("внешний вход: %+v", last)
+			}
+			if last.NotBefore == nil || !last.NotBefore.Equal(lower) || last.NotAfter == nil || !last.NotAfter.Equal(info.ModTime()) {
+				t.Fatalf("границы внешнего входа: %+v", last)
 			}
 			if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err != nil {
 				t.Fatal(err)
@@ -91,8 +103,13 @@ func TestExternalLoginJournal(t *testing.T) {
 func TestExternalLogoutJournal(t *testing.T) {
 	f := newFixture(t)
 	f.save("work")
+	lower := f.store().SyncedMtime
 	f.now = f.now.Add(time.Minute)
 	f.writeCreds(nil)
+	info, err := os.Stat(f.p.Credentials())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -101,23 +118,78 @@ func TestExternalLogoutJournal(t *testing.T) {
 	if last.From != work.email || last.To != "" || last.Source != "external" || !last.TimeUncertain || !last.At.Equal(f.now) || f.store().Active != "" {
 		t.Fatalf("внешний выход: %+v", last)
 	}
+	if last.NotBefore == nil || !last.NotBefore.Equal(lower) || last.NotAfter == nil || !last.NotAfter.Equal(info.ModTime()) {
+		t.Fatalf("границы выхода: %+v", last)
+	}
+}
+
+func TestExternalJournalInvalidBounds(t *testing.T) {
+	for _, mode := range []string{"unknown-lower", "reversed", "future-upper", "unknown-upper"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t)
+			f.save("work")
+			s := f.store()
+			mtime := f.now.Add(-time.Minute)
+			s.SyncedMtime = time.Time{}
+			if mode == "reversed" {
+				s.SyncedMtime = f.now
+			}
+			if mode == "future-upper" {
+				mtime = f.now.Add(time.Minute)
+			}
+			if mode == "unknown-upper" {
+				mtime = time.Time{}
+			}
+			if err := f.r.recordExternal(s, personal.uuid, personal.email, f.now, mtime); err != nil {
+				t.Fatal(err)
+			}
+			journal := readJournal(t, f)
+			last := journal[len(journal)-1]
+			noUpper := mode == "future-upper" || mode == "unknown-upper"
+			if last.NotBefore != nil || (last.NotAfter == nil) != noUpper {
+				t.Fatalf("границы: %+v", last)
+			}
+			data, err := json.Marshal(last)
+			if err != nil || strings.Contains(string(data), `"notBefore"`) || (strings.Contains(string(data), `"notAfter"`) == noUpper) {
+				t.Fatalf("поля границ: %s %v", data, err)
+			}
+		})
+	}
 }
 
 func TestExternalJournalErrorKeepsActive(t *testing.T) {
-	f := newFixture(t)
-	f.save("work")
+	for _, mode := range []string{"new", "known", "logout"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t)
+			if mode == "known" {
+				f.save("personal")
+			}
+			f.save("work")
+			prior := f.store().SyncedMtime
+			breakJournal(t, f)
+			var raw json.RawMessage
+			if mode != "logout" {
+				raw = f.login("personal", 1, 8*time.Hour)
+			}
+			f.writeCreds(raw)
+			if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err == nil {
+				t.Fatal("ожидалась ошибка журнала")
+			}
+			s := f.store()
+			if s.ActiveEmail() != work.email || !s.SyncedMtime.Equal(prior) {
+				t.Fatalf("состояние при ошибке журнала: %s %v", s.ActiveEmail(), s.SyncedMtime)
+			}
+		})
+	}
+}
+
+func breakJournal(t *testing.T, f *fixture) {
+	t.Helper()
 	if err := os.Remove(f.p.Journal()); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(f.p.Journal(), 0o700); err != nil {
 		t.Fatal(err)
-	}
-	f.writeCreds(f.login("personal", 1, 8*time.Hour))
-	if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err == nil {
-		t.Fatal("ожидалась ошибка журнала")
-	}
-	if got := f.store().ActiveEmail(); got != work.email {
-		t.Fatalf("активная учётка при ошибке журнала: %s", got)
 	}
 }
 
@@ -412,6 +484,39 @@ func TestSwitchRefreshesExpiringTarget(t *testing.T) {
 	}
 }
 
+func TestSwitchedJournalError(t *testing.T) {
+	for _, manual := range []bool{false, true} {
+		t.Run(fmt.Sprintf("manual=%v", manual), func(t *testing.T) {
+			f := twoAccounts(t)
+			f.limits.set(work.email, 100, f.now.Add(4*day))
+			f.limits.set(personal.email, 10, f.now.Add(2*day))
+			breakJournal(t, f)
+			if manual {
+				_, err := f.r.Switch(context.Background(), personal.email)
+				if !errors.Is(err, errJournalAfterSwitch) || !strings.Contains(err.Error(), work.email) || !strings.Contains(err.Error(), personal.email) {
+					t.Fatalf("ошибка ручного переключения: %v", err)
+				}
+			} else if _, err := f.r.Rotate(context.Background(), Options{}); err != nil {
+				t.Fatal(err)
+			}
+			if f.store().ActiveEmail() != personal.email {
+				t.Fatal("переключение не сохранено")
+			}
+			if o, _ := f.creds(); o.RefreshToken != refreshPrefix+"personal-1" {
+				t.Fatal("credentials не переключены")
+			}
+			log, err := os.ReadFile(f.logFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(log)
+			if !strings.Contains(got, `level=ERROR msg="accounts: switched, journal not written"`) || !strings.Contains(got, "from="+work.email) || !strings.Contains(got, "to="+personal.email) || strings.Contains(got, `msg="accounts: switch failed"`) {
+				t.Fatalf("сообщение о переключении: %s", got)
+			}
+		})
+	}
+}
+
 // Сервер отклонил обновление цели: цель мёртвая, Claude Code остаётся на
 // прежней учётке, ответ сервера с эхом токена не доходит до ошибки
 func TestSwitchToDeadLogin(t *testing.T) {
@@ -546,6 +651,10 @@ func TestPending(t *testing.T) {
 // Auto и forget правят хранилище под его блокировкой
 func TestAutoAndForget(t *testing.T) {
 	f := twoAccounts(t)
+	before, err := os.ReadFile(f.p.Journal())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := SetAuto(f.p, false); err != nil {
 		t.Fatal(err)
 	}
@@ -559,6 +668,21 @@ func TestAutoAndForget(t *testing.T) {
 	s := f.store()
 	if len(s.Accounts) != 1 || s.Active != "" {
 		t.Errorf("после forget: %d учёток, активна %q", len(s.Accounts), s.Active)
+	}
+	after, err := os.ReadFile(f.p.Journal())
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("forget изменил журнал: %v", err)
+	}
+	if o, _ := f.creds(); o.RefreshToken != refreshPrefix+"work-1" {
+		t.Fatal("forget изменил вход Claude")
+	}
+	if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	journal := readJournal(t, f)
+	last := journal[len(journal)-1]
+	if len(journal) < 2 || last.To != work.email || last.Source != "external" || last.NotBefore != nil || f.store().ActiveEmail() != work.email {
+		t.Fatalf("сверка после forget: %+v", last)
 	}
 	if _, err := Forget(f.p, "nobody@example.com"); err == nil {
 		t.Error("forget неизвестной прошёл")

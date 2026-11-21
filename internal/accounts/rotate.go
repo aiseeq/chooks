@@ -155,6 +155,9 @@ func (r *Rotator) autoSwitch(ctx context.Context, s *Store, usage map[string]Usa
 		if err == nil {
 			return
 		}
+		if errors.Is(err, errJournalAfterSwitch) {
+			return
+		}
 		r.Log.Warn("accounts: switch failed", "to", target.Email, "error", err)
 		if target.Dead == "" {
 			return
@@ -181,7 +184,7 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	if len(raw) == 0 {
 		// Выход (/logout): активной учётки нет, хранилище не трогается
 		r.Log.Info("accounts: no login in Claude Code credentials")
-		if err := r.recordExternal(s, "", "", now); err != nil {
+		if err := r.recordExternal(s, "", "", now, creds.mtime); err != nil {
 			return err
 		}
 		s.Active, s.SyncedMtime = "", creds.mtime
@@ -202,7 +205,7 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	known, err := s.byLogin(o)
 	switch {
 	case err == nil:
-		if err := r.recordExternal(s, known.UUID, known.Email, now); err != nil {
+		if err := r.recordExternal(s, known.UUID, known.Email, now, creds.mtime); err != nil {
 			return err
 		}
 		r.adoptKnown(s, known, raw, now, creds.mtime)
@@ -223,7 +226,7 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 		s.RetryAt = now.Add(retryDelay)
 		return err
 	}
-	if err := r.recordExternal(s, prof.UUID, prof.Email, now); err != nil {
+	if err := r.recordExternal(s, prof.UUID, prof.Email, now, creds.mtime); err != nil {
 		return err
 	}
 	a := s.byUUID(prof.UUID)
@@ -252,12 +255,18 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 }
 
 // Время внешнего перехода неизвестно: at — только момент обнаружения.
-func (r *Rotator) recordExternal(s *Store, uuid, email string, now time.Time) error {
+func (r *Rotator) recordExternal(s *Store, uuid, email string, now, mtime time.Time) error {
 	if s.Active == uuid {
 		return nil
 	}
-	from := s.ActiveEmail()
-	return appendSwitch(r.Paths, switchRecord{At: now, From: from, To: email, Reason: "внешняя смена входа", Source: "external", TimeUncertain: true})
+	rec := switchRecord{At: now, From: s.ActiveEmail(), To: email, Reason: "внешняя смена входа", Source: "external", TimeUncertain: true}
+	if !mtime.IsZero() && !mtime.After(now) {
+		rec.NotAfter = &mtime
+		if s.Active != "" && !s.SyncedMtime.IsZero() && !s.SyncedMtime.After(mtime) {
+			rec.NotBefore = &s.SyncedMtime
+		}
+	}
+	return appendSwitch(r.Paths, rec)
 }
 
 // adoptKnown делает знакомый хранилищу вход активным: токены — в хранилище
@@ -437,6 +446,8 @@ func (r *Rotator) Switch(ctx context.Context, name string) (string, error) {
 	return target.Email, saveStore(r.Paths, s)
 }
 
+var errJournalAfterSwitch = errors.New("switched, journal not written")
+
 // switchTo кладёт токены учётки в файл Claude Code. Под блокировками
 // обновления токена: сессия, обновляющая токен прежней учётки, либо
 // закончит до подмены (и её новый токен уйдёт в хранилище), либо начнёт
@@ -511,18 +522,24 @@ func (r *Rotator) switchTo(ctx context.Context, s *Store, target *Account, reaso
 			r.Log.Warn("accounts: oauthAccount not replaced", "to", target.Email, "error", err)
 		}
 	}
+	if err := appendSwitch(r.Paths, switchRecord{At: r.Now().Truncate(time.Second), From: fromEmail, To: target.Email, Reason: reason, Source: source}); err != nil {
+		r.Log.Error("accounts: switched, journal not written", "from", fromEmail, "to", target.Email, "error", err)
+		return fmt.Errorf("%w: from %s to %s: %w", errJournalAfterSwitch, fromEmail, target.Email, err)
+	}
 	r.Log.Info("accounts: switched", "from", fromEmail, "to", target.Email, "reason", reason)
-	return appendSwitch(r.Paths, switchRecord{At: r.Now().Truncate(time.Second), From: fromEmail, To: target.Email, Reason: reason, Source: source})
+	return nil
 }
 
 // switchRecord — строка журнала переключений
 type switchRecord struct {
-	At            time.Time `json:"at"`
-	From          string    `json:"from,omitempty"`
-	To            string    `json:"to"`
-	Reason        string    `json:"reason"`
-	Source        string    `json:"source,omitempty"`
-	TimeUncertain bool      `json:"timeUncertain,omitempty"`
+	At            time.Time  `json:"at"`
+	From          string     `json:"from,omitempty"`
+	To            string     `json:"to"`
+	Reason        string     `json:"reason"`
+	Source        string     `json:"source,omitempty"`
+	TimeUncertain bool       `json:"timeUncertain,omitempty"`
+	NotBefore     *time.Time `json:"notBefore,omitempty"`
+	NotAfter      *time.Time `json:"notAfter,omitempty"`
 }
 
 func appendSwitch(p Paths, rec switchRecord) error {
@@ -576,9 +593,6 @@ func Forget(p Paths, name string) (string, error) {
 	}
 	email := a.Email
 	if a.UUID == s.Active {
-		if err := appendSwitch(p, switchRecord{At: time.Now(), From: email, To: "", Reason: "учётка удалена из хранилища", Source: "manual"}); err != nil {
-			return "", err
-		}
 		s.Active = ""
 	}
 	uuid := a.UUID

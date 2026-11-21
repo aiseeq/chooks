@@ -123,6 +123,38 @@ func TestExternalLogoutJournal(t *testing.T) {
 	}
 }
 
+func TestSwitchAfterLogout(t *testing.T) {
+	f := newFixture(t)
+	f.save("work")
+	s := f.store()
+	f.writeCreds(nil)
+	if err := f.r.sync(context.Background(), s, true); err != nil {
+		t.Fatal(err)
+	}
+	if s.Active != "" {
+		t.Fatalf("после выхода активна %q", s.Active)
+	}
+	before := len(readJournal(t, f))
+	target, err := s.find(work.email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.r.switchTo(context.Background(), s, target, "тест", "rotation"); err != nil {
+		t.Fatal(err)
+	}
+	journal := readJournal(t, f)
+	if len(journal) != before+1 {
+		t.Fatalf("после переключения записей %d, ожидалось %d", len(journal), before+1)
+	}
+	last := journal[len(journal)-1]
+	if last.From != "" || last.To != work.email || last.Source != "rotation" || s.Active != work.uuid {
+		t.Fatalf("переключение после выхода: %+v, active=%q", last, s.Active)
+	}
+	if o, _ := f.creds(); o.RefreshToken != refreshPrefix+"work-1" {
+		t.Fatal("в credentials не восстановлена целевая учётка")
+	}
+}
+
 func TestExternalJournalInvalidBounds(t *testing.T) {
 	for _, mode := range []string{"unknown-lower", "reversed", "future-upper", "unknown-upper"} {
 		t.Run(mode, func(t *testing.T) {

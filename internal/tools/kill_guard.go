@@ -168,6 +168,8 @@ var signalNames = []string{"kill", "pkill", "killall", "killall5"}
 // сообщает (кроме eval) — признак берётся отсюда
 var scriptRunners = []string{"eval", "watch", "trap", "su", "runuser"}
 
+var elevatedWrapperNames = []string{"pkexec", "sudo", "doas", "su", "run0", "runuser", "systemd-run"}
+
 // shellCommandOption короткая связка опций оболочки (после - или +) с c:
 // -c, -lc, -ec; bash исполняет скрипт и с +c (+xc). Длинные опции (--…)
 // shellScript разбирает раньше
@@ -460,8 +462,7 @@ func (s *killScan) implicitElevatedScriptInput(c shellcmd.Call) bool {
 		return true
 	}
 	for _, wrapper := range c.Via {
-		switch wrapper {
-		case "pkexec", "sudo", "doas", "su", "run0", "runuser", "systemd-run":
+		if slices.Contains(elevatedWrapperNames, wrapper) {
 			return true
 		}
 	}

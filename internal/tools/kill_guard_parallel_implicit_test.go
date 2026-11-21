@@ -171,10 +171,50 @@ func TestKillGuardParallelImplicitKnownSystemctlArguments(t *testing.T) {
 		`parallel 'sudo systemctl restart {}' ::: nginx`,
 		`parallel -j2 'systemctl --user restart {}' ::: a b`,
 		`parallel 'systemctl --user restart {}.service' ::: foo`,
+		`parallel 'pkexec systemctl restart {}' ::: nginx`,
+		`parallel 'run0 systemctl restart {}' ::: nginx`,
+		`parallel 'doas systemctl restart {}' ::: nginx`,
+		`parallel 'systemctl --user restart {1}' ::: foo`,
+		`parallel -I XX 'systemctl --user restart XX' ::: foo`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if r := validateKill(t, command); !r.IsValid {
 				t.Fatalf("expected allow for %q: %v", command, r.Suggestions)
+			}
+		})
+	}
+}
+
+func TestKillGuardParallelImplicitSystemctlSubstitutionWhitelist(t *testing.T) {
+	for _, command := range []string{
+		`parallel 'systemctl --user stop {2}' ::: x ::: plasma-plasmashell.service`,
+		`parallel 'sudo systemctl stop {2}' ::: x ::: user@1000.service`,
+		`parallel 'systemctl --user stop {}' ::: x ::: plasma-plasmashell.service`,
+		`parallel 'systemctl --user stop {} {}' ::: plasma-plasmashell.service`,
+		`parallel 'systemctl --user stop {1}' ::: x ::: plasma-plasmashell.service`,
+		`parallel 'systemctl --user stop {3}' ::: a ::: b ::: plasma-plasmashell.service`,
+		`parallel 'systemctl --user stop {2}' ::: x :::+ plasma-plasmashell.service`,
+		`parallel 'systemctl --user stop {}' ::: foo :::+ plasma-plasmashell.service`,
+		`parallel --link 'systemctl --user stop {2}' ::: a ::: plasma-plasmashell.service`,
+		`parallel --xapply 'systemctl --user stop {2}' ::: a ::: plasma-plasmashell.service`,
+		`parallel 'sudo systemctl stop {2}' ::: x ::: 'session-*.scope'`,
+		`parallel --colsep : 'systemctl --user stop {2}' ::: x:plasma-plasmashell.service`,
+		`parallel --colsep _ 'systemctl --user stop plasma-{2}' ::: x_plasmashell.service`,
+		`parallel 'systemctl --user stop {.}' ::: plasma-plasmashell.service.x`,
+		`parallel 'sudo systemctl stop {.}' ::: user@1000.service.bak`,
+		`parallel 'systemctl --user stop {/.}.service' ::: plasma-plasmashell.x`,
+		`parallel 'systemctl --user stop {=s/x/plasma-plasmashell/=}' ::: x.service`,
+		`parallel --rpl '{U} s/x/plasma-plasmashell/' 'systemctl --user stop {U}' ::: x.service`,
+		`parallel --plus 'systemctl --user stop {..}' ::: plasma-plasmashell.service.a.b`,
+		`parallel 'sudo systemctl stop user@100{#}.service' ::: a`,
+		`parallel 'sudo systemctl stop user@100{%}.service' ::: a`,
+		`cat list | parallel -a - 'sudo systemctl restart {}' ::: foo`,
+		`cat list | parallel -a /dev/stdin 'sudo systemctl restart {}' ::: foo`,
+		`parallel -a units.txt 'sudo systemctl restart {}' ::: foo`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if r := validateKill(t, command); r.IsValid {
+				t.Fatalf("expected refusal for %q", command)
 			}
 		})
 	}

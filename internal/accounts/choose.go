@@ -31,17 +31,21 @@ type Usage struct {
 type state struct {
 	account *Account
 	week    Window
-	// reason — общий диагноз годности входа и недельного лимита.
-	reason      accountReason
-	detail      string
-	loginEnds   time.Time
-	loginUsable bool
 	// weekKnown — сброс недели известен и ещё не прошёл
 	weekKnown bool
 	// resets — сброс для сравнения: неизвестная неделя считается
 	// неначатой и кончится через полное окно
 	resets time.Time
 	empty  bool
+}
+
+type accountAssessment struct {
+	state
+	// reason — общий диагноз годности входа и недельного лимита.
+	reason      accountReason
+	detail      string
+	loginEnds   time.Time
+	loginUsable bool
 }
 
 type accountReason uint8
@@ -56,42 +60,61 @@ const (
 	accountWeekFull
 )
 
-// inspectAccount вычисляет состояние входа и недели единым правилом для
-// выбора, замеров и объяснения отказа переключения.
-func inspectAccount(a *Account, usage map[string]Usage, now time.Time) state {
-	st := state{account: a, resets: now.Add(weekWindow)}
+type accountEligibility struct {
+	usable    bool
+	reason    accountReason
+	detail    string
+	loginEnds time.Time
+}
+
+// inspectLogin — единственное правило годности входа.
+func inspectLogin(a *Account, now time.Time) accountEligibility {
+	var status accountEligibility
 	if a.Dead != "" {
-		st.reason = accountDead
-		st.detail = a.Dead
+		status.reason = accountDead
+		status.detail = a.Dead
 	} else if o, err := a.oauth(); err != nil {
-		st.reason = accountBroken
-		st.detail = err.Error()
+		status.reason = accountBroken
+		status.detail = err.Error()
 	} else if o.cleared() {
-		st.reason = accountCleared
+		status.reason = accountCleared
 	} else {
-		st.loginUsable = true
+		status.usable = true
 		if family := o.family(); family > 0 {
-			st.loginEnds = time.UnixMilli(family)
-			if !st.loginEnds.After(now.Add(loginMargin)) {
-				st.loginUsable = false
-				st.reason = accountLoginExpiring
+			status.loginEnds = time.UnixMilli(family)
+			if !status.loginEnds.After(now.Add(loginMargin)) {
+				status.usable = false
+				status.reason = accountLoginExpiring
 			}
 		}
+	}
+	return status
+}
+
+// inspectAccount combines the shared login assessment with current usage.
+func inspectAccount(a *Account, usage map[string]Usage, now time.Time) accountAssessment {
+	return inspectAccountWithEligibility(a, usage, now, inspectLogin(a, now))
+}
+
+func inspectAccountWithEligibility(a *Account, usage map[string]Usage, now time.Time, login accountEligibility) accountAssessment {
+	assessment := accountAssessment{
+		state:  state{account: a, resets: now.Add(weekWindow)},
+		reason: login.reason, detail: login.detail, loginEnds: login.loginEnds, loginUsable: login.usable,
 	}
 	if u := usage[a.Email].Week; u.ResetsAt.After(now) {
-		st.week, st.weekKnown, st.resets = u, true, u.ResetsAt
+		assessment.week, assessment.weekKnown, assessment.resets = u, true, u.ResetsAt
 		if u.Used >= WeekEmptyPercent {
-			st.empty = true
-			if st.loginUsable {
-				st.reason = accountWeekFull
+			assessment.empty = true
+			if login.usable {
+				assessment.reason = accountWeekFull
 			}
-		} else if st.loginUsable {
-			st.reason = accountAvailable
+		} else if login.usable {
+			assessment.reason = accountAvailable
 		}
-	} else if st.loginUsable {
-		st.reason = accountWeekUnknown
+	} else if login.usable {
+		assessment.reason = accountWeekUnknown
 	}
-	return st
+	return assessment
 }
 
 // eligible — вход учётки жив и не истекает в ближайший час
@@ -109,13 +132,18 @@ func statesWith(s *Store, usage map[string]Usage, now time.Time, usable func(*Ac
 	var out []state
 	for i := range s.Accounts {
 		a := &s.Accounts[i]
-		st := inspectAccount(a, usage, now)
+		var st state
 		if usable == nil {
-			if !st.loginUsable {
+			assessment := inspectAccount(a, usage, now)
+			if !assessment.loginUsable {
 				continue
 			}
-		} else if !usable(a) {
-			continue
+			st = assessment.state
+		} else {
+			if !usable(a) {
+				continue
+			}
+			st = inspectAccountWithEligibility(a, usage, now, accountEligibility{usable: true}).state
 		}
 		out = append(out, st)
 	}

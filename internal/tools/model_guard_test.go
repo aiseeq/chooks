@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/chooks/internal/core"
 )
@@ -506,35 +507,37 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	approvedPath := filepath.Join(home, "approved")
 	files := map[string]string{
 		approvedPath: "opus claude-opus-5-5\nfable claude-fable-5-2\n",
-		filepath.Join(home, ".claude/agents/fx.md"):         "---\nname: fx\nmodel: fable\n---\nтело\n",
-		filepath.Join(home, ".claude/agents/sub/fy.md"):     "---\nname: other-name\nmodel: \"claude-fable-5-2\"\n---\n",
-		filepath.Join(home, ".claude/agents/ok.md"):         "---\nname: ok\nmodel: opus\n---\nmodel: fable\n",
-		filepath.Join(home, ".claude/agents/hk.md"):         "---\r\nname: hk\r\nmodel: haiku\r\n---\r\n",
-		filepath.Join(home, ".claude/agents/in.md"):         "---\nname: in\nmodel: inherit\n---\n",
-		filepath.Join(home, ".claude/agents/nofm.md"):       "model: fable\n",
-		filepath.Join(project, ".claude/agents/px.md"):      "---\nname: px\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/byfile.md"):     "---\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/notes.txt"):     "---\nname: txt\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/unclosed.md"):   "---\nname: unclosed\nmodel: fable\n",
-		filepath.Join(home, ".claude/agents/noprefix.md"):   "name: noprefix\n---\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/emptyname.md"):  "---\nname: \"\"\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/nokey.md"):      "---\njust text\nname: nokey\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/spaced.md"):     "---\nname:   spaced-x  \nmodel:  'fable' \n---\n",
-		filepath.Join(home, ".claude/agents/badyaml.md"):    "---\nname : fb\nmodel: fable\nbad: [unclosed\n  name: other\n---\n",
-		filepath.Join(home, ".claude/agents/norm.md"):       "---\nname: f-dash\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/comment.md"):    "---\nname: fcomment\nmodel: fable # by user\n---\n",
-		filepath.Join(home, ".claude/agents/bom.md"):        "\xef\xbb\xbf---\nname: fbom\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/trail.md"):      "---  \nname: ftrail\nmodel: fable\n---  \n",
-		filepath.Join(home, ".claude/agents/block.md"):      "---\nname: fblock\nmodel: >-\n  fable\n---\n",
-		filepath.Join(home, ".claude/agents/nested.md"):     "---\nname: fnn\nmetadata:\n  name: other\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/nestmodel.md"):  "---\nname: fnm\nmodel: opus\nsrv:\n  model: fable\n---\n",
-		filepath.Join(home, ".claude/agents/big.md"):        "---\nname: fbig\ndescription: " + strings.Repeat("д", 3000) + "\nmodel: fable\n---\n" + strings.Repeat("тело\n", 300000),
-		filepath.Join(project, "outside/fl.md"):             "---\nname: flink\nmodel: fable\n---\n",
-		filepath.Join(project, "cfg/agents/fc.md"):          "---\nname: fconfig\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/crlf.md"):       "---\r\nname: crlf\r\nmodel: fable\r\n---\r\n",
-		filepath.Join(home, ".claude/agents/override.md"):   "---\nname: override\nmodel: opus\n---\n",
-		filepath.Join(home, ".claude/agents/caseupper.md"):  "---\nname: caseupper\nmodel: FABLE\n---\n",
-		filepath.Join(home, ".claude/agents/onemillion.md"): "---\nname: onemillion\nmodel: claude-fable-5-2[1m]\n---\n",
+		filepath.Join(home, ".claude/agents/fx.md"):                                "---\nname: fx\nmodel: fable\n---\nтело\n",
+		filepath.Join(home, ".claude/agents/sub/fy.md"):                            "---\nname: other-name\nmodel: \"claude-fable-5-2\"\n---\n",
+		filepath.Join(home, ".claude/agents/ok.md"):                                "---\nname: ok\nmodel: opus\n---\nmodel: fable\n",
+		filepath.Join(home, ".claude/agents/hk.md"):                                "---\r\nname: hk\r\nmodel: haiku\r\n---\r\n",
+		filepath.Join(home, ".claude/agents/in.md"):                                "---\nname: in\nmodel: inherit\n---\n",
+		filepath.Join(home, ".claude/agents/nofm.md"):                              "model: fable\n",
+		filepath.Join(project, ".claude/agents/px.md"):                             "---\nname: px\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/byfile.md"):                            "---\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/notes.txt"):                            "---\nname: txt\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/unclosed.md"):                          "---\nname: unclosed\nmodel: fable\n",
+		filepath.Join(home, ".claude/agents/noprefix.md"):                          "name: noprefix\n---\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/emptyname.md"):                         "---\nname: \"\"\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/nokey.md"):                             "---\njust text\nname: nokey\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/spaced.md"):                            "---\nname:   spaced-x  \nmodel:  'fable' \n---\n",
+		filepath.Join(home, ".claude/agents/badyaml.md"):                           "---\nname : fb\nmodel: fable\nbad: [unclosed\n  name: other\n---\n",
+		filepath.Join(home, ".claude/agents/norm.md"):                              "---\nname: f-dash\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/comment.md"):                           "---\nname: fcomment\nmodel: fable # by user\n---\n",
+		filepath.Join(home, ".claude/agents/bom.md"):                               "\xef\xbb\xbf---\nname: fbom\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/trail.md"):                             "---  \nname: ftrail\nmodel: fable\n---  \n",
+		filepath.Join(home, ".claude/agents/block.md"):                             "---\nname: fblock\nmodel: >-\n  fable\n---\n",
+		filepath.Join(home, ".claude/agents/nested.md"):                            "---\nname: fnn\nmetadata:\n  name: other\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/nestmodel.md"):                         "---\nname: fnm\nmodel: opus\nsrv:\n  model: fable\n---\n",
+		filepath.Join(home, ".claude/agents/big.md"):                               "---\nname: fbig\ndescription: " + strings.Repeat("д", 3000) + "\nmodel: fable\n---\n" + strings.Repeat("тело\n", 300000),
+		filepath.Join(project, "outside/fl.md"):                                    "---\nname: flink\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/long.md"):                              "---\nname: flong\nmodel: fable\ndescription: " + strings.Repeat("д", 100000) + "\n---\n",
+		filepath.Join(home, ".claude/agents", strings.Repeat("d/", 20), "deep.md"): "---\nname: fdeep\nmodel: fable\n---\n",
+		filepath.Join(project, "cfg/agents/fc.md"):                                 "---\nname: fconfig\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/crlf.md"):                              "---\r\nname: crlf\r\nmodel: fable\r\n---\r\n",
+		filepath.Join(home, ".claude/agents/override.md"):                          "---\nname: override\nmodel: opus\n---\n",
+		filepath.Join(home, ".claude/agents/caseupper.md"):                         "---\nname: caseupper\nmodel: FABLE\n---\n",
+		filepath.Join(home, ".claude/agents/onemillion.md"):                        "---\nname: onemillion\nmodel: claude-fable-5-2[1m]\n---\n",
 	}
 	for path, text := range files {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -589,7 +592,10 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent блочный скаляр", "Agent", `{"subagent_type":"fblock"}`, "", home, true},
 		{"Agent вложенный name не подменяет", "Agent", `{"subagent_type":"fnn"}`, "", home, true},
 		{"Agent вложенный model не считается", "Agent", `{"subagent_type":"fnm"}`, "", home, false},
-		{"Agent большой файл", "Agent", `{"subagent_type":"fbig"}`, "", home, true},
+		{"Agent файл больше 1 МБ — Claude Code не загрузит", "Agent", `{"subagent_type":"fbig"}`, "", home, false},
+		{"Agent frontmatter больше 64 КБ", "Agent", `{"subagent_type":"flong"}`, "", home, true},
+		{"Agent имя с тире U+2013", "Agent", `{"subagent_type":"f–dash"}`, "", home, true},
+		{"Agent глубже 16 каталогов", "Agent", `{"subagent_type":"fdeep"}`, "", home, true},
 		{"Agent в симлинке на каталог", "Agent", `{"subagent_type":"flink"}`, "", home, true},
 		{"Agent проекта из подкаталога", "Agent", `{"subagent_type":"px"}`, "", deep, true},
 		{"Agent из CLAUDE_CONFIG_DIR", "Agent", `{"subagent_type":"fconfig"}`, "", home, true},
@@ -611,9 +617,14 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			input := &core.ToolInput{ToolName: c.tool, ToolInput: []byte(c.raw), Command: c.command, CWD: c.cwd}
+			start := time.Now()
 			result, err := tool.ValidateTool(context.Background(), input)
 			if err != nil {
 				t.Fatal(err)
+			}
+			// петля симлинков sub/loop не должна доводить обход до срока agentScanBudget
+			if elapsed := time.Since(start); elapsed > agentScanBudget/2 {
+				t.Fatalf("обход каталогов агентов %v", elapsed)
 			}
 			if result.IsValid == c.reject {
 				t.Fatalf("reject=%v, want %v: %+v", !result.IsValid, c.reject, result.Violations)

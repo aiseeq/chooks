@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/aiseeq/akit/shellcmd"
@@ -192,17 +193,20 @@ type modelFiles struct {
 // одобрение моделей в определениях — не предмет хука (fighter.md — model: opus)
 func agentDefinitionModels(name, cwd, home string, logger core.Logger) []modelCandidate {
 	var found []modelCandidate
+	walk := agentWalk{seen: map[string]bool{}, deadline: time.Now().Add(agentScanBudget), logger: logger}
 	for _, dir := range agentDirs(cwd, home) {
-		for _, path := range agentFiles(dir, logger) {
-			data, err := readAgentHeader(path)
-			if err != nil {
-				logger.Warn("model_guard: определение агента не читается, модель из него не проверена", "path", path, "error", err)
-				continue
-			}
-			// inherit и прочие не-модели проверку «только пользователь» проходят сами
-			if defName, model := agentFrontmatter(data, path); sameAgentName(defName, name) && model != "" {
-				found = append(found, modelCandidate{value: model, userOnlyCheck: true})
-			}
+		walk.dir(dir)
+	}
+	for _, path := range walk.files {
+		data, ok, err := readAgentDefinition(path)
+		if err != nil {
+			logger.Warn("model_guard: определение агента не читается, модель из него не проверена", "path", path, "error", err)
+			continue
+		}
+		// больше maxAgentFile Claude Code определение не загружает;
+		// inherit и прочие не-модели проверку «только пользователь» проходят сами
+		if defName, model := agentFrontmatter(data, path); ok && sameAgentName(defName, name) && model != "" {
+			found = append(found, modelCandidate{value: model, userOnlyCheck: true})
 		}
 	}
 	return found
@@ -231,75 +235,86 @@ func agentDirs(cwd, home string) []string {
 	return dirs
 }
 
-// maxAgentDirDepth — глубина вложенных каталогов агентов, дальше не обходится
-const maxAgentDirDepth = 16
+// agentScanBudget — время на обход каталогов агентов: Claude Code свой
+// обход обрывает через 3 с, хук не ждёт дольше (таймаут хука 15 с)
+const agentScanBudget = 3 * time.Second
 
-// agentFiles — обычные файлы *.md в dir и его подкаталогах, по симлинкам
-// на файлы и каталоги, как Claude Code; каталог обходится один раз по
-// реальному пути (петли симлинков)
-func agentFiles(dir string, logger core.Logger) []string {
-	var files []string
-	seen := map[string]bool{}
-	var walk func(dir string, depth int)
-	walk = func(dir string, depth int) {
-		real, err := filepath.EvalSymlinks(dir)
-		if err != nil {
-			// нет каталога — определений в нём нет
-			if !errors.Is(err, fs.ErrNotExist) {
-				logger.Warn("model_guard: каталог агентов не читается, модели определений не проверены", "path", dir, "error", err)
-			}
-			return
-		}
-		if seen[real] || depth > maxAgentDirDepth {
-			return
-		}
-		seen[real] = true
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			logger.Warn("model_guard: каталог агентов не читается, модели определений не проверены", "path", dir, "error", err)
-			return
-		}
-		for _, e := range entries {
-			path := filepath.Join(dir, e.Name())
-			info, err := os.Stat(path)
-			if err != nil {
-				// битый симлинк Claude Code тоже не прочтёт
-				if !errors.Is(err, fs.ErrNotExist) {
-					logger.Warn("model_guard: файл в каталоге агентов не читается, модель из него не проверена", "path", path, "error", err)
-				}
-				continue
-			}
-			if info.IsDir() {
-				walk(path, depth+1)
-			} else if info.Mode().IsRegular() && strings.HasSuffix(e.Name(), ".md") {
-				files = append(files, path)
-			}
-		}
-	}
-	walk(dir, 0)
-	return files
+// agentWalk — обход каталогов агентов: обычные файлы *.md во всех
+// подкаталогах, по симлинкам на файлы и каталоги, как Claude Code (rg
+// --follow); каждый каталог — один раз по реальному пути (петли симлинков,
+// ~/.claude/agents и как предок cwd, и как пользовательский)
+type agentWalk struct {
+	seen     map[string]bool
+	deadline time.Time
+	logger   core.Logger
+	files    []string
+	late     bool
 }
 
-// maxAgentHeader — сколько байт начала определения агента читается: frontmatter
-// в начале файла, тело любого размера не нужно
-const maxAgentHeader = 64 << 10
+func (w *agentWalk) dir(dir string) {
+	if time.Now().After(w.deadline) {
+		if !w.late {
+			w.late = true
+			w.logger.Warn("model_guard: обход каталогов агентов не уложился в срок, остальные определения не проверены", "budget", agentScanBudget, "dir", dir)
+		}
+		return
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		// нет каталога — определений в нём нет
+		if !errors.Is(err, fs.ErrNotExist) {
+			w.logger.Warn("model_guard: каталог агентов не читается, модели определений не проверены", "path", dir, "error", err)
+		}
+		return
+	}
+	if w.seen[real] {
+		return
+	}
+	w.seen[real] = true
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		w.logger.Warn("model_guard: каталог агентов не читается, модели определений не проверены", "path", dir, "error", err)
+		return
+	}
+	for _, e := range entries {
+		path := filepath.Join(dir, e.Name())
+		info, err := os.Stat(path)
+		if err != nil {
+			// битый симлинк Claude Code тоже не прочтёт
+			if !errors.Is(err, fs.ErrNotExist) {
+				w.logger.Warn("model_guard: файл в каталоге агентов не читается, модель из него не проверена", "path", path, "error", err)
+			}
+			continue
+		}
+		if info.IsDir() {
+			w.dir(path)
+		} else if info.Mode().IsRegular() && strings.HasSuffix(e.Name(), ".md") {
+			w.files = append(w.files, path)
+		}
+	}
+}
 
-func readAgentHeader(path string) ([]byte, error) {
+// maxAgentFile — определение больше Claude Code не загружает (2.1.330)
+const maxAgentFile = 1 << 20
+
+// readAgentDefinition — определение агента целиком; ok=false — больше
+// maxAgentFile, Claude Code его не загрузит
+func readAgentDefinition(path string) (data []byte, ok bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("определение агента %s: %w", path, err)
+		return nil, false, fmt.Errorf("определение агента %s: %w", path, err)
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxAgentHeader))
+	data, err = io.ReadAll(io.LimitReader(f, maxAgentFile+1))
 	if err != nil {
-		return nil, fmt.Errorf("определение агента %s: %w", path, err)
+		return nil, false, fmt.Errorf("определение агента %s: %w", path, err)
 	}
-	return data, nil
+	return data, len(data) <= maxAgentFile, nil
 }
 
 // sameAgentName — имя subagent_type или --agent указывает на определение:
 // точно или после нормализации Claude Code (NFKC, нижний регистр, без
-// пробелов, дефисов и _). Claude Code берёт нормализованное только при
+// пробелов, тире \p{Pd} и _). Claude Code берёт нормализованное только при
 // единственном совпадении — хук отказывает при любом, это шире
 func sameAgentName(defName, name string) bool {
 	return defName == name || normalizeAgentName(defName) == normalizeAgentName(name)
@@ -307,7 +322,7 @@ func sameAgentName(defName, name string) bool {
 
 func normalizeAgentName(name string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) || r == '-' || r == '_' {
+		if unicode.IsSpace(r) || unicode.Is(unicode.Pd, r) || r == '_' {
 			return -1
 		}
 		return unicode.ToLower(r)

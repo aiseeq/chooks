@@ -60,6 +60,9 @@ func NewGitGuardToolForRequest(config core.ToolConfig, logger core.Logger, reque
 
 // ValidateTool проверяет git-вызовы команды суб-агента
 func (t *GitGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+	if _, ok := hookctx.Request(ctx); !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
 	if !t.IsEnabled() || input == nil || input.AgentID == "" || !strings.Contains(input.Command, "git") {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
@@ -71,18 +74,7 @@ func (t *GitGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) 
 		}
 		return &core.ValidationResult{IsValid: true}, nil
 	}
-	var home string
-	var homeErr error
-	if request, ok := hookctx.Request(ctx); ok {
-		home = request.Getenv("HOME")
-		if home == "" {
-			homeErr = errors.New("$HOME is not defined")
-		} else {
-			home = request.Abs(home)
-		}
-	} else {
-		home, homeErr = os.UserHomeDir()
-	}
+	home, homeErr := hookctx.UserHomeDir(ctx)
 	//nolint:fallback-return // home нужен только для ~: без него путь с ~ неизвестен, а неизвестный каталог — чужое дерево, то есть отказ (безопасная сторона)
 	if homeErr != nil {
 		t.Logger().Warn("git_guard: домашний каталог неизвестен", "error", homeErr)

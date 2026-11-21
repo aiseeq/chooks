@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -186,16 +185,16 @@ func judgeExecutable(ctx context.Context, name string) (string, error) {
 		}
 		return path, nil
 	}
-	return name, nil
+	return "", fmt.Errorf("hook request is missing")
 }
 
 func runCLI(ctx context.Context, cmd *exec.Cmd, dir, stdin string) ([]byte, error) {
 	cmd.Dir = dir
-	if request, ok := hookctx.Request(ctx); ok {
-		cmd.Env = judgeEnv(request.Env)
-	} else {
-		cmd.Env = judgeEnv(os.Environ())
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return nil, fmt.Errorf("hook request is missing")
 	}
+	cmd.Env = judgeEnv(request.Env)
 	// По таймауту контекст убивает сам CLI, а его потомки держат stdout:
 	// без WaitDelay хук ждал бы их и выходил за свой таймаут
 	cmd.WaitDelay = 2 * time.Second

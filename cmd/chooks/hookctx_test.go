@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -36,8 +37,8 @@ func TestNoPromptRequestStreams(t *testing.T) {
 	}
 }
 
-// TestNoPromptParallel compares independent request streams and config roots
-// with the corresponding sequential invocations.
+// TestNoPromptParallel checks each result against the fixture, independently
+// of the other requests.
 func TestNoPromptParallel(t *testing.T) {
 	const count = 50
 	type result struct {
@@ -74,21 +75,32 @@ func TestNoPromptParallel(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var want, got [count]result
-	for i := range want {
-		want[i] = run(i)
-		if i%3 == 0 && want[i].code != exitError || i%3 != 0 && want[i].code != exitAllowed {
-			t.Fatalf("request %d unexpectedly returned %+v", i, want[i])
-		}
-	}
+	var got [count]result
 	var wg sync.WaitGroup
 	for i := range got {
 		wg.Go(func() { got[i] = run(i) })
 	}
 	wg.Wait()
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("request %d: got %+v, want %+v", i, got[i], want[i])
+	for i, result := range got {
+		if i%3 == 0 {
+			if result.code != exitError || !strings.Contains(result.err, "invalid logger level") || result.out != "" {
+				t.Errorf("request %d: %+v", i, result)
+			}
+			continue
+		}
+		expected := "{\"hookSpecificOutput\":{\"action\":\"decline\",\"hookEventName\":\"Elicitation\"}}\n"
+		if i%2 == 0 {
+			payload, err := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{
+				"hookEventName": "PermissionRequest",
+				"decision":      map[string]any{"behavior": "deny", "interrupt": false, "message": permissionDeniedMessage},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected = string(payload) + "\n"
+		}
+		if result.code != exitAllowed || result.err != "" || result.errout != "" || result.out != expected {
+			t.Errorf("request %d: %+v", i, result)
 		}
 	}
 }
@@ -140,21 +152,15 @@ func TestPromptParallel(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var want, got [count]outcome
-	for i := range want {
-		want[i] = run(i)
-		if want[i].code != exitAllowed {
-			t.Fatalf("request %d: %+v", i, want[i])
-		}
-	}
+	var got [count]outcome
 	var wg sync.WaitGroup
 	for i := range got {
 		wg.Go(func() { got[i] = run(i) })
 	}
 	wg.Wait()
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("request %d: got %+v want %+v", i, got[i], want[i])
+	for i, result := range got {
+		if result.code != exitAllowed || result.output != "" || result.errors != "" {
+			t.Errorf("request %d: %+v", i, result)
 		}
 		state, err := os.ReadFile(filepath.Join(root, fmt.Sprint(i), "chooks", "sessions", "shared"))
 		if err != nil || string(state) != "working" {
@@ -293,9 +299,8 @@ func TestPreToolRequestRelativeCWD(t *testing.T) {
 	}
 }
 
-// TestHookCommandsParallel compares all hook entry points with the same
-// requests run sequentially. Notifications, external fetches and the judge
-// are disabled in these isolated fixtures.
+// TestHookCommandsParallel checks all hook entry points against fixed fixture
+// expectations. Notifications, external fetches and the judge are disabled.
 func TestHookCommandsParallel(t *testing.T) {
 	const count = 50
 	commands := []string{hookPreToolUse, hookPostToolBatch, hookUserPromptSubmit, hookUnderstandCheck, hookUnsentCheck, hookStop, hookStopFailure, hookNotification, hookNightHint, hookNoPrompt, hookWebFetchFallback, "statusline"}
@@ -335,21 +340,31 @@ func TestHookCommandsParallel(t *testing.T) {
 		code := executeHook(context.Background(), req, name)
 		return outcome{code: code, out: stdout.String(), stderr: stderr.String()}
 	}
-	var want, got [count]outcome
-	for i := range want {
-		want[i] = run(i)
-		if want[i].code != exitAllowed || want[i].failure != "" {
-			t.Fatalf("request %d: %+v", i, want[i])
-		}
-	}
+	var got [count]outcome
 	var wg sync.WaitGroup
 	for i := range got {
 		wg.Go(func() { got[i] = run(i) })
 	}
 	wg.Wait()
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("request %d (%s): got %+v want %+v", i, commands[i%len(commands)], got[i], want[i])
+	for i, result := range got {
+		name := commands[i%len(commands)]
+		if result.code != exitAllowed || result.failure != "" {
+			t.Errorf("request %d (%s): %+v", i, name, result)
+			continue
+		}
+		switch name {
+		case hookNoPrompt:
+			if !strings.Contains(result.out, `"action":"decline"`) || result.stderr != "" {
+				t.Errorf("request %d (%s): %+v", i, name, result)
+			}
+		case "statusline":
+			if !strings.Contains(result.out, " ~ ") || !strings.Contains(result.stderr, "]0;🔄 ~") {
+				t.Errorf("request %d (%s): %+v", i, name, result)
+			}
+		default:
+			if result.out != "" || result.stderr != "" {
+				t.Errorf("request %d (%s): %+v", i, name, result)
+			}
 		}
 	}
 }
@@ -419,21 +434,32 @@ func TestPreToolCommandsParallel(t *testing.T) {
 		code := executeHook(context.Background(), req, hookPreToolUse)
 		return outcome{code: code, out: out.String(), stderr: stderr.String()}
 	}
-	var want, got [count]outcome
-	for i := range want {
-		want[i] = run(i)
-		if want[i].code == exitError {
-			t.Fatalf("request %d: %+v", i, want[i])
-		}
-	}
+	var got [count]outcome
 	var wg sync.WaitGroup
 	for i := range got {
 		wg.Go(func() { got[i] = run(i) })
 	}
 	wg.Wait()
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("request %d: got %+v want %+v", i, got[i], want[i])
+	for i, result := range got {
+		expected := exitAllowed
+		switch i % 5 {
+		case 1:
+			if i%2 != 0 {
+				expected = exitBlocked
+			}
+		case 2:
+			expected = exitBlocked
+		case 3:
+			if i%2 != 0 {
+				expected = exitBlocked
+			}
+		case 4:
+			if i%2 == 0 {
+				expected = exitBlocked
+			}
+		}
+		if result.code != expected || result.out != "" || (expected == exitBlocked && result.stderr == "") || (expected == exitAllowed && result.stderr != "") {
+			t.Errorf("request %d: %+v want code=%d", i, result, expected)
 		}
 	}
 }
@@ -443,5 +469,69 @@ func TestHookRequestRejectsRelativeCWD(t *testing.T) {
 	req := hookctx.New(strings.NewReader(`{}`), &out, &stderr, nil, "relative", 1, 2)
 	if code := executeHook(context.Background(), req, hookNoPrompt); code != exitError || !strings.Contains(stderr.String(), "cwd must be absolute") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+// Relative paths must be resolved from each request, even when all requests
+// arrive together. Expectations come from the fixture, not another run.
+func TestRequestRelativeDirectoriesParallel(t *testing.T) {
+	const count = 50
+	root := t.TempDir()
+	var pids [count]int
+	for i := range pids {
+		child := exec.Command("/bin/sleep", "600")
+		child.Env = []string{}
+		child.Dir = root
+		if err := child.Start(); err != nil {
+			t.Fatal(err)
+		}
+		pids[i] = child.Process.Pid
+		t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+	}
+	const config = "logger:\n  level: error\ntools:\n  jira_style: {enabled: true}\n  wide_search_hint: {enabled: false}\n"
+	for i := range count {
+		dir := filepath.Join(root, fmt.Sprint(i))
+		if err := os.MkdirAll(filepath.Join(dir, "work"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(config), 0600); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"body":"готово"}`
+		if i%2 == 0 {
+			body = `{"body":"готово — сейчас"}`
+		}
+		if err := os.WriteFile(filepath.Join(dir, "work", "body.json"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wg sync.WaitGroup
+	for i := range count {
+		wg.Go(func() {
+			dir := filepath.Join(root, fmt.Sprint(i))
+			var out, stderr bytes.Buffer
+			input := `{"cwd":"work","tool_name":"Bash","tool_input":{"command":"curl -X POST -d @body.json https://x.atlassian.net/rest/api/3/issue/PROJ-1/comment"}}`
+			pid := pids[i]
+			req := hookctx.New(strings.NewReader(input), &out, &stderr, []string{"HOME=" + dir, "CLAUDE_CONFIG_DIR=" + filepath.Join(dir, "claude"), "CLAUDE_PID=" + fmt.Sprint(pid), "XDG_RUNTIME_DIR=" + filepath.Join(dir, "run")}, dir, pid, os.Getpid())
+			req.ConfigPath = filepath.Join(dir, "config.yaml")
+			code := executeHook(context.Background(), req, hookPreToolUse)
+			want := exitAllowed
+			if i%2 == 0 {
+				want = exitBlocked
+			}
+			if code != want || out.Len() != 0 || (want == exitBlocked && !strings.Contains(stderr.String(), "тире")) || (want == exitAllowed && stderr.Len() != 0) {
+				t.Errorf("request %d: code=%d stdout=%q stderr=%q, want code=%d", i, code, out.String(), stderr.String(), want)
+			}
+		})
+	}
+	wg.Wait()
+}
+
+func TestHookWithoutRequestFails(t *testing.T) {
+	if code, err := runHook(context.Background(), hookNoPrompt); code != exitError || err == nil {
+		t.Fatalf("runHook without request: code=%d err=%v", code, err)
+	}
+	if code, err := runPreToolUse(context.Background(), nil, nil, nil); code != exitError || err == nil {
+		t.Fatalf("runPreToolUse without request: code=%d err=%v", code, err)
 	}
 }

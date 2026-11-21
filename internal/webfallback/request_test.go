@@ -30,6 +30,12 @@ func TestExecRunnerRequest(t *testing.T) {
 	}
 }
 
+func TestExecRunnerRejectsMissingRequest(t *testing.T) {
+	if _, _, err := ExecRunner(context.Background(), nil); err == nil {
+		t.Fatal("webtext accepted a missing hook request")
+	}
+}
+
 func TestOpenRequestRelativePath(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "page.txt"), []byte("request page"), 0600); err != nil {

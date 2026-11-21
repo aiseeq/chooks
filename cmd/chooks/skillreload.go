@@ -52,20 +52,15 @@ func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Con
 	if input.SessionID == "" || input.TranscriptPath == "" {
 		return
 	}
-	base := request.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home := request.Getenv("HOME")
-		if home == "" {
-			logger.Warn("skill reload state dir unavailable", "error", errors.New("cannot resolve home dir: $HOME is not defined"))
-			return
-		}
-		base = filepath.Join(home, ".local", "state")
+	stateDir, err := skillreload.StateDir(request)
+	if err != nil {
+		logger.Warn("skill reload state dir unavailable", "error", err)
+		return
 	}
-	stateDir := filepath.Join(request.Abs(base), "chooks", "skill-reload")
 
-	checker := skillreload.Checker{StateDir: stateDir, CWD: request.Cwd, RequestPaths: true, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
+	checker := skillreload.Checker{StateDir: stateDir, CWD: request.Cwd, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
 	var result skillreload.Result
-	var err error
+	err = nil
 	if awaitSkillCheck(timer, logger, eventName, input, func() {
 		result, err = checker.Check(skillreload.Event{
 			SessionID:      input.SessionID,

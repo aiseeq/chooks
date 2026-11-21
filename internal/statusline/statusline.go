@@ -120,16 +120,18 @@ func contextFill(ctx context.Context, input Input, claudeDir string, logger core
 		// Явный failover: без settings порог штатный — по полному окну модели
 		logger.Warn("settings unreadable, context bar uses the default compaction window", "error", err)
 	}
-	if request, ok := hookctx.Request(ctx); ok {
-		return contextUsed(input, compactThreshold(input.ContextWindow.Size, input.Model.ID, settings, request.Getenv))
-	}
-	return contextUsed(input, compactThreshold(input.ContextWindow.Size, input.Model.ID, settings, os.Getenv))
+	request, _ := hookctx.Request(ctx)
+	return contextUsed(input, compactThreshold(input.ContextWindow.Size, input.Model.ID, settings, request.Getenv))
 }
 
 // Render читает данные Claude Code и возвращает строку статуса.
 // Попутно обновляется заголовок окна: строка статуса видна только в активном
 // окне, а по заголовку сессию видно в панели задач и в переключателе окон.
 func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return "", fmt.Errorf("hook request is missing")
+	}
 	data, err := io.ReadAll(stdin)
 	if err != nil {
 		return "", fmt.Errorf("failed to read status line input: %w", err)
@@ -197,40 +199,21 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	if store != nil && len(store.Accounts) > 0 {
 		bar.pool = poolPace(ctx, store, snapshot, now, logger)
 	}
-	if request, ok := hookctx.Request(ctx); ok {
-		home := request.Getenv("HOME")
-		if home != "" {
-			home = request.Abs(home)
-		}
-		bar.unit = store.PlanUnitForHome(now, home)
-	} else {
-		bar.unit = store.PlanUnit(now)
+	home := request.Getenv("HOME")
+	if home != "" {
+		home = request.Abs(home)
 	}
-
+	bar.unit = store.PlanUnitForHome(now, home)
 	visible := func() (bool, error) { return desktop.TabVisible(ctx) }
-	if request, ok := hookctx.Request(ctx); ok && input.Workspace.ProjectDir == "" && input.CWD == "" && input.Workspace.CurrentDir == "" {
+	if input.Workspace.ProjectDir == "" && input.CWD == "" && input.Workspace.CurrentDir == "" {
 		input.CWD = request.Cwd
 		if input.CWD == "" {
 			input.CWD = "."
 		}
 	}
 	used := contextFill(ctx, input, paths.ClaudeDir, logger)
-	var line, title string
-	if request, ok := hookctx.Request(ctx); ok {
-		home := request.Getenv("HOME")
-		if home != "" {
-			home = request.Abs(home)
-		}
-		line, title = buildForRuntime(request.RuntimeDir(), &home, input, used, bar, now, visible, logger)
-	} else {
-		line, title = build(input, used, bar, now, visible, logger)
-	}
-	var titleErr error
-	if request, ok := hookctx.Request(ctx); ok {
-		titleErr = desktop.SetTerminalTitleForRequest(title, request)
-	} else {
-		titleErr = desktop.SetTerminalTitle(title)
-	}
+	line, title := buildForRuntime(request.RuntimeDir(), &home, input, used, bar, now, visible, logger)
+	titleErr := desktop.SetTerminalTitleForRequest(title, request)
 	if titleErr != nil {
 		logger.Warn("terminal title not set", "error", titleErr)
 	}
@@ -242,10 +225,6 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 // сессии строку не срывает: она рисуется по тому, что удалось прочитать, а
 // сбой уходит в лог. Ветки и worktree в строке нет (пользователь 24.10 о
 // строке всех агентов: «Хочу видеть только вот это»)
-func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible func() (bool, error), logger core.Logger) (string, string) {
-	return buildForRuntime(core.RuntimeDir(), nil, input, ctxUsed, bar, now, visible, logger)
-}
-
 func buildForRuntime(runtimeDir string, home *string, input Input, ctxUsed float64, bar weekBar, now time.Time, visible func() (bool, error), logger core.Logger) (string, string) {
 	dir := sessionDir(input)
 	state, recorded, err := core.LookupSessionStateIn(runtimeDir, input.SessionID)
@@ -284,11 +263,11 @@ func buildForRuntime(runtimeDir string, home *string, input Input, ctxUsed float
 	// Путь не показывается: плашка уже называет проект, а полный путь
 	// повторяет её и занимает место
 	var output strings.Builder
-	if home == nil {
-		output.WriteString(projectBadge(dir, state))
-	} else {
-		output.WriteString(projectBadgeForHome(dir, *home, state))
+	homeDir := ""
+	if home != nil {
+		homeDir = *home
 	}
+	output.WriteString(projectBadgeForHome(dir, homeDir, state))
 
 	parts := details(input, ctxUsed, bar, now)
 	if part := backgroundPart(background, now); part != "" {
@@ -298,10 +277,7 @@ func buildForRuntime(runtimeDir string, home *string, input Input, ctxUsed float
 		output.WriteString(dim + " · " + reset + part)
 	}
 
-	if home == nil {
-		return output.String(), terminalTitle(dir, state)
-	}
-	return output.String(), state.Marker() + " " + core.ProjectNameForDirWithHome(dir, *home)
+	return output.String(), state.Marker() + " " + core.ProjectNameForDirWithHome(dir, homeDir)
 }
 
 // abandon переводит паузу в «готово», когда все задачи сессии висят дольше
@@ -421,10 +397,6 @@ func reloadState(runtimeDir, sessionID string, logger core.Logger) core.SessionS
 // terminalTitle собирает заголовок окна: значок состояния и проект.
 // Значок идёт первым — по нему окно находится взглядом в панели задач; ветка
 // есть в строке статуса, во вкладке она вытесняет имя проекта
-func terminalTitle(dir string, state core.SessionState) string {
-	return state.Marker() + " " + core.ProjectNameForDir(dir)
-}
-
 // projectBadge рисует имя проекта плашкой, цвет которой показывает состояние:
 // синяя — работает, в том числе своими агентами после хода, сине-серая — ход
 // кончился и ждёт внешнего: shell, монитор, будильник (что именно — в
@@ -433,11 +405,6 @@ func terminalTitle(dir string, state core.SessionState) string {
 // «давай сделаем зелёным в режиме "зелёная галочка"»), красная — ход оборван
 // ошибкой API. Заполнение контекста видно по полосе ctx, плашка его не
 // повторяет (пользователь 26.10: убрать красный с плашки)
-func projectBadge(dir string, state core.SessionState) string {
-	home, _ := os.UserHomeDir()
-	return projectBadgeForHome(dir, home, state)
-}
-
 func projectBadgeForHome(dir, home string, state core.SessionState) string {
 	badge := badgeBlue
 	switch state {
@@ -631,22 +598,18 @@ func firstDir(candidates ...string) string {
 		}
 	}
 
-	if wd, err := os.Getwd(); err == nil {
-		return wd
-	}
 	return "."
 }
 
 // loadAccounts читает хранилище учёток. Сбой не срывает строку статуса:
 // неделя пишется без учётки, ротации нет
 func loadAccounts(ctx context.Context, logger core.Logger) (*accounts.Store, accounts.Paths) {
-	var paths accounts.Paths
-	var err error
-	if request, ok := hookctx.Request(ctx); ok {
-		paths, err = accounts.PathsForRequest(request)
-	} else {
-		paths, err = accounts.DefaultPaths()
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		logger.Warn("accounts paths unavailable: hook request is missing")
+		return nil, accounts.Paths{}
 	}
+	paths, err := accounts.DefaultPaths(request)
 	if err != nil {
 		logger.Warn("accounts paths unavailable, no rotation", "error", err)
 		return nil, paths
@@ -674,14 +637,10 @@ func rotate(ctx context.Context, paths accounts.Paths, store *accounts.Store, sn
 		usage = accountUsage(snapshot, now)
 	} else {
 		var err error
-		if _, ok := hookctx.Request(ctx); ok {
-			var loaded *limitsSnapshot
-			loaded, err = diskLimitsForContext(ctx)
-			if err == nil {
-				usage = accountUsage(loaded, time.Now())
-			}
-		} else {
-			usage, err = (SnapshotLimits{}).Usage()
+		var loaded *limitsSnapshot
+		loaded, err = diskLimitsForContext(ctx)
+		if err == nil {
+			usage = accountUsage(loaded, time.Now())
 		}
 		if err != nil {
 			logger.Warn("limits snapshot unreadable, no rotation", "error", err)
@@ -693,12 +652,12 @@ func rotate(ctx context.Context, paths accounts.Paths, store *accounts.Store, sn
 		logger.Warn("own executable unknown, no rotation", "error", err)
 		return
 	}
-	var why string
-	if request, ok := hookctx.Request(ctx); ok {
-		why, err = accounts.MaybeRotateForRequest(paths, store, usage, now, executable, request, rotateArgs...)
-	} else {
-		why, err = startRotation(paths, store, usage, now, executable, rotateArgs...)
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		logger.Warn("account rotation not started: hook request is missing")
+		return
 	}
+	why, err := startRotation(paths, store, usage, now, executable, request, rotateArgs...)
 	if err != nil {
 		logger.Warn("account rotation not started", "error", err)
 		return

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/questioncheck"
 )
 
@@ -51,7 +52,7 @@ func TestReadTurn_RepliesAfterFinishedAnswer(t *testing.T) {
 		humanLine(3, "и только в проекте A"),
 		agentLine(4, "Передаю.", "tool_use"),
 	)
-	turn, err := ReadTurn(path)
+	turn, err := ReadTurn(path, understandTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +74,7 @@ func TestReadTurn_PeerStartsTurn(t *testing.T) {
 		agentLine(3, "Сделал.", "end_turn"),
 		peerLine(4, "git-admin", "итог"),
 	)
-	turn, err := ReadTurn(path)
+	turn, err := ReadTurn(path, understandTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +92,7 @@ func TestReadTurn_PeerMidTurnKeepsUserTurn(t *testing.T) {
 		peerLine(3, "glint-master", "готово"),
 		agentLine(4, "Пишу.", "tool_use"),
 	)
-	turn, err := ReadTurn(path)
+	turn, err := ReadTurn(path, understandTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestReadTurn_WindowGrowsToFinishedAnswer(t *testing.T) {
 	}
 	// Реплика после 400 текстов без конца хода: агент работал, пользователь
 	// написал посреди — prev всё равно конец прошлого хода
-	turn, err := ReadTurn(path)
+	turn, err := ReadTurn(path, understandTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +208,7 @@ func (f hookFixture) journal(t *testing.T) []Entry {
 
 func TestHook_FixDeniesOnceThenRepeatPasses(t *testing.T) {
 	f := newHookFixture(t, fixAnswer)
-	ctx := context.Background()
+	ctx := understandTestContext(t)
 	first := f.hook.Run(ctx, f.send("glint-master", "По каждому: закрыть или вернуть"))
 	if !first.Deny || first.Verdict != VerdictFix {
 		t.Fatalf("fix must deny: %+v", first)
@@ -244,7 +245,7 @@ func TestHook_FixDeniesOnceThenRepeatPasses(t *testing.T) {
 // Сценарий 3: отказ прошлого хода не пропускает тот же вызов после новой реплики
 func TestHook_NewReplyJudgesRepeatAgain(t *testing.T) {
 	f := newHookFixture(t, fixAnswer)
-	ctx := context.Background()
+	ctx := understandTestContext(t)
 	call := f.send("glint-master", "Запретить X")
 	if !f.hook.Run(ctx, call).Deny {
 		t.Fatal("first call must be denied")
@@ -263,7 +264,7 @@ func TestHook_NewReplyJudgesRepeatAgain(t *testing.T) {
 
 func TestHook_OKPasses(t *testing.T) {
 	f := newHookFixture(t, `{"verdict":"ok"}`)
-	out := f.hook.Run(context.Background(), f.send("x", "Пользователь спрашивает: копятся ли тикеты?"))
+	out := f.hook.Run(understandTestContext(t), f.send("x", "Пользователь спрашивает: копятся ли тикеты?"))
 	if out.Deny || out.Verdict != VerdictOK {
 		t.Fatalf("ok must pass: %+v", out)
 	}
@@ -287,7 +288,7 @@ func TestHook_JudgeFailureLetsThrough(t *testing.T) {
 			judge := tc.judge
 			f.hook.Judge = &judge
 			f.hook.Budget = 20 * time.Millisecond
-			out := f.hook.Run(context.Background(), f.send("x", "текст"))
+			out := f.hook.Run(understandTestContext(t), f.send("x", "текст"))
 			if out.Deny || out.Verdict != tc.want {
 				t.Fatalf("failure must let through with %s: %+v", tc.want, out)
 			}
@@ -295,7 +296,7 @@ func TestHook_JudgeFailureLetsThrough(t *testing.T) {
 				t.Fatalf("journal wrong: %+v", e)
 			}
 			// После сбоя ключ не записан: повтор снова к судье, не override
-			if again := f.hook.Run(context.Background(), f.send("x", "текст")); again.Verdict == VerdictOverride {
+			if again := f.hook.Run(understandTestContext(t), f.send("x", "текст")); again.Verdict == VerdictOverride {
 				t.Fatalf("failure must not store a key: %+v", again)
 			}
 		})
@@ -327,7 +328,7 @@ func TestHook_SkipsWithoutJudge(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHookFixture(t, fixAnswer, tc.lines...)
-			out := f.hook.Run(context.Background(), tc.call(f))
+			out := f.hook.Run(understandTestContext(t), tc.call(f))
 			if out.Deny || out.Skip == "" || f.judge.calls != 0 {
 				t.Fatalf("must skip without judge: %+v, calls %d", out, f.judge.calls)
 			}
@@ -341,7 +342,7 @@ func TestHook_SkipsWithoutJudge(t *testing.T) {
 func TestHook_RuleEditJudged(t *testing.T) {
 	f := newHookFixture(t, fixAnswer)
 	edit, _ := json.Marshal(map[string]any{"file_path": "/home/u/.claude/CLAUDE.md", "old_string": "a", "new_string": "Запрещено X"})
-	out := f.hook.Run(context.Background(), Call{SessionID: "sess-1", TranscriptPath: f.path, Tool: "Edit", Input: edit})
+	out := f.hook.Run(understandTestContext(t), Call{SessionID: "sess-1", TranscriptPath: f.path, Tool: "Edit", Input: edit})
 	if !out.Deny {
 		t.Fatalf("instruction edit with fix must deny: %+v", out)
 	}
@@ -354,7 +355,7 @@ func TestHook_BadSessionIDLetsThrough(t *testing.T) {
 	f := newHookFixture(t, fixAnswer)
 	call := f.send("x", "t")
 	call.SessionID = "../evil"
-	if out := f.hook.Run(context.Background(), call); out.Deny || out.Verdict != VerdictError {
+	if out := f.hook.Run(understandTestContext(t), call); out.Deny || out.Verdict != VerdictError {
 		t.Fatalf("bad session id must let through with error: %+v", out)
 	}
 }
@@ -368,7 +369,7 @@ func TestHook_HidesSecrets(t *testing.T) {
 		agentLine(1, key+" Передать мастерам?", "end_turn"),
 		humanLine(2, strings.Repeat("я", humanRunes-len("sk_live_Qz"))+key),
 	)
-	out := f.hook.Run(context.Background(), f.send("x", "ключ "+key))
+	out := f.hook.Run(understandTestContext(t), f.send("x", "ключ "+key))
 	if out.Deny || out.Verdict != VerdictOK {
 		t.Fatalf("ok must pass: %+v", out)
 	}
@@ -417,4 +418,18 @@ func TestDenyReasonCarriesFixWithoutTrialMark(t *testing.T) {
 			t.Errorf("в отказе нет %q: %q", want, got)
 		}
 	}
+}
+
+func understandTestContext(t *testing.T) context.Context {
+	t.Helper()
+	return hookctx.WithRequest(context.Background(), understandTestRequest(t))
+}
+
+func understandTestRequest(t *testing.T) hookctx.Context {
+	t.Helper()
+	req, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
 }

@@ -82,21 +82,25 @@ func TestRenderParallel(t *testing.T) {
 		}
 		return res
 	}
-	var want, got [count]outcome
-	for i := range want {
-		want[i] = render(i)
-		if want[i].err != "" {
-			t.Fatalf("request %d: %+v", i, want[i])
-		}
-	}
+	var got [count]outcome
 	var wg sync.WaitGroup
 	for i := range got {
 		wg.Go(func() { got[i] = render(i) })
 	}
 	wg.Wait()
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("request %d: got %+v, want %+v", i, got[i], want[i])
+	for i, result := range got {
+		color, marker := badgeBlue, "🔄"
+		if i%2 == 0 {
+			color, marker = badgeGreen, "❇️"
 		}
+		if result.err != "" || result.line != color+" ~ "+reset || result.stderr != "\033]0;"+marker+" ~\007" {
+			t.Errorf("request %d: %+v", i, result)
+		}
+	}
+}
+
+func TestRenderRejectsMissingRequest(t *testing.T) {
+	if _, err := Render(context.Background(), strings.NewReader(`{}`), testLogger(t)); err == nil {
+		t.Fatal("statusline accepted a missing hook request")
 	}
 }

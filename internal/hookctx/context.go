@@ -32,7 +32,7 @@ func Request(ctx context.Context) (Context, bool) {
 func UserHomeDir(ctx context.Context) (string, error) {
 	request, ok := Request(ctx)
 	if !ok {
-		return os.UserHomeDir()
+		return "", fmt.Errorf("hook request is missing")
 	}
 	home := request.Getenv("HOME")
 	if home == "" {

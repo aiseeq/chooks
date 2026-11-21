@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -97,27 +96,18 @@ func understandCall(ctx context.Context, input *core.ToolInput, logger core.Logg
 		Input:          input.ToolInput,
 	}
 	request, hasRequest := hookctx.Request(ctx)
-	pid := ""
-	if hasRequest {
-		pid = request.Getenv("CLAUDE_PID")
-	} else {
-		pid = os.Getenv("CLAUDE_PID")
+	if !hasRequest {
+		return call
 	}
+	pid := request.Getenv("CLAUDE_PID")
 	if pid != "" {
-		var home string
+		home := request.Getenv("HOME")
+		if home == "" {
+			return call
+		}
+		home = request.Abs(home)
 		var err error
-		if hasRequest {
-			home = request.Getenv("HOME")
-			if home == "" {
-				return call
-			}
-			home = request.Abs(home)
-		} else {
-			home, err = os.UserHomeDir()
-		}
-		if err == nil {
-			call.Name, err = questioncheck.SessionName(filepath.Join(home, ".claude"), pid)
-		}
+		call.Name, err = questioncheck.SessionName(filepath.Join(home, ".claude"), pid)
 		if err != nil {
 			logger.Debug("understand check session name unknown", "pid", pid, "error", err)
 		}
@@ -128,27 +118,14 @@ func understandCall(ctx context.Context, input *core.ToolInput, logger core.Logg
 // newUnderstandHook собирает проверку с путями по умолчанию
 func newUnderstandHook(ctx context.Context, logger core.Logger) (understandcheck.Hook, error) {
 	request, ok := hookctx.Request(ctx)
-	var journal, denied string
-	var judge questioncheck.CLIJudge
-	var err error
-	if ok {
-		base := request.Getenv("XDG_STATE_HOME")
-		if base == "" {
-			home := request.Getenv("HOME")
-			if home == "" {
-				return understandcheck.Hook{}, fmt.Errorf("cannot resolve home dir: $HOME is not defined")
-			}
-			base = filepath.Join(home, ".local", "state")
-		}
-		dir := filepath.Join(request.Abs(base), "chooks")
-		journal, denied = filepath.Join(dir, "understand-check.jsonl"), filepath.Join(dir, "understand-check")
-		judge, err = newJudgeForRequest(understandModel, understandEffort, request)
-	} else {
-		journal, denied, err = understandcheck.DefaultPaths()
-		if err == nil {
-			judge, err = newJudge(understandModel, understandEffort)
-		}
+	if !ok {
+		return understandcheck.Hook{}, fmt.Errorf("hook request is missing")
 	}
+	journal, denied, err := understandcheck.DefaultPaths(request)
+	if err != nil {
+		return understandcheck.Hook{}, err
+	}
+	judge, err := newJudgeForRequest(understandModel, understandEffort, request)
 	if err != nil {
 		return understandcheck.Hook{}, err
 	}

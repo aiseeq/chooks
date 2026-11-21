@@ -202,6 +202,14 @@ func hookCommandContext(cmd *cobra.Command) context.Context {
 	return ctx
 }
 
+func commandRequest(cmd *cobra.Command) (hookctx.Context, error) {
+	request, ok := hookctx.Request(cmd.Context())
+	if !ok {
+		return hookctx.Context{}, fmt.Errorf("hook request is missing")
+	}
+	return request, nil
+}
+
 func commandConfigPath(cmd *cobra.Command) string {
 	flags := cmd.Root().PersistentFlags()
 	if flags.Lookup("config") == nil {
@@ -249,11 +257,7 @@ func validateHookRequest(ctx context.Context, request hookctx.Context) error {
 func runHook(ctx context.Context, hookType string) (code int, err error) {
 	request, ok := hookctx.Request(ctx)
 	if !ok {
-		request, err = hookctx.FromProcess()
-		if err != nil {
-			return exitError, err
-		}
-		ctx = hookctx.WithRequest(ctx, request)
+		return exitError, fmt.Errorf("hook request is missing")
 	}
 	if err := validateHookRequest(ctx, request); err != nil {
 		return exitError, err
@@ -373,12 +377,7 @@ func sessionIDOf(data []byte) string {
 func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger core.Logger) (int, error) {
 	request, ok := hookctx.Request(ctx)
 	if !ok {
-		var err error
-		request, err = hookctx.FromProcess()
-		if err != nil {
-			return exitError, err
-		}
-		ctx = hookctx.WithRequest(ctx, request)
+		return exitError, fmt.Errorf("hook request is missing")
 	}
 	input, err := core.ParseToolInput(data)
 	if err != nil {
@@ -412,10 +411,6 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 // в отдельный процесс, поэтому хук укладывается в миллисекунды. Сбои здесь
 // только логируются: событие сессии нечего блокировать, а ошибка хука
 // показалась бы человеку в интерфейсе на каждой остановке
-func runSessionEvent(eventName string, data []byte, config *core.Config, logger core.Logger) {
-	runSessionEventForRequest(eventName, data, config, logger, nil)
-}
-
 func runSessionEventForRequest(eventName string, data []byte, config *core.Config, logger core.Logger, request *hookctx.Context) {
 	announceSessionEvent(eventName, parseSessionInputForRequest(logger, eventName, data, request), config, logger, request)
 }
@@ -425,13 +420,11 @@ func runSessionEventForRequest(eventName string, data []byte, config *core.Confi
 func announceSessionEvent(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, request *hookctx.Context) notifier.Decision {
 	// Неинтерактивную сессию человек не ждёт вовсе — ни её остановку, ни её
 	// вопросы: ответить в неё всё равно некому
-	var printMode bool
-	var err error
-	if request != nil {
-		printMode, err = core.PrintModeSessionForPID(request.Getenv("CLAUDE_PID"))
-	} else {
-		printMode, err = core.PrintModeSession()
+	if request == nil {
+		logger.Error("hook request is missing")
+		return notifier.Decision{Reason: "hook request is missing"}
 	}
+	printMode, err := core.PrintModeSessionForPID(request.Getenv("CLAUDE_PID"))
 	if err != nil {
 		logger.Warn("session mode unknown, assuming interactive", "error", err)
 	}
@@ -443,13 +436,7 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 	// Строка статуса рисуется отдельным процессом и о ходе сессии не знает —
 	// состояние для неё оставляют хуки. Предыдущее состояние нужно решению:
 	// по нему виден переход, а не только новое состояние
-	var previous core.SessionState
-	var recorded bool
-	if request != nil {
-		previous, recorded, err = core.LookupSessionStateIn(request.RuntimeDir(), input.SessionID)
-	} else {
-		previous, recorded, err = core.LookupSessionState(input.SessionID)
-	}
+	previous, recorded, err := core.LookupSessionStateIn(request.RuntimeDir(), input.SessionID)
 	if err != nil {
 		// Явный failover: без записи переход не виден, и решение принимается
 		// по StateUnknown — оно зовёт человека, лишний звонок лучше пропущенного
@@ -467,11 +454,7 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 			crons = *input.SessionCrons
 		}
 		var active []core.BackgroundTask
-		if request != nil {
-			active, err = core.RecordBackgroundIn(request.RuntimeDir(), input.SessionID, *input.BackgroundTasks, crons, time.Now())
-		} else {
-			active, err = core.RecordBackground(input.SessionID, *input.BackgroundTasks, crons, time.Now())
-		}
+		active, err = core.RecordBackgroundIn(request.RuntimeDir(), input.SessionID, *input.BackgroundTasks, crons, time.Now())
 		if err != nil {
 			// Failover на список Claude Code: брошенные задачи не отличить от
 			// живых, а про все задачи списка Claude Code сам сказал, что они живы
@@ -485,23 +468,14 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 	logDecision(logger, event, decision)
 
 	if decision.State != "" {
-		if request != nil {
-			saveStateIn(logger, request.RuntimeDir(), input.SessionID, decision.State)
-		} else {
-			saveState(logger, input.SessionID, decision.State)
-		}
+		saveStateIn(logger, request.RuntimeDir(), input.SessionID, decision.State)
 	}
 
 	toolConfig, exists := config.Tools["notifier"]
 	if !exists || !toolConfig.Enabled {
 		return decision
 	}
-	var tool *notifier.Notifier
-	if request != nil {
-		tool = notifier.NewForRequest(toolConfig, logger, *request)
-	} else {
-		tool = notifier.New(toolConfig, logger)
-	}
+	tool := notifier.NewForRequest(toolConfig, logger, *request)
 	if err := tool.Announce(eventName, input, decision); err != nil {
 		logger.Warn("failed to deliver alert", "hook", eventName, "error", err)
 	}
@@ -539,13 +513,6 @@ func resolveHookInput(input *core.ToolInput, request hookctx.Context) {
 // saveState запоминает состояние сессии для строки статуса и следующего
 // события. Сбой хранилища хук не срывает: код ошибки Claude Code показал бы
 // человеку на каждом событии, а уведомление важнее записи
-func saveState(logger core.Logger, sessionID string, state core.SessionState) {
-	//nolint:log-and-return-zero // события сессии нечего блокировать, а ошибка хука видна человеку в интерфейсе; без записи следующее событие решает по старому состоянию, сбой остаётся в логе
-	if err := core.SaveSessionState(sessionID, state); err != nil {
-		logger.Warn("session state not saved", "session", sessionID, "error", err)
-	}
-}
-
 func saveStateIn(logger core.Logger, runtimeDir, sessionID string, state core.SessionState) {
 	//nolint:log-and-return-zero // событие сессии не блокируется ошибкой записи состояния
 	if err := core.SaveSessionStateIn(runtimeDir, sessionID, state); err != nil {
@@ -922,10 +889,14 @@ func newLimitsCmd() *cobra.Command {
 учёток прогноз не учитывает: его продлевает пользователь. Его читает
 страница Сна.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if pool {
-				return statusline.WritePoolJSON(cmd.OutOrStdout())
+			request, err := commandRequest(cmd)
+			if err != nil {
+				return err
 			}
-			return statusline.WriteLimits(cmd.OutOrStdout(), steps)
+			if pool {
+				return statusline.WritePoolJSON(cmd.OutOrStdout(), request)
+			}
+			return statusline.WriteLimits(cmd.OutOrStdout(), steps, request)
 		},
 	}
 	cmd.Flags().BoolVar(&steps, "steps", false, "журнал шагов вместо сводки")

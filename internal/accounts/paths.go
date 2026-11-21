@@ -16,7 +16,6 @@ package accounts
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/aiseeq/chooks/internal/hookctx"
@@ -35,29 +34,7 @@ type Paths struct {
 // DefaultPaths — пути, которые читает Claude Code: каталог из
 // CLAUDE_CONFIG_DIR или ~/.claude, конфигурация рядом с каталогом из
 // CLAUDE_CONFIG_DIR или в домашнем каталоге
-func DefaultPaths() (Paths, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Paths{}, fmt.Errorf("no home directory: %w", err)
-	}
-	paths := Paths{
-		ClaudeDir:    filepath.Join(home, ".claude"),
-		GlobalConfig: filepath.Join(home, ".claude.json"),
-	}
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		paths.ClaudeDir = dir
-		paths.GlobalConfig = filepath.Join(dir, ".claude.json")
-	}
-	state := os.Getenv("XDG_STATE_HOME")
-	if state == "" {
-		state = filepath.Join(home, ".local", "state")
-	}
-	paths.StateDir = filepath.Join(state, "chooks")
-	return paths, nil
-}
-
-// PathsForRequest resolves account paths in the hook's environment.
-func PathsForRequest(request hookctx.Context) (Paths, error) {
+func DefaultPaths(request hookctx.Context) (Paths, error) {
 	home := request.Getenv("HOME")
 	if home == "" {
 		return Paths{}, fmt.Errorf("no home directory: $HOME is not defined")

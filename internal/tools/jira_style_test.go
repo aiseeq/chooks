@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -28,7 +27,7 @@ func validateJiraCommand(t *testing.T, command string) *core.ValidationResult {
 // validateJiraCommandIn проверяет команду, запущенную в каталоге cwd
 func validateJiraCommandIn(t *testing.T, cwd, command string) *core.ValidationResult {
 	t.Helper()
-	result, err := newJiraStyleTool(t).ValidateTool(context.Background(), &core.ToolInput{
+	result, err := newJiraStyleTool(t).ValidateTool(gitGuardTestContext(t), &core.ToolInput{
 		ToolName: "Bash",
 		Command:  command,
 		CWD:      cwd,

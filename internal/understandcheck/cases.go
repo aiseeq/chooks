@@ -3,7 +3,7 @@ package understandcheck
 import (
 	"encoding/json"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -97,35 +97,30 @@ var bashEditor = regexp.MustCompile(`(?:^|[\s;&|(\x60'"\\/=])(?:sub|tee)(?:[\s;'
 // bashRedirect — перенаправление вывода в файл инструкций
 var bashRedirect = regexp.MustCompile(`>{1,2}\s*["']?(` + bashPath.String() + `)`)
 
-// bashRuleFile — файл инструкций, который меняет команда Bash; пусто — команда
-// такой файл не меняет
-func bashRuleFile(command string) string {
-	home, _ := os.UserHomeDir()
-	return bashRuleFileForHome(command, home, func(err error) {
-		logger, logErr := core.NewLogger(core.DefaultLoggerConfig())
-		if logErr == nil {
-			logger.Warn("не удалось разобрать команду Bash для поиска правки инструкции", "error", err)
-		}
-	})
+func warnBashError(stderr io.Writer, err error) {
+	if err == nil || stderr == nil {
+		return
+	}
+	logger, logErr := core.NewLoggerTo(core.DefaultLoggerConfig(), stderr)
+	if logErr == nil {
+		logger.Warn("не удалось разобрать команду Bash для поиска правки инструкции", "error", err)
+	}
 }
 
-func bashRuleFileForHome(command, home string, warn func(error)) string {
+func bashRuleFileForHome(command, home string) (string, error) {
 	file, ok, err := parsedBashRuleFile(command, home)
 	if err != nil {
-		if warn != nil {
-			warn(err)
-		}
-		return textBashRuleFile(command)
+		return textBashRuleFile(command), err
 	}
 	if ok {
 		if file != "" {
 			if text := textBashRuleFile(command); text != "" {
-				return text
+				return text, nil
 			}
 		}
-		return file
+		return file, nil
 	}
-	return textBashRuleFile(command)
+	return textBashRuleFile(command), nil
 }
 
 // parsedBashRuleFile ищет видимую запись в командах оболочки. false означает,
@@ -536,6 +531,8 @@ func opaqueShellWrite(command string, calls []shellcmd.Call) bool {
 // Collector собирает случаи из событий одного транскрипта по порядку
 type Collector struct {
 	Session, Name string
+	Home          string
+	Stderr        io.Writer
 	cases         []Case
 	// open — случаи хода, ждущие следующей реплики пользователя
 	open []int
@@ -616,7 +613,7 @@ func (c *Collector) Add(e transcript.Event) {
 		if !c.inTurn {
 			return
 		}
-		kind, file, action, ok := classify(e.Who, e.Raw)
+		kind, file, action, ok := classifyForHome(e.Who, e.Raw, c.Home, c.Stderr)
 		if !ok {
 			return
 		}
@@ -670,11 +667,29 @@ func (c *Collector) Turn() Turn {
 
 // classify решает, уносит ли вызов инструмента слово пользователя дальше, и
 // собирает текст действия для судьи
-func classify(tool string, raw json.RawMessage) (Kind, string, string, bool) {
-	return classifyWithBash(tool, raw, bashRuleFile)
+func classifyForHome(tool string, raw json.RawMessage, home string, stderr io.Writer) (Kind, string, string, bool) {
+	file := ""
+	if command, ok := bashCommand(tool, raw); ok {
+		var err error
+		file, err = bashRuleFileForHome(command, home)
+		warnBashError(stderr, err)
+	}
+	return classifyWithBash(tool, raw, file)
 }
 
-func classifyWithBash(tool string, raw json.RawMessage, bashFile func(string) string) (Kind, string, string, bool) {
+func bashCommand(tool string, raw json.RawMessage) (string, bool) {
+	if tool != "Bash" {
+		return "", false
+	}
+	var input map[string]any
+	if json.Unmarshal(raw, &input) != nil {
+		return "", false
+	}
+	command, _ := input["command"].(string)
+	return command, true
+}
+
+func classifyWithBash(tool string, raw json.RawMessage, bashFile string) (Kind, string, string, bool) {
 	var in map[string]any
 	if json.Unmarshal(raw, &in) != nil {
 		return "", "", "", false
@@ -705,7 +720,7 @@ func classifyWithBash(tool string, raw json.RawMessage, bashFile func(string) st
 		return KindRule, file, "Файл: " + file + " (записан целиком)\n" + str("content"), true
 	case "Bash":
 		command := str("command")
-		file := bashFile(command)
+		file := bashFile
 		if file == "" {
 			return "", "", "", false
 		}

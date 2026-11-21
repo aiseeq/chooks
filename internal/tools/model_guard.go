@@ -50,6 +50,9 @@ func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardT
 
 // ValidateTool проверяет модель лишь у вызовов, которые её явно задают.
 func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+	if _, ok := hookctx.Request(ctx); !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
 	if !t.IsEnabled() || input == nil {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
@@ -228,8 +231,6 @@ func agentDirs(ctx context.Context, cwd, home string) []string {
 		if config != "" {
 			config = request.Abs(config)
 		}
-	} else {
-		config = os.Getenv("CLAUDE_CONFIG_DIR")
 	}
 	if config != "" {
 		dirs = append(dirs, filepath.Join(config, "agents"))
@@ -891,15 +892,7 @@ func (t *ModelGuardTool) approvedPath(ctx context.Context) string {
 		t.Logger().Warn("не удалось определить домашний каталог для списка моделей", "error", errors.New("$HOME is not defined"))
 		return request.Abs(defaultApprovedModelsPath)
 	}
-	if os.Getenv("MODELS_APPROVED") == "" && t.path != "" {
-		return t.path
-	}
-	path, err := approved.Path()
-	if err != nil {
-		t.Logger().Warn("не удалось определить домашний каталог для списка моделей", "error", err)
-		return defaultApprovedModelsPath
-	}
-	return path
+	return ""
 }
 
 func readApprovedModels(path string) ([]approvedModel, string) {

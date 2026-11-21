@@ -104,11 +104,13 @@ var (
 
 // ValidateTool проверяет цели rm и rmdir в команде Bash
 func (t *RmGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
-	if request, ok := hookctx.Request(ctx); ok {
-		local := *t
-		local.lookupEnv = request.LookupEnv
-		t = &local
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return nil, fmt.Errorf("hook request is missing")
 	}
+	local := *t
+	local.lookupEnv = request.LookupEnv
+	t = &local
 	cmd := input.Command
 	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(cmd, "rm") {
 		return &core.ValidationResult{IsValid: true}, nil

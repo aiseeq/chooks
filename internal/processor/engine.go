@@ -17,65 +17,25 @@ type Engine struct {
 	tools  []core.ToolValidator
 }
 
-// New создает процессор хуков по конфигурации
-func New(config *core.Config, logger core.Logger) (*Engine, error) {
-	return newEngineForPID(config, logger, nil, nil)
-}
-
 // NewForRequest creates guards with the hook's process and environment.
 func NewForRequest(config *core.Config, logger core.Logger, request hookctx.Context) (*Engine, error) {
-	return newEngineForPID(config, logger, &request.PID, &request)
-}
-
-func newEngineForPID(config *core.Config, logger core.Logger, pid *int, request *hookctx.Context) (*Engine, error) {
 	engine := &Engine{logger: logger.With("component", "engine")}
-
-	var err error
-	if pid == nil {
-		err = engine.initTools(config)
-	} else {
-		err = engine.initToolsForPID(config, pid, request)
-	}
-	if err != nil {
+	if err := engine.initToolsForRequest(config, request); err != nil {
 		return nil, err
 	}
-
 	engine.logger.Debug("engine initialized", "tools", len(engine.tools))
 	return engine, nil
 }
 
 // toolConstructor — проверка PreToolUse: ключ в config.yaml и конструктор
 type toolConstructor struct {
-	name string
-	new  func(core.ToolConfig, core.Logger) (core.ToolValidator, error)
-	// onWhenAbsent — без ключа в config.yaml проверка включена:
-	// установленный config.yaml при обновлении не перезаписывается
+	name         string
 	onWhenAbsent bool
 }
 
-// constructors — все проверки PreToolUse движка
 var constructors = []toolConstructor{
-	{name: "git_guard", new: func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
-		return tools.NewGitGuardTool(c, l)
-	}, onWhenAbsent: true},
-	{name: "rsync_guard", new: func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
-		return tools.NewRsyncGuardTool(c, l)
-	}, onWhenAbsent: true},
-	{"jira_style", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
-		return tools.NewJiraStyleTool(c, l)
-	}, false},
-	{"kill_guard", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
-		return tools.NewKillGuardTool(c, l)
-	}, false},
-	{"model_guard", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
-		return tools.NewModelGuardTool(c, l)
-	}, false},
-	{"rm_guard", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
-		return tools.NewRmGuardTool(c, l)
-	}, false},
-	{"write_guard", func(c core.ToolConfig, l core.Logger) (core.ToolValidator, error) {
-		return tools.NewWriteGuardTool(c, l)
-	}, false},
+	{"git_guard", true}, {"rsync_guard", true}, {"jira_style", false},
+	{"kill_guard", false}, {"model_guard", false}, {"rm_guard", false}, {"write_guard", false},
 }
 
 // ToolNames — ключи всех проверок PreToolUse движка в config.yaml
@@ -98,12 +58,8 @@ func DefaultOnNames() []string {
 	return names
 }
 
-// initTools инициализирует проверки вызовов инструментов
-func (e *Engine) initTools(config *core.Config) error {
-	return e.initToolsForPID(config, nil, nil)
-}
-
-func (e *Engine) initToolsForPID(config *core.Config, pid *int, request *hookctx.Context) error {
+// initToolsForRequest initializes each guard with request state.
+func (e *Engine) initToolsForRequest(config *core.Config, request hookctx.Context) error {
 	for _, constructor := range constructors {
 		toolConfig, exists := config.Tools[constructor.name]
 		if !exists && constructor.onWhenAbsent {
@@ -112,29 +68,39 @@ func (e *Engine) initToolsForPID(config *core.Config, pid *int, request *hookctx
 		if !exists || !toolConfig.Enabled {
 			continue
 		}
-
 		var tool core.ToolValidator
 		var err error
-		if constructor.name == "git_guard" && request != nil {
-			tool, err = tools.NewGitGuardToolForRequest(toolConfig, e.logger, *request)
-		} else if constructor.name == "rm_guard" && request != nil {
-			tool, err = tools.NewRmGuardToolForRequest(toolConfig, e.logger, *request)
-		} else if constructor.name == "kill_guard" && pid != nil {
-			tool, err = tools.NewKillGuardToolForPID(toolConfig, e.logger, *pid)
-		} else {
-			tool, err = constructor.new(toolConfig, e.logger)
+		switch constructor.name {
+		case "git_guard":
+			tool, err = tools.NewGitGuardToolForRequest(toolConfig, e.logger, request)
+		case "rm_guard":
+			tool, err = tools.NewRmGuardToolForRequest(toolConfig, e.logger, request)
+		case "kill_guard":
+			tool, err = tools.NewKillGuardToolForPID(toolConfig, e.logger, request.PID)
+		case "rsync_guard":
+			tool, err = tools.NewRsyncGuardTool(toolConfig, e.logger)
+		case "jira_style":
+			tool, err = tools.NewJiraStyleTool(toolConfig, e.logger)
+		case "model_guard":
+			tool, err = tools.NewModelGuardTool(toolConfig, e.logger)
+		case "write_guard":
+			tool, err = tools.NewWriteGuardTool(toolConfig, e.logger)
+		default:
+			return fmt.Errorf("unknown tool %q", constructor.name)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to create %s tool: %w", constructor.name, err)
 		}
 		e.tools = append(e.tools, tool)
 	}
-
 	return nil
 }
 
 // ProcessPreToolUse обрабатывает PreToolUse хук
 func (e *Engine) ProcessPreToolUse(ctx context.Context, input *core.ToolInput) (*core.HookResponse, error) {
+	if _, ok := hookctx.Request(ctx); !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
 	start := time.Now()
 	e.logger.Debug("processing pre-tool-use hook", "tool", input.ToolName)
 

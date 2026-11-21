@@ -39,7 +39,10 @@ func printModeCmdline(pid string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("cannot read cmdline of CLAUDE_PID %q: %w", pid, err)
 	}
-	for arg := range strings.SplitSeq(string(raw), "\x00") {
+	args := string(raw)
+	for more := true; more; {
+		var arg string
+		arg, args, more = strings.Cut(args, "\x00")
 		if arg == "-p" || arg == "--print" {
 			return true, nil
 		}

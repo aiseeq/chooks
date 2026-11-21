@@ -18,6 +18,7 @@ import (
 
 	"github.com/aiseeq/akit/transcript"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/questioncheck"
 	"github.com/aiseeq/chooks/internal/understandcheck"
 )
@@ -36,12 +37,17 @@ func newUnderstandCasesCmd() *cobra.Command {
 пользователя для разметки. Тяжёлое чтение: запускать через graft exec --heavy.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			home, err := os.UserHomeDir()
+			request, err := commandRequest(cmd)
 			if err != nil {
 				return err
 			}
+			home := request.Getenv("HOME")
+			if home == "" {
+				return fmt.Errorf("$HOME is not defined")
+			}
+			home = request.Abs(home)
 			since := time.Now().AddDate(0, 0, -days)
-			cases, err := collectUnderstandCases(filepath.Join(home, ".claude", "projects"), project, since)
+			cases, err := collectUnderstandCases(filepath.Join(home, ".claude", "projects"), project, since, request)
 			if err != nil {
 				return err
 			}
@@ -61,7 +67,7 @@ func newUnderstandCasesCmd() *cobra.Command {
 
 // collectUnderstandCases — случаи из транскриптов папки projects, изменённых
 // после since; события раньше since не дают случаев, но задают реплику хода
-func collectUnderstandCases(projects, project string, since time.Time) ([]understandcheck.Case, error) {
+func collectUnderstandCases(projects, project string, since time.Time, request hookctx.Context) ([]understandcheck.Case, error) {
 	paths, err := filepath.Glob(filepath.Join(projects, "*", "*.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("list transcripts: %w", err)
@@ -78,7 +84,7 @@ func collectUnderstandCases(projects, project string, since time.Time) ([]unders
 		if info.ModTime().Before(since) {
 			continue
 		}
-		collector := understandcheck.Collector{Session: sessionPrefix(path)}
+		collector := understandcheck.Collector{Session: sessionPrefix(path), Home: request.Abs(request.Getenv("HOME")), Stderr: request.Stderr}
 		meta, err := transcript.Read(path, keepUnderstandLine, collector.Add)
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", path, err)

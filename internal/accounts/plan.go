@@ -77,26 +77,24 @@ func RatesFile() (string, error) {
 // подтверждена, перевода нет. Колонки нет — тариф не сверяется (план в
 // курсах назван иначе)
 func (s *Store) PlanUnit(now time.Time) Unit {
-	return s.planUnit(now, RatesFile)
+	path, err := RatesFile()
+	return s.planUnit(now, path, err)
 }
 
 // PlanUnitForHome reads rates from the hook request's home directory.
 func (s *Store) PlanUnitForHome(now time.Time, home string) Unit {
-	return s.planUnit(now, func() (string, error) {
-		if home == "" {
-			return "", fmt.Errorf("home dir: $HOME is not defined")
-		}
-		return filepath.Join(home, ".claude", "improve", "rates.tsv"), nil
-	})
+	if home == "" {
+		return s.planUnit(now, "", fmt.Errorf("home dir: $HOME is not defined"))
+	}
+	return s.planUnit(now, filepath.Join(home, ".claude", "improve", "rates.tsv"), nil)
 }
 
-func (s *Store) planUnit(now time.Time, ratesFile func() (string, error)) Unit {
+func (s *Store) planUnit(now time.Time, path string, pathErr error) Unit {
 	if s != nil && s.MixedTiers() {
 		return Unit{Why: "тарифы учёток разные, а цена плана в курсах одна"}
 	}
-	path, err := ratesFile()
-	if err != nil {
-		return Unit{Why: err.Error()}
+	if pathErr != nil {
+		return Unit{Why: pathErr.Error()}
 	}
 	plan, err := planPrice(path, ratesProvider, now)
 	if err != nil {

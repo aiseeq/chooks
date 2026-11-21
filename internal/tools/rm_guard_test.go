@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // rmGuardEnv окружение, в котором снимались вердикты Claude Code: HOME и PWD
@@ -27,7 +28,7 @@ func newRmGuard(t *testing.T) *RmGuardTool {
 
 func validateRm(t *testing.T, command string) *core.ValidationResult {
 	t.Helper()
-	result, err := newRmGuard(t).ValidateTool(context.Background(),
+	result, err := newRmGuard(t).ValidateTool(rmTestContext(),
 		&core.ToolInput{ToolName: "Bash", Command: command, CWD: "/home/u/proj"})
 	if err != nil {
 		t.Fatalf("ValidateTool: %v", err)
@@ -492,4 +493,12 @@ func TestRmGuardCdGlobReason(t *testing.T) {
 	if got := strings.Join(r.Suggestions, "\n"); got != want {
 		t.Errorf("\nесть  %q\nждали %q", got, want)
 	}
+}
+
+func rmTestContext() context.Context {
+	env := make([]string, 0, len(rmGuardEnv))
+	for k, v := range rmGuardEnv {
+		env = append(env, k+"="+v)
+	}
+	return hookctx.WithRequest(context.Background(), hookctx.New(nil, nil, nil, env, "/home/u/proj", 1, 2))
 }

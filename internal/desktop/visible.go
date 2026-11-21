@@ -23,33 +23,21 @@ const visibleTimeout = 300 * time.Millisecond
 // в своём окне Konsole, а окно в фокусе. Не Konsole — false без ошибки:
 // узнать, смотрел ли человек, там нечем
 func TabVisible(ctx context.Context) (bool, error) {
-	request, hasRequest := hookctx.Request(ctx)
-	var service, session, window string
-	if hasRequest {
-		service = request.Getenv("KONSOLE_DBUS_SERVICE")
-		session = request.Getenv("KONSOLE_DBUS_SESSION")
-		window = request.Getenv("KONSOLE_DBUS_WINDOW")
-	} else {
-		service, session, _ = konsoleSession()
-		window = os.Getenv("KONSOLE_DBUS_WINDOW")
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return false, fmt.Errorf("hook request is missing")
 	}
-	ok := service != "" && session != ""
-	if !ok || window == "" {
+	service := request.Getenv("KONSOLE_DBUS_SERVICE")
+	session := request.Getenv("KONSOLE_DBUS_SESSION")
+	window := request.Getenv("KONSOLE_DBUS_WINDOW")
+	if service == "" || session == "" || window == "" {
 		return false, nil
 	}
-	var conn *dbus.Conn
-	var err error
-	if hasRequest {
-		conn, err = requestSessionBus(request)
-	} else {
-		conn, err = dbus.SessionBus()
-	}
+	conn, err := requestSessionBus(request)
 	if err != nil {
 		return false, fmt.Errorf("session bus unavailable: %w", err)
 	}
-	if hasRequest {
-		defer conn.Close()
-	}
+	defer conn.Close()
 	ctx, cancel := context.WithTimeout(ctx, visibleTimeout)
 	defer cancel()
 

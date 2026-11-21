@@ -79,11 +79,6 @@ const durationsFile = "chooks-hooks.tsv"
 
 // newHookTimer начинает отсчёт со старта процесса: запуск бинаря под
 // свопом — тоже часть таймаута
-func newHookTimer(hook string) *hookTimer {
-	request, _ := hookctx.FromProcess()
-	return newHookTimerForRequest(hook, request)
-}
-
 func newHookTimerForRequest(hook string, request hookctx.Context) *hookTimer {
 	t := &hookTimer{hook: hook, stderr: request.Stderr, now: time.Now, settingsPath: func() (string, error) {
 		if dir := request.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
@@ -333,11 +328,6 @@ const clockTicks = 100
 // загрузки (/proc/uptime) минус starttime в тиках от загрузки. Оба в одних
 // часах с точностью 10 мс; btime из /proc/stat округлён до секунды и дал бы
 // ошибку до секунды
-func processStart() (time.Time, error) {
-	request, _ := hookctx.FromProcess()
-	return processStartPID(request.PID)
-}
-
 func processStartPID(pid int) (time.Time, error) {
 	now := time.Now()
 	uptimeData, err := os.ReadFile("/proc/uptime")
@@ -346,7 +336,7 @@ func processStartPID(pid int) (time.Time, error) {
 	}
 	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return time.Time{}, fmt.Errorf("read /proc/self/stat: %w", err)
+		return time.Time{}, fmt.Errorf("read /proc/%d/stat: %w", pid, err)
 	}
 	uptime, err := parseUptime(string(uptimeData))
 	if err != nil {
@@ -381,13 +371,13 @@ func parseUptime(data string) (time.Duration, error) {
 func parseStartTicks(stat string) (int64, error) {
 	end := strings.LastIndexByte(stat, ')')
 	if end < 0 {
-		return 0, fmt.Errorf("unexpected /proc/self/stat: no command name")
+		return 0, fmt.Errorf("unexpected /proc/<pid>/stat: no command name")
 	}
 	// После «)» идут поля с 3-го: state — индекс 0, starttime (22) — индекс 19
 	fields := strings.Fields(stat[end+1:])
 	const startIndex = 22 - 3
 	if len(fields) <= startIndex {
-		return 0, fmt.Errorf("unexpected /proc/self/stat: %d fields after command", len(fields))
+		return 0, fmt.Errorf("unexpected /proc/<pid>/stat: %d fields after command", len(fields))
 	}
 	ticks, err := strconv.ParseInt(fields[startIndex], 10, 64)
 	if err != nil {

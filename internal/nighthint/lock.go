@@ -95,5 +95,5 @@ func connectSystemBus(ctx context.Context) (*dbus.Conn, error) {
 		}
 		return dbus.Connect(address, dbus.WithContext(ctx))
 	}
-	return dbus.ConnectSystemBus(dbus.WithContext(ctx))
+	return nil, fmt.Errorf("hook request is missing")
 }

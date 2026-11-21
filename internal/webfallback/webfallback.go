@@ -231,10 +231,11 @@ func open(ctx context.Context, rawURL string, noDirect bool, run Runner) (report
 	if !rep.OK {
 		return rep, "", nil
 	}
-	path := rep.Path
-	if request, ok := hookctx.Request(ctx); ok {
-		path = request.Abs(path)
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return rep, "", fmt.Errorf("hook request is missing")
 	}
+	path := request.Abs(rep.Path)
 	text, err := os.ReadFile(path)
 	if err != nil {
 		var pathErr *os.PathError
@@ -360,22 +361,17 @@ func LogURL(raw string) string {
 // ExecRunner запускает webtext из PATH, а без него — ~/bin/webtext: хук
 // наследует PATH сессии, а у фоновых claude -p он бывает урезан
 func ExecRunner(ctx context.Context, args []string) ([]byte, int, error) {
-	request, hasRequest := hookctx.Request(ctx)
-	var path string
-	var err error
-	if hasRequest {
-		path, err = webtextPathForRequest(request)
-	} else {
-		path, err = webtextPath()
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return nil, 0, fmt.Errorf("hook request is missing")
 	}
+	path, err := webtextPathForRequest(request)
 	if err != nil {
 		return nil, 0, err
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
-	if hasRequest {
-		cmd.Env = append([]string{}, request.Env...)
-		cmd.Dir = request.Cwd
-	}
+	cmd.Env = append([]string{}, request.Env...)
+	cmd.Dir = request.Cwd
 	cmd.WaitDelay = time.Second
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -401,19 +397,4 @@ func webtextPathForRequest(request hookctx.Context) (string, error) {
 		}
 	}
 	return "", ErrNoWebtext
-}
-
-func webtextPath() (string, error) {
-	if path, err := exec.LookPath("webtext"); err == nil {
-		return path, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", ErrNoWebtext
-	}
-	path := filepath.Join(home, "bin", "webtext")
-	if info, err := os.Stat(path); err != nil || info.IsDir() {
-		return "", ErrNoWebtext
-	}
-	return path, nil
 }

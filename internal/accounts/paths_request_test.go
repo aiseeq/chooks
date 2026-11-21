@@ -12,7 +12,7 @@ func TestPathsForRequest(t *testing.T) {
 	for _, name := range []string{"first", "second"} {
 		home := filepath.Join(root, name)
 		req := hookctx.New(nil, nil, nil, []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "claude"), "XDG_STATE_HOME=" + filepath.Join(home, "state")}, home, 1, 2)
-		paths, err := PathsForRequest(req)
+		paths, err := DefaultPaths(req)
 		if err != nil {
 			t.Fatal(err)
 		}

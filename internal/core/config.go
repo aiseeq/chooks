@@ -50,7 +50,21 @@ type ToolConfig struct {
 // Если файл отсутствует, возвращается конфигурация по умолчанию без записи на диск:
 // хук вызывается часто и параллельно, поэтому побочные эффекты здесь недопустимы
 func LoadConfig(configPath string) (*Config, error) {
-	return loadConfig(configPath, DefaultConfigPath, expandConfigPaths)
+	if configPath == "" {
+		var err error
+		configPath, err = DefaultConfigPath()
+		if err != nil {
+			return nil, err
+		}
+	}
+	config, present, err := loadConfig(configPath)
+	if err != nil || !present {
+		return config, err
+	}
+	if err := expandConfigPaths(config); err != nil {
+		return nil, fmt.Errorf("failed to expand paths in %s: %w", configPath, err)
+	}
+	return finishConfig(config, configPath)
 }
 
 // LoadConfigForRequest resolves config and log paths using the hook's environment.
@@ -84,23 +98,31 @@ func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, 
 	if configPath != "" {
 		configPath = request.Abs(configPath)
 	}
-	return loadConfig(configPath, defaultPath, expand)
-}
-
-func loadConfig(configPath string, defaultPath func() (string, error), expand func(*Config) error) (*Config, error) {
 	if configPath == "" {
 		var err error
-		if configPath, err = defaultPath(); err != nil {
+		configPath, err = defaultPath()
+		if err != nil {
 			return nil, err
 		}
 	}
+	config, present, err := loadConfig(configPath)
+	if err != nil || !present {
+		return config, err
+	}
+	if err := expand(config); err != nil {
+		return nil, fmt.Errorf("failed to expand paths in %s: %w", configPath, err)
+	}
+	return finishConfig(config, configPath)
+}
+
+func loadConfig(configPath string) (*Config, bool, error) {
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return DefaultConfig(), nil
+			return DefaultConfig(), false, nil
 		}
-		return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+		return nil, false, fmt.Errorf("failed to read config file %s: %w", configPath, err)
 	}
 
 	// Неизвестные ключи — ошибка: молча проигнорированная опечатка в имени поля
@@ -110,19 +132,19 @@ func loadConfig(configPath string, defaultPath func() (string, error), expand fu
 	decoder.KnownFields(true)
 	// io.EOF означает пустой файл — работаем на значениях по умолчанию
 	if err := decoder.Decode(&config); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+		return nil, false, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 	}
 
 	applyLoggerDefaults(&config.Logger)
-	if err := expand(&config); err != nil {
-		return nil, fmt.Errorf("failed to expand paths in %s: %w", configPath, err)
-	}
+	return &config, true, nil
+}
 
-	if err := validateConfig(&config); err != nil {
+func finishConfig(config *Config, configPath string) (*Config, error) {
+	if err := validateConfig(config); err != nil {
 		return nil, fmt.Errorf("config validation failed in %s: %w", configPath, err)
 	}
 
-	return &config, nil
+	return config, nil
 }
 
 // SaveConfig сохраняет конфигурацию в файл

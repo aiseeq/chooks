@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/accounts"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/statusline"
 )
 
@@ -36,7 +37,11 @@ chooks limits показывает доли в % недели подписки �
 
 Без подкоманды печатает сводку учёток, как chooks limits.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return statusline.WriteLimits(cmd.OutOrStdout(), false)
+			request, err := commandRequest(cmd)
+			if err != nil {
+				return err
+			}
+			return statusline.WriteLimits(cmd.OutOrStdout(), false, request)
 		},
 	}
 	cmd.AddCommand(newAccountSaveCmd(), newAccountSwitchCmd(), newAccountAutoCmd(), newAccountForgetCmd(), newAccountRotateCmd())
@@ -50,7 +55,7 @@ func newAccountSaveCmd() *cobra.Command {
 		Short: "Сохранить текущий вход Claude Code в хранилище",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := newRotator(commandConfigPath(cmd))
+			r, err := newRotator(cmd.Context(), commandConfigPath(cmd))
 			if err != nil {
 				return err
 			}
@@ -77,7 +82,7 @@ func newAccountSwitchCmd() *cobra.Command {
 		Short: "Переключить Claude Code на учётку и выключить автопереключение",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := newRotator(commandConfigPath(cmd))
+			r, err := newRotator(cmd.Context(), commandConfigPath(cmd))
 			if err != nil {
 				return err
 			}
@@ -99,7 +104,11 @@ func newAccountAutoCmd() *cobra.Command {
 		Args:      cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 		ValidArgs: []string{"on", "off"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			paths, err := accounts.DefaultPaths()
+			request, err := commandRequest(cmd)
+			if err != nil {
+				return err
+			}
+			paths, err := accounts.DefaultPaths(request)
 			if err != nil {
 				return err
 			}
@@ -124,7 +133,11 @@ func newAccountForgetCmd() *cobra.Command {
 		Short: "Удалить учётку из хранилища",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			paths, err := accounts.DefaultPaths()
+			request, err := commandRequest(cmd)
+			if err != nil {
+				return err
+			}
+			paths, err := accounts.DefaultPaths(request)
 			if err != nil {
 				return err
 			}
@@ -145,7 +158,7 @@ func newAccountRotateCmd() *cobra.Command {
 		Short: "Сверить хранилище и переключить по правилу (запускает строка статуса)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := newRotator(commandConfigPath(cmd))
+			r, err := newRotator(cmd.Context(), commandConfigPath(cmd))
 			if err != nil {
 				return err
 			}
@@ -158,23 +171,27 @@ func newAccountRotateCmd() *cobra.Command {
 }
 
 // newRotator собирает ротацию с логгером из конфигурации хуков
-func newRotator(configPath string) (*accounts.Rotator, error) {
-	config, err := core.LoadConfig(configPath)
+func newRotator(ctx context.Context, configPath string) (*accounts.Rotator, error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
+	config, err := core.LoadConfigForRequest(configPath, request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
-	logger, err := core.NewLogger(config.Logger)
+	logger, err := core.NewLoggerTo(config.Logger, request.Stderr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create logger: %w", err)
 	}
-	paths, err := accounts.DefaultPaths()
+	paths, err := accounts.DefaultPaths(request)
 	if err != nil {
 		return nil, err
 	}
 	return &accounts.Rotator{
 		Paths:  paths,
 		Client: accounts.NewClient("chooks/" + Version),
-		Limits: statusline.SnapshotLimits{},
+		Limits: statusline.SnapshotLimits{Request: request},
 		Log:    logger,
 		Now:    time.Now,
 	}, nil

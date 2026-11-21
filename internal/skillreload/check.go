@@ -35,8 +35,6 @@ type Checker struct {
 	StateDir string
 	// CWD resolves relative paths in state created by older versions.
 	CWD string
-	// RequestPaths rejects relative paths when the request has no cwd.
-	RequestPaths bool
 	// ScanBudget — сколько времени дать чтению транскрипта за одно событие.
 	// Первое чтение сессии в сотни МБ растягивается на несколько событий.
 	// Ноль — без ограничения
@@ -110,17 +108,13 @@ func (c Checker) Check(event Event) (Result, error) {
 	if store == nil {
 		store = newDirStore(c.StateDir)
 	}
-	view := diskView
-	var resolvePath func(string) (string, error)
-	if c.RequestPaths {
-		resolvePath = func(path string) (string, error) { return pathForCWD(c.CWD, path) }
-		view = func(kind, path string) (fileView, error) {
-			resolved, err := resolvePath(path)
-			if err != nil {
-				return fileView{}, err
-			}
-			return diskView(kind, resolved)
+	resolvePath := func(path string) (string, error) { return pathForCWD(c.CWD, path) }
+	view := func(kind, path string) (fileView, error) {
+		resolved, err := resolvePath(path)
+		if err != nil {
+			return fileView{}, err
 		}
+		return diskView(kind, resolved)
 	}
 	t := tracker{state: state, store: store, view: view, resolvePath: resolvePath}
 	for _, ev := range scan.Events {

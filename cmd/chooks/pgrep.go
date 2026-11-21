@@ -30,10 +30,6 @@ type preToolUseOutput struct {
 
 // writeAllowedOutput пишет ответ разрешённого вызова: подмену pgrep и
 // подсказку о широком обходе одним JSON; нечего сказать — ничего
-func writeAllowedOutput(input *core.ToolInput, config *core.Config, logger core.Logger, out io.Writer) {
-	writeAllowedOutputContext(context.Background(), input, config, logger, out)
-}
-
 func writeAllowedOutputContext(ctx context.Context, input *core.ToolInput, config *core.Config, logger core.Logger, out io.Writer) {
 	updated, err := rewritePgrep(input, config, logger)
 	if err != nil {

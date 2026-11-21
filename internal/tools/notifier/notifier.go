@@ -33,18 +33,12 @@ type Notifier struct {
 
 // NewForRequest binds notifications to the originating hook process.
 func NewForRequest(config core.ToolConfig, logger core.Logger, request hookctx.Context) *Notifier {
-	notifier := New(config, logger)
-	notifier.request = &request
-	return notifier
-}
-
-// New создает notifier по конфигурации
-func New(config core.ToolConfig, logger core.Logger) *Notifier {
 	return &Notifier{
 		logger:          logger.With("tool", "notifier"),
 		sound:           config.Sound,
 		desktop:         config.Desktop,
 		activateOnClick: config.ActivateOnClick,
+		request:         &request,
 	}
 }
 
@@ -53,6 +47,9 @@ func New(config core.ToolConfig, logger core.Logger) *Notifier {
 // панели задач. Звук и уведомление уходят в отдельный процесс — хук не ждёт
 // ни звука, ни клика
 func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision Decision) error {
+	if n.request == nil {
+		return fmt.Errorf("hook request is missing")
+	}
 	if decision.State != core.StateDone && decision.State != core.StateWaiting && decision.State != core.StateError {
 		return nil
 	}
@@ -66,12 +63,7 @@ func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision De
 	// Значок — по новому состоянию, как в строке статуса: минутное
 	// напоминание без конца хода — это «готово», а не вопрос.
 	// Без заголовка уведомление всё равно уходит
-	var titleErr error
-	if n.request != nil {
-		titleErr = desktop.SetTerminalTitleForRequest(decision.State.Marker()+" "+projectName, *n.request)
-	} else {
-		titleErr = desktop.SetTerminalTitle(decision.State.Marker() + " " + projectName)
-	}
+	titleErr := desktop.SetTerminalTitleForRequest(decision.State.Marker()+" "+projectName, *n.request)
 	if titleErr != nil {
 		n.logger.Warn("terminal title not set", "error", titleErr)
 	}
@@ -84,11 +76,7 @@ func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision De
 	if err != nil {
 		return fmt.Errorf("failed to locate own executable: %w", err)
 	}
-	if n.request != nil {
-		err = desktop.DeliverInBackgroundForRequest(executable, WatchCommand, alert, *n.request)
-	} else {
-		err = desktop.DeliverInBackground(executable, WatchCommand, alert)
-	}
+	err = desktop.DeliverInBackgroundForRequest(executable, WatchCommand, alert, *n.request)
 	if err != nil {
 		return err
 	}
@@ -116,13 +104,10 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 
 	if n.activateOnClick {
 		// Окно принадлежит одному из предков: сам хук окна не имеет
-		pid := 0
-		if n.request != nil {
-			pid = n.request.PID
-		} else {
-			pid = os.Getpid()
+		if n.request == nil {
+			return desktop.Alert{}, fmt.Errorf("hook request is missing")
 		}
-		ancestors, err := desktop.ProcessAncestors(pid)
+		ancestors, err := desktop.ProcessAncestors(n.request.PID)
 		if err != nil {
 			// Best effort: собранная часть цепочки — настоящие PID, окно может
 			// быть у них; без окна клик просто ничего не активирует
@@ -165,14 +150,14 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 // кодирует каталог транскрипта. Текущий каталог (cwd) агент меняет по ходу
 // работы, поэтому он только запасной вариант
 func (n *Notifier) ProjectName(input *core.ToolInput) string {
-	projectName := core.ProjectNameForDir
-	if n.request != nil {
-		home := n.request.Getenv("HOME")
-		if home != "" {
-			home = n.request.Abs(home)
-		}
-		projectName = func(dir string) string { return core.ProjectNameForDirWithHome(dir, home) }
+	if n.request == nil {
+		return "unknown"
 	}
+	home := n.request.Getenv("HOME")
+	if home != "" {
+		home = n.request.Abs(home)
+	}
+	projectName := func(dir string) string { return core.ProjectNameForDirWithHome(dir, home) }
 	if transcriptPath := input.TranscriptPath; transcriptPath != "" {
 		encoded := filepath.Base(filepath.Dir(transcriptPath))
 		if dir := decodeProjectDir(encoded, n.logger); dir != "" {
@@ -184,14 +169,8 @@ func (n *Notifier) ProjectName(input *core.ToolInput) string {
 		return projectName(input.CWD)
 	}
 
-	if n.request != nil {
-		if n.request.Cwd != "" {
-			return projectName(n.request.Cwd)
-		}
-		return "unknown"
-	}
-	if wd, err := os.Getwd(); err == nil {
-		return core.ProjectNameForDir(wd)
+	if n.request.Cwd != "" {
+		return projectName(n.request.Cwd)
 	}
 
 	return "unknown"

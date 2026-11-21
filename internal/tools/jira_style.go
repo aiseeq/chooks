@@ -61,6 +61,9 @@ func NewJiraStyleTool(config core.ToolConfig, logger core.Logger) (*JiraStyleToo
 
 // ValidateTool проверяет команду, постящую комментарий в Jira
 func (t *JiraStyleTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+	if _, ok := hookctx.Request(ctx); !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
 	if !t.IsEnabled() || input.ToolName != "Bash" || input.Command == "" {
 		return &core.ValidationResult{IsValid: true}, nil
 	}

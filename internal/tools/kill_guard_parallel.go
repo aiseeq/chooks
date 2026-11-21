@@ -14,22 +14,18 @@ import (
 // аргумент встаёт на её место, а не в конец команды
 var replacementRe = regexp.MustCompile(`\{[0-9]*[./#%]*[./]*\}|\{=`)
 var parallelImplicitShellCommandRe = regexp.MustCompile(`(?:^|[[:space:]])(?:sudo|doas|pkexec|su|run0|systemd-run)(?:[[:space:]]+[^|;&]*)?[[:space:]]+(?:bash|sh|dash|zsh|ksh|mksh|ksh93|fish)(?:[[:space:]]+[^|;&]*)?[[:space:]]+-[a-zA-Z]*c[a-zA-Z]*[[:space:]]*$`)
+var parallelProtectedCommandRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(systemd-run|run0|pkexec|sudo|doas|su)([^[:alnum:]_.-]|$)`)
+var parallelShellCRe = regexp.MustCompile(`(^|[[:space:]])(?:bash|sh|dash|zsh|ksh|mksh|ksh93|fish)(?:[[:space:]]+[^|;&]*)?[[:space:]]+-[a-zA-Z]*c[a-zA-Z]*(?:[[:space:]]|$)`)
 
-// parallelCommand команда parallel: words — слова после опций; pipe — ввод
-// идёт в stdin команды; quote — слова в кавычках; listed — заданы списки
-// аргументов; argInput — список читает stdin, argInputFirst — stdin-файл
-// стоит до списков в words; semaphore/wait — режим sem и --wait; remote —
-// все машины удалённые; failed — опции не разобраны,
-// parallel выйдет, ничего не запустив. argFileSep и colsep — разделители,
-// заданные опциями.
+// parallelCommand хранит разобранные parallelGetopt опции и оставшиеся слова.
 type parallelCommand struct {
 	words                       []string
 	pipe, quote, listed, remote bool
 	cat, fifo                   bool
-	argInput, argInputFirst     bool
-	argInputFromWords           bool
+	argInput                    bool
+	customArgSep                bool
 	semaphore, wait             bool
-	argFileSep, colsep          string
+	complexSource               bool
 	failed                      bool
 	replaces                    []string
 }
@@ -37,6 +33,8 @@ type parallelCommand struct {
 // parallelPipeOptions опции, с которыми ввод идёт командам в stdin
 // (--round-robin, --fifo, --cat и --group-by включают --pipe)
 var parallelPipeOptions = []string{"pipe", "pipe-part", "round-robin", "fifo", "cat", "group-by"}
+
+const maxParallelSourceCombinations = 256
 
 // parallelReplaceOptions опции, задающие свою строку замены вместо {}, {.},
 // {/}, {//}, {/.}, {#}, {%}
@@ -50,40 +48,128 @@ func parseParallel(args []string) parallelCommand {
 	var logins []string
 	files := false
 	for _, o := range sets {
-		switch {
-		case slices.Contains(parallelPipeOptions, o.name):
-			p.setPipeOption(o.name)
-		case o.name == "quote":
-			p.quote = true
-		case o.name == "rpl":
-			// --rpl 'XX perl': строка замены — первое слово
-			if f := strings.Fields(o.value); len(f) > 0 {
-				p.replaces = append(p.replaces, f[0])
-			}
-		case slices.Contains(parallelReplaceOptions, o.name) && o.value != "":
-			p.replaces = append(p.replaces, o.value)
-		case o.name == "sshlogin":
-			logins = append(logins, o.value)
-		case o.name == "sshloginfile":
-			files = true
-		case o.name == "arg-file" && parallelStdinFile(o.value):
-			p.argInputFirst = true
-		case o.name == "arg-file-sep":
-			p.argFileSep = o.value
-		case o.name == "col-sep":
-			p.colsep = o.value
-		case o.name == "wait":
-			p.wait = true
-		}
+		p.applyOption(o, &logins, &files)
 	}
 	local, hosts := parallelLocalLogins(logins)
 	p.remote = !local && (hosts || files)
 	p.listed = slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "arg-file" }) ||
 		slices.ContainsFunc(p.words, p.sourceWord)
-	p.argInputFromWords = parallelArgInput(p, p.words)
-	p.argInput = p.argInputFirst || p.argInputFromWords
-	p.semaphore = slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "semaphore" })
+	p.argInput = p.argInput || parallelArgInput(p, p.words)
+	p.complexSource = p.complexSource || parallelComplexSources(p, sets)
+	p.semaphore = slices.ContainsFunc(sets, func(o parallelSet) bool {
+		return slices.Contains([]string{"semaphore", "fg", "bg", "id", "semaphore-name", "semaphore-timeout"}, o.name)
+	})
 	return p
+}
+
+func (p *parallelCommand) applyOption(o parallelSet, logins *[]string, files *bool) {
+	switch {
+	case slices.Contains(parallelPipeOptions, o.name):
+		p.setPipeOption(o.name)
+	case o.name == "quote":
+		p.quote = true
+	case o.name == "rpl":
+		p.complexSource = true
+		if f := strings.Fields(o.value); len(f) > 0 {
+			p.replaces = append(p.replaces, f[0])
+		}
+	case slices.Contains(parallelReplaceOptions, o.name) && o.value != "":
+		p.complexSource = true
+		p.replaces = append(p.replaces, o.value)
+	case o.name == "sshlogin":
+		*logins = append(*logins, o.value)
+	case o.name == "sshloginfile":
+		*files = true
+	case o.name == "arg-sep" || o.name == "arg-file-sep":
+		p.customArgSep = true
+		p.complexSource = true
+	case o.name == "arg-file" && parallelStdinFile(o.value):
+		p.argInput = true
+	case parallelComplexOption(o.name):
+		p.complexSource = true
+	case o.name == "wait":
+		p.wait = true
+	}
+}
+
+func parallelComplexOption(name string) bool {
+	switch name {
+	case "col-sep", "delimiter", "null", "link", "quote", "arg-sep", "arg-file-sep",
+		"max-replace-args", "max-args", "max-lines", "X", "m", "header", "csv":
+		return true
+	default:
+		return slices.Contains(parallelReplaceOptions, name) || name == "rpl"
+	}
+}
+
+func parallelComplexSources(p parallelCommand, sets []parallelSet) bool {
+	stdinSources, files := parallelArgFileCounts(sets)
+	listSources, wordStdin, wordFiles, linked, combinations := parallelWordSourceCounts(p)
+	stdinSources += wordStdin
+	files += wordFiles
+	return p.complexSource || linked || files > 0 || stdinSources > 1 || stdinSources > 0 && listSources > 0 || combinations > maxParallelSourceCombinations
+}
+
+func parallelArgFileCounts(sets []parallelSet) (stdin, files int) {
+	for _, o := range sets {
+		if o.name != "arg-file" {
+			continue
+		}
+		if parallelStdinFile(o.value) {
+			stdin++
+		} else {
+			files++
+		}
+	}
+	return stdin, files
+}
+
+func parallelWordSourceCounts(p parallelCommand) (lists, stdin, files int, linked bool, combinations int) {
+	combinations = 1
+	for i, w := range p.words {
+		if w == ":::" {
+			lists++
+			combinations = parallelListCombinationCount(p.words, i, combinations)
+		}
+		if w == ":::"+"+" || w == "::::+" {
+			linked = true
+		}
+		if w == "::::" || w == "::::+" {
+			in, file := parallelFilesAfter(p, i)
+			stdin += in
+			files += file
+		}
+	}
+	return lists, stdin, files, linked, combinations
+}
+
+func parallelListCombinationCount(words []string, start, combinations int) int {
+	end := start + 1
+	for end < len(words) && words[end] != ":::" && words[end] != ":::"+"+" && words[end] != "::::" && words[end] != "::::+" {
+		end++
+	}
+	count := end - start - 1
+	if count == 0 || combinations > maxParallelSourceCombinations {
+		return combinations
+	}
+	if combinations > maxParallelSourceCombinations/count {
+		return maxParallelSourceCombinations + 1
+	}
+	return combinations * count
+}
+
+func parallelFilesAfter(p parallelCommand, start int) (stdin, files int) {
+	for _, path := range p.words[start+1:] {
+		if p.sourceWord(path) {
+			break
+		}
+		if parallelStdinFile(path) {
+			stdin++
+		} else {
+			files++
+		}
+	}
+	return stdin, files
 }
 
 func (p *parallelCommand) setPipeOption(name string) {
@@ -99,28 +185,12 @@ func (p parallelCommand) sourceWord(w string) bool {
 
 // fileSource разделитель файлов аргументов parallel
 func (p parallelCommand) fileSource(w string) bool {
-	if p.argFileSep != "" {
-		return w == p.argFileSep || w == p.argFileSep+"+"
-	}
 	return w == "::::" || w == "::::+"
 }
 
-// parallelStdinFile путь, которым parallel читает аргументы из stdin
-func parallelStdinFile(path string) bool {
-	switch path {
-	case "-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0":
-		return true
-	default:
-		return false
-	}
-}
-
-// parallelArgInput показывает, читает ли parallel список аргументов из stdin.
-// После разделителя файла могут идти несколько имён файлов до следующего
-// разделителя списка; stdin может быть указан любым из поддержанных путей.
 func parallelArgInput(p parallelCommand, words []string) bool {
 	for i, w := range words {
-		if !p.fileSource(w) {
+		if w != "::::" {
 			continue
 		}
 		for _, path := range words[i+1:] {
@@ -135,10 +205,43 @@ func parallelArgInput(p parallelCommand, words []string) bool {
 	return false
 }
 
+// parallelStdinFile путь, которым parallel читает аргументы из stdin
+func parallelStdinFile(path string) bool {
+	switch path {
+	case "-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0":
+		return true
+	default:
+		return false
+	}
+}
+
 // parallelSystemdRunReason причина отказа на systemd-run в команде parallel
 // (parallelSystemdRun)
 func (s *killScan) parallelSystemdRunReason(c shellcmd.Call) string {
 	reason, _ := s.parallelSystemdRun(c)
+	return reason
+}
+
+func parallelComplexSourceReason(s *killScan, c shellcmd.Call) string {
+	p := parseParallel(c.Args)
+	if p.failed || p.remote {
+		return ""
+	}
+	if p.argInput && (!parallelLiteralInputSource(s, c) || parallelInputRedirectCount(c) > 1) {
+		p.complexSource = true
+	}
+	if !p.complexSource {
+		return ""
+	}
+	const reason = "команду parallel под службой составляют источники в сложной форме (связанные, файловые, смешанные или изменяющие сборку строки): что запустится, не видно"
+	defines, err := parallelSourcesDefineCommand(p)
+	if err != nil {
+		s.tool.Logger().Warn("kill_guard: источник parallel не разобран", "error", err)
+		return reason
+	}
+	if !defines || !parallelComplexSourceNeedsRefusal(s, c, p) {
+		return ""
+	}
 	return reason
 }
 
@@ -190,7 +293,13 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 		return "", nil
 	}
 	p := parseParallel(c.Args)
-	if p.failed || p.remote || len(p.words) == 0 {
+	if p.failed || p.remote {
+		return "", nil
+	}
+	if reason := parallelComplexSourceReason(s, c); reason != "" {
+		return reason, nil
+	}
+	if len(p.words) == 0 {
 		return "", nil
 	}
 	commandOnly := p
@@ -217,6 +326,176 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 		return "systemd-run за parallel: команду parallel разобрать не удалось, что запустится, не видно" + hiddenTail, nil
 	}
 	return "", nil
+}
+
+func parallelInputRedirectCount(c shellcmd.Call) int {
+	n := 0
+	for _, r := range c.Redirs {
+		if (r.N == "" || r.N == "0") && strings.HasPrefix(r.Op, "<") {
+			n++
+		}
+	}
+	return n
+}
+
+func parallelLiteralInputSource(s *killScan, c shellcmd.Call) bool {
+	for _, r := range c.Redirs {
+		if r.N != "" && r.N != "0" {
+			continue
+		}
+		switch r.Op {
+		case "<<<":
+			return !strings.ContainsAny(r.Target, "$`\\")
+		case "<<", "<<-":
+			return !strings.ContainsAny(r.Body, "$`\\")
+		case "<":
+			return false
+		}
+	}
+	in := s.inputOf(c)
+	if in.feed == "" {
+		return false
+	}
+	calls, err := shellcmd.Calls(in.feed)
+	if err != nil {
+		s.tool.Logger().Warn("kill_guard: литеральный источник parallel не разобран", "error", err)
+		return false
+	}
+	if len(calls) != 2 || calls[1].Name != "sh" {
+		return false
+	}
+	return (calls[0].Name == "echo" || calls[0].Name == "printf") && !strings.ContainsAny(echoedValue(calls[0]), "$`\\")
+}
+
+func parallelSourcesDefineCommand(p parallelCommand) (bool, error) {
+	if !(p.listed || p.argInput || p.customArgSep || len(p.replaces) > 0) {
+		return false, nil
+	}
+	if len(p.words) == 0 {
+		return true, nil
+	}
+	commandText := strings.Join(p.words, " ")
+	if parallelReplacementCommand(p, commandText) {
+		return true, nil
+	}
+	first := p.words[0]
+	if replacementRe.MatchString(first) || slices.Contains(p.replaces, first) {
+		return true, nil
+	}
+	end := slices.IndexFunc(p.words, p.sourceWord)
+	if end < 0 {
+		return p.customArgSep || p.argInput && parallelShellCRe.MatchString(commandText), nil
+	}
+	prefix := strings.Join(p.words[:end], " ")
+	if strings.TrimSpace(prefix) == "" {
+		return true, nil
+	}
+	readsSource, err := parallelShellReadsSource(prefix)
+	if err != nil {
+		return false, fmt.Errorf("parallel shell source: %w", err)
+	}
+	if readsSource {
+		return true, nil
+	}
+	if p.listed {
+		readsSource, err := parallelShellReadsSource(commandText)
+		if err != nil {
+			return false, fmt.Errorf("parallel listed shell source: %w", err)
+		}
+		return readsSource, nil
+	}
+	return false, nil
+}
+
+func parallelReplacementCommand(p parallelCommand, commandText string) bool {
+	if p.listed && parallelProtectedCommandRe.MatchString(commandText) {
+		return true
+	}
+	return len(p.replaces) > 0 && (parallelProtectedCommandRe.MatchString(commandText) || parallelShellCRe.MatchString(commandText))
+}
+
+func parallelShellReadsSource(text string) (bool, error) {
+	calls, err := shellcmd.Calls(text)
+	if err != nil {
+		return false, fmt.Errorf("parallel shell command: %w", err)
+	}
+	for i := range calls {
+		if shellcmd.IsShell(calls[i].Name) && (shellReadsInput(calls[i].Args) || scriptUsesImplicitArgument(calls[i])) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func parallelComplexSourceNeedsRefusal(s *killScan, c shellcmd.Call, p parallelCommand) bool {
+	return parallelServiceContext(c) || parallelCommandHasSensitiveText(p) || parallelInputHasSensitiveText(s, c) || parallelSourceValuesHaveSensitiveText(p)
+}
+
+func parallelServiceContext(c shellcmd.Call) bool {
+	return slices.Contains(c.Via, "systemd-run") || slices.Contains(c.Via, "run0")
+}
+
+func parallelCommandHasSensitiveText(p parallelCommand) bool {
+	end := slices.IndexFunc(p.words, p.sourceWord)
+	command := strings.Join(p.words[:max(end, 0)], " ")
+	if parallelProtectedCommandRe.MatchString(command) || parallelShellCRe.MatchString(command) {
+		return true
+	}
+	if !p.customArgSep {
+		return false
+	}
+	return parallelWordsHaveSensitiveText(p.words)
+}
+
+func parallelInputHasSensitiveText(s *killScan, c shellcmd.Call) bool {
+	in := s.inputOf(c)
+	if in.feed != "" {
+		calls, err := shellcmd.Calls(in.feed)
+		if err != nil {
+			s.tool.Logger().Warn("kill_guard: значения источника parallel не разобраны", "error", err)
+			return true
+		}
+		for i := range calls {
+			if (calls[i].Name == "echo" || calls[i].Name == "printf") && parallelSensitiveText(echoedValue(calls[i])) {
+				return true
+			}
+		}
+	}
+	for _, redir := range c.Redirs {
+		if redir.N != "" && redir.N != "0" {
+			continue
+		}
+		if redir.Op == "<<<" && parallelSensitiveText(redir.Target) ||
+			(redir.Op == "<<" || redir.Op == "<<-") && parallelSensitiveText(redir.Body) {
+			return true
+		}
+	}
+	return false
+}
+
+func parallelSourceValuesHaveSensitiveText(p parallelCommand) bool {
+	for i, word := range p.words {
+		if !p.sourceWord(word) {
+			continue
+		}
+		for _, value := range p.words[i+1:] {
+			if p.sourceWord(value) {
+				break
+			}
+			if parallelSensitiveText(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func parallelWordsHaveSensitiveText(words []string) bool {
+	return slices.ContainsFunc(words, parallelSensitiveText)
+}
+
+func parallelSensitiveText(text string) bool {
+	return parallelProtectedCommandRe.MatchString(text) || parallelShellCRe.MatchString(text)
 }
 
 // parallelCalls проверка разобранной команды parallel (parallelSystemdRun)

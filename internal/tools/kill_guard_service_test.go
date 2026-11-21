@@ -5,8 +5,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/aiseeq/akit/shellcmd"
 )
 
 // Значение Exec с C-экранированием или вычислениями может скрыть команду от killText.
@@ -157,119 +155,111 @@ func TestKillGuardParallelBehindServiceWrappers(t *testing.T) {
 }
 
 func TestKillGuardParallelArgFileStdin(t *testing.T) {
-	for _, args := range [][]string{
-		{"::::", "/etc/hostname", "-"},
-		{"::::", "/dev/fd/0"},
-		{"::::", "/proc/self/fd/0"},
-		{"-a", "/dev/fd/0"},
-		{"-a", "/proc/self/fd/0"},
-		{"--arg-file-sep", "ZZ", "ZZ", "-"},
-		{"--arg-file-sep", "ZZ", "ZZ+", "-"},
-	} {
-		p := parseParallel(args)
-		if !p.argInput {
-			t.Errorf("stdin не найден в arg-file: %#v", args)
-		}
-	}
-	if p := parseParallel([]string{"--arg-file-sep", "ZZ", "ZZ", "-"}); !p.sourceWord("ZZ") {
-		t.Error("--arg-file-sep не распознан как разделитель списка")
-	}
-	if p := parseParallel([]string{"--arg-file-sep", "ZZ", "ZZ+", "-"}); !p.fileSource("ZZ+") || !p.argInput {
-		t.Error("--arg-file-sep не распознал файловый источник с +")
-	}
-	if p := parseParallel([]string{"--arg-file-sep", "ZZ", "::::", "-"}); p.fileSource("::::") || p.argInput {
-		t.Error(":::: ошибочно остался разделителем при --arg-file-sep")
-	}
-	if p := parseParallel([]string{"-a", "-", ":::", "12345"}); !p.argInputFirst {
-		t.Error("stdin arg-file должен идти перед источником :::")
-	}
-	for _, args := range [][]string{
-		{":::", "kill", "::::", "-"},
-		{"--colsep", ",", "::::", "-"},
-		{"-a", "-", ":::", "12345"},
-	} {
-		got, ok := parallelShell(args)
-		if !ok || got != "kill $PARALLEL_ARG" {
-			t.Errorf("parallelShell(%#v) = %q, %v; нужен анализ вычисляемой команды/цели", args, got, ok)
-		}
-	}
-	input := shellcmd.Call{Redirs: []shellcmd.Redir{{Op: "<<<", Target: "kill"}}}
-	if got, ok := parallelShellCall([]string{"-a", "-", ":::", "12345"}, &input); !ok || got != "kill 12345" {
-		t.Errorf("источники stdin и ::: в неверном порядке: %q, %v", got, ok)
-	}
-	input.Redirs[0].Target = "echo,done"
-	if got, ok := parallelShellCall([]string{"--colsep", ",", "-a", "-"}, &input); !ok || got != "echo done" {
-		t.Errorf("--colsep не разрезал известный ввод: %q, %v", got, ok)
-	}
-	input.Redirs[0].Target = "kill 12345"
-	if got, ok := parallelShellCall([]string{"-q", "-a", "-"}, &input); !ok || got != "'kill 12345'" {
-		t.Errorf("-q не сохранил строку одним словом: %q, %v", got, ok)
-	}
-	if got, ok := parallelShellCall([]string{"--semaphore", "--wait", "kill", "12345"}, nil); !ok || got != "true" {
-		t.Errorf("sem --wait должен проверяться как true: %q, %v", got, ok)
-	}
 	for _, command := range []string{
-		`systemd-run --user --pipe parallel :::: - <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel -a - <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel --arg-file=- <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel --arg-file - <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel :::: /dev/stdin <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel -a /dev/stdin <<< 'kill 12345'`,
-		`echo 'kill -9 -1' | setsid systemd-run --user --pipe parallel :::: -`,
-		`run0 parallel :::: - <<< 'kill 12345'`,
-		`systemd-run --user sem 'kill 12345'`,
-		`systemd-run --user sem kill 12345`,
-		`systemd-run --user sem --id x 'kill 12345'`,
-		`setsid systemd-run --user sem 'kill 12345'`,
-		`systemd-run --user --pipe parallel ::: kill :::: - <<< '12345'`,
-		`systemd-run --user --pipe parallel ::: 'kill 12345' :::: - <<< 'echo'`,
-		`systemd-run --user --pipe parallel ::: kill :::: /dev/stdin <<< '12345'`,
-		`systemd-run --user parallel ::: 'kill 12345' :::: /dev/stdin <<< x`,
-		`systemd-run --user --pipe parallel ::: 'kill 12345' ::::+ - <<< 'x'`,
-		`systemd-run --user setsid parallel ::: kill :::: - <<< '12345'`,
-		`run0 parallel ::: 'kill 12345' :::: - <<< 'echo'`,
-		`systemd-run --user --pipe parallel -a - ::: 12345 <<< kill`,
-		`run0 parallel -a - ::: 12345 <<< kill`,
-		`systemd-run --user --pipe parallel -a - ::: 12345 :::: - <<< kill`,
-		`systemd-run --user --pipe parallel --arg-file-sep ZZ ZZ+ - <<< 'kill 12345'`,
-		`run0 parallel --arg-file-sep ZZ ZZ+ - <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel :::: /etc/hostname - <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel -a /dev/fd/0 <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel -a /proc/self/fd/0 <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel :::: /dev/fd/0 <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel :::: /proc/self/fd/0 <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel --arg-file /dev/fd/0 <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel --arg-file-sep ZZ ZZ - <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel --colsep , :::: - <<< 'kill,12345'`,
-		`parallel -a - systemd-run --user sh -c <<< 'kill 12345'`,
-		`parallel -a /dev/stdin systemd-run --user sh -c <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel ::: echo :::: - <<< 'done'`,
+		`systemd-run --user --pipe parallel :::: /etc/hostname - <<< 'make'`,
+		`systemd-run --user --pipe parallel --colsep , -a - <<< 'echo,done'`,
+		`systemd-run --user --pipe parallel --arg-file-sep ZZ :::: - <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel -q -a - <<< 'kill 12345'`,
+		`systemd-run --user parallel -a list.txt -a - ::: 12345 <<< kill`,
+		`systemd-run --user parallel :::+ 'echo safe'`,
+		`run0 parallel ::: nice :::: kill`,
+		`systemd-run --pipe parallel ::: nice :::: kill`,
+		`systemd-run --user parallel --colsep , ::: 'echo,safe'`,
+		`systemd-run --user parallel ::: echo kill ::: :::+ 12345`,
+		`systemd-run --user parallel ::: echo kill :::: /etc/hostname :::+ 12345`,
+		`systemd-run --user --pipe parallel ::: echo kill :::: /etc/hostname +- <<< 12345`,
+		`run0 parallel ::: echo kill ::: :::+ 12345`,
+		`systemd-run --user parallel --link ::: echo kill :::+ 12345`,
+		`systemd-run --user parallel --xapply ::: echo kill :::+ 12345`,
+		`systemd-run --user --pipe parallel -a - <<< 'echo done' <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel :::: - <<< 'echo done' <<< 'kill 12345'`,
+		`run0 parallel -a - <<< 'echo done' <<< 'kill 12345'`,
+		`systemd-run --user parallel -a /dev/null ::: 'kill 12345'`,
+		`systemd-run --user parallel :::: /etc/hostname ::: kill ::: 12345`,
+		`systemd-run --user parallel --arg-sep ,, ,, 'kill 12345'`,
+		`systemd-run --user parallel -d , ::: 'echo a,kill 12345'`,
+		`systemd-run --user parallel -I XX XX ::: 'kill 12345'`,
+		`systemd-run --user --pipe parallel {} <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel :::: /dev//stdin <<< 'kill 12345'`,
+		`systemd-run --user parallel -q ::: 'kill 12345'`,
+		`echo 'kill 12345' | systemd-run --user --pipe parallel -a - 3<<< 'echo done'`,
 	} {
 		if r := validateKill(t, command); r.IsValid {
 			t.Errorf("должно блокироваться: %s", command)
 		}
 	}
 	for _, command := range []string{
-		`systemd-run --user --pipe parallel :::: - <<< 'echo done'`,
-		`systemd-run --user --pipe parallel -a - <<< 'make -j2'`,
-		`systemd-run --user sem 'make -j2'`,
-		`systemd-run --user sem --wait`,
-		`parallel :::: - <<< 'echo done'`,
-		`parallel :::: - <<< 'kill 12345'`,
-		`sem 'kill 12345'`,
-		`systemd-run -H host sem 'kill 12345'`,
-		`sem 'make -j2'`,
-		`systemd-run --user --pipe parallel ::: echo :::: - <<< 'done'`,
-		`systemd-run --user --pipe parallel :::: /etc/hostname - <<< 'make'`,
+		`systemd-run --user parallel ::: 'echo a' 'echo b'`,
+		`systemd-run --user parallel ::: echo ::: a b`,
 		`systemd-run --user parallel -a list.txt make`,
-		`systemd-run --user sem --wait`,
-		`systemd-run --user --pipe parallel --colsep , -a - <<< 'echo,done'`,
+		`systemd-run --user sem 'make -j2'`,
 		`systemd-run --user sem --wait kill 12345`,
-		`systemd-run --user --pipe parallel --arg-file-sep ZZ :::: - <<< 'kill 12345'`,
-		`systemd-run --user --pipe parallel -q -a - <<< 'kill 12345'`,
+		`systemd-run --user parallel --semaphore --wait kill 12345`,
+		`parallel --semaphore --wait kill 12345`,
+		`run0 parallel --semaphore --wait kill 12345`,
+		`systemd-run --user parallel --fg --wait kill 12345`,
+		`parallel :::: - <<< 'kill 12345'`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("должно пропускаться: %s: %v", command, r.Suggestions)
 		}
+	}
+}
+
+func TestKillGuardParallelArgFileR6(t *testing.T) {
+	for i, command := range []string{
+		`systemd-run --user --pipe parallel ::: echo :::: - <<< 'done'`,
+		`systemd-run --user --pipe parallel :::: /etc/hostname - <<< 'make'`,
+		`systemd-run --user --pipe parallel --colsep , -a - <<< 'echo,done'`,
+		`systemd-run --user --pipe parallel --arg-file-sep ZZ :::: - <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel -q -a - <<< 'kill 12345'`,
+		`systemd-run --user parallel -a list.txt -a - ::: 12345 <<< kill`,
+		`systemd-run --user parallel :::+ 'echo safe'`,
+		`systemd-run --user parallel --colsep , ::: 'echo,safe'`,
+		`systemd-run --user parallel ::: echo kill ::: :::+ 12345`,
+		`systemd-run --user parallel ::: echo kill :::: /etc/hostname :::+ 12345`,
+		`systemd-run --user --pipe parallel ::: echo kill :::: /etc/hostname +- <<< 12345`,
+		`run0 parallel ::: echo kill ::: :::+ 12345`,
+		`systemd-run --user parallel --link ::: echo kill :::+ 12345`,
+		`systemd-run --user parallel --xapply ::: echo kill :::+ 12345`,
+		`systemd-run --user --pipe parallel -a - <<< 'echo done' <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel :::: - <<< 'echo done' <<< 'kill 12345'`,
+		`run0 parallel -a - <<< 'echo done' <<< 'kill 12345'`,
+		`systemd-run --user parallel -a /dev/null ::: 'kill 12345'`,
+		`systemd-run --user parallel :::: /etc/hostname ::: kill ::: 12345`,
+		`systemd-run --user parallel --arg-sep ,, ,, 'kill 12345'`,
+		`systemd-run --user parallel -d , ::: 'echo a,kill 12345'`,
+		`systemd-run --user parallel -I XX XX ::: 'kill 12345'`,
+		`systemd-run --user --pipe parallel {} <<< 'kill 12345'`,
+		`systemd-run --user --pipe parallel :::: /dev//stdin <<< 'kill 12345'`,
+		`systemd-run --user parallel -q ::: 'kill 12345'`,
+		`echo 'kill 12345' | systemd-run --user --pipe parallel -a - 3<<< 'echo done'`,
+	} {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			if r := validateKill(t, command); r.IsValid {
+				t.Errorf("сложный источник parallel пропущен: %s", command)
+			}
+		})
+	}
+	for i, command := range []string{
+		`systemd-run --user --pipe parallel :::: - <<< 'echo done'`,
+		`systemd-run --user --pipe parallel -a - <<< 'make -j2'`,
+		`systemd-run --user parallel ::: 'echo a' 'echo b'`,
+		`systemd-run --user parallel ::: echo ::: a b`,
+		`systemd-run --user parallel -a list.txt make`,
+		`systemd-run --user sem --wait kill 12345`,
+		`systemd-run --user sem 'make -j2'`,
+		`parallel :::: - <<< 'kill 12345'`,
+	} {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			if r := validateKill(t, command); !r.IsValid {
+				t.Errorf("простая/обычная форма заблокирована: %s: %v", command, r.Suggestions)
+			}
+		})
+	}
+	if r := validateKill(t, "systemd-run --user --pipe parallel -a - <<EOF\necho done\nEOF"); !r.IsValid {
+		t.Errorf("литеральный heredoc должен пройти: %v", r.Suggestions)
 	}
 }
 

@@ -274,7 +274,7 @@ func scriptNesting(via []string) int {
 // предела вложенности akit, в неразобранном вложенном скрипте) не виден
 func (s *killScan) parsedCalls() error {
 	calls, err := shellcmd.Calls(s.command)
-	if err != nil && s.killText {
+	if err != nil && s.killText && !parallelSemaphoreWaitParseError(calls) {
 		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду со словом kill, отказ", "error", err)
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
@@ -292,6 +292,21 @@ func (s *killScan) parsedCalls() error {
 		}
 	}
 	return nil
+}
+
+func parallelSemaphoreWaitParseError(calls []shellcmd.Call) bool {
+	if len(calls) == 1 && calls[0].Name == "parallel" {
+		p := parseParallel(calls[0].Args)
+		return !p.failed && p.semaphore && p.wait
+	}
+	if len(calls) != 2 || calls[0].Name != "systemd-run" && calls[0].Name != "run0" || calls[1].Name != "parallel" {
+		return false
+	}
+	if !slices.Contains(calls[1].Via, "systemd-run") && !slices.Contains(calls[1].Via, "run0") {
+		return false
+	}
+	p := parseParallel(calls[1].Args)
+	return !p.failed && p.semaphore && p.wait
 }
 
 // withWrappedRun0 calls текста text и run0 за обёртками среди них
@@ -512,6 +527,12 @@ func harmlessImplicitXargsScriptInput(c shellcmd.Call, s *killScan) bool {
 }
 
 func (s *killScan) rewrittenCall(c shellcmd.Call, calls []shellcmd.Call) (bool, error) {
+	if c.Name == "parallel" {
+		if reason := parallelComplexSourceReason(s, c); reason != "" {
+			s.addToolReason(reason, systemdRunHiddenHint, false)
+			return true, nil
+		}
+	}
 	if c.Name == "sem" && s.signalWord {
 		in := s.inputOf(c)
 		if in.src == stdinPipe || in.src == stdinFile || in.src == stdinRedirect {

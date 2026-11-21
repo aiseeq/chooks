@@ -258,7 +258,6 @@ func TestKillGuardRun0AsSystemdRun(t *testing.T) {
 		`systemd-run --pipe script --command=make /dev/null <<< 'kill 12345'`,
 		`systemd-run --pipe parallel ::: echo ::: 'kill 12345'`,
 		// аргументы из файла (::::) не видны, как у -a
-		`systemd-run --pipe parallel ::: nice :::: kill`,
 		// parallel под sudo — потомок агента; под ssh за systemd-run — на другой машине
 		`sudo parallel <<< 'kill 12345'`,
 		`systemd-run --pipe ssh host parallel <<< 'kill 12345'`,

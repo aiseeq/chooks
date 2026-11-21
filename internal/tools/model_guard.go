@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -56,9 +58,9 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 	}
 	var reasons []string
 	for _, c := range candidates {
-		if c.fast {
-			// быстрая модель одобрения не требует, но модель «только
-			// пользователь» агент не задаёт и сюда
+		if c.userOnlyCheck {
+			// быстрая модель и модель определения агента одобрения не
+			// требуют, но модель «только пользователь» агент не задаёт и сюда
 			if name, ok := t.userOnlyModel(c.value, models); ok {
 				reasons = append(reasons, userOnlyReason(c.value, name))
 			}
@@ -85,35 +87,26 @@ func userOnlyReason(value, name string) string {
 type modelCandidate struct {
 	value   string
 	dynamic bool
-	// fast — модель быстрых запросов (переменные haiku): проверяется только
-	// на модель «только пользователь»
-	fast bool
+	// userOnlyCheck — модель быстрых запросов (переменные haiku) или
+	// определения агента: проверяется только на модель «только пользователь»
+	userOnlyCheck bool
 }
 
 func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate {
-	if input.ToolName == "Agent" {
-		var found []modelCandidate
-		var fields map[string]json.RawMessage
-		if json.Unmarshal(input.ToolInput, &fields) == nil {
-			if raw := fields["model"]; len(raw) > 0 && string(raw) != "null" {
-				var model string
-				if err := json.Unmarshal(raw, &model); err != nil {
-					logger.Warn("поле модели Agent имеет неверный тип", "value", string(raw), "error", err)
-					found = append(found, modelCandidate{value: string(raw)})
-				} else if strings.TrimSpace(model) != "" {
-					found = append(found, modelCandidate{value: model})
-				}
-			}
-		}
-		return found
-	}
-	if !core.IsShellTool(input.ToolName) {
+	if input.ToolName != "Agent" && !core.IsShellTool(input.ToolName) {
 		return nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		// ~ в пути --settings не раскроется: файл не читается, остальное проверяется
+		// ~ в пути --settings не раскроется, определения агентов в ~ не
+		// читаются: остальное проверяется
 		logger.Warn("model_guard: домашний каталог неизвестен", "error", err)
+	}
+	agentModels := func(name string) []modelCandidate {
+		return agentDefinitionModels(name, input.CWD, home, logger)
+	}
+	if input.ToolName == "Agent" {
+		return agentToolCandidates(input, agentModels, logger)
 	}
 	unresolvedTildeSettings := false
 	readSettings := func(path string, tilde shellcmd.Tilde) []byte {
@@ -137,7 +130,7 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		}
 		return data
 	}
-	candidates := bashModelCandidates(input.Command, readSettings, logger)
+	candidates := bashModelCandidates(input.Command, modelFiles{settings: readSettings, agent: agentModels}, logger)
 	if unresolvedTildeSettings {
 		candidates = append(candidates, modelCandidate{value: "settings path with unknown home", dynamic: true})
 	}
@@ -146,6 +139,110 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 
 // maxSettingsSize — предел файла --settings: настройки — килобайты
 const maxSettingsSize = 1 << 20
+
+// agentToolCandidates — модель Agent: поле model, без него — модель
+// определения агента subagent_type
+func agentToolCandidates(input *core.ToolInput, agentModels func(string) []modelCandidate, logger core.Logger) []modelCandidate {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(input.ToolInput, &fields) != nil {
+		return nil
+	}
+	if raw := fields["model"]; len(raw) > 0 && string(raw) != "null" {
+		var model string
+		if err := json.Unmarshal(raw, &model); err != nil {
+			logger.Warn("поле модели Agent имеет неверный тип", "value", string(raw), "error", err)
+			return []modelCandidate{{value: string(raw)}}
+		}
+		if strings.TrimSpace(model) != "" {
+			return []modelCandidate{{value: model}}
+		}
+	}
+	var agentType string
+	if json.Unmarshal(fields["subagent_type"], &agentType) == nil && agentType != "" {
+		return agentModels(agentType)
+	}
+	return nil
+}
+
+// modelFiles — файлы, откуда клиент берёт модель: --settings по пути и
+// определение агента по имени
+type modelFiles struct {
+	settings func(path string, tilde shellcmd.Tilde) []byte
+	agent    func(name string) []modelCandidate
+}
+
+// agentDefinitionModels — модель из определения агента name (frontmatter
+// name и model, *.md в <cwd>/.claude/agents и ~/.claude/agents): Agent без
+// model и claude --agent берут её оттуда. Модель определения проверяется
+// только на «только пользователь»: одобрение моделей в определениях — не
+// предмет хука (fighter.md — model: opus)
+func agentDefinitionModels(name, cwd, home string, logger core.Logger) []modelCandidate {
+	var dirs []string
+	for _, root := range []string{cwd, home} {
+		if root != "" {
+			dirs = append(dirs, filepath.Join(root, ".claude", "agents"))
+		}
+	}
+	var found []modelCandidate
+	for _, dir := range dirs {
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				// нет каталога — определений в нём нет
+				if !errors.Is(err, fs.ErrNotExist) {
+					logger.Warn("model_guard: каталог агентов не читается, модели определений не проверены", "path", path, "error", err)
+				}
+				return nil
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".md") {
+				return nil
+			}
+			data, err := readSettingsFile(path)
+			if err != nil {
+				logger.Warn("model_guard: определение агента не читается, модель из него не проверена", "path", path, "error", err)
+				return nil
+			}
+			// inherit и прочие не-модели проверку «только пользователь» проходят сами
+			if defName, model := agentFrontmatter(data, path); defName == name && model != "" {
+				found = append(found, modelCandidate{value: model, userOnlyCheck: true})
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Warn("model_guard: каталог агентов не обойдён", "dir", dir, "error", err)
+		}
+	}
+	return found
+}
+
+// agentFrontmatter — name и model из frontmatter определения агента; без
+// name — имя файла
+func agentFrontmatter(data []byte, path string) (name, model string) {
+	name = strings.TrimSuffix(filepath.Base(path), ".md")
+	rest, ok := strings.CutPrefix(strings.ReplaceAll(string(data), "\r\n", "\n"), "---\n")
+	if !ok {
+		return name, ""
+	}
+	head, _, ok := strings.Cut(rest, "\n---")
+	if !ok {
+		return name, ""
+	}
+	for line := range strings.Lines(head) {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		switch strings.TrimSpace(key) {
+		case "name":
+			if value != "" {
+				name = value
+			}
+		case "model":
+			model = value
+		}
+	}
+	return name, model
+}
 
 // readSettingsFile читает файл настроек, только обычный и не больше
 // maxSettingsSize: чтение FIFO или /dev/zero повесило бы хук (ревью 12.11)
@@ -179,7 +276,7 @@ func clientDialect(name string) string {
 // присваивание переменной модели), чтобы ошибка разбора akit не пропустила
 // неодобренную. readSettings читает файл --settings по пути из команды, nil —
 // не прочесть; файла нет — текст команды, которая может его написать
-func bashModelCandidates(command string, readSettings func(string, shellcmd.Tilde) []byte, logger core.Logger) []modelCandidate {
+func bashModelCandidates(command string, files modelFiles, logger core.Logger) []modelCandidate {
 	calls, err := shellcmd.Calls(command)
 	if calls == nil && err != nil {
 		logger.Warn("model_guard: shellcmd не разобрал команду, модели ищутся в тексте", "error", err)
@@ -197,7 +294,7 @@ func bashModelCandidates(command string, readSettings func(string, shellcmd.Tild
 			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`"), tilde: call.ArgTilde(i)}
 		}
 		dialect := clientDialect(call.Name)
-		found = append(found, candidatesFromArgs(dialect, args, readSettings)...)
+		found = append(found, candidatesFromArgs(dialect, args, files)...)
 		if dialect == "claude" {
 			claude = true
 		}
@@ -304,7 +401,7 @@ func envCandidate(name, value string, dynamic bool) (modelCandidate, bool) {
 	if !ok || value == "" {
 		return modelCandidate{}, false
 	}
-	return modelCandidate{value: value, dynamic: dynamic, fast: !full}, true
+	return modelCandidate{value: value, dynamic: dynamic, userOnlyCheck: !full}, true
 }
 
 // envModelCandidates — модели из присваиваний переменных modelEnvNames, что
@@ -473,7 +570,7 @@ func assignedModelWord(w string) []modelCandidate {
 }
 
 // valueFlags — флаги claude со значением, которые пишутся и через «=»
-var valueFlags = []string{"--settings", "--agents", "--fallback-model"}
+var valueFlags = []string{"--settings", "--agents", "--agent", "--fallback-model"}
 
 // splitValueFlags разбивает --flag=value флагов valueFlags на два слова
 func splitValueFlags(args []word) []word {
@@ -502,7 +599,7 @@ func modelValueFlag(name, flag string) bool {
 	return false
 }
 
-func candidatesFromArgs(name string, args []word, readSettings func(string, shellcmd.Tilde) []byte) []modelCandidate {
+func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandidate {
 	var found []modelCandidate
 	if name == "claude" {
 		args = splitValueFlags(args)
@@ -521,7 +618,9 @@ func candidatesFromArgs(name string, args []word, readSettings func(string, shel
 		case modelValueFlag(name, a.text):
 			found = append(found, modelCandidate{value: next.text, dynamic: !next.literal})
 		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
-			found = append(found, jsonModelCandidates(a.text, next, readSettings)...)
+			found = append(found, jsonModelCandidates(a.text, next, files.settings)...)
+		case name == "claude" && a.text == "--agent":
+			found = append(found, files.agent(next.text)...)
 		case name == "codex" && (a.text == "-c" || a.text == "--config"):
 			if candidate, ok := codexConfigCandidate(next); ok {
 				found = append(found, candidate)

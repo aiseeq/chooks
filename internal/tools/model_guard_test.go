@@ -496,3 +496,92 @@ func TestModelGuardUserOnly(t *testing.T) {
 		})
 	}
 }
+
+// TestModelGuardAgentDefinition — модель «только пользователь» в
+// определении агента: Agent без model и claude --agent берут её оттуда
+// (приёмка 20.11, тикет model-guard-user-only-agent-files)
+func TestModelGuardAgentDefinition(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	approvedPath := filepath.Join(home, "approved")
+	files := map[string]string{
+		approvedPath: "opus claude-opus-5-5\nfable claude-fable-5-2\n",
+		filepath.Join(home, ".claude/agents/fx.md"):         "---\nname: fx\nmodel: fable\n---\nтело\n",
+		filepath.Join(home, ".claude/agents/sub/fy.md"):     "---\nname: other-name\nmodel: \"claude-fable-5-2\"\n---\n",
+		filepath.Join(home, ".claude/agents/ok.md"):         "---\nname: ok\nmodel: opus\n---\nmodel: fable\n",
+		filepath.Join(home, ".claude/agents/hk.md"):         "---\r\nname: hk\r\nmodel: haiku\r\n---\r\n",
+		filepath.Join(home, ".claude/agents/in.md"):         "---\nname: in\nmodel: inherit\n---\n",
+		filepath.Join(home, ".claude/agents/nofm.md"):       "model: fable\n",
+		filepath.Join(project, ".claude/agents/px.md"):      "---\nname: px\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/byfile.md"):     "---\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/notes.txt"):     "---\nname: txt\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/unclosed.md"):   "---\nname: unclosed\nmodel: fable\n",
+		filepath.Join(home, ".claude/agents/noprefix.md"):   "name: noprefix\n---\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/emptyname.md"):  "---\nname:\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/nokey.md"):      "---\njust text\nname: nokey\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/spaced.md"):     "---\n name : spaced-x \nmodel:  'fable' \n---\n",
+		filepath.Join(home, ".claude/agents/crlf.md"):       "---\r\nname: crlf\r\nmodel: fable\r\n---\r\n",
+		filepath.Join(home, ".claude/agents/override.md"):   "---\nname: override\nmodel: opus\n---\n",
+		filepath.Join(home, ".claude/agents/caseupper.md"):  "---\nname: caseupper\nmodel: FABLE\n---\n",
+		filepath.Join(home, ".claude/agents/onemillion.md"): "---\nname: onemillion\nmodel: claude-fable-5-2[1m]\n---\n",
+	}
+	for path, text := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("MODELS_APPROVED", approvedPath)
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	cases := []struct {
+		name, tool, raw, command, cwd string
+		reject                        bool
+	}{
+		{"Agent fx", "Agent", `{"subagent_type":"fx"}`, "", home, true},
+		{"Agent по name во вложенной папке", "Agent", `{"subagent_type":"other-name"}`, "", home, true},
+		{"Agent по имени файла при другом name", "Agent", `{"subagent_type":"fy"}`, "", home, false},
+		{"Agent без name — имя файла", "Agent", `{"subagent_type":"byfile"}`, "", home, true},
+		{"Agent opus в frontmatter, fable в теле", "Agent", `{"subagent_type":"ok"}`, "", home, false},
+		{"Agent haiku CRLF", "Agent", `{"subagent_type":"hk"}`, "", home, false},
+		{"Agent inherit", "Agent", `{"subagent_type":"in"}`, "", home, false},
+		{"Agent без frontmatter", "Agent", `{"subagent_type":"nofm"}`, "", home, false},
+		{"Agent не .md", "Agent", `{"subagent_type":"txt"}`, "", home, false},
+		{"Agent незакрытый frontmatter", "Agent", `{"subagent_type":"unclosed"}`, "", home, false},
+		{"Agent frontmatter не с начала", "Agent", `{"subagent_type":"noprefix"}`, "", home, false},
+		{"Agent пустой name — имя файла", "Agent", `{"subagent_type":"emptyname"}`, "", home, true},
+		{"Agent строка без двоеточия", "Agent", `{"subagent_type":"nokey"}`, "", home, true},
+		{"Agent пробелы и кавычки", "Agent", `{"subagent_type":"spaced-x"}`, "", home, true},
+		{"Agent CRLF fable", "Agent", `{"subagent_type":"crlf"}`, "", home, true},
+		{"Agent FABLE", "Agent", `{"subagent_type":"caseupper"}`, "", home, true},
+		{"Agent fable [1m]", "Agent", `{"subagent_type":"onemillion"}`, "", home, true},
+		{"Agent нет такого", "Agent", `{"subagent_type":"absent"}`, "", home, false},
+		{"Agent fx с model opus", "Agent", `{"subagent_type":"fx","model":"opus"}`, "", home, false},
+		{"Agent fx с пустым model", "Agent", `{"subagent_type":"fx","model":""}`, "", home, true},
+		{"Agent проекта", "Agent", `{"subagent_type":"px"}`, "", project, true},
+		{"Agent проекта из другого каталога", "Agent", `{"subagent_type":"px"}`, "", home, false},
+		{"Agent override opus", "Agent", `{"subagent_type":"override"}`, "", home, false},
+		{"claude --agent fx", "Bash", "", "claude -p --agent fx hi", home, true},
+		{"cl --agent=fx", "Bash", "", "cl --agent=fx", home, true},
+		{"claude --agent ok", "Bash", "", "claude -p --agent ok hi", home, false},
+		{"claude --agent из переменной", "Bash", "", `claude -p --agent "$A" hi`, home, false},
+		{"codex --agent fx", "Bash", "", "codex exec --agent fx hi", home, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			input := &core.ToolInput{ToolName: c.tool, ToolInput: []byte(c.raw), Command: c.command, CWD: c.cwd}
+			result, err := tool.ValidateTool(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid == c.reject {
+				t.Fatalf("reject=%v, want %v: %+v", !result.IsValid, c.reject, result.Violations)
+			}
+		})
+	}
+}

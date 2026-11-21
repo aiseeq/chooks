@@ -10,6 +10,6 @@ func BenchmarkForecast(b *testing.B) {
 	s := &Store{Active: "a", Accounts: []Account{account("a", 20*day, now), account("b", 20*day, now), account("c", 20*day, now)}}
 	usage := map[string]Usage{"a@example.com": {Week: Window{Used: 96, ResetsAt: now.Add(4 * day)}}}
 	for i := 0; i < b.N; i++ {
-		s.Forecast(usage, 0.6, now)
+		s.Forecast(usage, 2.5, now)
 	}
 }

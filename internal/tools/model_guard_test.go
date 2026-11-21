@@ -447,7 +447,7 @@ func TestModelGuardUserOnly(t *testing.T) {
 		{"Agent id fable", "Agent", `{"model":"claude-fable-5-2"}`, "", true},
 		{"Agent fable [1m]", "Agent", `{"model":"claude-fable-5-2[1m]"}`, "", true},
 		{"Agent opus", "Agent", `{"model":"opus"}`, "", false},
-		{"Agent без модели", "Agent", `{"subagent_type":"fighter"}`, "", false},
+		{"Agent без модели", "Agent", `{"subagent_type":"general-purpose"}`, "", false},
 		{"claude -p fable", "Bash", "", "claude -p --model fable hi", true},
 		{"cl id fable", "Bash", "", "cl --model claude-fable-5-2", true},
 		{"cl --model=fable", "Bash", "", "cl --model=fable", true},
@@ -473,6 +473,12 @@ func TestModelGuardUserOnly(t *testing.T) {
 		{"присваивание opus, потом export", "Bash", "", "ANTHROPIC_MODEL=opus; export ANTHROPIC_MODEL; claude -p hi", false},
 		{"классификатор fable", "Bash", "", "CLAUDE_CODE_AUTO_MODE_MODEL=fable claude -p hi", true},
 		{"фоновый классификатор fable", "Bash", "", "CLAUDE_CODE_BG_CLASSIFIER_MODEL=claude-fable-5-2 claude -p hi", true},
+		{"значение модели из предыдущего присваивания", "Bash", "", "F=fable; ANTHROPIC_SMALL_FAST_MODEL=$F claude -p hi", true},
+		{"значение классификатора из предыдущего присваивания", "Bash", "", "F=fable; export CLAUDE_CODE_BG_CLASSIFIER_MODEL=$F; claude -p hi", true},
+		{"codex -m=fable", "Bash", "", "codex exec -m=fable hi", true},
+		{"codex --config=model=fable", "Bash", "", "codex exec --config=model=fable hi", true},
+		{"codex разрешённая -m", "Bash", "", "codex exec -m=luna hi", false},
+		{"codex разрешённая config", "Bash", "", "codex exec --config=model=luna hi", false},
 		{"HAIKU в пишущемся settings", "Bash", "", `echo '{"env":{"ANTHROPIC_DEFAULT_HAIKU_MODEL":"claude-haiku-5-5"}}' > /tmp/mg-absent-h.json; claude --settings /tmp/mg-absent-h.json -p hi`, false},
 		{"fable в пишущемся settings env", "Bash", "", `echo '{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}' > /tmp/mg-absent-f.json; claude --settings /tmp/mg-absent-f.json -p hi`, true},
 		{"--fallback-model у codex", "Bash", "", "codex exec --fallback-model fable hi", false},
@@ -491,6 +497,12 @@ func TestModelGuardUserOnly(t *testing.T) {
 			if result.IsValid == c.reject {
 				t.Fatalf("reject=%v, want %v: %+v", !result.IsValid, c.reject, result.Violations)
 			}
+			if c.reject && (strings.Contains(c.name, "нет такого") || strings.Contains(c.name, "неизвестный") || strings.Contains(c.name, "missing-agent")) && !strings.Contains(result.Violations[0].Message, "определение агента") {
+				t.Fatalf("причина неизвестного агента: %+v", result.Violations)
+			}
+			if c.reject && (strings.Contains(c.name, "cd к проекту") || strings.Contains(c.name, "add-dir") || strings.Contains(c.name, "settings")) && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+				t.Fatalf("модель агента/settings не распознана: %+v", result.Violations)
+			}
 			if c.reject && c.name == "Agent fable" && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
 				t.Fatalf("причина: %s", result.Violations[0].Message)
 			}
@@ -501,6 +513,17 @@ func TestModelGuardUserOnly(t *testing.T) {
 // TestModelGuardAgentDefinition — модель «только пользователь» в
 // определении агента: Agent без model и claude --agent берут её оттуда
 // (приёмка 20.11, тикет model-guard-user-only-agent-files)
+func TestModelGuardSettingsAgentReference(t *testing.T) {
+	called := ""
+	candidates := settingsCandidates([]byte(`{"agent":"fx"}`), func(name string) []modelCandidate {
+		called = name
+		return []modelCandidate{{value: "fable", userOnlyCheck: true}}
+	})
+	if called != "fx" || len(candidates) != 1 || candidates[0].value != "fable" || !candidates[0].userOnlyCheck {
+		t.Fatalf("settings agent resolution: name=%q candidates=%+v", called, candidates)
+	}
+}
+
 func TestModelGuardAgentDefinition(t *testing.T) {
 	home, project := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
@@ -514,6 +537,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		filepath.Join(home, ".claude/agents/in.md"):                                "---\nname: in\nmodel: inherit\n---\n",
 		filepath.Join(home, ".claude/agents/nofm.md"):                              "model: fable\n",
 		filepath.Join(project, ".claude/agents/px.md"):                             "---\nname: px\nmodel: fable\n---\n",
+		filepath.Join(project, ".claude/agents/settings-agent.md"):                 "---\nname: settings-agent\nmodel: fable\n---\n",
 		filepath.Join(home, ".claude/agents/byfile.md"):                            "---\nmodel: fable\n---\n",
 		filepath.Join(home, ".claude/agents/notes.txt"):                            "---\nname: txt\nmodel: fable\n---\n",
 		filepath.Join(home, ".claude/agents/unclosed.md"):                          "---\nname: unclosed\nmodel: fable\n",
@@ -534,6 +558,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		filepath.Join(home, ".claude/agents/long.md"):                              "---\nname: flong\nmodel: fable\ndescription: " + strings.Repeat("д", 100000) + "\n---\n",
 		filepath.Join(home, ".claude/agents", strings.Repeat("d/", 20), "deep.md"): "---\nname: fdeep\nmodel: fable\n---\n",
 		filepath.Join(project, "cfg/agents/fc.md"):                                 "---\nname: fconfig\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/plugins/cache/market/plugin/agents/pa.md"):    "---\nname: plug-agent\nmodel: fable\n---\n",
 		filepath.Join(home, ".claude/agents/crlf.md"):                              "---\r\nname: crlf\r\nmodel: fable\r\n---\r\n",
 		filepath.Join(home, ".claude/agents/override.md"):                          "---\nname: override\nmodel: opus\n---\n",
 		filepath.Join(home, ".claude/agents/caseupper.md"):                         "---\nname: caseupper\nmodel: FABLE\n---\n",
@@ -558,6 +583,8 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(project, "cfg"))
+	managedSettingsPath = filepath.Join(project, "managed-settings.json")
+	t.Cleanup(func() { managedSettingsPath = "/etc/claude-code/managed-settings.json" })
 	t.Setenv("MODELS_APPROVED", approvedPath)
 	logger, err := core.NewLogger(core.DefaultLoggerConfig())
 	if err != nil {
@@ -570,13 +597,13 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	}{
 		{"Agent fx", "Agent", `{"subagent_type":"fx"}`, "", home, true},
 		{"Agent по name во вложенной папке", "Agent", `{"subagent_type":"other-name"}`, "", home, true},
-		{"Agent по имени файла при другом name", "Agent", `{"subagent_type":"fy"}`, "", home, false},
+		{"Agent по имени файла при другом name", "Agent", `{"subagent_type":"fy"}`, "", home, true},
 		{"Agent без name — имя файла", "Agent", `{"subagent_type":"byfile"}`, "", home, true},
 		{"Agent opus в frontmatter, fable в теле", "Agent", `{"subagent_type":"ok"}`, "", home, false},
 		{"Agent haiku CRLF", "Agent", `{"subagent_type":"hk"}`, "", home, false},
 		{"Agent inherit", "Agent", `{"subagent_type":"in"}`, "", home, false},
 		{"Agent без frontmatter", "Agent", `{"subagent_type":"nofm"}`, "", home, false},
-		{"Agent не .md", "Agent", `{"subagent_type":"txt"}`, "", home, false},
+		{"Agent не .md", "Agent", `{"subagent_type":"txt"}`, "", home, true},
 		{"Agent незакрытый frontmatter", "Agent", `{"subagent_type":"unclosed"}`, "", home, false},
 		{"Agent frontmatter не с начала", "Agent", `{"subagent_type":"noprefix"}`, "", home, false},
 		{"Agent пустой name — имя файла", "Agent", `{"subagent_type":"emptyname"}`, "", home, true},
@@ -592,7 +619,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent блочный скаляр", "Agent", `{"subagent_type":"fblock"}`, "", home, true},
 		{"Agent вложенный name не подменяет", "Agent", `{"subagent_type":"fnn"}`, "", home, true},
 		{"Agent вложенный model не считается", "Agent", `{"subagent_type":"fnm"}`, "", home, false},
-		{"Agent файл больше 1 МБ — Claude Code не загрузит", "Agent", `{"subagent_type":"fbig"}`, "", home, false},
+		{"Agent файл больше 1 МБ — Claude Code не загрузит", "Agent", `{"subagent_type":"fbig"}`, "", home, true},
 		{"Agent frontmatter больше 64 КБ", "Agent", `{"subagent_type":"flong"}`, "", home, true},
 		{"Agent имя с тире U+2013", "Agent", `{"subagent_type":"f–dash"}`, "", home, true},
 		{"Agent глубже 16 каталогов", "Agent", `{"subagent_type":"fdeep"}`, "", home, true},
@@ -601,19 +628,57 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent из CLAUDE_CONFIG_DIR", "Agent", `{"subagent_type":"fconfig"}`, "", home, true},
 		{"Agent FABLE", "Agent", `{"subagent_type":"caseupper"}`, "", home, true},
 		{"Agent fable [1m]", "Agent", `{"subagent_type":"onemillion"}`, "", home, true},
-		{"Agent нет такого", "Agent", `{"subagent_type":"absent"}`, "", home, false},
+		{"Agent нет такого", "Agent", `{"subagent_type":"absent"}`, "", home, true},
+		{"Agent встроенный", "Agent", `{"subagent_type":"general-purpose"}`, "", home, false},
 		{"Agent fx с model opus", "Agent", `{"subagent_type":"fx","model":"opus"}`, "", home, false},
 		{"Agent fx с пустым model", "Agent", `{"subagent_type":"fx","model":""}`, "", home, true},
 		{"Agent проекта", "Agent", `{"subagent_type":"px"}`, "", project, true},
-		{"Agent проекта из другого каталога", "Agent", `{"subagent_type":"px"}`, "", home, false},
+		{"Agent проекта из другого каталога", "Agent", `{"subagent_type":"px"}`, "", home, true},
 		{"Agent override opus", "Agent", `{"subagent_type":"override"}`, "", home, false},
 		{"claude --agent fx", "Bash", "", "claude -p --agent fx hi", home, true},
 		{"cl --agent=fx", "Bash", "", "cl --agent=fx", home, true},
 		{"claude --agent ok", "Bash", "", "claude -p --agent ok hi", home, false},
 		{"claude --agent из переменной", "Bash", "", `claude -p --agent "$A" hi`, home, true},
 		{"claude --agent проекта из подкаталога", "Bash", "", "claude -p --agent px hi", deep, true},
+		{"claude cd к проекту", "Bash", "", "cd " + project + " && claude -p --agent px hi", home, true},
+		{"claude add-dir", "Bash", "", "claude --add-dir " + project + " -p --agent px hi", home, true},
+		{"claude неизвестный агент", "Bash", "", "claude --agent missing-agent", home, true},
+		{"claude неизвестный plugin", "Bash", "", "claude --agent plugin:missing-agent", home, true},
+		{"claude plugin agent fable", "Bash", "", "claude --agent plugin:plug-agent", home, true},
+		{"claude переменный config dir", "Bash", "", "CLAUDE_CONFIG_DIR=$DIR claude", home, true},
 		{"codex --agent fx", "Bash", "", "codex exec --agent fx hi", home, false},
 	}
+	for path, value := range map[string]string{
+		filepath.Join(project, ".claude/settings.json"):       `{"model":"opus"}`,
+		filepath.Join(project, ".claude/settings.local.json"): `{"agent":"settings-agent"}`,
+		filepath.Join(project, "cfg/settings.json"):           `{"model":"opus"}`,
+		filepath.Join(project, "cfg-fable/settings.json"):     `{"model":"fable"}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases = append(cases,
+		struct {
+			name, tool, raw, command, cwd string
+			reject                        bool
+		}{"claude project settings", "Bash", "", "cd " + project + " && claude", home, true},
+		struct {
+			name, tool, raw, command, cwd string
+			reject                        bool
+		}{"explicit model overrides settings", "Bash", "", "cd " + project + " && claude --model opus", home, false},
+		struct {
+			name, tool, raw, command, cwd string
+			reject                        bool
+		}{"settings config dir", "Bash", "", "CLAUDE_CONFIG_DIR=" + filepath.Join(project, "cfg-fable") + " claude", home, true},
+		struct {
+			name, tool, raw, command, cwd string
+			reject                        bool
+		}{"settings managed", "Bash", "", "cd " + project + " && claude", home, true},
+	)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			input := &core.ToolInput{ToolName: c.tool, ToolInput: []byte(c.raw), Command: c.command, CWD: c.cwd}
@@ -629,6 +694,25 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 			if result.IsValid == c.reject {
 				t.Fatalf("reject=%v, want %v: %+v", !result.IsValid, c.reject, result.Violations)
 			}
+			if c.reject && (strings.Contains(c.name, "нет такого") || strings.Contains(c.name, "неизвестный") || strings.Contains(c.name, "missing-agent")) && !strings.Contains(result.Violations[0].Message, "определение агента") {
+				t.Fatalf("причина неизвестного агента: %+v", result.Violations)
+			}
+			if c.reject && (strings.Contains(c.name, "cd к проекту") || strings.Contains(c.name, "add-dir") || strings.Contains(c.name, "project settings")) && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+				t.Fatalf("модель агента/settings не распознана: %+v", result.Violations)
+			}
 		})
+	}
+	if err := os.WriteFile(managedSettingsPath, []byte(`{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "cfg/settings.json"), []byte(`{"model":"opus"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	managedResult, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "cd " + home + " && claude", CWD: home})
+	if err != nil || managedResult.IsValid {
+		t.Fatalf("managed settings: valid=%v err=%v", managedResult.IsValid, err)
+	}
+	if !strings.Contains(managedResult.Violations[0].Message, "запускает только пользователь") {
+		t.Fatalf("managed settings reason: %+v", managedResult.Violations)
 	}
 }

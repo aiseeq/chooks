@@ -63,6 +63,10 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 	}
 	var reasons []string
 	for _, c := range candidates {
+		if c.unknownAgent {
+			reasons = append(reasons, fmt.Sprintf("определение агента %s не найдено: модель не проверить", c.value))
+			continue
+		}
 		if c.userOnlyCheck {
 			// быстрая модель и модель определения агента одобрения не
 			// требуют, но модель «только пользователь» агент не задаёт и сюда
@@ -90,8 +94,9 @@ func userOnlyReason(value, name string) string {
 }
 
 type modelCandidate struct {
-	value   string
-	dynamic bool
+	value        string
+	dynamic      bool
+	unknownAgent bool
 	// userOnlyCheck — модель быстрых запросов (переменные haiku) или
 	// определения агента: проверяется только на модель «только пользователь»
 	userOnlyCheck bool
@@ -108,18 +113,18 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		logger.Warn("model_guard: домашний каталог неизвестен", "error", err)
 	}
 	agentModels := func(name string) []modelCandidate {
-		return agentDefinitionModels(name, input.CWD, home, logger)
+		return agentDefinitionModels(name, input.CWD, home, nil, logger)
 	}
 	if input.ToolName == "Agent" {
 		return agentToolCandidates(input, agentModels, logger)
 	}
 	unresolvedTildeSettings := false
-	readSettings := func(path string, tilde shellcmd.Tilde) []byte {
+	readSettings := func(path string, tilde shellcmd.Tilde, cwd string) []byte {
 		if tilde&shellcmd.TildeHome != 0 && home == "" {
 			unresolvedTildeSettings = true
 			return nil
 		}
-		abs := absPath(tildePath(path, tilde, home), input.CWD)
+		abs := absPath(tildePath(path, tilde, home), cwd)
 		if abs == "" {
 			return nil
 		}
@@ -135,9 +140,89 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		}
 		return data
 	}
-	candidates := bashModelCandidates(input.Command, modelFiles{settings: readSettings, agent: agentModels}, logger)
+	settingsAt := func(cwd string) []modelCandidate { return settingsForCWD(cwd, input.Command, home, logger) }
+	candidates := bashModelCandidatesAt(input.Command, input.CWD, modelFiles{settings: readSettings, agent: agentModels}, settingsAt, func(name, cwd string, extra []string) []modelCandidate {
+		if configDir, found, dynamic := commandConfigDir(input.Command); found {
+			if dynamic {
+				return []modelCandidate{{value: "CLAUDE_CONFIG_DIR", dynamic: true}}
+			}
+			extra = append(extra, filepath.Join(configDir, "agents"))
+		} else if configDir := os.Getenv("CLAUDE_CONFIG_DIR"); configDir != "" {
+			extra = append(extra, filepath.Join(configDir, "agents"))
+		}
+		return agentDefinitionModels(name, cwd, home, extra, logger)
+	}, logger)
+	candidates = resolveAssignedModelValues(input.Command, candidates)
 	if unresolvedTildeSettings {
 		candidates = append(candidates, modelCandidate{value: "settings path with unknown home", dynamic: true})
+	}
+	return candidates
+}
+
+func settingsForCWD(cwd, command, home string, logger core.Logger) []modelCandidate {
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if value, found, dynamic := commandConfigDir(command); found {
+		if dynamic {
+			return []modelCandidate{{value: "CLAUDE_CONFIG_DIR", dynamic: true}}
+		}
+		configDir = value
+	}
+	paths := []string{filepath.Join(cwd, ".claude", "settings.json"), filepath.Join(cwd, ".claude", "settings.local.json"), managedSettingsPath}
+	var agentDirsForSettings []string
+	if configDir != "" {
+		paths = append(paths, filepath.Join(configDir, "settings.json"))
+		agentDirsForSettings = append(agentDirsForSettings, filepath.Join(configDir, "agents"))
+	}
+	lookupAgent := func(name string) []modelCandidate {
+		return agentDefinitionModels(name, cwd, home, agentDirsForSettings, logger)
+	}
+	var candidates []modelCandidate
+	for _, path := range paths {
+		raw, err := readSettingsFile(path)
+		if err == nil {
+			candidates = append(candidates, settingsCandidates(raw, lookupAgent)...)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			logger.Warn("model_guard: файл настроек не читается, модель не проверена", "path", path, "error", err)
+			candidates = append(candidates, modelCandidate{value: path, dynamic: true})
+		}
+	}
+	return candidates
+}
+
+var configDirAssignment = regexp.MustCompile(`(?:^|[;|&\n]\s*|\s)CLAUDE_CONFIG_DIR=([^\s;|&]+)`)
+
+func commandConfigDir(command string) (string, bool, bool) {
+	m := configDirAssignment.FindStringSubmatch(command)
+	if len(m) != 2 {
+		return "", false, false
+	}
+	value := strings.Trim(m[1], "'\"")
+	if strings.ContainsAny(value, "$`*?[") {
+		return "", true, true
+	}
+	return value, true, false
+}
+
+var literalShellAssignment = regexp.MustCompile(`(?:^|[;|&\n]\s*|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&]+)`)
+
+func resolveAssignedModelValues(command string, candidates []modelCandidate) []modelCandidate {
+	assigned := map[string]string{}
+	for _, m := range literalShellAssignment.FindAllStringSubmatch(command, -1) {
+		v := strings.Trim(m[2], "'\"")
+		if !strings.ContainsAny(v, "$`*?[]") {
+			assigned[m[1]] = v
+		}
+	}
+	for i := range candidates {
+		if !candidates[i].dynamic {
+			continue
+		}
+		v := strings.Trim(candidates[i].value, "'\"")
+		name := strings.TrimPrefix(v, "$")
+		name = strings.Trim(name, "{}")
+		if resolved, ok := assigned[name]; ok {
+			candidates[i].value, candidates[i].dynamic = resolved, false
+		}
 	}
 	return candidates
 }
@@ -181,7 +266,7 @@ func agentFlagCandidates(agent word, files modelFiles) []modelCandidate {
 // modelFiles — файлы, откуда клиент берёт модель: --settings по пути и
 // определение агента по имени
 type modelFiles struct {
-	settings func(path string, tilde shellcmd.Tilde) []byte
+	settings func(path string, tilde shellcmd.Tilde, cwd string) []byte
 	agent    func(name string) []modelCandidate
 }
 
@@ -191,10 +276,12 @@ type modelFiles struct {
 // точно и нормализованным, как в Claude Code 2.1.330 (приёмка 21.11).
 // Модель определения проверяется только на «только пользователь»:
 // одобрение моделей в определениях — не предмет хука (fighter.md — model: opus)
-func agentDefinitionModels(name, cwd, home string, logger core.Logger) []modelCandidate {
+func agentDefinitionModels(name, cwd, home string, extra []string, logger core.Logger) []modelCandidate {
 	var found []modelCandidate
+	definitionFound := false
 	walk := agentWalk{seen: map[string]bool{}, logger: logger}
-	for _, dir := range agentDirs(cwd, home) {
+	dirs := append(agentDirs(cwd, home), extra...)
+	for _, dir := range dirs {
 		// срок — каждому корню, как в Claude Code: большое дерево одного
 		// каталога не снимает проверку остальных
 		walk.deadline, walk.late = time.Now().Add(agentScanBudget), false
@@ -208,11 +295,35 @@ func agentDefinitionModels(name, cwd, home string, logger core.Logger) []modelCa
 		}
 		// больше maxAgentFile Claude Code определение не загружает;
 		// inherit и прочие не-модели проверку «только пользователь» проходят сами
-		if defName, model := agentFrontmatter(data, path); ok && sameAgentName(defName, name) && model != "" {
-			found = append(found, modelCandidate{value: model, userOnlyCheck: true})
+		if defName, model := agentFrontmatter(data, path); ok && agentNameMatches(defName, name) {
+			definitionFound = true
+			if model != "" {
+				found = append(found, modelCandidate{value: model, userOnlyCheck: true})
+			}
 		}
 	}
+	if !definitionFound && !builtinAgent(name) {
+		return []modelCandidate{{value: name, unknownAgent: true}}
+	}
 	return found
+}
+
+var managedSettingsPath = "/etc/claude-code/managed-settings.json"
+
+// names confirmed in Claude Code 2.1.330 strings; Explore and Plan may be
+// disabled by environment, but treating their names as built in is safe.
+var builtinAgents = map[string]bool{"general-purpose": true, "Explore": true, "Plan": true, "claude-code-guide": true, "statusline-setup": true, "claude": true, "fork": true}
+
+func builtinAgent(name string) bool { return builtinAgents[name] }
+
+func agentNameMatches(defName, name string) bool {
+	if sameAgentName(defName, name) {
+		return true
+	}
+	if pluginName, ok := strings.CutPrefix(name, "plugin:"); ok {
+		return sameAgentName(defName, pluginName)
+	}
+	return false
 }
 
 // agentDirs — каталоги определений агентов: пользовательские первыми
@@ -226,6 +337,7 @@ func agentDirs(cwd, home string) []string {
 	}
 	if home != "" {
 		dirs = append(dirs, filepath.Join(home, ".claude", "agents"))
+		dirs = append(dirs, filepath.Join(home, ".claude", "plugins"))
 	}
 	for dir := cwd; dir != ""; {
 		dirs = append(dirs, filepath.Join(dir, ".claude", "agents"))
@@ -400,14 +512,14 @@ func clientDialect(name string) string {
 	return name
 }
 
-// bashModelCandidates — модели вызовов агентов в команде оболочки. Вызовы
+// bashModelCandidatesAt — модели вызовов агентов в команде оболочки. Вызовы
 // ищет akit shellcmd: он видит и вложенные скрипты (bash -c, ssh, here-doc на
 // вход оболочке). Команду, которую shellcmd не разобрал, оболочка не
 // исполнит, если ошибка настоящая: модели ищутся в её тексте (--model, -m,
 // присваивание переменной модели), чтобы ошибка разбора akit не пропустила
 // неодобренную. readSettings читает файл --settings по пути из команды, nil —
 // не прочесть; файла нет — текст команды, которая может его написать
-func bashModelCandidates(command string, files modelFiles, logger core.Logger) []modelCandidate {
+func bashModelCandidatesAt(command, initialCWD string, files modelFiles, settingsAt func(string) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) []modelCandidate {
 	calls, err := shellcmd.Calls(command)
 	if calls == nil && err != nil {
 		logger.Warn("model_guard: shellcmd не разобрал команду, модели ищутся в тексте", "error", err)
@@ -415,8 +527,13 @@ func bashModelCandidates(command string, files modelFiles, logger core.Logger) [
 	}
 	var found []modelCandidate
 	claude := false
+	cwd := initialCWD
 	for i := range calls {
 		call := &calls[i]
+		if call.Name == "cd" || call.Name == "pushd" {
+			cwd = changeDir(call, cwd, homeForPaths())
+			continue
+		}
 		if !slices.Contains(modelClients, call.Name) {
 			continue
 		}
@@ -425,7 +542,24 @@ func bashModelCandidates(command string, files modelFiles, logger core.Logger) [
 			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`"), tilde: call.ArgTilde(i)}
 		}
 		dialect := clientDialect(call.Name)
-		found = append(found, candidatesFromArgs(dialect, args, files)...)
+		callExtraDirs := []string{}
+		localFiles := files
+		if localFiles.settings != nil {
+			read := localFiles.settings
+			localFiles.settings = func(path string, tilde shellcmd.Tilde, _ string) []byte { return read(path, tilde, cwd) }
+		}
+		if agentAt != nil {
+			localFiles.agent = func(name string) []modelCandidate { return agentAt(name, cwd, callExtraDirs) }
+		}
+		if call.Name == "claude" {
+			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
+			if settingsAt != nil {
+				if !hasExplicitModelFlag(args) {
+					found = append(found, settingsAt(cwd)...)
+				}
+			}
+		}
+		found = append(found, candidatesFromArgs(dialect, args, localFiles)...)
 		if dialect == "claude" {
 			claude = true
 		}
@@ -447,6 +581,43 @@ func bashModelCandidates(command string, files modelFiles, logger core.Logger) [
 	}
 	return found
 }
+
+func claudeAddedAgentDirs(args []word, cwd, home string) []string {
+	var dirs []string
+	for i := 0; i < len(args); i++ {
+		var path string
+		var tilde shellcmd.Tilde
+		if args[i].text == "--add-dir" && i+1 < len(args) {
+			i++
+			path, tilde = args[i].text, args[i].tilde
+		} else if value, ok := strings.CutPrefix(args[i].text, "--add-dir="); ok {
+			if strings.ContainsAny(value, "$`") {
+				continue
+			}
+			path = value
+		} else {
+			continue
+		}
+		text, known := knownPath(path, home)
+		if !known {
+			continue
+		}
+		resolved := resolvePath(text, tilde, cwd, home)
+		dirs = append(dirs, resolved, filepath.Join(resolved, ".claude", "agents"))
+	}
+	return dirs
+}
+
+func hasExplicitModelFlag(args []word) bool {
+	for _, arg := range args {
+		if arg.text == "--model" || strings.HasPrefix(arg.text, "--model=") {
+			return true
+		}
+	}
+	return false
+}
+
+func homeForPaths() string { return os.Getenv("HOME") }
 
 // modelClientWord — отдельное слово клиента из modelClients (не .claude/ и не claude-hooks)
 var modelClientWord = regexp.MustCompile(`(^|[^[:alnum:]_.-])(claude|cl|codex|opencode|worker)([^[:alnum:]_.-]|$)`)
@@ -737,6 +908,18 @@ func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandi
 	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if name == "codex" {
+			if value, ok := strings.CutPrefix(a.text, "-m="); ok {
+				found = append(found, modelCandidate{value: value, dynamic: !a.literal})
+				continue
+			}
+			if value, ok := strings.CutPrefix(a.text, "--config="); ok {
+				if candidate, ok := codexConfigCandidate(word{text: value, literal: a.literal}); ok {
+					found = append(found, candidate)
+				}
+				continue
+			}
+		}
 		if after, ok := strings.CutPrefix(a.text, "--model="); ok {
 			found = append(found, modelCandidate{value: after, dynamic: !a.literal})
 			continue
@@ -749,7 +932,7 @@ func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandi
 		case modelValueFlag(name, a.text):
 			found = append(found, modelCandidate{value: next.text, dynamic: !next.literal})
 		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
-			found = append(found, jsonModelCandidates(a.text, next, files.settings)...)
+			found = append(found, jsonModelCandidates(a.text, next, files.settings, files.agent)...)
 		case name == "claude" && a.text == "--agent":
 			found = append(found, agentFlagCandidates(next, files)...)
 		case name == "codex" && (a.text == "-c" || a.text == "--config"):
@@ -776,7 +959,7 @@ var writtenModel = regexp.MustCompile(`"(model|` + modelEnvPattern() + `)"\s*:\s
 // или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
 // Файла --settings ещё нет — модели в тексте команды, которая его пишет.
 // Не JSON — моделей нет: такой запуск claude сам не начнётся
-func jsonModelCandidates(flag string, arg word, readSettings func(string, shellcmd.Tilde) []byte) []modelCandidate {
+func jsonModelCandidates(flag string, arg word, readSettings func(string, shellcmd.Tilde, string) []byte, agent func(string) []modelCandidate) []modelCandidate {
 	if !arg.literal {
 		// Путь файла из переменной не прочесть, а JSON с подстановкой — модель
 		// переменной, если в нём есть поле модели
@@ -793,7 +976,7 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string, shellc
 		if arg.tilde&(shellcmd.TildeOther|shellcmd.TildeModeUnknown) != 0 {
 			return []modelCandidate{{value: arg.text, dynamic: true}}
 		}
-		if raw = readSettings(arg.text, arg.tilde); raw == nil {
+		if raw = readSettings(arg.text, arg.tilde, ""); raw == nil {
 			return nil
 		}
 	}
@@ -809,7 +992,19 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string, shellc
 		}
 		return found
 	}
-	return found.settings(raw)
+	return settingsCandidates(raw, agent)
+}
+
+func settingsCandidates(raw []byte, agent func(string) []modelCandidate) []modelCandidate {
+	found := (jsonModels{}).settings(raw)
+	if agent != nil {
+		var fields map[string]json.RawMessage
+		var name string
+		if json.Unmarshal(raw, &fields) == nil && json.Unmarshal(fields["agent"], &name) == nil && name != "" {
+			found = append(found, agent(name)...)
+		}
+	}
+	return found
 }
 
 // jsonModels — модели из JSON флага claude
@@ -848,6 +1043,12 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 	if json.Unmarshal(settings["model"], &model) == nil {
 		found.add(model)
 	}
+	var agent struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(settings["agent"], &agent) == nil {
+		found.add(agent.Model)
+	}
 	var env map[string]json.RawMessage
 	if json.Unmarshal(settings["env"], &env) == nil {
 		for name, raw := range env {
@@ -864,7 +1065,11 @@ func codexConfigCandidate(config word) (modelCandidate, bool) {
 	if !strings.HasPrefix(config.text, "model=") {
 		return modelCandidate{}, false
 	}
-	return modelCandidate{value: strings.TrimPrefix(config.text, "model="), dynamic: !config.literal}, true
+	value, ok := strings.CutPrefix(config.text, "model=")
+	if !ok {
+		return modelCandidate{}, false
+	}
+	return modelCandidate{value: value, dynamic: !config.literal}, true
 }
 
 func (t *ModelGuardTool) approvedPath() string {

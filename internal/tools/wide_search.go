@@ -16,14 +16,18 @@ const WideSearchHintText = "дерево большое: код — `git grep` �
 
 // wideRoots — большие деревья относительно домашнего каталога; обход их
 // самих или их предков (~, /) — широкий, обход внутри одного репо или
-// своего scratchpad — нет
-var wideRoots = []string{"", ".cache", ".cache/claude-tmp", "git", "work", ".local/state"}
+// своего scratchpad — нет. claude-1000 — все scratchpad сессий сразу,
+// .local/state/worker и транскрипты .claude/projects — из обходов 20–21.11
+var wideRoots = []string{"", ".cache", ".cache/claude-tmp", ".cache/claude-tmp/claude-1000", "git", "work",
+	".local/state", ".local/state/worker", ".claude/projects"}
 
 // WideSearch — первый в команде рекурсивный обход большого дерева: grep -r,
 // rg, find, du, ls -R по пути из wideRoots или его предку. Относительный
-// путь и вызов без пути — от cwd (cd с путём без подстановки меняет его для
-// следующих вызовов в порядке shellcmd.Calls; cd в подоболочке тоже — для
-// подсказки это допустимая неточность). Пустая строка — обхода нет
+// путь и вызов без пути — от cwd (cd и pushd с известным путём, cd без
+// пути — домой, меняют его для следующих вызовов в порядке shellcmd.Calls;
+// cd в подоболочке тоже, cd - и cd -P путь не меняют — для подсказки это
+// допустимая неточность). Пустая
+// строка — обхода нет
 func WideSearch(command, cwd, home string) (string, error) {
 	calls, err := shellcmd.Calls(command)
 	if err != nil {
@@ -31,8 +35,8 @@ func WideSearch(command, cwd, home string) (string, error) {
 	}
 	for i := range calls {
 		c := &calls[i]
-		if c.Name == "cd" && len(c.Args) == 1 && !dynamicWord(c.Args[0]) {
-			cwd = resolvePath(c.Args[0], c.ArgTilde(0), cwd, home)
+		if c.Name == "cd" || c.Name == "pushd" {
+			cwd = changeDir(c, cwd, home)
 			continue
 		}
 		paths, ok := walkPaths(c)
@@ -43,10 +47,11 @@ func WideSearch(command, cwd, home string) (string, error) {
 			paths = []walkArg{{text: "."}}
 		}
 		for _, p := range paths {
-			if p.dynamic {
+			text, known := knownPath(p.text, home)
+			if !known {
 				continue
 			}
-			if dir := resolvePath(p.text, p.tilde, cwd, home); isWideRoot(dir, home) {
+			if dir := resolvePath(text, p.tilde, cwd, home); isWideRoot(dir, home) {
 				return c.Name + " " + dir, nil
 			}
 		}
@@ -54,10 +59,28 @@ func WideSearch(command, cwd, home string) (string, error) {
 	return "", nil
 }
 
+// changeDir — cwd после cd или pushd c; путь с неизвестной подстановкой
+// оставляет прежний
+func changeDir(c *shellcmd.Call, cwd, home string) string {
+	if len(c.Args) == 0 {
+		if c.Name == "cd" {
+			return home
+		}
+		return cwd
+	}
+	if len(c.Args) != 1 {
+		return cwd
+	}
+	text, known := knownPath(c.Args[0], home)
+	if !known {
+		return cwd
+	}
+	return resolvePath(text, c.ArgTilde(0), cwd, home)
+}
+
 type walkArg struct {
-	text    string
-	tilde   shellcmd.Tilde
-	dynamic bool
+	text  string
+	tilde shellcmd.Tilde
 }
 
 // walkPaths — пути, которые обходит вызов c; ok=false — вызов не
@@ -83,17 +106,32 @@ func walkPaths(c *shellcmd.Call) ([]walkArg, bool) {
 
 func grepPaths(c *shellcmd.Call) ([]walkArg, bool) {
 	recursive := hasFlag(c.Args, 'r', "--recursive") || hasFlag(c.Args, 'R', "--dereference-recursive") ||
-		slices.Contains(c.Args, "--directories=recurse")
+		directoriesRecurse(c.Args)
 	if !recursive {
 		return nil, false
 	}
 	patternGiven := hasFlag(c.Args, 'e', "--regexp") || hasFlag(c.Args, 'f', "--file")
-	return positional(c, []string{"-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--regexp", "--file", "--max-count", "--context", "--after-context", "--before-context", "--include", "--exclude", "--exclude-dir", "--directories", "--devices", "--label"}, !patternGiven), true
+	return positional(c, []string{"-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--regexp", "--file", "--max-count", "--context", "--after-context", "--before-context", "--include", "--exclude", "--exclude-dir", "--exclude-from", "--directories", "--devices", "--label", "--binary-files", "--group-separator"}, !patternGiven), true
+}
+
+// directoriesRecurse — grep -d recurse в записях -d recurse, --directories
+// recurse, --directories=recurse (-drecurse ловит hasFlag по букве r)
+func directoriesRecurse(args []string) bool {
+	for i, a := range args {
+		if a == "--" {
+			return false
+		}
+		next := i+1 < len(args) && args[i+1] == "recurse"
+		if a == "--directories=recurse" || (a == "-d" || a == "--directories") && next {
+			return true
+		}
+	}
+	return false
 }
 
 func rgPaths(c *shellcmd.Call) []walkArg {
 	patternGiven := slices.Contains(c.Args, "--files") || hasFlag(c.Args, 'e', "--regexp") || hasFlag(c.Args, 'f', "--file")
-	return positional(c, []string{"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-M", "-j", "-d", "-E", "-r", "--regexp", "--file", "--glob", "--iglob", "--type", "--type-not", "--max-count", "--context", "--after-context", "--before-context", "--max-columns", "--threads", "--max-depth", "--encoding", "--replace", "--type-add", "--sort", "--sortr", "--ignore-file", "--pre", "--pre-glob"}, !patternGiven)
+	return positional(c, []string{"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-M", "-j", "-d", "-E", "-r", "--regexp", "--file", "--glob", "--iglob", "--type", "--type-not", "--max-count", "--context", "--after-context", "--before-context", "--max-columns", "--threads", "--max-depth", "--max-filesize", "--encoding", "--replace", "--type-add", "--type-clear", "--sort", "--sortr", "--ignore-file", "--pre", "--pre-glob", "--color", "--colors", "--context-separator", "--field-context-separator", "--field-match-separator", "--path-separator", "--dfa-size-limit", "--regex-size-limit", "--engine", "--hostname-bin", "--hyperlink-format"}, !patternGiven)
 }
 
 // findPaths — начальные точки find: слова до первого выражения
@@ -106,20 +144,33 @@ func findPaths(c *shellcmd.Call) []walkArg {
 		if strings.HasPrefix(a, "-") || a == "(" || a == "!" {
 			break
 		}
-		paths = append(paths, walkArg{text: a, tilde: c.ArgTilde(i), dynamic: dynamicWord(a)})
+		paths = append(paths, walkArg{text: a, tilde: c.ArgTilde(i)})
 	}
 	return paths
 }
 
-// dynamicWord — слово с подстановкой: его путь до запуска не известен.
-// ArgLiteral тут строже нужного (тильда, список через && дают false), а
-// подсказка ничего не запрещает
-func dynamicWord(a string) bool {
-	return strings.ContainsAny(a, "$`")
+// knownPath — путь слова до запуска: $HOME и ${HOME} в начале — home,
+// кавычки вокруг слова с подстановкой сняты (shellcmd отдаёт такое слово
+// исходным текстом); другая подстановка — путь не известен. ArgLiteral тут
+// строже нужного (тильда, список через && дают false), а подсказка ничего
+// не запрещает
+func knownPath(a, home string) (string, bool) {
+	if len(a) > 1 && a[0] == '"' && a[len(a)-1] == '"' {
+		a = a[1 : len(a)-1]
+	}
+	for _, v := range []string{"${HOME}", "$HOME"} {
+		rest, ok := strings.CutPrefix(a, v)
+		if ok && (rest == "" || rest[0] == '/') {
+			a = home + rest
+			break
+		}
+	}
+	return a, !strings.ContainsAny(a, "$`")
 }
 
 // positional — слова вызова, не опции и не значения опций valueOpts; skip
-// — первое такое слово (шаблон grep и rg) не путь
+// — первое такое слово (шаблон grep и rg) не путь. Короткая опция со
+// значением в связке (-rne x) берёт остаток связки или следующее слово
 func positional(c *shellcmd.Call, valueOpts []string, skip bool) []walkArg {
 	var out []walkArg
 	options := true
@@ -130,7 +181,7 @@ func positional(c *shellcmd.Call, valueOpts []string, skip bool) []walkArg {
 			options = false
 			continue
 		case options && strings.HasPrefix(a, "-") && a != "-":
-			if slices.Contains(valueOpts, a) {
+			if takesNext(a, valueOpts) {
 				i++
 			}
 			continue
@@ -139,9 +190,27 @@ func positional(c *shellcmd.Call, valueOpts []string, skip bool) []walkArg {
 			skip = false
 			continue
 		}
-		out = append(out, walkArg{text: a, tilde: c.ArgTilde(i), dynamic: dynamicWord(a)})
+		out = append(out, walkArg{text: a, tilde: c.ArgTilde(i)})
 	}
 	return out
+}
+
+// takesNext — опция a берёт следующее слово значением: длинная или
+// короткая из valueOpts целиком, либо связка коротких, где первая со
+// значением стоит последней (-rne x; -rnex — значение «x» в самой связке)
+func takesNext(a string, valueOpts []string) bool {
+	if slices.Contains(valueOpts, a) {
+		return true
+	}
+	if strings.HasPrefix(a, "--") {
+		return false
+	}
+	for j := 1; j < len(a); j++ {
+		if slices.Contains(valueOpts, "-"+a[j:j+1]) {
+			return j == len(a)-1
+		}
+	}
+	return false
 }
 
 // hasFlag — короткий флаг short (в том числе в связке -rn) или длинный long

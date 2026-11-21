@@ -46,9 +46,10 @@ pgrep_ancestors, wide_search_hint и understand_check, остальные вык
     пока процесс кончится» не кончается.
   wide_search_hint (Bash, Monitor) — подсказка модели (additionalContext в
     stdout), вызов не прерывается: grep -r, rg, find, du, ls -R по ~, ~/.cache,
-    ~/.cache/claude-tmp, ~/git, ~/work, ~/.local/state или их предку (путь и
-    вызов без пути — от cwd) фризят диск; взамен git grep, tl, plocate или
-    путь уже.
+    ~/.cache/claude-tmp (и claude-1000 — все scratchpad), ~/git, ~/work,
+    ~/.local/state (и worker), ~/.claude/projects или их предку (путь и вызов
+    без пути — от cwd после cd и pushd, $HOME — домой) фризят диск; взамен
+    git grep, tl, plocate или путь уже.
 
 Отдельной подкомандой, своей строкой хука в settings.json:
   understand-check (ключ understand_check; SendMessage, Edit, Write, Bash) —

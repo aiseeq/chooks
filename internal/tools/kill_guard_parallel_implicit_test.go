@@ -14,6 +14,15 @@ func TestKillGuardParallelImplicitShellInput(t *testing.T) {
 		`echo 'kill 1' | parallel --pipe 'parallel --pipe pkexec bash'`,
 		`echo 'kill -9 -1' | parallel --pipe 'parallel sudo bash -c'`,
 		`echo 'kill -9 -1' | parallel --pipe 'parallel bash -c'`,
+		`echo 'kill 1' | parallel --pipe 'parallel --cat pkexec bash {}'`,
+		`echo 'kill 1' | parallel --pipe 'parallel --fifo pkexec bash {}'`,
+		`echo 'kill 1' | parallel --pipe 'parallel --pipe --cat pkexec bash {}'`,
+		`echo 'kill 1' | parallel --pipe 'parallel --cat pkexec sh {}'`,
+		`echo 'kill 1' | parallel --pipe 'parallel --cat pkexec bash -- {}'`,
+		`echo 'kill 1' | parallel --pipe 'parallel --cat pkexec bash --norc {}'`,
+		`echo 'kill 1' | parallel --pipe 'parallel --pipe parallel --cat pkexec bash {}'`,
+		`echo 'kill 1' | parallel --cat 'parallel --cat pkexec bash {}'`,
+		`echo 'kill 1' | parallel --pipe 'parallel --cat -I XX sudo bash XX'`,
 		`parallel pkexec bash -c ::: 'kill 1'`,
 		`parallel 'pkexec bash -c' <<< 'kill 1'`,
 		`parallel 'sudo bash -c' <<< 'kill 1'`,
@@ -145,6 +154,23 @@ func TestKillGuardParallelImplicitAllowsUnusedScriptArgument(t *testing.T) {
 		`cat urls | parallel --pipe -N100 'parallel -j4 curl -sO'; kill 1234`,
 		`parallel --pipe 'parallel --pipe gzip' < big.txt; kill 1234`,
 		`grep kill log | parallel --pipe 'sudo parallel --pipe wc -l'`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if r := validateKill(t, command); !r.IsValid {
+				t.Fatalf("expected allow for %q: %v", command, r.Suggestions)
+			}
+		})
+	}
+}
+
+func TestKillGuardParallelImplicitKnownSystemctlArguments(t *testing.T) {
+	for _, command := range []string{
+		`parallel 'systemctl --user restart {}' ::: foo`,
+		`parallel 'systemctl --user stop {}' ::: foo`,
+		`parallel 'sudo systemctl stop {}' ::: nginx`,
+		`parallel 'sudo systemctl restart {}' ::: nginx`,
+		`parallel -j2 'systemctl --user restart {}' ::: a b`,
+		`parallel 'systemctl --user restart {}.service' ::: foo`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if r := validateKill(t, command); !r.IsValid {

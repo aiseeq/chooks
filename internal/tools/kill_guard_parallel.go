@@ -25,6 +25,7 @@ var parallelImplicitShellCommandRe = regexp.MustCompile(`(?:^|[[:space:]])(?:sud
 type parallelCommand struct {
 	words                       []string
 	pipe, quote, listed, remote bool
+	cat, fifo                   bool
 	argInput, argInputFirst     bool
 	argInputFromWords           bool
 	semaphore, wait             bool
@@ -51,7 +52,7 @@ func parseParallel(args []string) parallelCommand {
 	for _, o := range sets {
 		switch {
 		case slices.Contains(parallelPipeOptions, o.name):
-			p.pipe = true
+			p.setPipeOption(o.name)
 		case o.name == "quote":
 			p.quote = true
 		case o.name == "rpl":
@@ -83,6 +84,12 @@ func parseParallel(args []string) parallelCommand {
 	p.argInput = p.argInputFirst || p.argInputFromWords
 	p.semaphore = slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "semaphore" })
 	return p
+}
+
+func (p *parallelCommand) setPipeOption(name string) {
+	p.pipe = true
+	p.cat = p.cat || name == "cat"
+	p.fifo = p.fifo || name == "fifo"
 }
 
 // sourceWord разделитель списка parallel, включая --arg-file-sep
@@ -229,7 +236,7 @@ func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script stri
 		}
 	}
 	// systemd-run и за run0, pkexec (parallel run0 systemd-run --pipe bash)
-	expanded := s.elevatedCalls(calls)
+	expanded := parallelExpandLiteralSystemctl(p, s.elevatedCalls(calls))
 	markParallelScriptInput(expanded, p, in, pipeInput)
 	if reason := parallelUnknownScriptInputReason(p, in, expanded); reason != "" {
 		return reason, expanded
@@ -465,7 +472,8 @@ func (s *killScan) parallelReadsInputAsScript(c shellcmd.Call, depth int) bool {
 	expanded := s.elevatedCalls(calls)
 	for i := range expanded {
 		call := expanded[i]
-		if shellcmd.IsShell(call.Name) && shellReadsInput(call.Args) {
+		if shellcmd.IsShell(call.Name) && (shellReadsInput(call.Args) ||
+			parallelShellExecutesReplacement(p, call)) {
 			return true
 		}
 		if call.Name == "parallel" && s.parallelReadsInputAsScript(call, depth+1) {
@@ -473,6 +481,67 @@ func (s *killScan) parallelReadsInputAsScript(c shellcmd.Call, depth int) bool {
 		}
 	}
 	return false
+}
+
+func parallelShellExecutesReplacement(p parallelCommand, c shellcmd.Call) bool {
+	if !p.cat && !p.fifo || !shellcmd.IsShell(c.Name) {
+		return false
+	}
+	isReplacement := func(arg string) bool {
+		return replacementRe.MatchString(arg) || slices.ContainsFunc(p.replaces, func(r string) bool {
+			return strings.Contains(arg, r)
+		})
+	}
+	script, command := shellScript(c.Args)
+	return !command && isReplacement(script)
+}
+
+var parallelLiteralUnitRe = regexp.MustCompile(`^[[:alnum:]_.@:-]+$`)
+
+// parallelExpandLiteralSystemctl expands only statically known, shell-safe
+// ::: values in systemctl operands. The unit checker can then assess the same
+// literal unit that GNU parallel will pass instead of treating {} as a glob.
+func parallelExpandLiteralSystemctl(p parallelCommand, calls []shellcmd.Call) []shellcmd.Call {
+	if !p.listed || !parallelSourcesHarmless(p) {
+		return calls
+	}
+	start := slices.IndexFunc(p.words, p.sourceWord)
+	if start < 0 || p.fileSource(p.words[start]) {
+		return calls
+	}
+	var values []string
+	for _, value := range p.words[start+1:] {
+		if p.sourceWord(value) {
+			break
+		}
+		if !parallelLiteralUnitRe.MatchString(value) {
+			return calls
+		}
+		values = append(values, value)
+	}
+	if len(values) == 0 {
+		return calls
+	}
+	out := make([]shellcmd.Call, 0, len(calls))
+	for i := range calls {
+		call := &calls[i]
+		if call.Name != "systemctl" {
+			out = append(out, *call)
+			continue
+		}
+		for _, value := range values {
+			copy := *call
+			copy.Args = slices.Clone(call.Args)
+			for i, arg := range copy.Args {
+				copy.Args[i] = replacementRe.ReplaceAllString(arg, value)
+				for _, replacement := range p.replaces {
+					copy.Args[i] = strings.ReplaceAll(copy.Args[i], replacement, value)
+				}
+			}
+			out = append(out, copy)
+		}
+	}
+	return out
 }
 
 func parallelHasSiblingSignal(command string, p parallelCommand) (bool, error) {

@@ -102,11 +102,12 @@ type Deps struct {
 }
 
 // Result — подсказка для контекста агента или причина, почему её нет.
-// LockErr — признак блокировки не получен: подсказки нет, причина — в лог
+// LockErr и LidErr — признак не получен: подсказки нет, причина — в лог
 type Result struct {
 	Context          string
 	Skip             string
 	LockErr          error
+	LidErr           error
 	PresenceSkipInfo bool
 	// Damaged — запись сессии была испорчена и заменена (ErrRecordDamaged):
 	// решение принято, причина — в лог
@@ -184,7 +185,7 @@ func Run(ctx context.Context, deps Deps, event Event) (Result, error) {
 		if deps.LidClosed != nil {
 			closed, lidErr := deps.LidClosed(ctx)
 			if lidErr != nil {
-				return Result{Skip: "признак крышки не получен", LockErr: lidErr, Damaged: damaged}, nil
+				return Result{Skip: "признак крышки не получен", LidErr: lidErr, Damaged: damaged}, nil
 			}
 			locked = closed
 		}

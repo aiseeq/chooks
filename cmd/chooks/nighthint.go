@@ -110,11 +110,11 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 	var probe bool
 	cmd := &cobra.Command{
 		Use:   hookNightHint,
-		Short: "Ночью при заблокированном экране подсказать сессии: пользователь спит, вопрос — тикетом админу пространства (SessionStart, UserPromptSubmit, PreToolUse AskUserQuestion, Stop с ❓)",
+		Short: "Ночью при заблокированном экране или закрытой крышке подсказать сессии: пользователь спит, вопрос — тикетом админу пространства (SessionStart, UserPromptSubmit, PreToolUse AskUserQuestion, Stop с ❓)",
 		Long: "Подсказка в additionalContext, не отказ. Признак «спит» — экран заблокирован (LockedHint сессии seat0) или крышка закрыта (LidClosed logind), и местное время 22:00–09:00. " +
 			"SessionStart — раз за ночь на сессию и после сжатия и /clear; UserPromptSubmit — на каждом ходе, пока в сессии не вызван скилл autonomous-work или night-work (sc2go) (по записи skill-reload; записи нет — не вызван), после вызова, при выключенном skill_reload, сбое чтения записи или исчерпанном сроке хука — раз за ночь; " +
 			"PreToolUse AskUserQuestion — на каждый вызов, Stop — если в последнем ответе есть строка с ❓, раз за ход. " +
-			"--probe печатает признак блокировки и время его получения.",
+			"--probe печатает признаки блокировки и крышки и время их получения.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if probe {
 				return probeNightHint(cmd.Context(), cmd.OutOrStdout())
@@ -124,20 +124,28 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().BoolVar(&probe, "probe", false, "напечатать признак блокировки экрана, время вызова и, ночь ли сейчас")
+	cmd.Flags().BoolVar(&probe, "probe", false, "напечатать признаки блокировки экрана и крышки, время вызова и, ночь ли сейчас")
 	return cmd
 }
 
-// probeNightHint — живая проба признака на машине
+// probeNightHint — живая проба признаков на машине.
 func probeNightHint(ctx context.Context, out io.Writer) error {
+	return probeNightHintWith(ctx, out, nighthint.ScreenLocked, nighthint.LidClosed)
+}
+
+func probeNightHintWith(ctx context.Context, out io.Writer, lockedFn, lidFn func(context.Context) (bool, error)) error {
 	start := time.Now()
-	locked, err := nighthint.ScreenLocked(ctx)
+	locked, err := lockedFn(ctx)
+	if err != nil {
+		return fmt.Errorf("screen lock state unknown after %s: %w", time.Since(start).Round(time.Microsecond), err)
+	}
+	closed, err := lidFn(ctx)
 	elapsed := time.Since(start)
 	if err != nil {
-		return fmt.Errorf("screen lock state unknown after %s: %w", elapsed.Round(time.Microsecond), err)
+		return fmt.Errorf("lid state unknown after %s: %w", elapsed.Round(time.Microsecond), err)
 	}
-	fmt.Fprintf(out, "locked=%t elapsed=%s night=%t now=%s\n", locked, elapsed.Round(time.Microsecond), nighthint.IsNight(start), start.Format("15:04:05 MST"))
-	return nil
+	_, err = fmt.Fprintf(out, "locked=%t lid_closed=%t elapsed=%s night=%t now=%s\n", locked, closed, elapsed.Round(time.Microsecond), nighthint.IsNight(start), start.Format("15:04:05 MST"))
+	return err
 }
 
 // runNightHint печатает подсказку для события из stdin. Сбои только
@@ -187,11 +195,11 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 		}
 	}
 	if result.LockErr != nil {
-		message := "night hint skipped: screen lock state unknown"
-		if result.Skip == "признак крышки не получен" {
-			message = "night hint skipped: lid state unknown"
-		}
-		logger.Warn(message, "event", input.HookEventName, "session", input.SessionID, "reason", result.Skip, "error", result.LockErr)
+		logger.Warn("night hint skipped: screen lock state unknown", "event", input.HookEventName, "session", input.SessionID, "reason", result.Skip, "error", result.LockErr)
+		return
+	}
+	if result.LidErr != nil {
+		logger.Warn("night hint skipped: lid state unknown", "event", input.HookEventName, "session", input.SessionID, "reason", result.Skip, "error", result.LidErr)
 		return
 	}
 	if result.Context == "" {

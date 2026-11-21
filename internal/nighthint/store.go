@@ -178,7 +178,7 @@ func parseRecord(data []byte) (record, error) {
 }
 
 // Sweep убирает записи сессий, не тронутые recordTTL. Зовётся после
-// подсказки: записи появляются только тогда
+// подсказки; отметка пропуска по присутствию тоже создаёт запись
 func (s Store) Sweep(now time.Time) error {
 	entries, err := os.ReadDir(s.Dir)
 	if errors.Is(err, fs.ErrNotExist) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -514,5 +515,58 @@ func TestPresenceSkipLoggedOncePerNight(t *testing.T) {
 	log := readLog(t, logPath)
 	if n := strings.Count(log, `level=INFO msg="night hint skipped"`); n != 1 {
 		t.Fatalf("info logs %d: %s", n, log)
+	}
+}
+
+func TestNightHintDepsConnectsLid(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	deps, err := nightHintDeps(core.DefaultConfig(), time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deps.LidClosed == nil || reflect.ValueOf(deps.LidClosed).Pointer() != reflect.ValueOf(nighthint.LidClosed).Pointer() {
+		t.Fatal("nightHintDeps не подключает LidClosed logind")
+	}
+}
+
+func TestNightHintLidErrorLog(t *testing.T) {
+	t.Setenv("CLAUDE_PID", "")
+	deps := nightTestDeps(t, time.Date(2026, 11, 19, 23, 0, 0, 0, time.Local), false, nil)
+	deps.LidClosed = func(context.Context) (bool, error) { return false, errors.New("lid unavailable") }
+	logger, path := nightTestLogger(t)
+	var out bytes.Buffer
+	runNightHint(context.Background(), []byte(`{"hook_event_name":"SessionStart","session_id":"s1"}`), core.DefaultConfig(), logger, &out, deps)
+	log := readLog(t, path)
+	if out.Len() != 0 || !strings.Contains(log, `level=WARN msg="night hint skipped: lid state unknown"`) || !strings.Contains(log, "lid unavailable") || strings.Contains(log, "screen lock state unknown") {
+		t.Fatalf("вывод %q, лог %s", out.String(), log)
+	}
+}
+
+func TestProbeNightHint(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		var out bytes.Buffer
+		err := probeNightHintWith(context.Background(), &out, func(context.Context) (bool, error) { return true, nil }, func(context.Context) (bool, error) { return closed, nil })
+		if err != nil || !strings.Contains(out.String(), "locked=true lid_closed="+strconv.FormatBool(closed)) || !strings.Contains(out.String(), "night=") {
+			t.Fatalf("closed %t: вывод %q, ошибка %v", closed, out.String(), err)
+		}
+	}
+	failure := errors.New("unavailable")
+	for _, lidFailure := range []bool{false, true} {
+		var out bytes.Buffer
+		lock := func(context.Context) (bool, error) {
+			if !lidFailure {
+				return false, failure
+			}
+			return false, nil
+		}
+		lid := func(context.Context) (bool, error) { return false, failure }
+		err := probeNightHintWith(context.Background(), &out, lock, lid)
+		want := "screen lock state unknown"
+		if lidFailure {
+			want = "lid state unknown"
+		}
+		if !errors.Is(err, failure) || !strings.Contains(err.Error(), want) || out.Len() != 0 {
+			t.Fatalf("lidFailure %t: вывод %q, ошибка %v", lidFailure, out.String(), err)
+		}
 	}
 }

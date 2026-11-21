@@ -612,7 +612,7 @@ func TestLidAndPresenceSkip(t *testing.T) {
 	fake.locked = false
 	closed = false
 	lidErr = errors.New("lid unavailable")
-	if r := run(); r.Context != "" || !errors.Is(r.LockErr, lidErr) {
+	if r := run(); r.Context != "" || !errors.Is(r.LidErr, lidErr) {
 		t.Fatalf("unknown: %+v", r)
 	}
 	lidErr = nil
@@ -623,5 +623,31 @@ func TestLidAndPresenceSkip(t *testing.T) {
 	event.SessionID = "s2"
 	if r := run(); !r.PresenceSkipInfo {
 		t.Fatalf("different session: %+v", r)
+	}
+}
+
+func TestPresenceSkipRepairsDamagedRecord(t *testing.T) {
+	fake := newFake(t, at(19, 23, 0), false)
+	if err := os.MkdirAll(fake.store.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(fake.store.Dir, "s1.json")
+	if err := os.WriteFile(path, []byte(`{"broken`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := fake.deps()
+	deps.LidClosed = func(context.Context) (bool, error) { return false, nil }
+	result, err := Run(context.Background(), deps, eventOf(EventSessionStart))
+	if err != nil || !errors.Is(result.Damaged, ErrRecordDamaged) || !result.PresenceSkipInfo || result.Context != "" {
+		t.Fatalf("первый пропуск: %+v, err=%v", result, err)
+	}
+	result, err = Run(context.Background(), deps, eventOf(EventSessionStart))
+	if err != nil || result.Damaged != nil || result.PresenceSkipInfo || result.Context != "" {
+		t.Fatalf("повторный пропуск: %+v, err=%v", result, err)
+	}
+	fake.locked = true
+	result, err = Run(context.Background(), deps, eventOf(EventSessionStart))
+	if err != nil || result.Context == "" {
+		t.Fatalf("после блокировки: %+v, err=%v", result, err)
 	}
 }

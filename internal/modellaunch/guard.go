@@ -115,6 +115,9 @@ func (g *Guard) Check(ctx context.Context, hookPID int) (string, error) {
 		return "", nil
 	}
 	if !agent {
+		if message, err := c.judgeUserLaunchers(ctx, claudePID, basis); message != "" || err != nil {
+			return message, err
+		}
 		c.logUserDecision(claudePID, basis)
 		return "", nil
 	}
@@ -370,6 +373,66 @@ func (l launch) input() *core.ToolInput {
 	return &core.ToolInput{ToolName: "Bash", Command: literalCommand(l.args, l.env), CWD: l.cwd}
 }
 
+// judgeUserLaunchers судит процессы между claude пользователя и хуком со
+// словами модели в argv. Процесс префикса таких слов не несёт, а claude под
+// видом префикса несёт: агент ставит префикс «<claude> --model haiku -p» и
+// запускает «<claude> --model haiku -p user-prompt-submit», проход по предкам
+// его пропускает и доходит до claude пользователя. Судятся только слова argv:
+// env и cwd этих процессов — env и cwd claude пользователя, поэтому отказ —
+// только когда без слов argv та же проверка проходит
+func (c *check) judgeUserLaunchers(ctx context.Context, claudePID int, basis string) (string, error) {
+	for _, pid := range c.launchers {
+		// запускатель узнан по argv: его cmdline прочитан и лежит в кэше
+		args := modelArgs(c.argv[pid].values)
+		if len(args) == 0 {
+			continue
+		}
+		l := c.launcherLaunch(pid, "")
+		message, err := c.argvRejection(ctx, l)
+		if err != nil {
+			c.logDecision(claudePID, "user", basis, "unknown", "error")
+			return "", err
+		}
+		if message != "" {
+			c.logDecision(claudePID, "user", basis+";claude_like_launcher="+strconv.Itoa(pid), strings.Join(args, " "), "rejected_launcher")
+			return message, nil
+		}
+	}
+	return "", nil
+}
+
+// argvRejection — отказ из-за слов модели в argv запускателя: с ними проверка
+// не проходит, без них проходит. Не проходит и без них — модель вне списка в
+// настройках пользователя, а не в argv: не отказ. Env запускателя не судится,
+// HOME из него только раскрывает «~/» в пути --settings
+func (c *check) argvRejection(ctx context.Context, l launch) (string, error) {
+	if badPath, err := fdSettingsPath(l); badPath != "" {
+		c.logger.Warn("modellaunch: модель из --settings запускателя не проверить", "pid", l.pid, "path", badPath, "error", err)
+		return rejectionPrefix + ": модель из --settings не удалось проверить: " + badPath, nil
+	}
+	judged := launch{pid: l.pid, args: l.args, cwd: l.cwd}
+	with, err := c.judge.ValidateTool(ctx, judged.input())
+	if err != nil {
+		return "", err
+	}
+	if with.IsValid {
+		return "", nil
+	}
+	judged.args = nil
+	without, err := c.judge.ValidateTool(ctx, judged.input())
+	if err != nil {
+		return "", err
+	}
+	if !without.IsValid {
+		c.logger.Info("modellaunch: модель вне списка — в настройках пользователя, не в argv запускателя", "pid", l.pid)
+		return "", nil
+	}
+	if len(with.Violations) == 0 {
+		return rejectionPrefix, nil
+	}
+	return rejectionPrefix + ": " + with.Violations[0].Message, nil
+}
+
 // logUserDecision — строка лога о сессии пользователя: её модель не судится
 func (c *check) logUserDecision(claudePID int, basis string) {
 	model, err := c.userModel(claudePID)
@@ -573,16 +636,22 @@ func envWords(env []string) []string {
 	return words
 }
 
+// literalCommand — команда «K='v' 'claude' 'слово'…»: переменные —
+// присваиваниями перед командой, а не через env. За «env» model_guard
+// сдвигает разбор кавычек слов claude, и путь --agents выходит нелитеральным:
+// отказ агенту с файлом --agents на одобренной модели. Имена переменных — из
+// envWords, они не требуют кавычек
 func literalCommand(args, env []string) string {
 	words := make([]string, 0, len(env)+len(args)+1)
 	for _, item := range env {
-		words = append(words, shellQuote(item))
+		key, value, _ := strings.Cut(item, "=")
+		words = append(words, key+"="+shellQuote(value))
 	}
 	words = append(words, shellQuote("claude"))
 	for _, arg := range args {
 		words = append(words, shellQuote(arg))
 	}
-	return "env " + strings.Join(words, " ")
+	return strings.Join(words, " ")
 }
 
 // fdSettingsPath — значение --settings или --agents, которое указывает в

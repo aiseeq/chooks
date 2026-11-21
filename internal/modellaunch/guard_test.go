@@ -233,28 +233,78 @@ func TestRuntimeModelGuardRejectsNonRegularSettingsPath(t *testing.T) {
 	wantReject(t, agentTree([]string{"claude", "--settings", "/dev/fd/63"}, "CLAUDECODE=1"))
 }
 
-// /proc/self/fd/N и /dev/stdin хук открыл бы в своём процессе: там может
-// оказаться обычный файл без модели, а claude читал свой
-func TestRuntimeModelGuardRejectsHookProcessFDSettings(t *testing.T) {
+// openFile — открытый файл теста с содержимым и его путь /proc/self/fd/N
+func openFile(t *testing.T, content string) string {
+	t.Helper()
 	file, err := os.CreateTemp(t.TempDir(), "settings")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
-	if _, err := file.WriteString("{}"); err != nil {
+	t.Cleanup(func() { file.Close() })
+	if _, err := file.WriteString(content); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(t.TempDir(), "s.json")
-	if err := os.Symlink("/proc/self/fd/"+strconv.Itoa(int(file.Fd())), link); err != nil {
+	return "/proc/self/fd/" + strconv.Itoa(int(file.Fd()))
+}
+
+func symlink(t *testing.T, target, link string) string {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/proc/self/fd/" + strconv.Itoa(int(file.Fd())), "/dev/stdin", link} {
-		for _, args := range [][]string{{"claude", "--settings", path}, {"claude", "--settings=" + path}, {"claude", "--agents", path}} {
-			t.Run(strings.Join(args, " "), func(t *testing.T) {
-				wantReject(t, agentTree(args, "CLAUDECODE=1"))
-			})
+	return link
+}
+
+// /proc/self/fd/N и /dev/stdin хук открыл бы в своём процессе: там может
+// оказаться обычный файл, который model_guard пропустит, а claude читал свой.
+// Файлы теста model_guard пропускает: отказ — только от проверки пути
+func TestRuntimeModelGuardRejectsHookProcessFDSettings(t *testing.T) {
+	flags := map[string]string{
+		"--settings": "{}",
+		"--agents":   `{"rev":{"description":"d","prompt":"p","model":"opus"}}`,
+	}
+	for flag, content := range flags {
+		fd := openFile(t, content)
+		dir := t.TempDir()
+		link := symlink(t, fd, filepath.Join(dir, "s.json"))
+		// каталог-ссылка: сам путь не ссылка, ссылка — его каталог
+		viaDir := filepath.Join(symlink(t, "/proc/self/fd", filepath.Join(dir, "fd")), filepath.Base(fd))
+		for _, path := range []string{fd, "/dev/stdin", link, viaDir} {
+			for _, args := range [][]string{{"claude", flag, path}, {"claude", flag + "=" + path}} {
+				t.Run(strings.Join(args, " "), func(t *testing.T) {
+					wantReject(t, agentTree(args, "CLAUDECODE=1"))
+				})
+			}
 		}
+		// «~/» — каталог HOME claude, а не каталог «~» в cwd: там обычный
+		// файл, который model_guard прочтёт, а claude читает ссылку из HOME
+		t.Run(flag+" ~/", func(t *testing.T) {
+			cwd := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cwd, "~"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cwd, "~", "s.json"), []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			f := agentTree([]string{"claude", flag, "~/s.json"}, "CLAUDECODE=1", "HOME="+dir)
+			f.cwd[90] = cwd
+			wantReject(t, f)
+		})
+		t.Run(flag+" control", func(t *testing.T) {
+			plain := filepath.Join(t.TempDir(), "plain.json")
+			if err := os.WriteFile(plain, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			wantPass(t, agentTree([]string{"claude", flag, plain}, "CLAUDECODE=1"))
+		})
 	}
+}
+
+// Путь в /proc у запускателя между claude и хуком судится так же
+func TestRuntimeModelGuardRejectsLauncherFDSettings(t *testing.T) {
+	fd := openFile(t, "{}")
+	f := prefixTree("claude --settings "+fd+" -p", []string{"claude", "--settings", fd, "-p", "user-prompt-submit"}, []string{"bash", "-c", "agent command"}, "CLAUDECODE=1")
+	wantReject(t, f)
 }
 
 func TestRuntimeModelGuardUserParentCanHaveAnyName(t *testing.T) {
@@ -284,6 +334,7 @@ func TestRuntimeModelGuardAgentCases(t *testing.T) {
 		{"fable id", []string{"claude", "--model", "claude-fable-5-2"}, []string{"CLAUDECODE=1"}, true},
 		{"model=", []string{"claude", "--model=haiku", "-p", "x"}, []string{"CLAUDECODE=1"}, true},
 		{"model after prompt", []string{"claude", "-p", "x", "--model", "haiku"}, []string{"CLAUDECODE=1"}, true},
+		{"model after inline system prompt", []string{"claude", "--append-system-prompt=x", "--model", "haiku"}, []string{"CLAUDECODE=1"}, true},
 		{"fallback", []string{"claude", "--model", "opus", "--fallback-model", "haiku"}, []string{"CLAUDECODE=1"}, true},
 		{"settings", []string{"claude", "--settings", `{"model":"haiku"}`}, []string{"CLAUDECODE=1"}, true},
 		{"settings=", []string{"claude", `--settings={"model":"haiku"}`}, []string{"CLAUDECODE=1"}, true},
@@ -551,7 +602,7 @@ func TestRuntimeModelGuardLogsDecision(t *testing.T) {
 
 func TestLiteralCommandQuotesEveryWord(t *testing.T) {
 	got := literalCommand([]string{"--model", "a'b"}, envWords([]string{"HOME=/home/a user", "ANTHROPIC_MODEL=opus", "PATH=/bin"}))
-	want := "env 'ANTHROPIC_MODEL=opus' 'HOME=/home/a user' 'claude' '--model' 'a'\\''b'"
+	want := "ANTHROPIC_MODEL='opus' HOME='/home/a user' 'claude' '--model' 'a'\\''b'"
 	if got != want {
 		t.Fatalf("literalCommand = %q; want %q", got, want)
 	}
@@ -581,4 +632,99 @@ func TestLinksIntoProcessLoop(t *testing.T) {
 		t.Fatalf("linksIntoProcess = %v, nil; want loop error", links)
 	}
 	wantReject(t, agentTree([]string{"claude", "--settings", a}, "CLAUDECODE=1"))
+}
+
+// Claude пользователя с читаемым environ без признаков агента — сессия
+// пользователя, даже если признаки агента есть у предков: konsole или tmux,
+// поднятые агентом, несут его environ
+func TestRuntimeModelGuardUserClaudeUnderMarkedAncestors(t *testing.T) {
+	f := agentTree([]string{"claude", "--model", "fable"}, "CLAUDE_BASE_DIR=/home/user/.claude")
+	userChain(f)
+	f.environ[70] = []string{"CLAUDECODE=1", "CLAUDE_CODE_SESSION_ID=agent"}
+	f.environ[60] = []string{"CLAUDECODE=1", "CLAUDE_PID=55"}
+	wantPass(t, f)
+}
+
+// Префикс-скрипт, найденный через PATH: в префиксе имя, в argv — полный путь
+func TestRuntimeModelGuardPrefixScriptFromPath(t *testing.T) {
+	f := prefixTree("w-fork.sh", []string{"/bin/bash", "/usr/local/bin/w-fork.sh", hookCommand}, []string{"claude", "--model", "haiku"}, "CLAUDECODE=1")
+	f.exe[92] = "/usr/bin/bash"
+	wantReject(t, f)
+}
+
+// Слово за словами интерпретатора без «/» — не путь скрипта: claude
+// «claude -c '<текст с маркером>'» не процесс префикса «… bash -c»
+func TestRuntimeModelGuardClaudeOptionIsNotScriptPath(t *testing.T) {
+	f := prefixTree("timeout 60 bash -c", []string{"timeout", "60", "bash", "-c", hookCommand}, []string{"claude", "-c", "почини хук user-prompt-submit"}, "CLAUDECODE=1", "ANTHROPIC_MODEL=haiku")
+	userChain(f)
+	wantReject(t, f)
+}
+
+// Оболочка хука с закрытым exe и argv[0] под другим именем узнаётся по comm
+func TestRuntimeModelGuardHookShellByComm(t *testing.T) {
+	f := agentTree(nil)
+	f.add(90, 80, "/usr/bin/bash", []string{"CLAUDECODE=1"}, []string{"renamed", "-c", hookCommand})
+	f.exeErr[90] = errDenied
+	f.comm[90] = "bash"
+	f.add(80, 70, "/opt/claude/claude", []string{"CLAUDECODE=1"}, []string{"claude", "--model", "haiku"})
+	f.add(70, 1, "/usr/bin/bash", nil, []string{"bash"})
+	wantReject(t, f)
+}
+
+// disguisedTree — Р1: агент (bash 91 под claude пользователя 90) ставит
+// префикс «pw.sh <claude> --model M -p» и запускает «<claude> --model M -p
+// user-prompt-submit»: claude 92 и процесс префикса 93 похожи на запускатели
+// хука, проход по предкам доходит до claude пользователя
+func disguisedTree(model string) *fakeProcess {
+	const claude = "/opt/claude/claude"
+	prefixValue := "/r/pw.sh " + claude + " --model " + model + " -p"
+	agentEnv := []string{"CLAUDECODE=1", "CLAUDE_CODE_SESSION_ID=agent", "CLAUDE_CODE_SHELL_PREFIX=" + prefixValue}
+	f := newFake()
+	f.add(100, 93, "/usr/bin/chooks", agentEnv, []string{"/home/u/bin/chooks", "user-prompt-submit"})
+	f.add(93, 92, "/usr/bin/bash", agentEnv, []string{"/bin/bash", "/r/pw.sh", claude, "--model", model, "-p", hookCommand})
+	f.add(92, 91, claude, agentEnv, []string{claude, "--model", model, "-p", "user-prompt-submit"})
+	f.add(91, 90, "/usr/bin/bash", []string{"CLAUDECODE=1"}, []string{"/bin/bash", "-c", "bash /r/disg.sh user-prompt-submit"})
+	f.add(90, 80, "/home/u/.local/share/claude/versions/2.1.330", []string{"CLAUDE_BASE_DIR=/home/u/.claude"}, []string{"claude", "--model", "fable"})
+	f.comm[90] = "claude"
+	userChain(f)
+	return f
+}
+
+func TestRuntimeModelGuardClaudeDisguisedAsPrefixUnderUser(t *testing.T) {
+	t.Run("haiku", func(t *testing.T) {
+		wantReject(t, disguisedTree("haiku"))
+	})
+	t.Run("settings in /proc", func(t *testing.T) {
+		fd := openFile(t, "{}")
+		f := disguisedTree("opus")
+		f.argv[92] = []string{"/opt/claude/claude", "--settings", fd, "-p", "user-prompt-submit"}
+		f.environ[100] = []string{"CLAUDE_CODE_SHELL_PREFIX=/r/pw.sh /opt/claude/claude --settings " + fd + " -p"}
+		f.argv[93] = []string{"/bin/bash", "/r/pw.sh", "/opt/claude/claude", "--settings", fd, "-p", hookCommand}
+		wantReject(t, f)
+	})
+	t.Run("opus", func(t *testing.T) {
+		wantPass(t, disguisedTree("opus"))
+	})
+	// env запускателя — env claude пользователя: модель в нём не судится
+	t.Run("model in launcher environment", func(t *testing.T) {
+		f := disguisedTree("opus")
+		f.environ[92] = append(slices.Clone(f.environ[92]), "ANTHROPIC_MODEL=fable")
+		f.environ[93] = f.environ[92]
+		f.environ[100] = f.environ[92]
+		wantPass(t, f)
+	})
+	// модель вне списка в настройках пользователя, а не в argv: не отказ
+	t.Run("model in user settings", func(t *testing.T) {
+		guard := runtimeGuard(t, disguisedTree("opus"))
+		dir := filepath.Join(os.Getenv("HOME"), ".claude")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"model":"fable"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if message, err := guard.Check(context.Background(), 100); err != nil || message != "" {
+			t.Fatalf("Check = %q, %v; want pass", message, err)
+		}
+	})
 }

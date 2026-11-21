@@ -151,7 +151,7 @@ func (r *Rotator) autoSwitch(ctx context.Context, s *Store, usage map[string]Usa
 			}
 			return
 		}
-		err := r.switchTo(ctx, s, target, reason)
+		err := r.switchTo(ctx, s, target, reason, "rotation")
 		if err == nil {
 			return
 		}
@@ -181,6 +181,9 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	if len(raw) == 0 {
 		// Выход (/logout): активной учётки нет, хранилище не трогается
 		r.Log.Info("accounts: no login in Claude Code credentials")
+		if err := r.recordExternal(s, "", "", now); err != nil {
+			return err
+		}
 		s.Active, s.SyncedMtime = "", creds.mtime
 		return nil
 	}
@@ -199,6 +202,9 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	known, err := s.byLogin(o)
 	switch {
 	case err == nil:
+		if err := r.recordExternal(s, known.UUID, known.Email, now); err != nil {
+			return err
+		}
 		r.adoptKnown(s, known, raw, now, creds.mtime)
 		return nil
 	case !errors.Is(err, errUnknownLogin):
@@ -215,6 +221,9 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	prof, err := r.Client.Profile(ctx, o.AccessToken)
 	if err != nil {
 		s.RetryAt = now.Add(retryDelay)
+		return err
+	}
+	if err := r.recordExternal(s, prof.UUID, prof.Email, now); err != nil {
 		return err
 	}
 	a := s.byUUID(prof.UUID)
@@ -240,6 +249,15 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	s.Active, s.SyncedMtime, s.RetryAt = a.UUID, creds.mtime, time.Time{}
 	r.Log.Info("accounts: login saved", "account", a.Email)
 	return nil
+}
+
+// Время внешнего перехода неизвестно: at — только момент обнаружения.
+func (r *Rotator) recordExternal(s *Store, uuid, email string, now time.Time) error {
+	if s.Active == uuid {
+		return nil
+	}
+	from := s.ActiveEmail()
+	return appendSwitch(r.Paths, switchRecord{At: now, From: from, To: email, Reason: "внешняя смена входа", Source: "external", TimeUncertain: true})
 }
 
 // adoptKnown делает знакомый хранилищу вход активным: токены — в хранилище
@@ -409,7 +427,7 @@ func (r *Rotator) Switch(ctx context.Context, name string) (string, error) {
 	}
 	s.AutoOff = true
 	if target.UUID != s.Active {
-		if err := r.switchTo(ctx, s, target, "вручную"); err != nil {
+		if err := r.switchTo(ctx, s, target, "вручную", "manual"); err != nil {
 			if saveErr := saveStore(r.Paths, s); saveErr != nil {
 				r.Log.Error("accounts: store not saved", "error", saveErr)
 			}
@@ -423,7 +441,7 @@ func (r *Rotator) Switch(ctx context.Context, name string) (string, error) {
 // обновления токена: сессия, обновляющая токен прежней учётки, либо
 // закончит до подмены (и её новый токен уйдёт в хранилище), либо начнёт
 // после и увидит уже новую учётку
-func (r *Rotator) switchTo(ctx context.Context, s *Store, target *Account, reason string) error {
+func (r *Rotator) switchTo(ctx context.Context, s *Store, target *Account, reason, source string) error {
 	if !eligible(target, r.Now()) {
 		return fmt.Errorf("login of %s is not usable: %s", target.Email, target.Dead)
 	}
@@ -440,6 +458,11 @@ func (r *Rotator) switchTo(ctx context.Context, s *Store, target *Account, reaso
 		return err
 	}
 	from := s.byUUID(s.Active)
+	if len(creds.oauthRaw()) == 0 && s.Active != "" {
+		release()
+		s.SyncedMtime = time.Time{}
+		return errors.New("credentials login removed, switch postponed until it is synced")
+	}
 	if raw := creds.oauthRaw(); len(raw) > 0 {
 		cur, err := parseOAuth(raw)
 		if err != nil {
@@ -463,6 +486,11 @@ func (r *Rotator) switchTo(ctx context.Context, s *Store, target *Account, reaso
 				s.SyncedMtime = time.Time{}
 				return errors.New("credentials hold an unknown login, switch postponed until it is saved")
 			}
+			if owner.UUID != s.Active {
+				release()
+				s.SyncedMtime = time.Time{}
+				return errors.New("credentials changed account, switch postponed until it is synced")
+			}
 			owner.OAuth, owner.SavedAt = raw, r.Now()
 			from = owner
 		}
@@ -484,15 +512,17 @@ func (r *Rotator) switchTo(ctx context.Context, s *Store, target *Account, reaso
 		}
 	}
 	r.Log.Info("accounts: switched", "from", fromEmail, "to", target.Email, "reason", reason)
-	return appendSwitch(r.Paths, switchRecord{At: r.Now().Truncate(time.Second), From: fromEmail, To: target.Email, Reason: reason})
+	return appendSwitch(r.Paths, switchRecord{At: r.Now().Truncate(time.Second), From: fromEmail, To: target.Email, Reason: reason, Source: source})
 }
 
 // switchRecord — строка журнала переключений
 type switchRecord struct {
-	At     time.Time `json:"at"`
-	From   string    `json:"from,omitempty"`
-	To     string    `json:"to"`
-	Reason string    `json:"reason"`
+	At            time.Time `json:"at"`
+	From          string    `json:"from,omitempty"`
+	To            string    `json:"to"`
+	Reason        string    `json:"reason"`
+	Source        string    `json:"source,omitempty"`
+	TimeUncertain bool      `json:"timeUncertain,omitempty"`
 }
 
 func appendSwitch(p Paths, rec switchRecord) error {
@@ -546,6 +576,9 @@ func Forget(p Paths, name string) (string, error) {
 	}
 	email := a.Email
 	if a.UUID == s.Active {
+		if err := appendSwitch(p, switchRecord{At: time.Now(), From: email, To: "", Reason: "учётка удалена из хранилища", Source: "manual"}); err != nil {
+			return "", err
+		}
 		s.Active = ""
 	}
 	uuid := a.UUID

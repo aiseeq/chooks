@@ -55,6 +55,108 @@ func TestSyncFollowsClaudeRefresh(t *testing.T) {
 	}
 }
 
+// /login меняет только временную копию credentials; профиль отдаёт fixture.
+func TestExternalLoginJournal(t *testing.T) {
+	for _, known := range []bool{false, true} {
+		t.Run(fmt.Sprintf("known=%v", known), func(t *testing.T) {
+			f := newFixture(t)
+			if known {
+				f.save("personal")
+			}
+			f.save("work")
+			before := len(readJournal(t, f))
+			f.now = f.now.Add(time.Minute)
+			f.writeCreds(f.login("personal", 1, 8*time.Hour))
+			if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err != nil {
+				t.Fatal(err)
+			}
+			journal := readJournal(t, f)
+			if len(journal) != before+1 {
+				t.Fatalf("записей: %d, ожидалось %d", len(journal), before+1)
+			}
+			last := journal[len(journal)-1]
+			if last.From != work.email || last.To != personal.email || last.Source != "external" || !last.TimeUncertain || !last.At.Equal(f.now) || f.store().ActiveEmail() != personal.email {
+				t.Fatalf("внешний вход: %+v", last)
+			}
+			if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(readJournal(t, f)); got != len(journal) {
+				t.Fatalf("повторная сверка добавила запись: %d", got)
+			}
+		})
+	}
+}
+
+func TestExternalLogoutJournal(t *testing.T) {
+	f := newFixture(t)
+	f.save("work")
+	f.now = f.now.Add(time.Minute)
+	f.writeCreds(nil)
+	if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	journal := readJournal(t, f)
+	last := journal[len(journal)-1]
+	if last.From != work.email || last.To != "" || last.Source != "external" || !last.TimeUncertain || !last.At.Equal(f.now) || f.store().Active != "" {
+		t.Fatalf("внешний выход: %+v", last)
+	}
+}
+
+func TestExternalJournalErrorKeepsActive(t *testing.T) {
+	f := newFixture(t)
+	f.save("work")
+	if err := os.Remove(f.p.Journal()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(f.p.Journal(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.writeCreds(f.login("personal", 1, 8*time.Hour))
+	if _, err := f.r.Rotate(context.Background(), Options{Force: true}); err == nil {
+		t.Fatal("ожидалась ошибка журнала")
+	}
+	if got := f.store().ActiveEmail(); got != work.email {
+		t.Fatalf("активная учётка при ошибке журнала: %s", got)
+	}
+}
+
+func TestSwitchPostponesExternalChange(t *testing.T) {
+	for _, logout := range []bool{false, true} {
+		t.Run(fmt.Sprintf("logout=%v", logout), func(t *testing.T) {
+			f := twoAccounts(t)
+			s := f.store()
+			target, err := s.find(personal.email)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw json.RawMessage
+			if !logout {
+				raw = f.login("personal", 1, 8*time.Hour)
+			}
+			f.writeCreds(raw)
+			if err := f.r.switchTo(context.Background(), s, target, "test", "rotation"); err == nil {
+				t.Fatal("переключение не отложено до сверки")
+			}
+			if !s.SyncedMtime.IsZero() || s.Active != work.uuid {
+				t.Fatal("состояние не оставлено для повторной сверки")
+			}
+			if err := f.r.sync(context.Background(), s, true); err != nil {
+				t.Fatal(err)
+			}
+			journal := readJournal(t, f)
+			last := journal[len(journal)-1]
+			want := personal.email
+			if logout {
+				want = ""
+			}
+			if last.From != work.email || last.To != want || last.Source != "external" {
+				t.Fatalf("журнал после сверки: %+v", last)
+			}
+		})
+	}
+}
+
 // Файл, изменённый только что, сверяется после settle: /login пишет
 // токены и учётку не одним движением
 func TestSyncWaitsForSettle(t *testing.T) {
@@ -144,7 +246,8 @@ func TestRotateSwitchesFromEmptyAccount(t *testing.T) {
 		t.Errorf("хранилище: активна %q, переключение %v", s.ActiveEmail(), s.LastSwitch)
 	}
 	journal := readJournal(t, f)
-	if len(journal) != 1 || journal[0].From != work.email || journal[0].To != personal.email || !strings.Contains(journal[0].Reason, "пуста") {
+	last := journal[len(journal)-1]
+	if last.From != work.email || last.To != personal.email || last.Source != "rotation" || last.TimeUncertain || !strings.Contains(last.Reason, "пуста") {
 		t.Errorf("журнал переключений: %+v", journal)
 	}
 
@@ -264,7 +367,7 @@ func TestSwitchSavesActiveTokenFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.r.switchTo(context.Background(), s, target, "тест"); err != nil {
+	if err := f.r.switchTo(context.Background(), s, target, "тест", "manual"); err != nil {
 		t.Fatal(err)
 	}
 	if err := saveStore(f.p, s); err != nil {
@@ -298,6 +401,11 @@ func TestSwitchRefreshesExpiringTarget(t *testing.T) {
 	s := f.store()
 	if !s.AutoOff {
 		t.Error("ручное переключение не выключило автоматическое")
+	}
+	journal := readJournal(t, f)
+	last := journal[len(journal)-1]
+	if last.From != work.email || last.To != personal.email || last.Source != "manual" || last.TimeUncertain {
+		t.Fatalf("ручное переключение в журнале: %+v", last)
 	}
 	if got := f.storedRefresh(personal.email); got != refreshPrefix+"personal-2" {
 		t.Error("обновлённый токен цели не в хранилище")
@@ -346,7 +454,7 @@ func TestSwitchPostponedForUnknownLogin(t *testing.T) {
 	f.writeCreds(f.login("third", 1, 8*time.Hour))
 	s := f.store()
 	target, _ := s.find(personal.email)
-	if err := f.r.switchTo(context.Background(), s, target, "тест"); err == nil {
+	if err := f.r.switchTo(context.Background(), s, target, "тест", "manual"); err == nil {
 		t.Fatal("подмена затёрла несохранённый вход")
 	}
 	if o, _ := f.creds(); o.RefreshToken != refreshPrefix+"third-1" {
@@ -368,14 +476,14 @@ func TestSwitchHonoursClaudeLocks(t *testing.T) {
 	}
 	s := f.store()
 	target, _ := s.find(personal.email)
-	if err := f.r.switchTo(context.Background(), s, target, "тест"); !errors.Is(err, errLockBusy) {
+	if err := f.r.switchTo(context.Background(), s, target, "тест", "manual"); !errors.Is(err, errLockBusy) {
 		t.Fatalf("занятая блокировка: %v", err)
 	}
 	if o, _ := f.creds(); o.RefreshToken != refreshPrefix+"work-1" {
 		t.Fatal("файл подменён под чужой блокировкой")
 	}
 	f.age(f.p.refreshLock(), 2*refreshLockStale)
-	if err := f.r.switchTo(context.Background(), s, target, "тест"); err != nil {
+	if err := f.r.switchTo(context.Background(), s, target, "тест", "manual"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(f.p.refreshLock()); !os.IsNotExist(err) {

@@ -3,17 +3,38 @@ package modellaunch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
+
+	"mvdan.cc/sh/v3/shell"
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/tools"
 )
 
-const rejectionPrefix = "claude запущен агентом на модели вне списка разрешённых"
+const (
+	rejectionPrefix = "claude запущен агентом на модели вне списка разрешённых"
+	// hookCommandMarker — слово команды этого хука в настройках
+	// ($HOME/bin/chooks user-prompt-submit): по нему оболочка и префикс,
+	// которые claude поставил перед хуком, отличаются от самого claude
+	hookCommandMarker = "user-prompt-submit"
+	// shellPrefixEnv — префикс, которым Claude Code запускает команды хуков:
+	// «<префикс> '<команда хука>'»
+	shellPrefixEnv = "CLAUDE_CODE_SHELL_PREFIX"
+	// maxSymlinkHops — предел звеньев ссылок пути настроек, как ELOOP у kernel
+	maxSymlinkHops = 40
+)
+
+// promptFlags — флаги claude, значение которых — текст промпта: данные, а не
+// команда, model_guard их не судит
+var promptFlags = []string{"--system-prompt", "--append-system-prompt", "--system-prompt-file", "--append-system-prompt-file"}
 
 // ProcessReader reads the process attributes used to identify and inspect Claude.
 type ProcessReader interface {
@@ -25,184 +46,277 @@ type ProcessReader interface {
 	Cwd(pid int) (string, error)
 }
 
-// Guard checks the nearest Claude ancestor of the hook process.
+// Judge судит команду запуска claude: model_guard
+type Judge interface {
+	ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error)
+	CandidateModels(input *core.ToolInput) []string
+}
+
+// Guard checks the Claude process of the session that runs the hook.
 type Guard struct {
 	proc   ProcessReader
-	models *tools.ModelGuardTool
+	judge  Judge
 	logger core.Logger
 }
 
-func New(proc ProcessReader, models *tools.ModelGuardTool, logger core.Logger) *Guard {
-	return &Guard{proc: proc, models: models, logger: logger}
+func New(proc ProcessReader, judge Judge, logger core.Logger) *Guard {
+	return &Guard{proc: proc, judge: judge, logger: logger}
+}
+
+// check — состояние одной проверки: прочитанные environ и cmdline
+type check struct {
+	*Guard
+	env       map[int]readResult
+	argv      map[int]readResult
+	launchers []int
+}
+
+type readResult struct {
+	values []string
+	err    error
+}
+
+func (c *check) environ(pid int) ([]string, error) {
+	if r, ok := c.env[pid]; ok {
+		return r.values, r.err
+	}
+	values, err := c.proc.Environ(pid)
+	c.env[pid] = readResult{values, err}
+	return values, err
+}
+
+func (c *check) cmdline(pid int) ([]string, error) {
+	if r, ok := c.argv[pid]; ok {
+		return r.values, r.err
+	}
+	values, err := c.proc.Cmdline(pid)
+	c.argv[pid] = readResult{values, err}
+	return values, err
 }
 
 // Check returns a rejection message only when an agent launched Claude with a
-// model that model_guard does not approve. Proc read failures fail open.
+// model that model_guard does not approve. Reads that fail for a user session
+// pass; an agent's claude whose model cannot be read is rejected.
 func (g *Guard) Check(ctx context.Context, hookPID int) (string, error) {
-	claudePID, cmdline, cmdlineErr, err := g.findSessionClaude(hookPID)
+	c := &check{Guard: g, env: map[int]readResult{}, argv: map[int]readResult{}}
+	claudePID, err := c.findSessionClaude(hookPID)
 	if err != nil {
-		g.logDecision(0, "unknown", "ancestry_unreadable", "unknown", "skipped")
+		g.logger.Warn("modellaunch: предки хука не прочитаны, проверка пропущена", "error", err)
+		c.logDecision(0, "unknown", "ancestry_unreadable", "unknown", "skipped")
 		return "", nil
 	}
 	if claudePID == 0 {
-		g.logDecision(0, "unknown", "claude_not_found", "unknown", "skipped")
+		c.logDecision(0, "unknown", "claude_not_found", "unknown", "skipped")
 		return "", nil
 	}
-	procEnv, err := g.proc.Environ(claudePID)
-	if err != nil {
-		g.logger.Warn("modellaunch: окружение claude не прочитано, проверка пропущена", "pid", claudePID, "error", err)
-		g.logDecision(claudePID, "unknown", "claude_environ_unreadable", "unknown", "skipped")
+	agent, basis, complete := c.classify(claudePID)
+	if !complete {
+		c.logDecision(claudePID, "unknown", basis+"ancestor_read_incomplete", "not_checked", "skipped")
 		return "", nil
-	}
-	agent, basis := agentEnvironment(procEnv)
-	if !agent {
-		parentPID, parentErr := g.proc.Parent(claudePID)
-		if parentErr != nil {
-			g.logDecision(claudePID, "unknown", "ancestor_read_incomplete", "not_checked", "skipped")
-			return "", nil
-		}
-		var complete bool
-		agent, complete = g.hasClaudeAncestor(parentPID)
-		if agent {
-			basis = "ancestor_claude"
-		} else if complete {
-			basis = "no_agent_markers_or_claude_ancestor"
-		} else {
-			g.logDecision(claudePID, "unknown", "ancestor_read_incomplete", "not_checked", "skipped")
-			return "", nil
-		}
-	}
-	return g.checkModel(ctx, claudePID, agent, basis, cmdline, cmdlineErr, procEnv)
-}
-
-func (g *Guard) checkModel(ctx context.Context, pid int, agent bool, basis string, cmdline []string, cmdlineErr error, procEnv []string) (string, error) {
-	if cmdlineErr != nil {
-		g.logger.Warn("modellaunch: cmdline claude не прочитан, проверка пропущена", "pid", pid, "error", cmdlineErr)
-		g.logDecision(pid, agentLabel(agent), basis, "unknown", "skipped")
-		return "", nil
-	}
-	cwd, cwdErr := g.proc.Cwd(pid)
-	if cwdErr != nil && agent {
-		g.logDecision(pid, "agent", basis, "unknown", "skipped_cwd_unreadable")
-		return "", nil
-	}
-	if cwdErr != nil {
-		basis += ";cwd_unreadable=" + cwdErr.Error()
-	}
-	command := literalCommand(cmdline, procEnv)
-	if command == "" && agent {
-		g.logDecision(pid, "agent", basis, "unknown", "skipped_cmdline_invalid")
-		return "", nil
-	}
-	input := &core.ToolInput{ToolName: "Bash", Command: command, CWD: cwd}
-	model := "unknown"
-	if cwdErr == nil && command != "" {
-		model = strings.Join(g.models.CandidateModels(input), ",")
-		if model == "" {
-			model = "unspecified"
-		}
 	}
 	if !agent {
-		g.logDecision(pid, "user", basis, model, "allowed")
+		c.logUserDecision(claudePID, basis)
 		return "", nil
 	}
-	if badPath, settingsErr := unreadableSettingsPath(cmdline, procEnv, cwd); badPath != "" {
-		model = "unreadable_settings"
-		g.logger.Warn("modellaunch: модель из --settings не удалось проверить", "pid", pid, "path", badPath, "error", settingsErr)
-		g.logDecision(pid, "agent", basis, model, "rejected_settings_unreadable")
-		return rejectionPrefix + ": модель из --settings не удалось проверить: " + badPath, nil
-	}
-	result, err := g.models.ValidateTool(ctx, input)
-	if err != nil {
-		g.logDecision(pid, "agent", basis, model, "error")
-		return "", err
-	}
-	if result.IsValid {
-		g.logDecision(pid, "agent", basis, model, "allowed")
-		return "", nil
-	}
-	g.logDecision(pid, "agent", basis, model, "rejected")
-	if len(result.Violations) == 0 {
-		return rejectionPrefix, nil
-	}
-	return rejectionPrefix + ": " + result.Violations[0].Message, nil
+	return c.judgeAgent(ctx, hookPID, claudePID, basis)
 }
 
-func (g *Guard) findSessionClaude(hookPID int) (int, []string, error, error) {
-	parent, err := g.proc.Parent(hookPID)
+// findSessionClaude — claude этой сессии: ближайший предок хука, который не
+// запускает его команду. Пропускаются оболочка хука (sh -c '<команда хука>')
+// и процессы префикса CLAUDE_CODE_SHELL_PREFIX с их потомками: их argv —
+// хвост слов префикса и команда хука последним словом
+func (c *check) findSessionClaude(hookPID int) (int, error) {
+	hookPrefix := c.prefixOf(hookPID)
+	pid, err := c.proc.Parent(hookPID)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("hook parent %d: %w", hookPID, err)
+		return 0, fmt.Errorf("hook parent %d: %w", hookPID, err)
 	}
-	if parent <= 1 {
-		return 0, nil, nil, nil
-	}
-	exe, exeErr := g.proc.Exe(parent)
-	comm, commErr := g.proc.Comm(parent)
-	argv, argvErr := g.proc.Cmdline(parent)
-	if isHookShell(exe, exeErr, comm, commErr, argv, argvErr) {
-		shellPID := parent
-		parent, err = g.proc.Parent(shellPID)
+	seen := map[int]bool{}
+	for pid > 1 && !seen[pid] {
+		seen[pid] = true
+		if !c.isLauncher(pid, hookPrefix) {
+			return pid, nil
+		}
+		c.launchers = append(c.launchers, pid)
+		next, err := c.proc.Parent(pid)
 		if err != nil {
-			return 0, nil, nil, fmt.Errorf("hook shell parent %d: %w", shellPID, err)
+			return 0, fmt.Errorf("launcher %d parent: %w", pid, err)
 		}
-		if parent <= 1 {
-			return 0, nil, nil, nil
-		}
-		argv, argvErr = g.proc.Cmdline(parent)
+		pid = next
 	}
-	return parent, argv, argvErr, nil
+	return 0, nil
 }
 
-func isHookShell(exe string, exeErr error, comm string, commErr error, argv []string, argvErr error) bool {
-	if argvErr != nil || len(argv) < 3 {
+func (c *check) isLauncher(pid int, hookPrefix prefix) bool {
+	argv, err := c.cmdline(pid)
+	if err != nil {
 		return false
 	}
-	base := ""
-	if exeErr == nil {
-		base = filepath.Base(exe)
+	exe, exeErr := c.proc.Exe(pid)
+	comm, commErr := c.proc.Comm(pid)
+	if isHookShell(exe, exeErr, comm, commErr, argv) {
+		return true
 	}
-	if base == "" && commErr == nil {
-		base = strings.TrimSpace(comm)
+	if hookPrefix.launches(argv) {
+		return true
 	}
-	if base == "" && len(argv) > 0 {
-		base = filepath.Base(argv[0])
+	return c.prefixOf(pid).launches(argv)
+}
+
+// prefix — слова CLAUDE_CODE_SHELL_PREFIX, раскрытые в окружении процесса,
+// как их раскрыла оболочка
+type prefix struct{ words []string }
+
+// prefixOf — префикс из environ процесса. Environ не прочитан или префикс
+// не разобран — префикса нет: процесс не узнаётся как процесс префикса и
+// судится как claude сессии
+func (c *check) prefixOf(pid int) prefix {
+	env, err := c.environ(pid)
+	if err != nil {
+		c.logger.Debug("modellaunch: environ не прочитан, префикс не известен", "pid", pid, "error", err)
+		return prefix{}
 	}
-	shell := base == "sh" || base == "bash" || base == "dash"
-	if !shell {
+	p, err := parsePrefix(env)
+	if err != nil {
+		c.logger.Warn("modellaunch: префикс команд хуков не разобран", "pid", pid, "error", err)
+		return prefix{}
+	}
+	return p
+}
+
+func parsePrefix(env []string) (prefix, error) {
+	values := envMap(env)
+	value := values[shellPrefixEnv]
+	if strings.TrimSpace(value) == "" {
+		return prefix{}, nil
+	}
+	words, err := shell.Fields(value, func(name string) string { return values[name] })
+	if err != nil {
+		return prefix{}, fmt.Errorf("%s=%q: %w", shellPrefixEnv, value, err)
+	}
+	return prefix{words: words}, nil
+}
+
+// launches — argv принадлежит процессу префикса, который запускает этот хук:
+// после 0–2 слов интерпретатора (#! скрипта, тогда дальше путь скрипта) идёт
+// хвост слов префикса, за ним команда хука. Процесс префикса и каждый его потомок на пути к хуку
+// (timeout → bash -c) несут хвост тех же слов и ту же команду
+func (p prefix) launches(argv []string) bool {
+	words := p.words
+	if len(words) == 0 {
 		return false
 	}
-	for i := range argv {
-		if i == 0 || i+1 >= len(argv) {
+	hookAt := slices.IndexFunc(argv, func(arg string) bool { return strings.Contains(arg, hookCommandMarker) })
+	if hookAt < 1 {
+		return false
+	}
+	head := argv[:hookAt]
+	for skip := 0; skip <= 2 && skip < len(head); skip++ {
+		rest := head[skip:]
+		if len(rest) > len(words) {
 			continue
 		}
-		if argv[i] == "-c" && strings.Contains(argv[i+1], "user-prompt-submit") {
+		// за словами интерпретатора kernel ставит путь скрипта: он с «/»
+		if skip > 0 && !strings.Contains(rest[0], "/") {
+			continue
+		}
+		tail := words[len(words)-len(rest):]
+		if sameProgram(rest[0], tail[0]) && slices.Equal(rest[1:], tail[1:]) {
 			return true
 		}
 	}
 	return false
 }
 
-func (g *Guard) hasClaudeAncestor(pid int) (bool, bool) {
+func sameProgram(a, b string) bool {
+	return a == b || filepath.Base(a) == filepath.Base(b)
+}
+
+func isHookShell(exe string, exeErr error, comm string, commErr error, argv []string) bool {
+	if len(argv) < 3 {
+		return false
+	}
+	base := ""
+	if exeErr == nil {
+		base = exeName(exe)
+	}
+	if base == "" && commErr == nil {
+		base = strings.TrimSpace(comm)
+	}
+	if base == "" {
+		base = filepath.Base(argv[0])
+	}
+	if base != "sh" && base != "bash" && base != "dash" {
+		return false
+	}
+	for i := 1; i+1 < len(argv); i++ {
+		if argv[i] == "-c" && strings.Contains(argv[i+1], hookCommandMarker) {
+			return true
+		}
+	}
+	return false
+}
+
+// exeName — имя бинаря из /proc/<pid>/exe без пометки kernel о бинаре,
+// заменённом на диске обновлением пакета
+func exeName(exe string) string {
+	return filepath.Base(strings.TrimSuffix(exe, " (deleted)"))
+}
+
+// classify — запущен ли claude агентом: признаки агента в его environ или
+// claude среди предков. Environ claude не читается (бинарь без права чтения)
+// — признаки агента берутся и из environ читаемых предков
+func (c *check) classify(claudePID int) (agent bool, basis string, complete bool) {
+	env, envErr := c.environ(claudePID)
+	if envErr == nil {
+		if agent, key := agentEnvironment(env); agent {
+			return true, key, true
+		}
+	} else {
+		c.logger.Warn("modellaunch: окружение claude не прочитано, признаки агента ищутся у предков", "pid", claudePID, "error", envErr)
+		basis = "claude_environ_unreadable;"
+	}
+	parent, err := c.proc.Parent(claudePID)
+	if err != nil {
+		c.logger.Warn("modellaunch: родитель claude не прочитан", "pid", claudePID, "error", err)
+		return false, basis, false
+	}
+	found, ancestorBasis, complete := c.scanAncestors(parent, envErr != nil)
+	if found {
+		return true, basis + ancestorBasis, true
+	}
+	return false, basis + "no_agent_markers_or_claude_ancestor", complete
+}
+
+func (c *check) scanAncestors(pid int, markers bool) (bool, string, bool) {
 	seen := map[int]bool{}
 	for pid > 1 && !seen[pid] {
 		seen[pid] = true
-		exe, exeErr := g.proc.Exe(pid)
-		comm, commErr := g.proc.Comm(pid)
-		argv, argvErr := g.proc.Cmdline(pid)
+		exe, exeErr := c.proc.Exe(pid)
+		comm, commErr := c.proc.Comm(pid)
+		argv, argvErr := c.cmdline(pid)
 		if isClaude(exe, exeErr, comm, commErr, argv, argvErr) {
-			return true, true
+			return true, "ancestor_claude", true
 		}
-		parent, err := g.proc.Parent(pid)
+		if markers {
+			if env, err := c.environ(pid); err == nil {
+				if agent, key := agentEnvironment(env); agent {
+					return true, "ancestor_environ_" + key, true
+				}
+			}
+		}
+		parent, err := c.proc.Parent(pid)
 		if err != nil {
-			return false, false
+			c.logger.Warn("modellaunch: родитель предка claude не прочитан", "pid", pid, "error", err)
+			return false, "", false
 		}
 		pid = parent
 	}
-	return false, true
+	return false, "", true
 }
 
 func isClaude(exe string, exeErr error, comm string, commErr error, argv []string, argvErr error) bool {
-	if exeErr == nil && filepath.Base(exe) == "claude" {
+	if exeErr == nil && exeName(exe) == "claude" {
 		return true
 	}
 	if commErr == nil && strings.TrimSpace(comm) == "claude" {
@@ -243,35 +357,226 @@ func agentEnvironment(env []string) (bool, string) {
 	return false, ""
 }
 
-func agentLabel(agent bool) string {
-	if agent {
-		return "agent"
+// launch — команда запуска для model_guard: слова модели из argv процесса,
+// переменные модели из его окружения и его cwd
+type launch struct {
+	pid  int
+	args []string
+	env  []string
+	cwd  string
+}
+
+func (l launch) input() *core.ToolInput {
+	return &core.ToolInput{ToolName: "Bash", Command: literalCommand(l.args, l.env), CWD: l.cwd}
+}
+
+// logUserDecision — строка лога о сессии пользователя: её модель не судится
+func (c *check) logUserDecision(claudePID int, basis string) {
+	model, err := c.userModel(claudePID)
+	if err != nil {
+		c.logDecision(claudePID, "user", basis+";model_unreadable="+err.Error(), "unknown", "allowed")
+		return
 	}
-	return "user"
+	c.logDecision(claudePID, "user", basis, model, "allowed")
 }
 
-func (g *Guard) logDecision(pid int, actor, basis, model, outcome string) {
-	g.logger.Info("modellaunch: runtime model decision", "claude_pid", pid, "actor", actor, "basis", basis, "model", model, "result", outcome)
+// userModel — модель сессии пользователя для строки лога; не судится
+func (c *check) userModel(pid int) (string, error) {
+	argv, err := c.cmdline(pid)
+	if err != nil {
+		return "", fmt.Errorf("cmdline %d: %w", pid, err)
+	}
+	cwd, err := c.proc.Cwd(pid)
+	if err != nil {
+		return "", fmt.Errorf("cwd %d: %w", pid, err)
+	}
+	return c.models(launch{pid: pid, args: modelArgs(argv), env: c.modelEnv(pid), cwd: cwd}), nil
 }
 
-func literalCommand(argv, env []string) string {
+// modelEnv — переменные модели из environ процесса; environ не прочитан —
+// их нет: модель окружения судится по environ хука
+func (c *check) modelEnv(pid int) []string {
+	env, err := c.environ(pid)
+	if err != nil {
+		c.logger.Debug("modellaunch: environ не прочитан, переменные модели берутся у хука", "pid", pid, "error", err)
+		return nil
+	}
+	return envWords(env)
+}
+
+func (c *check) models(l launch) string {
+	model := strings.Join(c.judge.CandidateModels(l.input()), ",")
+	if model == "" {
+		return "unspecified"
+	}
+	return model
+}
+
+// judgeAgent судит модель claude, запущенного агентом. Кроме claude судятся
+// процессы между ним и хуком и сам хук: их окружение и cwd унаследованы от
+// claude сессии, а процесс, принятый за оболочку или префикс, мог быть claude
+func (c *check) judgeAgent(ctx context.Context, hookPID, claudePID int, basis string) (string, error) {
+	argv, err := c.cmdline(claudePID)
+	if err != nil {
+		c.logger.Warn("modellaunch: cmdline claude не прочитан", "pid", claudePID, "error", err)
+		c.logDecision(claudePID, "agent", basis, "unknown", "rejected_cmdline_unreadable")
+		return rejectionPrefix + ": командная строка claude не прочитана, модель не проверить", nil
+	}
+	cwd, err := c.sessionCWD(claudePID, hookPID)
+	if err != nil {
+		c.logger.Warn("modellaunch: каталог claude не прочитан", "pid", claudePID, "error", err)
+		c.logDecision(claudePID, "agent", basis, "unknown", "rejected_cwd_unreadable")
+		return rejectionPrefix + ": каталог claude не прочитан, модель не проверить", nil
+	}
+	primary := launch{pid: claudePID, args: modelArgs(argv), env: c.modelEnv(claudePID), cwd: cwd}
+	launches := []launch{primary}
+	for _, pid := range c.launchers {
+		launches = c.addLaunch(launches, c.launcherLaunch(pid, cwd))
+	}
+	launches = c.addLaunch(launches, c.launcherLaunch(hookPID, cwd))
+	model := c.models(primary)
+	for _, l := range launches {
+		if badPath, err := fdSettingsPath(l); badPath != "" {
+			c.logger.Warn("modellaunch: модель из --settings не проверить: путь читается в процессе хука, а не claude", "pid", l.pid, "path", badPath, "error", err)
+			c.logDecision(claudePID, "agent", basis, "unreadable_settings", "rejected_settings_unreadable")
+			return rejectionPrefix + ": модель из --settings не удалось проверить: " + badPath, nil
+		}
+	}
+	for _, l := range launches {
+		result, err := c.judge.ValidateTool(ctx, l.input())
+		if err != nil {
+			c.logDecision(claudePID, "agent", basis, model, "error")
+			return "", err
+		}
+		if result.IsValid {
+			continue
+		}
+		c.logDecision(claudePID, "agent", basis, model, "rejected")
+		if len(result.Violations) == 0 {
+			return rejectionPrefix, nil
+		}
+		return rejectionPrefix + ": " + result.Violations[0].Message, nil
+	}
+	c.logDecision(claudePID, "agent", basis, model, "allowed")
+	return "", nil
+}
+
+// sessionCWD — каталог claude сессии. Его cwd закрыт (бинарь без права
+// чтения) — каталог хука: claude запускает хук в своём каталоге
+func (c *check) sessionCWD(claudePID, hookPID int) (string, error) {
+	cwd, err := c.proc.Cwd(claudePID)
+	if err == nil {
+		return cwd, nil
+	}
+	hookCWD, hookErr := c.proc.Cwd(hookPID)
+	if hookErr != nil {
+		return "", fmt.Errorf("cwd claude %d: %v; cwd хука %d: %w", claudePID, err, hookPID, hookErr)
+	}
+	c.logger.Debug("modellaunch: cwd claude не прочитан, судится cwd хука", "pid", claudePID, "error", err)
+	return hookCWD, nil
+}
+
+// launcherLaunch — запуск процесса между claude и хуком или самого хука:
+// слова модели из его argv, его переменные модели и cwd. Cwd не прочитан —
+// судится в каталоге claude сессии
+func (c *check) launcherLaunch(pid int, sessionCWD string) launch {
+	l := launch{pid: pid, env: c.modelEnv(pid), cwd: sessionCWD}
+	if argv, err := c.cmdline(pid); err == nil {
+		l.args = modelArgs(argv)
+	} else {
+		c.logger.Debug("modellaunch: cmdline не прочитан", "pid", pid, "error", err)
+	}
+	if cwd, err := c.proc.Cwd(pid); err == nil {
+		l.cwd = cwd
+	} else {
+		c.logger.Debug("modellaunch: cwd не прочитан, судится каталог claude", "pid", pid, "error", err)
+	}
+	return l
+}
+
+// addLaunch добавляет команду, если она судит что-то сверх уже собранных:
+// без слов модели, с тем же окружением модели и cwd она ничего не добавит
+func (c *check) addLaunch(launches []launch, l launch) []launch {
+	for _, have := range launches {
+		if len(l.args) == 0 && slices.Equal(l.env, have.env) && l.cwd == have.cwd {
+			return launches
+		}
+		if slices.Equal(l.args, have.args) && slices.Equal(l.env, have.env) && l.cwd == have.cwd {
+			return launches
+		}
+	}
+	return append(launches, l)
+}
+
+func (c *check) logDecision(pid int, actor, basis, model, outcome string) {
+	c.logger.Info("modellaunch: runtime model decision", "claude_pid", pid, "actor", actor, "basis", basis, "model", model, "result", outcome, "launchers", len(c.launchers))
+}
+
+// modelArgs — слова командной строки claude, которые читает model_guard:
+// флаги модели, настроек, агентов и каталогов агентов со значениями. argv[0]
+// не судится (exec -a), интерпретатор, его опции и скрипт — позиционные слова
+// и отбрасываются, как и промпт: позиционные слова, слова после «--» и
+// значения флагов системного промпта — данные, а не команда
+func modelArgs(argv []string) []string {
 	if len(argv) == 0 {
-		return ""
+		return nil
 	}
-	args := normalizedClaudeArgs(argv)
+	args := argv[1:] // argv[0] may be changed by exec -a; command name is always claude
+	modelFlags := tools.ClaudeModelArgFlags()
+	var kept []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		name, _, inline := strings.Cut(arg, "=")
+		if slices.Contains(promptFlags, name) {
+			if !inline {
+				i++
+			}
+			continue
+		}
+		if !slices.Contains(modelFlags, name) {
+			continue
+		}
+		kept = append(kept, arg)
+		if !inline && i+1 < len(args) {
+			kept = append(kept, args[i+1])
+			i++
+		}
+	}
+	return kept
+}
+
+func envMap(env []string) map[string]string {
 	values := make(map[string]string, len(env))
 	for _, item := range env {
-		key, value, ok := strings.Cut(item, "=")
-		if ok {
+		if key, value, ok := strings.Cut(item, "="); ok {
 			values[key] = value
 		}
 	}
-	keys := append(tools.ModelEnvironmentNames(), "CLAUDE_CONFIG_DIR", "HOME")
+	return values
+}
+
+// envWords — переменные окружения, задающие модель claude, словами K=V
+func envWords(env []string) []string {
+	values := envMap(env)
 	var words []string
-	for _, key := range keys {
+	for _, key := range append(tools.ModelEnvironmentNames(), "CLAUDE_CONFIG_DIR", "HOME") {
 		if value, ok := values[key]; ok {
-			words = append(words, shellQuote(key+"="+value))
+			words = append(words, key+"="+value)
 		}
+	}
+	return words
+}
+
+func literalCommand(args, env []string) string {
+	words := make([]string, 0, len(env)+len(args)+1)
+	for _, item := range env {
+		words = append(words, shellQuote(item))
 	}
 	words = append(words, shellQuote("claude"))
 	for _, arg := range args {
@@ -280,71 +585,73 @@ func literalCommand(argv, env []string) string {
 	return "env " + strings.Join(words, " ")
 }
 
-func normalizedClaudeArgs(argv []string) []string {
-	start := 1 // argv[0] may be changed by exec -a; command name is always claude
-	if len(argv) > 1 && isInterpreter(filepath.Base(argv[0])) {
-		start = 2 // discard interpreter script path too
-	}
-	if start > len(argv) {
-		return nil
-	}
-	return argv[start:]
-}
-
-func isInterpreter(name string) bool {
-	name = strings.ToLower(name)
-	for _, interpreter := range []string{"node", "nodejs", "bun", "deno", "python", "python2", "python3", "ruby", "perl", "php", "lua"} {
-		if name == interpreter || strings.HasPrefix(name, interpreter+".") {
-			return true
-		}
-	}
-	return false
-}
-
-func unreadableSettingsPath(argv, env []string, cwd string) (string, error) {
-	args := normalizedClaudeArgs(argv)
-	values := make(map[string]string, len(env))
-	for _, item := range env {
-		key, value, ok := strings.Cut(item, "=")
-		if ok {
-			values[key] = value
-		}
-	}
-	for i := range args {
-		value := ""
-		switch {
-		case args[i] == "--settings" && i+1 < len(args):
-			value = args[i+1]
-		case strings.HasPrefix(args[i], "--settings="):
-			value = strings.TrimPrefix(args[i], "--settings=")
-		default:
+// fdSettingsPath — значение --settings или --agents, которое указывает в
+// /proc или /dev (/dev/fd/63, /dev/stdin, /proc/self/fd/N): такой путь хук
+// читает в своём процессе, а не в процессе claude, и модель не проверить.
+// Прочие пути (FIFO, нет файла, не читается) отклоняет сам model_guard
+func fdSettingsPath(l launch) (string, error) {
+	home := envMap(l.env)["HOME"]
+	for i := 0; i < len(l.args); i++ {
+		name, value, inline := strings.Cut(l.args[i], "=")
+		if name != "--settings" && name != "--agents" {
 			continue
 		}
+		if !inline {
+			if i+1 >= len(l.args) {
+				continue
+			}
+			i++
+			value = l.args[i]
+		}
 		if strings.HasPrefix(strings.TrimSpace(value), "{") {
-			continue // inline JSON settings
+			continue // inline JSON
 		}
-		if relativeHome, ok := strings.CutPrefix(value, "~/"); ok {
-			value = filepath.Join(values["HOME"], relativeHome)
+		path := value
+		if rest, ok := strings.CutPrefix(path, "~/"); ok && home != "" {
+			path = filepath.Join(home, rest)
 		}
-		if specialSettingsPath(value) {
-			return value, fmt.Errorf("необычный путь настроек")
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(l.cwd, path)
 		}
-		if !filepath.IsAbs(value) {
-			value = filepath.Join(cwd, value)
-		}
-		if err := tools.CheckSettingsFile(value); err != nil {
+		links, err := linksIntoProcess(path)
+		if err != nil {
 			return value, err
+		}
+		if links {
+			return value, nil
 		}
 	}
 	return "", nil
 }
 
-func specialSettingsPath(path string) bool {
-	clean := filepath.Clean(path)
-	if clean == "/dev/fd" || strings.HasPrefix(clean, "/dev/fd/") {
-		return true
+// linksIntoProcess — путь или звено его ссылок (сам файл или каталог)
+// ведёт в /proc или /dev
+func linksIntoProcess(path string) (bool, error) {
+	for range maxSymlinkHops {
+		if perProcessPath(path) {
+			return true, nil
+		}
+		if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil && perProcessPath(dir) {
+			return true, nil
+		}
+		target, err := os.Readlink(path)
+		if errors.Is(err, syscall.EINVAL) || errors.Is(err, fs.ErrNotExist) {
+			return false, nil // не ссылка или нет файла: путь судит model_guard
+		}
+		if err != nil {
+			return false, fmt.Errorf("ссылка %s не прочитана: %w", path, err)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		path = target
 	}
-	return strings.HasPrefix(clean, "/proc/") && (strings.HasSuffix(clean, "/fd") || strings.Contains(clean, "/fd/"))
+	return false, fmt.Errorf("больше %d звеньев ссылок: %s", maxSymlinkHops, path)
+}
+
+func perProcessPath(path string) bool {
+	clean := filepath.Clean(path)
+	return strings.HasPrefix(clean, "/proc/") || strings.HasPrefix(clean, "/dev/")
 }
 
 func shellQuote(value string) string {
@@ -362,7 +669,7 @@ func (p ProcReader) root() string {
 }
 
 func (p ProcReader) Parent(pid int) (int, error) {
-	data, err := readFile(filepath.Join(p.root(), strconv.Itoa(pid), "stat"))
+	data, err := os.ReadFile(filepath.Join(p.root(), strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return 0, err
 	}
@@ -378,11 +685,11 @@ func (p ProcReader) Parent(pid int) (int, error) {
 }
 
 func (p ProcReader) Exe(pid int) (string, error) {
-	return readLink(filepath.Join(p.root(), strconv.Itoa(pid), "exe"))
+	return os.Readlink(filepath.Join(p.root(), strconv.Itoa(pid), "exe"))
 }
 
 func (p ProcReader) Comm(pid int) (string, error) {
-	data, err := readFile(filepath.Join(p.root(), strconv.Itoa(pid), "comm"))
+	data, err := os.ReadFile(filepath.Join(p.root(), strconv.Itoa(pid), "comm"))
 	return strings.TrimSpace(string(data)), err
 }
 
@@ -395,15 +702,11 @@ func (p ProcReader) Cmdline(pid int) ([]string, error) {
 }
 
 func (p ProcReader) Cwd(pid int) (string, error) {
-	return readLink(filepath.Join(p.root(), strconv.Itoa(pid), "cwd"))
+	return os.Readlink(filepath.Join(p.root(), strconv.Itoa(pid), "cwd"))
 }
 
-func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
-
-func readLink(path string) (string, error) { return os.Readlink(path) }
-
 func splitNULFile(path string) ([]string, error) {
-	data, err := readFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -288,16 +289,34 @@ func runUserPromptSubmit(ctx context.Context, hookType string, data []byte, conf
 	return exitAllowed, nil
 }
 
-func checkRuntimeLaunchGuard(ctx context.Context, config core.ToolConfig, logger core.Logger) (string, error) {
+// checkRuntimeLaunchGuard — отказ claude, запущенному агентом на модели вне
+// списка. Паника в проверке не блокирует реплику: строка Error в лог и пропуск
+func checkRuntimeLaunchGuard(ctx context.Context, config core.ToolConfig, logger core.Logger) (message string, err error) {
 	if config.RuntimeLaunchGuard != nil && !*config.RuntimeLaunchGuard {
 		return "", nil
 	}
-	config.Enabled = true
-	modelGuard, err := tools.NewModelGuardTool(config, logger)
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("modellaunch: паника в проверке модели claude, проверка пропущена", "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			message, err = "", nil
+		}
+	}()
+	guard, err := newRuntimeGuard(config, logger)
 	if err != nil {
 		return "", err
 	}
-	return modellaunch.New(modellaunch.ProcReader{}, modelGuard, logger).Check(ctx, os.Getpid())
+	return guard.Check(ctx, os.Getpid())
+}
+
+// newRuntimeGuard строит проверку модели claude сессии: model_guard судит
+// команду из /proc. Тест подменяет судью
+var newRuntimeGuard = func(config core.ToolConfig, logger core.Logger) (*modellaunch.Guard, error) {
+	config.Enabled = true
+	modelGuard, err := tools.NewModelGuardTool(config, logger)
+	if err != nil {
+		return nil, err
+	}
+	return modellaunch.New(modellaunch.ProcReader{}, modelGuard, logger), nil
 }
 
 // sessionIDOf — сессия события для строк о длительности. Нечитаемый вход

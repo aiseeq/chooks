@@ -719,13 +719,6 @@ func readSettingsFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// CheckSettingsFile reports whether a runtime --settings target is an ordinary
-// readable settings file accepted by model_guard.
-func CheckSettingsFile(path string) error {
-	_, err := readSettingsFile(path)
-	return err
-}
-
 // modelClients — программы, которым модель задают в командной строке: cl
 // передаёт флаги claude, worker run|ask|continue берёт --model
 var modelClients = []string{"claude", "cl", "codex", "opencode", "worker"}
@@ -1354,6 +1347,13 @@ func assignedModelWord(w string) []modelCandidate {
 
 // valueFlags — флаги Claude, которые model_guard анализирует как пару.
 var valueFlags = []string{"--settings", "--agents", "--agent", "--fallback-model"}
+
+// ClaudeModelArgFlags — флаги claude, которые model_guard читает вместе со
+// значением в следующем слове: модель, настройки, агенты и каталоги агентов.
+// Остальные слова командной строки claude модель не задают
+func ClaudeModelArgFlags() []string {
+	return append([]string{"--model", "--add-dir", "--plugin-dir"}, valueFlags...)
+}
 
 // splitValueFlags разбивает --flag=value для флагов Claude со значением.
 func splitValueFlags(args []word) []word {

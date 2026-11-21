@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/modellaunch"
 	"github.com/aiseeq/chooks/internal/processor"
 	"github.com/aiseeq/chooks/internal/statusline"
 	"github.com/aiseeq/chooks/internal/textstyle"
@@ -221,12 +222,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		// возобновилась (без неё ответ без единого вызова инструмента остался
 		// бы незамеченным), и напоминает о скиллах, изменённых после вызова.
 		// Срабатывает и на сообщение другой сессии, и посреди хода
-		input := parseSessionInput(logger, hookType, data)
-		timer.stage("state")
-		saveState(logger, input.SessionID, core.StateWorking)
-		timer.stage("skills")
-		remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer)
-		return exitAllowed, nil
+		return runUserPromptSubmit(ctx, hookType, data, config, logger, timer)
 	case hookPostToolBatch:
 		// Пакет инструментов — место напоминания в длинном ходе и у субагентов,
 		// до которых UserPromptSubmit не доходит. Он же снимает «ждёт ответа»:
@@ -274,6 +270,34 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	default:
 		return exitError, fmt.Errorf("unknown hook type: %s", hookType)
 	}
+}
+
+func runUserPromptSubmit(ctx context.Context, hookType string, data []byte, config *core.Config, logger core.Logger, timer *hookTimer) (int, error) {
+	input := parseSessionInput(logger, hookType, data)
+	message, err := checkRuntimeLaunchGuard(ctx, config.Tools["model_guard"], logger)
+	if err != nil {
+		return exitError, err
+	}
+	if message != "" {
+		return exitBlocked, fmt.Errorf("%s", message)
+	}
+	timer.stage("state")
+	saveState(logger, input.SessionID, core.StateWorking)
+	timer.stage("skills")
+	remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer)
+	return exitAllowed, nil
+}
+
+func checkRuntimeLaunchGuard(ctx context.Context, config core.ToolConfig, logger core.Logger) (string, error) {
+	if config.RuntimeLaunchGuard != nil && !*config.RuntimeLaunchGuard {
+		return "", nil
+	}
+	config.Enabled = true
+	modelGuard, err := tools.NewModelGuardTool(config, logger)
+	if err != nil {
+		return "", err
+	}
+	return modellaunch.New(modellaunch.ProcReader{}, modelGuard, logger).Check(ctx, os.Getpid())
 }
 
 // sessionIDOf — сессия события для строк о длительности. Нечитаемый вход

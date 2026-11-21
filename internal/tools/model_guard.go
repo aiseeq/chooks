@@ -1148,6 +1148,11 @@ var modelEnvNames = map[string]bool{
 	"CLAUDE_CODE_AUTO_MODE_MODEL": false, "CLAUDE_CODE_BG_CLASSIFIER_MODEL": false,
 }
 
+// ModelEnvironmentNames returns the environment keys inspected by model_guard.
+func ModelEnvironmentNames() []string {
+	return slices.Sorted(maps.Keys(modelEnvNames))
+}
+
 // modelEnvPattern — имена modelEnvNames альтернативой регулярного выражения
 func modelEnvPattern() string {
 	names := slices.Sorted(maps.Keys(modelEnvNames))

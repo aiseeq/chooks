@@ -102,10 +102,11 @@ func userOnlyReason(value, name string) string {
 }
 
 type modelCandidate struct {
-	value        string
-	dynamic      bool
-	unknownAgent bool
-	unknownWrite bool
+	value         string
+	dynamic       bool
+	unknownAgent  bool
+	unknownWrite  bool
+	settingsModel bool
 	// userOnlyCheck — модель быстрых запросов (переменные haiku) или
 	// определения агента: проверяется только на модель «только пользователь»
 	userOnlyCheck bool
@@ -632,13 +633,17 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		if agentAt != nil {
 			localFiles.agent = func(name string) []modelCandidate { return agentAt(name, lookupCWD, callExtraDirs) }
 		}
+		modelOverride := dialect == "claude" && claudeHasEffectiveModelFlag(args)
 		if dialect == "claude" {
 			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
 			if settingsAt != nil {
-				found = append(found, settingsAt(cwd, cwdKnown)...)
+				found = appendSettingsCandidates(found, settingsAt(cwd, cwdKnown), modelOverride)
 			}
 		}
 		callCandidates := candidatesFromArgs(dialect, args, localFiles)
+		if modelOverride {
+			callCandidates = withoutSettingsModel(callCandidates)
+		}
 		found = append(found, callCandidates...)
 		if dialect == "claude" {
 			claude = true
@@ -1138,14 +1143,73 @@ func assignedModelWord(w string) []modelCandidate {
 	return nil
 }
 
-// valueFlags — флаги claude со значением, которые пишутся и через «=»
-var valueFlags = []string{"--settings", "--agents", "--agent", "--fallback-model"}
+type claudeOptionKind uint8
 
-// splitValueFlags разбивает --flag=value флагов valueFlags на два слова
+const (
+	claudeOptionUnknown claudeOptionKind = iota
+	claudeOptionValue
+	claudeOptionBool
+)
+
+// claudeOptions is shared by option splitting and --model recognition.
+var claudeOptions = map[string]claudeOptionKind{
+	"--add-dir": claudeOptionValue, "--agent": claudeOptionValue, "--agents": claudeOptionValue,
+	"--allow-dangerously-skip-permissions": claudeOptionBool, "--allowedTools": claudeOptionValue, "--allowed-tools": claudeOptionValue,
+	"--append-system-prompt": claudeOptionValue, "--autocompact": claudeOptionValue, "--ax-screen-reader": claudeOptionBool,
+	"--background": claudeOptionBool, "--bare": claudeOptionBool, "--betas": claudeOptionValue, "--bg": claudeOptionBool,
+	"--brief": claudeOptionBool, "--chrome": claudeOptionBool, "--cloud": claudeOptionValue,
+	"--continue": claudeOptionBool, "-c": claudeOptionBool, "--dangerously-skip-permissions": claudeOptionBool,
+	"--debug": claudeOptionValue, "-d": claudeOptionBool, "--debug-file": claudeOptionValue,
+	"--desktop": claudeOptionBool, "--disable-slash-commands": claudeOptionBool, "--disallowedTools": claudeOptionValue,
+	"--disallowed-tools": claudeOptionValue, "--effort": claudeOptionValue, "--environment": claudeOptionValue,
+	"--exclude-dynamic-system-prompt-sections": claudeOptionBool, "--fallback-model": claudeOptionValue,
+	"--file": claudeOptionValue, "--fork-session": claudeOptionBool, "--forward-subagent-text": claudeOptionBool,
+	"--from-pr": claudeOptionValue, "--help": claudeOptionBool, "-h": claudeOptionBool, "--ide": claudeOptionBool,
+	"--include-hook-events": claudeOptionBool, "--include-partial-messages": claudeOptionBool,
+	"--input-format": claudeOptionValue, "--json-schema": claudeOptionValue, "--max-budget-usd": claudeOptionValue,
+	"--mcp-config": claudeOptionValue, "--model": claudeOptionValue, "-n": claudeOptionValue, "--name": claudeOptionValue,
+	"--no-chrome": claudeOptionBool, "--no-session-persistence": claudeOptionBool, "--output-format": claudeOptionValue,
+	"--permission-mode": claudeOptionValue, "--permission-prompts": claudeOptionValue, "--plugin-dir": claudeOptionValue,
+	"--plugin-url": claudeOptionValue, "--print": claudeOptionBool, "-p": claudeOptionBool,
+	"--prompt-suggestions": claudeOptionValue, "--remote-control": claudeOptionValue,
+	"--remote-control-session-name-prefix": claudeOptionValue, "--replay-user-messages": claudeOptionBool,
+	"--restricted": claudeOptionBool, "--resume": claudeOptionValue, "-r": claudeOptionValue,
+	"--safe-mode": claudeOptionBool, "--session-id": claudeOptionValue, "--setting-sources": claudeOptionValue,
+	"--settings": claudeOptionValue, "--strict-mcp-config": claudeOptionBool, "--system-prompt": claudeOptionValue,
+	"--system-prompt-snapshot": claudeOptionValue, "--teleport": claudeOptionValue, "--tmux": claudeOptionBool,
+	"--tools": claudeOptionValue, "--verbose": claudeOptionBool, "--version": claudeOptionBool, "-v": claudeOptionBool,
+	"--worktree": claudeOptionValue, "-w": claudeOptionValue,
+}
+
+func claudeHasEffectiveModelFlag(args []word) bool {
+	waitingForValue := false
+	for _, arg := range args {
+		text := arg.text
+		if text == "--" {
+			return false
+		}
+		if waitingForValue {
+			waitingForValue = false
+			continue
+		}
+		if text == "--model" || strings.HasPrefix(text, "--model=") {
+			return true
+		}
+		if !strings.HasPrefix(text, "-") || text == "-" || strings.Contains(text, "=") {
+			continue
+		}
+		if kind, known := claudeOptions[text]; !known || kind == claudeOptionValue {
+			waitingForValue = true
+		}
+	}
+	return false
+}
+
+// splitValueFlags разбивает --flag=value для опций Claude со значением.
 func splitValueFlags(args []word) []word {
 	out := make([]word, 0, len(args))
 	for _, a := range args {
-		if flag, value, ok := strings.Cut(a.text, "="); ok && slices.Contains(valueFlags, flag) {
+		if flag, value, ok := strings.Cut(a.text, "="); ok && claudeOptions[flag] == claudeOptionValue {
 			out = append(out, word{text: flag, literal: true}, word{text: value, literal: a.literal})
 			continue
 		}
@@ -1311,6 +1375,23 @@ func settingsCandidates(raw []byte, agent func(string) []modelCandidate) []model
 	return found
 }
 
+func withoutSettingsModel(candidates []modelCandidate) []modelCandidate {
+	filtered := candidates[:0]
+	for _, candidate := range candidates {
+		if !candidate.settingsModel {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
+func appendSettingsCandidates(dst, candidates []modelCandidate, modelOverride bool) []modelCandidate {
+	if modelOverride {
+		candidates = withoutSettingsModel(candidates)
+	}
+	return append(dst, candidates...)
+}
+
 // jsonModels — модели из JSON флага claude
 type jsonModels []modelCandidate
 
@@ -1318,6 +1399,12 @@ func (found *jsonModels) add(model string) {
 	// inherit — модель агента из основного вызова, она проверена отдельно
 	if strings.TrimSpace(model) != "" && model != "inherit" {
 		*found = append(*found, modelCandidate{value: model})
+	}
+}
+
+func (found *jsonModels) addSettingsModel(model string) {
+	if strings.TrimSpace(model) != "" && model != "inherit" {
+		*found = append(*found, modelCandidate{value: model, settingsModel: true})
 	}
 }
 
@@ -1345,7 +1432,7 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 	}
 	var model string
 	if json.Unmarshal(settings["model"], &model) == nil {
-		found.add(model)
+		found.addSettingsModel(model)
 	}
 	var agent struct {
 		Model string `json:"model"`

@@ -13,9 +13,8 @@ import (
 // Временная служба systemd-run (без --scope) исполняет не только свою
 // команду: свойства Exec* (-p ExecStartPre=…, ExecStopPost=…) и --shell
 // тоже запускает менеджер, потомком PID 1, а не агента. Их проверяют те же
-// правила, что команду под службой, тем же приёмом, что run0
-// (kill_guard_run0.go): вызов переписывается в равносильную форму, которую
-// правила уже знают. --shell/-S — systemd-run --pipe bash в тексте команды
+// правила, что команду под службой: вызов переписывается в равносильную
+// форму, которую правила уже знают. --shell/-S — systemd-run --pipe bash в тексте команды
 // (rewriteSystemdRunShell): heredoc, <<<, пайп и < <(…) идут путём оболочки
 // под службой. Команда Exec-свойства — отдельный вызов systemd-run [--user]
 // -- команда с вводом systemd-run (serviceExecProperties)
@@ -37,7 +36,7 @@ type systemdRunLevel struct {
 // команде, по вложенности: разбор отдаёт вызовом только внешний, а внутренний
 // (systemd-run --pipe systemd-run -S, … setsid systemd-run -p
 // ExecStartPre=…) — словами внешнего. Внутренний ищет nestedSystemdRun.
-// Уровней не больше 1+maxRun0Rewrites: глубже — err последнего
+// Уровней не больше 1+maxNestedRewrites: глубже — err последнего
 func systemdRunLevels(args []string) []systemdRunLevel {
 	levels := []systemdRunLevel{{args: args, o: parseSystemdRunOptions(plainWords(args))}}
 	for {
@@ -54,8 +53,8 @@ func systemdRunLevels(args []string) []systemdRunLevel {
 		if inner == nil {
 			return levels
 		}
-		if len(levels) > maxRun0Rewrites {
-			cur.err = fmt.Errorf("systemd-run в systemd-run глубже %d", maxRun0Rewrites)
+		if len(levels) > maxNestedRewrites {
+			cur.err = fmt.Errorf("systemd-run в systemd-run глубже %d", maxNestedRewrites)
 			return levels
 		}
 		at := cur.at + cur.o.start + len(cmd) - len(inner)
@@ -123,65 +122,6 @@ func literalShellWords(args []string) string {
 	return strings.Join(words, " ")
 }
 
-// wrappedRun0Calls calls и вызовы run0 в словах вызовов-обёрток среди них
-// (wrappedRun0), которых разбор не отдал: вызов run0, который уже есть
-// (сам c — run0, nice run0 …), — один раз (sameRun0). err — первая ошибка
-// wrappedRun0: такой run0 не найден
-func wrappedRun0Calls(text string, calls []shellcmd.Call) ([]shellcmd.Call, error) {
-	out := slices.Clone(calls)
-	var first error
-	for i := range calls {
-		x, ok, err := wrappedRun0(text, calls[i])
-		if err != nil && first == nil {
-			first = err
-		}
-		if ok && !hasRun0(out, &x) {
-			out = append(out, x)
-		}
-	}
-	return out, first
-}
-
-// hasRun0 — вызов x уже есть среди calls (sameRun0)
-func hasRun0(calls []shellcmd.Call, x *shellcmd.Call) bool {
-	for i := range calls {
-		if sameRun0(&calls[i], x) {
-			return true
-		}
-	}
-	return false
-}
-
-// sameRun0 — o тот же вызов run0, что x: разбор уже отдал его (nice run0 …)
-func sameRun0(o, x *shellcmd.Call) bool {
-	return o.Name == x.Name && o.Raw == x.Raw && slices.Equal(o.Via, x.Via) && slices.Equal(o.Args, x.Args)
-}
-
-// wrappedRun0 вызов run0, который вызов-обёртка c исполнит своей командой
-// (systemd-run --pipe nice run0 …, setsid run0 …, flock /tmp/l run0 …).
-// shellcmd (akit v1.88) снимает run0 как обёртку, но за systemd-run,
-// setsid, flock отдаёт вызовом только самую внутреннюю команду, с run0 лишь
-// в Via, а опции run0 (--machine, --property=ExecStartPre=…) проверка берёт
-// из его слов. Слово run0 ищет тот же разбор, что systemd-run за обёрткой
-// (nestedCommand). Вызов — с Via до run0, текстом c и местом слова run0 в
-// text (-1 — c нет в тексте словом, run0Words); ввод ему даёт участок
-// текста (stdinOf). err — слова c не разобраны
-func wrappedRun0(text string, c shellcmd.Call) (shellcmd.Call, bool, error) {
-	words := append([]string{c.Name}, c.Args...)
-	j, via, err := nestedCommand(words, "run0")
-	if err != nil {
-		return shellcmd.Call{}, false, err
-	}
-	if j < 0 {
-		return shellcmd.Call{}, false, nil
-	}
-	x := shellcmd.Call{Name: "run0", Args: words[j+1:], Via: slices.Concat(c.Via, via), Raw: c.Raw, Offset: -1}
-	if at, spans, werr := run0Words(text, c); werr == nil && spans != nil {
-		x.Offset = at + spans[j][0]
-	}
-	return x, true, nil
-}
-
 // systemdRunShellWords слова вызова systemd-run, где --shell/-S последнего
 // systemd-run во вложении (systemdRunLevels: только у него нет команды)
 // переписан в --pipe bash: слово опции — --pipe, буква S в связке — P (тоже
@@ -219,7 +159,7 @@ func systemdRunPipeWord(arg string, letter int) string {
 // ошибка разбора слов вызова
 func rewriteSystemdRunShell(command string) (text string, err error) {
 	text = command
-	for range maxRun0Rewrites {
+	for range maxNestedRewrites {
 		calls, perr := shellcmd.Calls(text)
 		if calls == nil && perr != nil {
 			return text, err
@@ -259,7 +199,7 @@ func replaceSystemdRunShell(text string, c *shellcmd.Call) (string, bool, error)
 	if !safeValueRe.MatchString(pipe) {
 		return "", false, nil
 	}
-	at, spans, err := run0Words(text, *c)
+	at, spans, err := callWords(text, *c)
 	if err != nil || spans == nil {
 		return "", false, err
 	}
@@ -292,45 +232,43 @@ func execPropertyKey(key string) bool {
 	return slices.Contains(systemdExecKeys, strings.TrimSuffix(key, "Ex"))
 }
 
-// serviceCommands проверяет команды, которые служба systemd-run c исполнит
-// помимо видимой разбору: Exec-свойства (serviceExecProperties) и parallel
-// без команды (serviceParallel). systemd-run --shell, не переписанный в
-// тексте, сюда не доходит: его проверяет rewrittenCommand вместе со
-// свойствами
+// serviceCommands проверяет команды, которые служба systemd-run или run0 c
+// исполнит помимо видимой разбору: Exec-свойства (serviceExecProperties,
+// run0Service). systemd-run --shell, не переписанный в тексте, сюда не
+// доходит: его проверяет rewrittenCommand вместе со свойствами
 func (s *killScan) serviceCommands(c shellcmd.Call, calls []shellcmd.Call) error {
-	service := c
-	if c.Name == "systemd-run" {
-		if err := s.serviceExecProperties(c, calls); err != nil {
-			return err
-		}
-	} else if run, ok, err := s.wrappedSystemdRun(c); err != nil {
+	switch c.Name {
+	case "run0":
+		return s.run0Service(c)
+	case "systemd-run":
+		return s.serviceExecProperties(c, calls)
+	}
+	if run, err := s.wrappedSystemdRun(c); err != nil {
 		// как ошибка уровня в serviceExecProperties: вызов-обёртка — любой
 		// nice, timeout, setsid, отказ без kill в тексте задел бы обычные команды
 		s.tool.Logger().Debug("kill_guard: systemd-run за обёрткой не разобрать", "error", err)
 		if s.killText {
 			s.addReason("systemd-run за обёрткой: " + err.Error() + ": свойства и команду временной службы проверить нельзя")
 		}
-	} else if ok {
-		service = run
-		if err := s.serviceExecProperties(run, calls); err != nil {
-			return err
-		}
+	} else if run != nil {
+		return s.serviceExecProperties(*run, calls)
 	}
-	return s.serviceParallel(service, calls)
+	return nil
 }
 
 // wrappedSystemdRun systemd-run, который вызов-обёртка c (setsid, flock,
 // chrt, nice и их цепочки) исполнит своей командой, отдельным вызовом с
 // Via c. Слово systemd-run ищет в словах самого c тот же разбор, что для
 // systemd-run в команде службы (nestedSystemdRun): systemd-run операндом
-// (echo systemd-run …) — не команда. err — вызов не разобрать заново
-func (s *killScan) wrappedSystemdRun(c shellcmd.Call) (shellcmd.Call, bool, error) {
+// (echo systemd-run …) — не команда; nil — его нет. err — вызов не
+// разобрать заново
+func (s *killScan) wrappedSystemdRun(c shellcmd.Call) (*shellcmd.Call, error) {
 	inner, err := nestedSystemdRun(append([]string{c.Name}, c.Args...))
 	if err != nil {
-		return shellcmd.Call{}, false, fmt.Errorf("найти обёрнутый systemd-run: %w", err)
+		return nil, fmt.Errorf("найти обёрнутый systemd-run: %w", err)
 	}
 	if inner == nil {
-		return shellcmd.Call{}, false, nil
+		return nil, nil
 	}
 	i := len(c.Args) - len(inner) - 1
 	fallback := shellcmd.Call{Name: "systemd-run", Args: c.Args[i+1:], Via: append(slices.Clone(c.Via), c.Name)}
@@ -339,7 +277,7 @@ func (s *killScan) wrappedSystemdRun(c shellcmd.Call) (shellcmd.Call, bool, erro
 	// восстанавливает эти признаки, если слово осталось тем же.
 	calls, err := shellcmd.Calls(c.Raw)
 	if err != nil {
-		return shellcmd.Call{}, false, fmt.Errorf("разобрать вызов отдельно от скрипта: %w", err)
+		return nil, fmt.Errorf("разобрать вызов отдельно от скрипта: %w", err)
 	}
 	var isolated shellcmd.Call
 	for j := range calls {
@@ -358,23 +296,23 @@ func (s *killScan) wrappedSystemdRun(c shellcmd.Call) (shellcmd.Call, bool, erro
 		}
 	}
 	parsed, err := shellcmd.Calls(strings.Join(words, " "))
-	//nolint:error-masking // слово без признака литеральности ("a\"b" рядом с "$X") ломает склейку; исходные слова без признаков — строгая сторона: Exec-значение с \ или $ получает отказ, обычная команда проходит
+	// слово без признака литеральности ("a\"b" рядом с "$X") ломает склейку; исходные слова без признаков — строгая сторона: Exec-значение с \ или $ получает отказ, обычная команда проходит
 	if err != nil {
 		s.tool.Logger().Debug("kill_guard: обёрнутый systemd-run не разобрать заново, проверка по исходным словам", "error", err)
-		//nolint:fallback-return // то же: проверка по исходным словам — строгая сторона
-		return fallback, true, nil
+		// то же: проверка по исходным словам — строгая сторона
+		return &fallback, nil
 	}
 	for j := range parsed {
 		call := &parsed[j]
 		if call.Name == "systemd-run" && slices.Equal(call.Args, c.Args[i+1:]) {
 			call.Via = fallback.Via
-			return *call, true, nil
+			return call, nil
 		}
 	}
 	// При неизвестном слове ArgLiteral не гарантирован даже для отдельного
 	// вызова. Проверяем исходные аргументы, не приписывая им признаки
 	// другого разбора.
-	return fallback, true, nil
+	return &fallback, nil
 }
 
 // serviceExecProperties проверяет команду и Exec-свойства временной службы.
@@ -740,4 +678,44 @@ func xargsReplaceString(opts []string) string {
 		}
 	}
 	return repl
+}
+
+// run0ValueOptions опции run0 со значением отдельным словом (run0 --help,
+// systemd 259)
+var run0ValueOptions = []string{"-u", "--user", "-g", "--group", "-D", "--chdir", "--machine", "--unit", "--property",
+	"--description", "--slice", "--nice", "--setenv", "--background", "--shell-prompt-prefix", "--area", "--lightweight"}
+
+// run0Options свойства --property run0, место первого слова команды и
+// viaShell — --via-shell или -i: слова команды run0 склеит в скрипт sh -c.
+// run0 запускает службу, как systemd-run, и Exec-свойства исполнит менеджер
+func run0Options(args []string) (props []word, start int, viaShell bool) {
+	i := 0
+	for ; i < len(args) && strings.HasPrefix(args[i], "-") && args[i] != "-"; i++ {
+		switch a := args[i]; {
+		case a == "--":
+			return props, i + 1, viaShell
+		case a == "--via-shell" || a == "-i":
+			viaShell = true
+		case strings.HasPrefix(a, "--property="):
+			v := strings.TrimPrefix(a, "--property=")
+			props = append(props, word{text: v, literal: !computedArg(v)})
+		case a == "--property" && i+1 < len(args):
+			i++
+			props = append(props, word{text: args[i], literal: !computedArg(args[i])})
+		case slices.Contains(run0ValueOptions, a):
+			i++
+		}
+	}
+	return props, i, viaShell
+}
+
+// run0Service проверяет то, что служба run0 исполнит помимо видимой
+// разбору команды: Exec-свойства и подстановку окружения systemd в имени
+// команды или её глаголе (run0 --setenv=K=ki podman '${K}ll')
+func (s *killScan) run0Service(c shellcmd.Call) error {
+	props, start, _ := run0Options(c.Args)
+	if s.serviceCommandHasDynamicSelector(c, c.Args, start, 0) {
+		s.addToolReason("команда службы run0 содержит литеральную подстановку systemd, которая может выбрать подкоманду", systemdRunHiddenHint, false)
+	}
+	return s.unitExecPropertyValues(c, props, func(string) bool { return false })
 }

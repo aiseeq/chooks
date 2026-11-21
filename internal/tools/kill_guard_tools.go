@@ -284,12 +284,14 @@ func loginctlReason(args []word) string {
 	if len(ops) == 0 {
 		return ""
 	}
-	switch verb := ops[0].text; verb {
-	case "terminate-user", "kill-user", "terminate-session", "kill-session", "terminate-seat":
+	if verb := ops[0].text; slices.Contains(loginctlEndVerbs, verb) {
 		return "loginctl " + verb + " " + loginEndEffect
 	}
 	return ""
 }
+
+// loginctlEndVerbs команды loginctl, которые завершают процессы сеанса
+var loginctlEndVerbs = []string{"terminate-user", "kill-user", "terminate-session", "kill-session", "terminate-seat"}
 
 // systemctlValues опции systemctl со значением отдельным словом
 var systemctlValues = []string{

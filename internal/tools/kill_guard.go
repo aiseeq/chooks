@@ -214,11 +214,34 @@ func scriptArgs(c shellcmd.Call) ([]string, bool) {
 	switch {
 	case slices.Contains(scriptRunners, c.Name):
 		return c.Args, true
+	case c.Name == "script":
+		for i, a := range c.Args {
+			if a == "--command" || a == "-c" || strings.HasPrefix(a, "--command=") {
+				if strings.Contains(a, "=") {
+					return []string{strings.SplitN(a, "=", 2)[1]}, true
+				}
+				if i+1 < len(c.Args) {
+					return []string{c.Args[i+1]}, true
+				}
+				return nil, true
+			}
+			if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.Contains(a[1:], "c") {
+				if i+1 < len(c.Args) {
+					return []string{c.Args[i+1]}, true
+				}
+				return nil, true
+			}
+		}
 	case c.Name == "env" && slices.ContainsFunc(c.Args, envSplitOption):
 		return c.Args, true
 	case shellcmd.IsShell(c.Name):
 		if script, ok := shellScript(c.Args); ok {
 			return []string{script}, true
+		}
+		for _, a := range c.Args {
+			if (strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+")) && shellCommandOption(a) {
+				return nil, true
+			}
 		}
 	}
 	return nil, false
@@ -354,15 +377,26 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		}
 	}
 	if !s.signalWord {
+		if s.implicitElevatedScriptInput(c, calls) {
+			s.addReason(scriptInputReason(c.Name))
+		}
 		return s.signal(c, calls)
 	}
 	script, runner := scriptArgs(c)
 	fed := ""
-	if runner {
+	if runner || (slices.Contains(c.Via, "xargs") || slices.Contains(c.Via, "parallel")) &&
+		slices.Contains(c.Via, "-c") && implicitShellArgRe.MatchString(c.Raw) {
 		fed = fedIntoScript(c, calls)
+		if fed == "xargs" && !slices.ContainsFunc(xargsOptions(c, calls), replaceOption) &&
+			harmlessImplicitXargsInput(c, s.inputOf(c)) {
+			fed = ""
+		}
 	}
 	switch {
 	case c.ScriptInput:
+		if harmlessImplicitXargsScriptInput(c, calls, s) {
+			break
+		}
 		// оболочка исполняет текст из ввода или <(…) (bash <(…), source
 		// <(…), … | bash -): shellcmd его не читает, kill в нём не виден
 		s.addReason(scriptInputReason(c.Name))
@@ -383,7 +417,93 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	return s.signal(c, calls)
 }
 
+// implicitElevatedScriptInput covers an unread argument stream that xargs or
+// parallel appends to a privileged -c invocation. A visible literal stream
+// is handled by the ordinary script check; unknown input fails closed.
+func (s *killScan) implicitElevatedScriptInput(c shellcmd.Call, calls []shellcmd.Call) bool {
+	usesInput := scriptCommandInput(c) && scriptUsesImplicitArgument(c)
+	if !afterXargs(c) || c.ScriptInput || !usesInput {
+		return false
+	}
+	in := s.inputOf(c)
+	if in.src != stdinPipe && in.src != stdinFile && in.src != stdinRedirect {
+		return false
+	}
+	if harmlessImplicitXargsInput(c, in) {
+		return false
+	}
+	if c.Name == "script" {
+		return true
+	}
+	for _, wrapper := range c.Via {
+		switch wrapper {
+		case "pkexec", "sudo", "doas", "su", "run0", "runuser", "systemd-run":
+			return true
+		}
+	}
+	return false
+}
+
+// knownHarmlessInput recognizes a literal echo/printf producer in the input
+// scope, so a known benign argument does not become a blanket refusal.
+func knownHarmlessInput(in stdinSpan) bool {
+	if in.feed == "" {
+		return false
+	}
+	calls, err := shellcmd.Calls(in.feed)
+	if err != nil || len(calls) == 0 {
+		return false
+	}
+	producer := calls[0]
+	if producer.Name != "echo" && producer.Name != "printf" {
+		return false
+	}
+	value := echoedValue(producer)
+	if value == "" || signalWordRe.MatchString(unquoted(value)) {
+		return false
+	}
+	return true
+}
+
+// harmlessImplicitXargsInput preserves the known xargs exception. With no
+// script operand, run0 and systemd-run still refuse even literal input as a
+// script; when -c already has a script, that same input is only $0/arguments.
+func harmlessImplicitXargsInput(c shellcmd.Call, in stdinSpan) bool {
+	if !knownHarmlessInput(in) {
+		return false
+	}
+	args, hasScript := scriptArgs(c)
+	if hasScript && len(args) > 0 {
+		return true
+	}
+	return !slices.Contains(c.Via, "run0") && !slices.Contains(c.Via, "systemd-run")
+}
+
+func harmlessImplicitXargsScriptInput(c shellcmd.Call, calls []shellcmd.Call, s *killScan) bool {
+	if afterXargs(c) && slices.Contains(c.Via, "-c") && implicitShellArgRe.MatchString(c.Raw) &&
+		knownHarmlessInput(s.inputOf(c)) {
+		return true
+	}
+	for _, c := range calls {
+		args, ok := scriptArgs(c)
+		if !afterXargs(c) || !shellcmd.IsShell(c.Name) || !ok || len(args) == 0 ||
+			!scriptUsesImplicitArgument(c) || !harmlessImplicitXargsInput(c, s.inputOf(c)) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func (s *killScan) rewrittenCall(c shellcmd.Call, calls []shellcmd.Call) (bool, error) {
+	if c.Name == "sem" && s.signalWord {
+		if script, ok := parallelShellCall(append([]string{"--semaphore"}, c.Args...), &c); ok {
+			if inner, err := shellcmd.Calls(script); err == nil && parallelHasElevatedScript(inner) {
+				s.addReason("sem передаёт неявный аргумент команде оболочки за привилегированной обёрткой")
+				return true, nil
+			}
+		}
+	}
 	if c.Name == "sem" && systemdRunElsewhere(c, calls) {
 		return true, nil
 	}
@@ -706,10 +826,60 @@ func fedIntoScript(c shellcmd.Call, calls []shellcmd.Call) string {
 	if slices.Contains(c.Via, "parallel") {
 		return "parallel"
 	}
-	if slices.ContainsFunc(xargsOptions(c, calls), replaceOption) {
+	options := xargsOptions(c, calls)
+	if slices.ContainsFunc(options, replaceOption) {
+		return "xargs"
+	}
+	// xargs без -I дописывает входные слова в конец вызова. Для -c они
+	// остаются значимыми и при уже заданном скрипте (как $0), поэтому не
+	// снимай отказ, который основная проверка даёт по тексту этого ввода.
+	if slices.Contains(c.Via, "xargs") && scriptUsesImplicitArgument(c) {
+		return "xargs"
+	}
+	if slices.Contains(c.Via, "xargs") && slices.Contains(c.Via, "-c") && implicitShellArgRe.MatchString(c.Raw) {
 		return "xargs"
 	}
 	return ""
+}
+
+// scriptCommandInput сообщает, что вызов исполняет операнд команды как
+// скрипт: оболочка с -c или script -c. Сюда xargs может дописать ввод как
+// скрипт либо как $0; оба случая требуют проверки.
+func scriptCommandInput(c shellcmd.Call) bool {
+	_, ok := scriptArgs(c)
+	if !ok {
+		return false
+	}
+	if shellcmd.IsShell(c.Name) || c.Name == "script" {
+		return true
+	}
+	if c.Name == "su" || c.Name == "runuser" {
+		return slices.ContainsFunc(c.Args, func(a string) bool {
+			return strings.HasPrefix(a, "-") && shellCommandOption(a)
+		})
+	}
+	return false
+}
+
+var implicitShellArgRe = regexp.MustCompile(`\$(?:[0-9]+|[@*])|\$\{(?:[0-9]+|[@*])\}`)
+
+func scriptUsesImplicitArgument(c shellcmd.Call) bool {
+	if c.Name == "su" || c.Name == "runuser" {
+		for i, a := range c.Args {
+			if strings.HasPrefix(a, "-") && shellCommandOption(a) {
+				return i+1 >= len(c.Args)
+			}
+		}
+		return false
+	}
+	args, ok := scriptArgs(c)
+	if !ok {
+		return false
+	}
+	if len(args) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(args, func(a string) bool { return implicitShellArgRe.MatchString(a) })
 }
 
 // replaceOption опция xargs, подставляющая ввод в аргументы команды

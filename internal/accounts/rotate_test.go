@@ -176,6 +176,84 @@ func TestRotatePrefersNearestReset(t *testing.T) {
 	}
 }
 
+// Ошибка обновления токена неактивной учётки объясняется в WARN с её именем.
+func TestInactiveLoginRefreshFailureIsWarned(t *testing.T) {
+	f := twoAccounts(t)
+	if err := os.WriteFile(f.logFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := f.store()
+	target, err := s.find(personal.email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := target.oauth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.ExpiresAt = f.now.Add(time.Minute).UnixMilli()
+	target.OAuth, err = json.Marshal(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.UsageCheckedAt = time.Time{}
+	if active := s.byUUID(s.Active); active != nil {
+		active.UsageCheckedAt = f.now
+	}
+	if err := saveStore(f.p, s); err != nil {
+		t.Fatal(err)
+	}
+	f.dead["personal"] = true
+	f.limits.set(work.email, 30, f.now.Add(3*day))
+	if _, err := f.r.Rotate(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	log, err := os.ReadFile(f.logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(log); !strings.Contains(got, "level=WARN msg=\"accounts: inactive login refresh failed\"") ||
+		!strings.Contains(got, "account="+personal.email) || !strings.Contains(got, "invalid_grant") {
+		t.Errorf("нет WARN с учёткой и причиной отказа обновления:\n%s", got)
+	}
+}
+
+// Если ни одна учётка не подходит, ротация перечисляет причины по каждой.
+func TestRotateNoTargetWarnsPerAccount(t *testing.T) {
+	f := twoAccounts(t)
+	if err := os.WriteFile(f.logFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := f.store()
+	dead, err := s.find(personal.email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead.Dead = "обновление отклонено"
+	if active := s.byUUID(s.Active); active != nil {
+		active.UsageCheckedAt = f.now
+	}
+	if err := saveStore(f.p, s); err != nil {
+		t.Fatal(err)
+	}
+	f.limits.set(work.email, 100, f.now.Add(3*day))
+	if _, err := f.r.Rotate(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	log, err := os.ReadFile(f.logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(log)
+	if !strings.Contains(got, "level=WARN msg=\"accounts: no switch\"") ||
+		!strings.Contains(got, personal.email) || !strings.Contains(got, "мёртв") ||
+		!strings.Contains(got, work.email) || !strings.Contains(got, "100%") {
+		t.Errorf("нет причины по каждой непригодной учётке:\n%s", got)
+	}
+}
+
 // Перед подменой токен активной учётки из файла уходит в хранилище: Claude
 // Code мог обновить его после последней сверки
 func TestSwitchSavesActiveTokenFirst(t *testing.T) {

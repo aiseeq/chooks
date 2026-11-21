@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"path"
 	"regexp"
 	"slices"
@@ -23,21 +24,19 @@ const depthHint = "Запусти напрямую: сигнал или оста
 // слова kill в команде может не быть
 var run0WordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])run0([^[:alnum:]_.-]|$)`)
 
-// feedLinesMark пометка в Via вызова из строки задания parallel или sem
-// простой формы: дописанный ввод уже стоит в тексте строки
-const feedLinesMark = "feed-lines"
+// notLevels слова Via, которые не уровень обёртки: pipe — пометка разбора,
+// command, builtin, exec, time и eval снимает сама оболочка, -exec и -ok —
+// часть уровня find
+var notLevels = []string{"-c", "pipe", "command", "builtin", "exec", "time", "eval", "-exec", "-execdir", "-ok", "-okdir"}
 
-// notLevels слова Via, которые не уровень обёртки: pipe и feed-lines —
-// пометки разбора, command, builtin, exec и time снимает сама оболочка
-var notLevels = []string{"-c", "pipe", "command", "builtin", "exec", "time", feedLinesMark}
-
-// wrapperLevels число уровней обёрток в Via вызова. Оболочка с литеральным
-// текстом (bash -c, bash -euo pipefail -c, sh -ec: akit пишет их как
-// «оболочка, -c») уровнем не считается — команда в ней судится как прямая
+// wrapperLevels число уровней обёрток в Via вызова. Оболочка в Via —
+// всегда с текстом, который разбор прочёл литералом (bash -c, bash -euo
+// pipefail -c, sh -ec, bash <<< '…', heredoc): уровнем она не считается,
+// команда в ней судится как прямая
 func wrapperLevels(via []string) int {
 	n := 0
-	for i, v := range via {
-		if !slices.Contains(notLevels, v) && (i+1 == len(via) || via[i+1] != "-c") {
+	for _, v := range via {
+		if !slices.Contains(notLevels, v) && !inlineShells[path.Base(v)] && path.Base(v) != "fish" {
 			n++
 		}
 	}
@@ -81,8 +80,8 @@ func depthSignal(c shellcmd.Call) (name string, ok bool) {
 
 // depthReason отказ правила глубины на вызов c: под двумя и более
 // обёртками стоит сигнал или остановка либо имя, вычисляемое при запуске,
-// рядом со словом сигнала. Вызов в скрипте ssh и за systemd-run на другую
-// машину исполнится не здесь
+// а в тексте вызова видна команда сигнала ($(echo kill) 1). Вызов в
+// скрипте ssh и за systemd-run на другую машину исполнится не здесь
 func (s *killScan) depthReason(c shellcmd.Call, calls []shellcmd.Call) string {
 	if wrapperLevels(c.Via) < 2 || slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
 		return ""
@@ -91,8 +90,8 @@ func (s *killScan) depthReason(c shellcmd.Call, calls []shellcmd.Call) string {
 	if name, ok := depthSignal(c); ok && !harmlessKill(c) {
 		return name + " под обёртками " + chain + ": глубже одной обёртки хук команду не разбирает"
 	}
-	if (c.Name == "" || strings.ContainsAny(c.Name, "$`{}")) && s.signalWord {
-		return "имя команды под обёртками " + chain + " вычисляется при запуске, а в команде есть слово kill: глубже одной обёртки хук команду не разбирает"
+	if _, ok := signalWords(c.Raw); ok && (c.Name == "" || strings.ContainsAny(c.Name, "$`")) {
+		return "имя команды под обёртками " + chain + " вычисляется при запуске, а в её тексте видна команда сигнала: глубже одной обёртки хук команду не разбирает"
 	}
 	return ""
 }
@@ -111,184 +110,136 @@ func harmlessKill(c shellcmd.Call) bool {
 // feedMarkers слова источников parallel
 var feedMarkers = []string{":::", "::::", ":::+", "::::+"}
 
-// parallelValueOptions частые опции parallel со значением отдельным словом.
-// Прочие считаются флагами: ошибка в месте команды бывает только в сложной
-// форме, а её слова проверяет signalWords
-var parallelValueOptions = []string{"-j", "--jobs", "-n", "--max-args", "-P", "-L", "-l", "-d", "--delimiter",
-	"-S", "--sshlogin", "--joblog", "--results", "--workdir", "--env", "--block", "--tagstring", "--halt",
-	"--timeout", "--delay", "-C", "--colsep", "--retries", "--tmpdir", "--header", "--arg-sep", "-s", "-e", "-E", "-I"}
+// feedSplitOptions опции parallel и xargs, которые делят ввод или списки не
+// по строкам и словам или отдают его файлом (--cat, --fifo): значения из
+// них хук не вычисляет
+var feedSplitOptions = []string{"--pipe", "--pipepart", "--cat", "--fifo", "-C", "--colsep", "--arg-sep", "--arg-file-sep", "-d", "--delimiter", "-0", "--null"}
 
-// feedForm слова parallel или sem: команда и источники
-type feedForm struct {
-	cmd []string
-	// lists — значения списков :::; stdin — источник — ввод (:::: -, -a -
-	// или без источников)
-	lists [][]string
-	// simple — опций и подстановок {} нет, источники — списки ::: или один
-	// ввод: строки заданий видны (feedLines); wait — sem --wait без --sql*;
-	// files — источник — файл
-	stdin, simple, wait, files bool
-}
-
-// parseFeed слова parallel (sem — с semaphore)
-func parseFeed(args []string, semaphore bool) feedForm {
-	f := feedForm{simple: true}
-	i, semaphore, wait := f.options(args, semaphore)
-	if semaphore {
-		f.cmd, f.wait = args[i:], wait
-		return f
+// feedWords слова parallel, sem или xargs: head — опции и команда, values —
+// значения списков :::, stdin — задания или аргументы идут из ввода,
+// literal — источник один и литерал: нет файлов, --pipe, деления ввода,
+// подстановок в списках, сочетания нескольких источников
+func feedWords(name string, args []string) (head, values []string, stdin, literal bool) {
+	j := len(args)
+	if k := slices.IndexFunc(args, func(a string) bool { return slices.Contains(feedMarkers, a) }); k >= 0 && name == "parallel" {
+		j = k
 	}
-	j := i
-	for j < len(args) && !slices.Contains(feedMarkers, args[j]) {
-		j++
+	head, literal = args[:j], true
+	sources := 0
+	file := func(f string) {
+		in := f == "-" || stdinPathRe.MatchString(path.Clean(f))
+		sources, stdin, literal = sources+1, stdin || in, literal && in
 	}
-	f.cmd = args[i:j]
-	f.sources(args[j:])
-	f.stdin = f.stdin || len(f.lists) == 0 && !f.files
-	if f.files || f.stdin && len(f.lists) > 0 || slices.ContainsFunc(f.cmd, func(w string) bool { return strings.Contains(w, "{") }) ||
-		slices.ContainsFunc(f.lists, func(l []string) bool { return slices.ContainsFunc(l, computedArg) }) {
-		f.simple = false
-	}
-	return f
-}
-
-// options разбирает опции в начале args: i — место первого слова после
-// них; semaphore — sem или --semaphore; wait — --wait без --sql*
-func (f *feedForm) options(args []string, semaphore bool) (i int, sem, wait bool) {
-	sql := false
-	for ; i < len(args) && strings.HasPrefix(args[i], "-") && args[i] != "-"; i++ {
-		a := args[i]
-		if a == "--" {
-			return i + 1, semaphore, wait && !sql
-		}
+	for i, a := range head {
 		switch {
-		case (a == "-a" || a == "--arg-file") && i+1 < len(args):
-			i++
-			f.source(args[i])
-			continue
-		case a == "--semaphore":
-			semaphore = true
-		case a == "--wait" || a == "-W":
-			wait = true
-		case strings.HasPrefix(a, "--sql"):
-			sql = true
-		}
-		f.simple = false
-		if slices.Contains(parallelValueOptions, a) {
-			i++
+		case (a == "-a" || a == "--arg-file") && i+1 < len(head):
+			file(head[i+1])
+		case slices.Contains(feedSplitOptions, a):
+			literal = false
 		}
 	}
-	return min(i, len(args)), semaphore, wait && !sql
-}
-
-// sources разбирает источники после команды: списки ::: и файлы ::::
-func (f *feedForm) sources(words []string) {
 	from := ""
-	for _, w := range words {
+	for _, a := range args[j:] {
 		switch {
-		case slices.Contains(feedMarkers, w):
-			from = w
-			if w == ":::" {
-				f.lists = append(f.lists, nil)
+		case slices.Contains(feedMarkers, a):
+			from = a
+			if !strings.HasPrefix(a, "::::") {
+				sources++
 			}
-			f.simple = f.simple && !strings.HasSuffix(w, "+")
-		case from == ":::":
-			f.lists[len(f.lists)-1] = append(f.lists[len(f.lists)-1], w)
-		case from == "::::":
-			f.source(w)
+		case strings.HasPrefix(from, "::::"):
+			file(a)
+		default:
+			values, literal = append(values, a), literal && !computedArg(a)
 		}
 	}
+	return head, values, stdin || name != "sem" && sources == 0, literal && sources <= 1
 }
 
-// source источник-файл: - — ввод
-func (f *feedForm) source(file string) {
-	f.stdin, f.files = f.stdin || file == "-", f.files || file != "-"
-}
-
-// maxFeedLines предел строк заданий простой формы: больше — сложная форма
-const maxFeedLines = 64
-
-// feedInput ввод вызова c текстом: <<< и heredoc без подстановок, пайп из
-// echo или printf с литералом. bodies — тексты всех перенаправлений ввода
-// и echo или printf в пайпе (слова сигнала ищутся во всех); literal — последний
-// ввод известен, text — он
-func (s *killScan) feedInput(c shellcmd.Call) (text string, literal bool, bodies []string) {
+// feedInput строки ввода c, если он виден литералом (literal): <<< и heredoc
+// без подстановок, пайп из echo или printf с литералом; ввод агента пуст.
+// shown — видимый текст ввода и в нелитеральном случае: тело <<< и heredoc,
+// команда echo или printf в пайпе
+func (s *killScan) feedInput(c shellcmd.Call) (lines []string, shown string, literal bool) {
 	redirected := false
 	for _, r := range c.Redirs {
 		if r.N != "" && r.N != "0" || !strings.HasPrefix(r.Op, "<") {
 			continue
 		}
-		redirected = true
+		redirected, shown, literal = true, "", false
 		switch r.Op {
 		case "<<<":
-			bodies = append(bodies, r.Target)
-			text, literal = r.Target+"\n", !strings.ContainsAny(r.Target, "$`\\")
+			shown = r.Target
 		case "<<", "<<-":
-			bodies = append(bodies, r.Body)
-			text, literal = r.Body, !strings.ContainsAny(r.Body, "$`\\")
+			shown = r.Body
 		default:
-			text, literal = "", false
-		}
-	}
-	if redirected {
-		return text, literal, bodies
-	}
-	in := s.inputOf(c)
-	if in.src != stdinPipe || in.feed == "" {
-		return "", in.src == stdinOwn, nil
-	}
-	calls, err := shellcmd.Calls(strings.TrimSuffix(in.feed, " | sh"))
-	if err != nil {
-		s.tool.Logger().Debug("kill_guard: пайп в parallel не разобран, ввод не литерал", "feed", in.feed, "error", err)
-		return "", false, nil
-	}
-	if len(calls) != 1 || calls[0].Name != "echo" && calls[0].Name != "printf" {
-		return "", false, nil
-	}
-	if v := echoedValue(calls[0]); v != "" {
-		return v + "\n", true, []string{in.feed}
-	}
-	return "", false, []string{in.feed}
-}
-
-// feedLines строки заданий простой формы: значения ввода или произведение
-// списков :::; без команды строка — сама команда, с командой — её
-// аргументы в кавычках, как их дописывает parallel. ok false — строк
-// больше предела
-func feedLines(f feedForm, input string) ([]string, bool) {
-	rows := [][]string{{}}
-	if f.stdin {
-		rows = nil
-		for line := range strings.SplitSeq(strings.TrimSuffix(input, "\n"), "\n") {
-			if line != "" {
-				rows = append(rows, []string{line})
-			}
-		}
-	}
-	for _, l := range f.lists {
-		var next [][]string
-		for _, r := range rows {
-			for _, v := range l {
-				next = append(next, append(slices.Clone(r), v))
-			}
-		}
-		if rows = next; len(rows) > maxFeedLines {
-			return nil, false
-		}
-	}
-	lines := make([]string, 0, len(rows))
-	for _, r := range rows {
-		if len(f.cmd) == 0 {
-			lines = append(lines, strings.Join(r, " "))
 			continue
 		}
-		words := slices.Clone(f.cmd)
-		for _, v := range r {
-			words = append(words, singleQuotedWord(v))
-		}
-		lines = append(lines, strings.Join(words, " "))
+		literal = !strings.ContainsAny(shown, "$`\\")
 	}
-	return lines, len(rows) <= maxFeedLines
+	if !redirected {
+		in := s.inputOf(c)
+		if in.src == stdinOwn {
+			return nil, "", true
+		}
+		if in.src != stdinPipe {
+			return nil, "", false
+		}
+		calls, err := shellcmd.Calls(strings.TrimSuffix(in.feed, " | sh"))
+		if err != nil {
+			s.tool.Logger().Debug("kill_guard: пайп в parallel или xargs не разобран, ввод не литерал", "feed", in.feed, "error", err)
+			return nil, in.feed, false
+		}
+		if len(calls) != 1 || calls[0].Name != "echo" && calls[0].Name != "printf" {
+			return nil, "", false
+		}
+		shown = echoedValue(calls[0])
+		if literal = shown != ""; !literal {
+			shown = in.feed
+		}
+	}
+	if !literal {
+		return nil, shown, false
+	}
+	return strings.FieldsFunc(shown, func(r rune) bool { return r == '\n' }), shown, true
+}
+
+// feeders команды, которые собирают команду из своих слов и источников
+var feeders = []string{"parallel", "sem", "xargs"}
+
+// feedSignals вызовы сигнала или остановки (depthSignal, кроме harmlessKill)
+// и вложенные feeders в команде head с каждым значением values: строка задания — команда и
+// значение одним текстом, без команды — само значение. Начало команды —
+// start (место, найденное разбором akit, feedStart); без него — первое
+// слово head не опция, а если слово сразу за опцией (может быть её
+// значением) — пробуется и следующее. err — текст заданий не разобран
+func feedSignals(head, values []string, start int) ([]shellcmd.Call, error) {
+	for i := max(start, 0); i <= len(head); i++ {
+		if i < len(head) && strings.HasPrefix(head[i], "-") {
+			continue
+		}
+		cmd := strings.Join(head[i:], " ")
+		lines := []string{}
+		for _, v := range values {
+			lines = append(lines, strings.TrimSpace(cmd+" "+v))
+		}
+		if len(values) == 0 {
+			lines = []string{cmd}
+		}
+		calls, err := shellcmd.Calls(strings.Join(lines, "\n"))
+		if err != nil {
+			return nil, fmt.Errorf("строки заданий %q: %w", lines, err)
+		}
+		var sig []shellcmd.Call
+		for j := range calls {
+			if _, ok := depthSignal(calls[j]); ok && !harmlessKill(calls[j]) || slices.Contains(feeders, calls[j].Name) {
+				sig = append(sig, calls[j])
+			}
+		}
+		if len(sig) > 0 || start >= 0 || i == len(head) || i == 0 || !strings.HasPrefix(head[i-1], "-") {
+			return sig, nil
+		}
+	}
+	return nil, nil
 }
 
 // signalWords — в словах текста (разбит по всему, кроме букв, цифр и
@@ -306,73 +257,117 @@ func signalWords(text string) (string, bool) {
 	return "", false
 }
 
-// feedCall проверяет parallel и sem: команду и аргументы они собирают из
-// своих слов и источников. Простая форма с литеральным вводом — строки
-// заданий проверяются вызовами под parallel, как прямые. Прочее хук не
-// вычисляет: отказ, если в словах и вводе есть сигнал или остановка, или
-// если имя команды приходит из источников под второй обёрткой
+// feedCall проверяет parallel, sem и xargs: команду и аргументы они
+// собирают из своих слов и источников. Команда с литеральными аргументами
+// и значениями ::: (и литеральным вводом) судится одним текстом как
+// команда под одной обёрткой. Источник не литерал (::::, -a, ввод, --pipe),
+// а в тексте видна команда сигнала или остановки — отказ: такую форму хук
+// не вычисляет. Без видимого сигнала — пропуск: граница защиты — ошибки
+// агента, содержимое файла хук не видит
 func (s *killScan) feedCall(c shellcmd.Call, calls []shellcmd.Call) error {
-	if c.Name != "parallel" && c.Name != "sem" || slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
+	if !slices.Contains(feeders, c.Name) || slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
 		return nil
 	}
-	f := parseFeed(c.Args, c.Name == "sem")
-	if f.wait {
+	head, values, stdin, literal := feedWords(c.Name, c.Args)
+	if semWaits(c.Name, head) {
 		return nil
 	}
-	input, literal, bodies := s.feedInput(c)
-	if f.simple && (literal || !f.stdin) {
-		if lines, ok := feedLines(f, input); ok {
-			return s.feedLinesCalls(c, calls, lines)
+	lines, shown, ok := s.feedInput(c)
+	if stdin {
+		values, literal = append(values, lines...), literal && ok
+	}
+	text := feedText(head, values, shown)
+	sig, err := feedSignals(head, values, feedStart(&c, calls))
+	if err != nil {
+		// текст заданий не разобран: судится как нелитеральный источник
+		s.tool.Logger().Debug("kill_guard: строки заданий не разобраны", "call", c.Name, "error", err)
+		s.feedDeny(c, nil, text)
+		return nil
+	}
+	if !literal {
+		s.feedDeny(c, sig, text)
+		return nil
+	}
+	if len(sig) == 0 && slices.ContainsFunc(head, func(a string) bool {
+		return strings.Contains(a, "{") || a == "-I" || a == "-i" || strings.HasPrefix(a, "--replace")
+	}) {
+		// значения встают в команду подстановкой (-I, {}), а не словами в
+		// конце: сигнал в них хук к команде не приложит
+		s.feedDeny(c, nil, strings.Join(values, "\n"))
+	}
+	for i := range sig {
+		sig[i].Via = slices.Concat(c.Via, []string{c.Name}, sig[i].Via)
+		sig[i].Offset = -1
+		if err := s.call(sig[i], slices.Concat(calls, sig)); err != nil {
+			return err
 		}
-	}
-	via := strings.Join(append(slices.Clone(c.Via), c.Name), " → ") + ": "
-	if name, ok := signalWords(strings.Join(slices.Concat(c.Args, bodies), "\n")); ok {
-		s.addToolReason(via+name+" с целями или именем из источников и опций "+c.Name+": такую форму хук не вычисляет", depthHint, false)
-	} else if len(f.cmd) == 0 && (wrapperLevels(c.Via) >= 1 || !literal && s.signalWord) {
-		s.addToolReason(via+"имя команды "+c.Name+" берёт из источников: под второй обёрткой или рядом со словом kill хук его не вычисляет", depthHint, false)
 	}
 	return nil
 }
 
-// expandedFeed — c из слов команды parallel или sem простой формы с
-// литеральным вводом: её строки заданий проверены вызовами (feedLinesCalls),
-// дописанный ввод c уже виден в них
-func (s *killScan) expandedFeed(c shellcmd.Call, calls []shellcmd.Call) bool {
+// semWaits — sem --wait без --sql*: ждёт заданий и команду не запускает
+func semWaits(name string, head []string) bool {
+	return name == "sem" && slices.ContainsFunc(head, func(a string) bool { return a == "--wait" || a == "-W" }) &&
+		!slices.ContainsFunc(head, func(a string) bool { return strings.HasPrefix(a, "--sql") })
+}
+
+// feedText текст, где ищутся слова сигнала нелитеральной формы: значения
+// и ввод; слова команды — только у --arg-sep, где они тоже значения: grep
+// pkill в команде xargs — не сигнал
+func feedText(head, values []string, shown string) string {
+	words := slices.Concat(values, []string{shown})
+	if slices.ContainsFunc(head, func(a string) bool { return a == "--arg-sep" || a == "--arg-file-sep" }) {
+		words = append(words, head...)
+	}
+	return strings.Join(words, "\n")
+}
+
+// feedStart место команды среди слов c по разбору akit: вызов под c с тем
+// же текстом; -1 — разбор его не отдал (sem, команда из ::: )
+func feedStart(c *shellcmd.Call, calls []shellcmd.Call) int {
+	via := append(slices.Clone(c.Via), c.Name)
 	for i := range calls {
-		p := &calls[i]
-		if p.Name != "parallel" && p.Name != "sem" || p.Offset < 0 || c.Offset < p.Offset || c.Offset >= p.Offset+len(p.Raw) || c.Name == p.Name && slices.Equal(c.Args, p.Args) {
-			continue
-		}
-		f := parseFeed(p.Args, p.Name == "sem")
-		input, literal, _ := s.feedInput(*p)
-		if _, ok := feedLines(f, input); ok && f.simple && (literal || !f.stdin) {
-			return true
+		if o := &calls[i]; o.Raw == c.Raw && slices.Equal(o.Via, via) {
+			return slices.Index(c.Args, o.Name)
 		}
 	}
-	return false
+	return -1
 }
 
-// feedLinesCalls проверяет строки заданий простой формы вызовами под c
-func (s *killScan) feedLinesCalls(c shellcmd.Call, calls []shellcmd.Call, lines []string) error {
-	for _, line := range lines {
-		inner, err := shellcmd.Calls(line)
-		if err != nil {
-			if s.killText {
-				s.addToolReason(c.Name+": строка задания «"+line+"» не разобрана ("+err.Error()+"): проверить её нельзя", depthHint, false)
-			}
+// signalIn имя команды сигнала среди sig, у вложенных feeders — в их
+// заданиях (в словах значений, если задания не разобраны)
+func signalIn(sig []shellcmd.Call) (string, bool) {
+	for i := range sig {
+		if n, ok := depthSignal(sig[i]); ok {
+			return n, true
+		}
+		if !slices.Contains(feeders, sig[i].Name) {
 			continue
 		}
-		for i := range inner {
-			inner[i].Via = slices.Concat(c.Via, []string{c.Name, feedLinesMark}, inner[i].Via)
-			inner[i].Offset = -1
+		head, values, _, _ := feedWords(sig[i].Name, sig[i].Args)
+		sub, err := feedSignals(head, values, -1)
+		n, ok := signalIn(sub)
+		if err != nil {
+			n, ok = signalWords(feedText(head, values, ""))
 		}
-		for i := range inner {
-			if err := s.call(inner[i], slices.Concat(calls, inner)); err != nil {
-				return err
-			}
+		if ok {
+			return n, true
 		}
 	}
-	return nil
+	return "", false
+}
+
+// feedDeny отказ на c с нелитеральным источником, если видна команда
+// сигнала: среди вызовов sig (signalIn) или в словах текста shown
+func (s *killScan) feedDeny(c shellcmd.Call, sig []shellcmd.Call, shown string) {
+	name, ok := signalWords(shown)
+	if n, yes := signalIn(sig); yes {
+		name, ok = n, true
+	}
+	if ok {
+		via := strings.Join(append(slices.Clone(c.Via), c.Name), " → ")
+		s.addToolReason(via+": "+name+" с целями или командой из источников "+c.Name+" (файл, ввод, --pipe): такую форму хук не вычисляет", depthHint, false)
+	}
 }
 
 // wrappedFeeds вызовы parallel, sem и run0, которые обёртки среди calls
@@ -414,7 +409,7 @@ func (s *killScan) withWrappedFeeds(calls []shellcmd.Call) []shellcmd.Call {
 	if err != nil {
 		s.tool.Logger().Debug("kill_guard: parallel или run0 за обёрткой не найти", "error", err)
 		if s.killText {
-			s.addReason("parallel или run0 за обёрткой: " + err.Error() + ": проверить их команду нельзя")
+			s.addToolReason("parallel или run0 за обёрткой: "+err.Error()+": проверить их команду нельзя", depthHint, false)
 		}
 	}
 	return append(calls, more...)

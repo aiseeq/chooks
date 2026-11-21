@@ -710,10 +710,14 @@ func run0Options(args []string) (props []word, start int, viaShell bool) {
 }
 
 // run0Service проверяет то, что служба run0 исполнит помимо видимой
-// разбору команды: Exec-свойства и подстановку окружения systemd в имени
-// команды или её глаголе (run0 --setenv=K=ki podman '${K}ll')
+// разбору команды: SuccessAction= и FailureAction=, как у systemd-run,
+// Exec-свойства и подстановку окружения systemd в имени команды или её
+// глаголе (run0 --setenv=K=ki podman '${K}ll')
 func (s *killScan) run0Service(c shellcmd.Call) error {
 	props, start, _ := run0Options(c.Args)
+	if reason, hint := unitEndActionReason(props, (unitAction{}).scope(), "run0"); reason != "" {
+		s.addToolReason(reason, hint, false)
+	}
 	if s.serviceCommandHasDynamicSelector(c, c.Args, start, 0) {
 		s.addToolReason("команда службы run0 содержит литеральную подстановку systemd, которая может выбрать подкоманду", systemdRunHiddenHint, false)
 	}

@@ -379,10 +379,7 @@ func (s *killScan) fedScriptInput(c shellcmd.Call, calls []shellcmd.Call, runner
 			harmlessImplicitXargsInput(c, s.inputOf(c)) {
 			fed = ""
 		}
-		script, _ := scriptArgs(c)
-		if fed == "parallel" && (s.expandedFeed(c, calls) || slices.Contains(c.Via, feedLinesMark) && len(script) > 0) {
-			fed = ""
-		}
+
 	}
 	return fed
 }

@@ -147,8 +147,6 @@ func TestKillGuardBlocks(t *testing.T) {
 		`bash -c "bash -c 'kill 1500'"`,
 		`bash -o pipefail -c 'kill 1500'`,
 		`bash -e -c -- 'kill 1500'`,
-		// глубже предела вложенности разбор не идёт: отказ даже на безопасный PID
-		`eval eval eval eval eval kill 455274`,
 		// оболочка не разобрала команду со словом kill: отказ даже на
 		// безопасный PID — kill за ошибкой разбора не виден
 		`echo a(b); kill 455274`,

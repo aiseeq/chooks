@@ -624,6 +624,76 @@ func TestModelGuardRoundTwo(t *testing.T) {
 	}
 }
 
+func TestModelGuardRoundThree(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	approved := filepath.Join(t.TempDir(), "approved")
+	if err := os.WriteFile(approved, []byte("opus claude-opus-5-5\nfable claude-fable-5-2\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MODELS_APPROVED", approved)
+	oldManaged := managedSettingsPath
+	managedSettingsPath = filepath.Join(t.TempDir(), "managed-settings.json")
+	t.Cleanup(func() { managedSettingsPath = oldManaged })
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	write := func(path, contents string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(cwd, ".claude/settings.json"), `{"model":"opus"}`)
+	write(filepath.Join(cwd, "proj/.claude/settings.json"), `{"model":"opus"}`)
+	cases := []struct {
+		name, tool, command string
+		reject              bool
+	}{
+		{"parameter substitution", "Bash", `M=opus; claude --model ${M/opus/fable} -p hi`, true},
+		{"parameter default operator", "Bash", `M=opus; claude --model ${M:+fable} -p hi`, true},
+		{"empty substring in model", "Bash", `M=opus; claude --model fa${M:0:0}ble -p hi`, true},
+		{"empty substring at end", "Bash", `M=opus; claude --model fable${M:0:0} -p hi`, true},
+		{"quoted replacement operator", "Bash", `M=opus; claude --model "${M//opus/fable}" -p hi`, true},
+		{"suffix operator", "Bash", `M=opus; claude --model ${M%us}fable -p hi`, true},
+		{"env substitution operator", "Bash", `M=opus; ANTHROPIC_MODEL=${M/opus/fable} claude -p hi`, true},
+		{"worker substitution operator", "Bash", `M=opus; worker run --model ${M/opus/fable} --brief b --dir /x --class c`, true},
+		{"monitor substitution operator", "Monitor", `M=opus; claude --model ${M/opus/fable} -p hi`, true},
+		{"fast model with suffix", "Bash", `F=fa; ANTHROPIC_SMALL_FAST_MODEL=${F}ble claude -p hi`, true},
+		{"fast model with two variables", "Bash", `A=fa; B=ble; ANTHROPIC_SMALL_FAST_MODEL=$A$B claude -p hi`, true},
+		{"fast model with replacement operator", "Bash", `F=opus; ANTHROPIC_SMALL_FAST_MODEL=${F/opus/fable} claude -p hi`, true},
+		{"full variable reference allowed", "Bash", `M=opus; claude --model "${M}" -p hi`, false},
+		{"cd literal assignment", "Bash", "D=" + cwd + `; cd $D && claude -p --model opus hi`, false},
+		{"cd quoted assignment", "Bash", "P=" + cwd + `; cd "$P" && claude -p --model opus hi`, false},
+		{"cd variable prefix", "Bash", "P=" + cwd + `; cd $P/proj && claude -p --model opus hi`, false},
+		{"mktemp empty cwd", "Bash", `bash -c 'd=$(mktemp -d); cd $d && claude -p --model opus hi'`, false},
+		{"prompt mentions settings redirection elsewhere", "Bash", `claude -p "проверь .claude/settings.json" > /tmp/out.txt`, false},
+		{"settings source with output redirection", "Bash", `claude --settings ` + filepath.Join(cwd, ".claude/settings.json") + ` -p hi > /tmp/out.txt`, false},
+		{"read settings source", "Bash", `jq .model ~/.claude/settings.json; claude --version`, false},
+		{"copy settings to backup", "Bash", `cp ~/.claude/settings.json /tmp/bak.json && claude -p hi`, false},
+		{"prompt mentions install and settings", "Bash", `claude -p "install deps, see settings.json"`, false},
+		{"prompt mentions agent with tee elsewhere", "Bash", `claude -p "посмотри ~/.claude/agents/fighter.md" 2>&1 | tee /tmp/log`, false},
+		{"unknown copy into settings target", "Bash", `cp /not/readable/source ` + filepath.Join(cwd, ".claude/settings.local.json") + ` && claude -p hi`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: tc.tool, CWD: cwd, Command: tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid == tc.reject {
+				t.Fatalf("reject=%v want=%v violations=%+v", !result.IsValid, tc.reject, result.Violations)
+			}
+		})
+	}
+}
+
 func TestModelGuardAgentDefinition(t *testing.T) {
 	home, project := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)

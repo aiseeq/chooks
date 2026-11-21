@@ -71,6 +71,10 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 			reasons = append(reasons, "каталог запуска неизвестен: модель не проверить")
 			continue
 		}
+		if c.unknownWrite {
+			reasons = append(reasons, "содержимое изменяемого файла настроек не проверить")
+			continue
+		}
 		if c.userOnlyCheck {
 			if c.uncertainDynamic {
 				reasons = append(reasons, "модель задана динамически после неоднозначного присваивания переменной")
@@ -106,6 +110,7 @@ type modelCandidate struct {
 	dynamic          bool
 	unknownAgent     bool
 	unknownCWD       bool
+	unknownWrite     bool
 	uncertainDynamic bool
 	settingsModel    bool
 	// userOnlyCheck — модель быстрых запросов (переменные haiku) или
@@ -276,63 +281,164 @@ func commandHomeDir(command, cwd, defaultHome string) (string, bool, bool) {
 
 var literalShellAssignment = regexp.MustCompile(`(?:^|[;|&(\n]\s*|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&()]+)`)
 var shellVariableReference = regexp.MustCompile(`\$(?:\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|([A-Za-z_][A-Za-z0-9_]*))`)
+var fullShellVariableReference = regexp.MustCompile(`^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$`)
+var simpleShellVariableReference = regexp.MustCompile(`\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))`)
 var taintedVariableWrite = regexp.MustCompile(`\b(?:for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in|read\s+(?:-[a-zA-Z]+\s+)?([A-Za-z_][A-Za-z0-9_]*)|printf\s+-v\s+([A-Za-z_][A-Za-z0-9_]*))\b`)
 
-func resolveAssignedModelValues(command string, candidates []modelCandidate) []modelCandidate {
-	assigned := map[string]string{}
-	counts := map[string]int{}
-	unsafe := map[string]bool{}
-	positions := map[string]int{}
+type shellAssignmentInfo struct {
+	value    string
+	count    int
+	position int
+	unsafe   bool
+}
+
+func shellAssignments(command string) map[string]shellAssignmentInfo {
+	assignments := map[string]shellAssignmentInfo{}
 	for _, m := range literalShellAssignment.FindAllStringSubmatchIndex(command, -1) {
 		name := command[m[2]:m[3]]
 		value := command[m[4]:m[5]]
-		counts[name]++
-		positions[name] = m[0]
-		if strings.ContainsAny(value, "$`") || strings.LastIndex(command[:m[0]], "(") > strings.LastIndex(command[:m[0]], ")") {
-			unsafe[name] = true
+		info := assignments[name]
+		info.count++
+		info.value = strings.Trim(value, "'\"")
+		info.position = m[0]
+		if strings.ContainsAny(value, "$`*?[]") || strings.LastIndex(command[:m[0]], "(") > strings.LastIndex(command[:m[0]], ")") {
+			info.unsafe = true
 		}
+		assignments[name] = info
 	}
 	for _, m := range taintedVariableWrite.FindAllStringSubmatch(command, -1) {
 		for _, name := range m[1:] {
 			if name != "" {
-				unsafe[name] = true
-				counts[name]++
+				info := assignments[name]
+				info.count++
+				info.unsafe = true
+				assignments[name] = info
 			}
 		}
 	}
-	for _, m := range literalShellAssignment.FindAllStringSubmatch(command, -1) {
-		v := strings.Trim(m[2], "'\"")
-		if counts[m[1]] == 1 && !unsafe[m[1]] && !strings.ContainsAny(v, "$`*?[]") {
-			assigned[m[1]] = v
-		}
-	}
+	return assignments
+}
+
+func resolveAssignedModelValues(command string, candidates []modelCandidate) []modelCandidate {
+	assignments := shellAssignments(command)
 	for i := range candidates {
 		if !candidates[i].dynamic {
 			continue
 		}
 		v := strings.Trim(candidates[i].value, "'\"")
-		name := ""
-		if ref := shellVariableReference.FindStringSubmatch(v); len(ref) == 3 {
-			name = ref[1]
-			if name == "" {
-				name = ref[2]
+		ref := fullShellVariableReference.FindStringSubmatch(v)
+		if len(ref) != 3 {
+			if shellVariableReference.MatchString(v) {
+				candidates[i].uncertainDynamic = true
 			}
-		}
-		if name == "" {
 			continue
 		}
-		if counts[name] > 0 && (counts[name] != 1 || unsafe[name]) {
+		name := ref[1]
+		if name == "" {
+			name = ref[2]
+		}
+		assignment, hasAssignment := assignments[name]
+		if !hasAssignment {
+			continue
+		}
+		if assignment.count != 1 || assignment.unsafe {
 			candidates[i].uncertainDynamic = true
+			continue
 		}
 		refAt := strings.Index(command, "$"+name)
 		if refAt < 0 {
 			refAt = strings.Index(command, "${"+name)
 		}
-		if resolved, ok := assigned[name]; ok && positions[name] < refAt {
-			candidates[i].value, candidates[i].dynamic = resolved, false
+		if assignment.position < refAt {
+			candidates[i].value, candidates[i].dynamic = assignment.value, false
+		} else {
+			candidates[i].uncertainDynamic = true
 		}
 	}
 	return candidates
+}
+
+func resolveAssignedPath(command, value string, referenceAt int) (string, bool) {
+	assignments := shellAssignments(command)
+	matches := simpleShellVariableReference.FindAllStringSubmatchIndex(value, -1)
+	if len(matches) == 0 {
+		return value, !strings.ContainsAny(value, "$`")
+	}
+	var resolved strings.Builder
+	last := 0
+	for _, match := range matches {
+		start, end := match[0], match[1]
+		name := ""
+		if match[2] >= 0 {
+			name = value[match[2]:match[3]]
+		}
+		if name == "" && match[4] >= 0 {
+			name = value[match[4]:match[5]]
+		}
+		assignment, ok := assignments[name]
+		if !ok || assignment.count != 1 || assignment.unsafe || assignment.position >= referenceAt+start {
+			return "", false
+		}
+		resolved.WriteString(value[last:start])
+		resolved.WriteString(assignment.value)
+		last = end
+	}
+	resolved.WriteString(value[last:])
+	return resolved.String(), !strings.ContainsAny(resolved.String(), "$`")
+}
+
+func expandedChangeDirCall(command string, call *shellcmd.Call) (*shellcmd.Call, bool, bool) {
+	copyCall := *call
+	copyCall.Args = slices.Clone(call.Args)
+	i := 0
+	for i < len(copyCall.Args) && (copyCall.Args[i] == "-P" || copyCall.Args[i] == "-L") {
+		i++
+	}
+	if i < len(copyCall.Args) && copyCall.Args[i] == "--" {
+		i++
+	}
+	if i >= len(copyCall.Args) {
+		return &copyCall, false, false
+	}
+	path := copyCall.Args[i]
+	rawAt := strings.Index(call.Raw, path)
+	if rawAt < 0 {
+		rawAt = strings.Index(command[call.Offset:], path)
+	}
+	if rawAt < 0 {
+		return &copyCall, false, false
+	}
+	referenceAt := call.Offset + rawAt
+	resolved, known := resolveAssignedPath(command, path, referenceAt)
+	if known {
+		copyCall.Args[i] = resolved
+		return &copyCall, true, false
+	}
+	if emptyMktempAssignmentBefore(command, path, referenceAt) {
+		copyCall.Args[i] = filepath.Join(os.TempDir(), ".chooks-model-guard-empty-mktemp")
+		return &copyCall, true, true
+	}
+	return &copyCall, false, false
+}
+
+var shellVariableWord = regexp.MustCompile(`^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$`)
+var mktempDirectoryAssignment = regexp.MustCompile(`(?:^|[;|&\n\s'"])([A-Za-z_][A-Za-z0-9_]*)=\$\(\s*mktemp\s+-d\s*\)`)
+
+func emptyMktempAssignmentBefore(command, value string, referenceAt int) bool {
+	ref := shellVariableWord.FindStringSubmatch(value)
+	if len(ref) != 3 {
+		return false
+	}
+	name := ref[1]
+	if name == "" {
+		name = ref[2]
+	}
+	assignments := mktempDirectoryAssignment.FindAllStringSubmatchIndex(command, -1)
+	if len(assignments) != 1 {
+		return false
+	}
+	match := assignments[0]
+	return command[match[2]:match[3]] == name && match[0] < referenceAt
 }
 
 // maxSettingsSize — предел файла --settings: настройки — килобайты
@@ -639,10 +745,14 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 	for i := range calls {
 		call := &calls[i]
 		if call.Name == "cd" || call.Name == "pushd" {
+			change, _, emptyTemp := expandedChangeDirCall(command, call)
 			var known bool
 			previousKnown := cwdKnown
-			cwd, known = changeDirKnown(call, cwd, homeForPaths())
-			cwdKnown = known && (previousKnown || absoluteChangePath(call))
+			cwd, known = changeDirKnown(change, cwd, homeForPaths())
+			if emptyTemp {
+				known = true
+			}
+			cwdKnown = known && (previousKnown || absoluteChangePath(change))
 			continue
 		}
 		if call.Name == "env" {
@@ -728,10 +838,98 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 var whichClaudeSubstitution = regexp.MustCompile(`\$\(\s*which\s+claude\s*\)`)
 
 var protectedSettingsTarget = regexp.MustCompile(`(?i)(?:settings(?:\.local)?\.json|agents/[^\s"';&|<>]+\.md)`)
-var fileWriterCommand = regexp.MustCompile(`\b(?:tee|cp|mv|install)\b|>`)
+
+func protectedWriteTargets(command string) []string {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil
+	}
+	var targets []string
+	addTarget := func(value string) {
+		if protectedSettingsTarget.MatchString(value) || explicitSettingsTarget(command, value) {
+			targets = append(targets, value)
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.Stmt:
+			for _, redirect := range n.Redirs {
+				switch redirect.Op.String() {
+				case ">", ">>", ">|", "&>", "&>>":
+					if value, literal := literalValue(redirect.Word); literal {
+						addTarget(value)
+					}
+				}
+			}
+		case *syntax.CallExpr:
+			if len(n.Args) < 2 {
+				return true
+			}
+			name, literal := literalValue(n.Args[0])
+			if !literal || !slices.Contains([]string{"cp", "mv", "install", "tee"}, filepath.Base(name)) {
+				return true
+			}
+			var positional []string
+			for i := 1; i < len(n.Args); i++ {
+				value, isLiteral := literalValue(n.Args[i])
+				if !isLiteral {
+					continue
+				}
+				if (value == "-t" || value == "--target-directory") && i+1 < len(n.Args) {
+					target, ok := literalValue(n.Args[i+1])
+					if ok {
+						addTarget(target)
+					}
+					i++
+					continue
+				}
+				if after, ok := strings.CutPrefix(value, "--target-directory="); ok {
+					addTarget(after)
+					continue
+				}
+				if strings.HasPrefix(value, "-") {
+					continue
+				}
+				positional = append(positional, value)
+			}
+			if len(positional) == 0 {
+				return true
+			}
+			if filepath.Base(name) == "tee" {
+				for _, target := range positional {
+					addTarget(target)
+				}
+			} else {
+				target := positional[len(positional)-1]
+				addTarget(target)
+				if strings.HasSuffix(target, string(os.PathSeparator)) && len(positional) > 1 {
+					addTarget(filepath.Join(target, filepath.Base(positional[len(positional)-2])))
+				}
+			}
+		}
+		return true
+	})
+	return targets
+}
+
+var settingsFileArgument = regexp.MustCompile(`(?:^|\s)--settings(?:=|\s+)("[^"]*"|'[^']*'|[^\s;&|]+)`)
+
+func explicitSettingsTarget(command, target string) bool {
+	target = filepath.Clean(strings.Trim(target, `"'`))
+	for _, match := range settingsFileArgument.FindAllStringSubmatch(command, -1) {
+		path := strings.Trim(match[1], `"'`)
+		if strings.HasPrefix(strings.TrimSpace(path), "{") {
+			continue
+		}
+		if filepath.Clean(path) == target {
+			return true
+		}
+	}
+	return false
+}
 
 func writtenProtectedFileCandidates(command string) []modelCandidate {
-	if !protectedSettingsTarget.MatchString(command) || !fileWriterCommand.MatchString(command) {
+	if len(protectedWriteTargets(command)) == 0 {
 		return nil
 	}
 	decoded := strings.ReplaceAll(command, "\\\"", "\"")
@@ -748,7 +946,7 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 		found = append(found, modelCandidate{value: strings.Trim(match[1], `"'`), userOnlyCheck: true})
 	}
 	if len(found) == 0 {
-		return []modelCandidate{{value: "written settings or agent contents", dynamic: true}}
+		return []modelCandidate{{value: "written settings or agent contents", unknownWrite: true}}
 	}
 	return found
 }

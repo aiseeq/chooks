@@ -26,14 +26,10 @@ type parallelCommand struct {
 	words                       []string
 	pipe, quote, listed, remote bool
 	cat, fifo                   bool
-	link, plus, rpl, argSep     bool
-	hasArgFile, nonIReplace     bool
 	argInput, argInputFirst     bool
 	argInputFromWords           bool
 	semaphore, wait             bool
 	argFileSep, colsep          string
-	replaceI                    string
-	replaceICount               int
 	failed                      bool
 	replaces                    []string
 }
@@ -54,7 +50,6 @@ func parseParallel(args []string) parallelCommand {
 	var logins []string
 	files := false
 	for _, o := range sets {
-		p.noteSystemctlOption(o)
 		switch {
 		case slices.Contains(parallelPipeOptions, o.name):
 			p.setPipeOption(o.name)
@@ -89,28 +84,6 @@ func parseParallel(args []string) parallelCommand {
 	p.argInput = p.argInputFirst || p.argInputFromWords
 	p.semaphore = slices.ContainsFunc(sets, func(o parallelSet) bool { return o.name == "semaphore" })
 	return p
-}
-
-func (p *parallelCommand) noteSystemctlOption(o parallelSet) {
-	switch {
-	case o.name == "rpl":
-		p.rpl = true
-	case slices.Contains(parallelReplaceOptions, o.name) && o.value != "":
-		if o.name == "I" {
-			p.replaceI = o.value
-			p.replaceICount++
-		} else {
-			p.nonIReplace = true
-		}
-	case o.name == "arg-file":
-		p.hasArgFile = true
-	case o.name == "arg-sep":
-		p.argSep = true
-	case o.name == "link":
-		p.link = true
-	case o.name == "plus":
-		p.plus = true
-	}
 }
 
 func (p *parallelCommand) setPipeOption(name string) {
@@ -263,19 +236,13 @@ func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script stri
 		}
 	}
 	// systemd-run и за run0, pkexec (parallel run0 systemd-run --pipe bash)
-	expanded := parallelExpandLiteralSystemctl(p, s.elevatedCalls(calls))
+	expanded := s.elevatedCalls(calls)
 	markParallelScriptInput(expanded, p, in, pipeInput)
 	if reason := parallelUnknownScriptInputReason(p, in, expanded); reason != "" {
 		return reason, expanded
 	}
 	if !parallelHasSystemdRun(expanded) {
 		return "", expanded
-	}
-	if _, _, literal := parallelSystemctlLiteralMarker(p); literal && parallelSourcesHarmless(p) {
-		// run0 is rewritten to systemd-run. Keep its literal substitution in
-		// the calls that the service checker analyzes as well as in the direct
-		// expanded calls.
-		return s.parallelSystemdRunCalls(p, script, expanded, expanded, in)
 	}
 	return s.parallelSystemdRunCalls(p, script, calls, expanded, in)
 }
@@ -527,110 +494,6 @@ func parallelShellExecutesReplacement(p parallelCommand, c shellcmd.Call) bool {
 	}
 	script, command := shellScript(c.Args)
 	return !command && isReplacement(script)
-}
-
-var parallelLiteralUnitRe = regexp.MustCompile(`^[[:alnum:]_.@:-]+$`)
-var parallelBraceTokenRe = regexp.MustCompile(`\{[^{}]*\}`)
-
-// parallelExpandLiteralSystemctl expands only statically known, shell-safe
-// ::: values in systemctl operands. The unit checker can then assess the same
-// literal unit that GNU parallel will pass instead of treating {} as a glob.
-func parallelExpandLiteralSystemctl(p parallelCommand, calls []shellcmd.Call) []shellcmd.Call {
-	marker, start, ok := parallelSystemctlLiteralMarker(p)
-	if !ok || !parallelSourcesHarmless(p) {
-		return calls
-	}
-	var values []string
-	for _, value := range p.words[start+1:] {
-		if !parallelLiteralUnitRe.MatchString(value) {
-			return calls
-		}
-		values = append(values, value)
-	}
-	if len(values) == 0 {
-		return calls
-	}
-	wrappers := map[string]bool{}
-	for i := range calls {
-		call := &calls[i]
-		if call.Name != "systemctl" || !strings.Contains(strings.Join(call.Args, " "), marker) {
-			continue
-		}
-		for _, via := range call.Via {
-			wrappers[via] = true
-		}
-	}
-	out := make([]shellcmd.Call, 0, len(calls)+len(values))
-	for i := range calls {
-		call := &calls[i]
-		systemctl := call.Name == "systemctl" && strings.Contains(strings.Join(call.Args, " "), marker)
-		wrapper := wrappers[call.Name] && slices.Contains(elevatedWrapperNames, call.Name) &&
-			strings.Contains(strings.Join(call.Args, " "), marker)
-		if !systemctl && !wrapper {
-			out = append(out, *call)
-			continue
-		}
-		for _, value := range values {
-			copy := *call
-			copy.Args = slices.Clone(call.Args)
-			for j, arg := range copy.Args {
-				copy.Args[j] = strings.ReplaceAll(arg, marker, value)
-			}
-			copy.Raw = strings.ReplaceAll(copy.Raw, marker, value)
-			out = append(out, copy)
-		}
-	}
-	return out
-}
-
-func parallelSystemctlLiteralMarker(p parallelCommand) (string, int, bool) {
-	if !p.listed || p.colsep != "" || p.link || p.plus || p.rpl || p.argSep || p.hasArgFile || p.nonIReplace {
-		return "", 0, false
-	}
-	start, ok := parallelSingleLiteralGroup(p)
-	if !ok {
-		return "", 0, false
-	}
-	marker, ok := parallelSystemctlTemplateMarker(p, strings.Join(p.words[:start], " "))
-	if !ok {
-		return "", 0, false
-	}
-	return marker, start, true
-}
-
-func parallelSingleLiteralGroup(p parallelCommand) (int, bool) {
-	start := -1
-	groups := 0
-	for i, word := range p.words {
-		if !p.sourceWord(word) {
-			continue
-		}
-		groups++
-		if start < 0 {
-			start = i
-		}
-		if word != ":::" {
-			return 0, false
-		}
-	}
-	if groups != 1 || start < 0 {
-		return 0, false
-	}
-	return start, true
-}
-
-func parallelSystemctlTemplateMarker(p parallelCommand, template string) (string, bool) {
-	braces := parallelBraceTokenRe.FindAllString(template, -1)
-	if p.replaceI != "" {
-		if p.replaceICount != 1 || len(braces) != 0 || strings.Count(template, p.replaceI) != 1 {
-			return "", false
-		}
-		return p.replaceI, true
-	}
-	if len(braces) != 1 || braces[0] != "{}" && braces[0] != "{1}" {
-		return "", false
-	}
-	return braces[0], true
 }
 
 func parallelHasSiblingSignal(command string, p parallelCommand) (bool, error) {

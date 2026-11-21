@@ -104,6 +104,7 @@ func execute(ctx context.Context, request hookctx.Context) int {
 		newSkillScanCmd(),
 
 		newSaidBenchCmd(),
+		newClaimCheckInputCmd(),
 		newUnderstandCasesCmd(),
 		newUnderstandBenchCmd(),
 		newCorpusSweepCmd(),

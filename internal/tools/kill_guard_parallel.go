@@ -13,6 +13,7 @@ import (
 // replacementRe строка замены parallel ({}, {.}, {/}, {1}, {#}, {%}, {=…=}):
 // аргумент встаёт на её место, а не в конец команды
 var replacementRe = regexp.MustCompile(`\{[0-9]*[./#%]*[./]*\}|\{=`)
+var parallelImplicitShellCommandRe = regexp.MustCompile(`(?:^|[[:space:]])(?:sudo|doas|pkexec|su|run0|systemd-run)(?:[[:space:]]+[^|;&]*)?[[:space:]]+(?:bash|sh|dash|zsh|ksh|mksh|ksh93|fish)(?:[[:space:]]+[^|;&]*)?[[:space:]]+-[a-zA-Z]*c[a-zA-Z]*[[:space:]]*$`)
 
 // parallelCommand команда parallel: words — слова после опций; pipe — ввод
 // идёт в stdin команды; quote — слова в кавычках; listed — заданы списки
@@ -197,6 +198,13 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 			return s.parallelCalls(c, p, script, calls)
 		}
 	}
+	if parallelScriptNeedsImplicitInput(p) {
+		in := s.inputOf(c)
+		if (!p.pipe && (in.src == stdinPipe || in.src == stdinFile || in.src == stdinRedirect) && !knownHarmlessInput(in)) ||
+			p.listed && !parallelSourcesHarmless(p) {
+			return "parallel передаёт неизвестную строку команде оболочки за привилегированной обёрткой", nil
+		}
+	}
 	s.tool.Logger().Warn("kill_guard: команда parallel не разобрана", "error", err)
 	if strings.Contains(strings.Join(p.words, " "), "systemd-run") {
 		return "systemd-run за parallel: команду parallel разобрать не удалось, что запустится, не видно" + hiddenTail, nil
@@ -207,28 +215,52 @@ func (s *killScan) parallelSystemdRun(c shellcmd.Call) (string, []shellcmd.Call)
 // parallelCalls проверка разобранной команды parallel (parallelSystemdRun)
 func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script string, calls []shellcmd.Call) (string, []shellcmd.Call) {
 	in, pipeInput := s.parallelCallsInput(c, p, calls)
+	hasSiblingSignal, parseErr := parallelHasSiblingSignal(s.command, p)
+	if parseErr != nil {
+		s.tool.Logger().Warn("kill_guard: соседние вызовы parallel не разобраны", "error", parseErr)
+		return "parallel в команде с неразбираемым соседним вызовом; проверить сигнал нельзя", calls
+	}
+	if hasSiblingSignal {
+		return "parallel находится в команде с отдельным вызовом сигнала процесса; отказ сохраняется", calls
+	}
 	// systemd-run и за run0, pkexec (parallel run0 systemd-run --pipe bash)
 	expanded := s.elevatedCalls(calls)
-	for i := range expanded {
-		x := &expanded[i]
-		readsPipe := inputTaker(*x) || shellcmd.IsShell(x.Name) && shellReadsInput(x.Args)
-		wrapperOwnsInput := parallelWrapperOwnsInput(*x)
-		x.ScriptInput = x.ScriptInput || pipeInput && readsPipe && !wrapperOwnsInput
-		x.ScriptInput = x.ScriptInput || !p.pipe && parallelArgumentAffectsScript(p, *x)
-	}
-	if !p.pipe && p.listed && parallelHasElevatedScript(expanded) &&
-		parallelArgumentsAffectScript(p, expanded) && !parallelSourcesHarmless(p) {
-		return "parallel передаёт неизвестный аргумент скрипту за привилегированной командой", expanded
-	}
-	if p.pipe && parallelPkexecSystemdRunPipe(calls) {
-		return "parallel --pipe передаёт stdin через pkexec в systemd-run --pipe bash; ввод всё равно считается непросматриваемым для службы", calls
-	}
-	if !p.pipe && (in.src == stdinPipe || in.src == stdinFile || in.src == stdinRedirect) &&
-		!knownHarmlessInput(in) && parallelHasElevatedScript(expanded) {
-		return "оболочка -c за привилегированной командой получает строку parallel последним аргументом; неизвестный ввод может содержать сигнал", expanded
+	markParallelScriptInput(expanded, p, in, pipeInput)
+	if reason := parallelUnknownScriptInputReason(p, in, expanded); reason != "" {
+		return reason, expanded
 	}
 	if !parallelHasSystemdRun(expanded) {
 		return "", expanded
+	}
+	return s.parallelSystemdRunCalls(p, script, calls, expanded, in)
+}
+
+func markParallelScriptInput(calls []shellcmd.Call, p parallelCommand, in stdinSpan, pipeInput bool) {
+	for i := range calls {
+		c := &calls[i]
+		readsPipe := inputTaker(*c) || shellcmd.IsShell(c.Name) && shellReadsInput(c.Args)
+		wrapperOwnsInput := parallelWrapperOwnsInput(*c)
+		c.ScriptInput = c.ScriptInput || pipeInput && readsPipe && !wrapperOwnsInput
+		c.ScriptInput = c.ScriptInput || !p.pipe && parallelArgumentAffectsScript(p, *c) &&
+			!parallelImplicitInputHarmless(p, in)
+	}
+}
+
+func parallelUnknownScriptInputReason(p parallelCommand, in stdinSpan, calls []shellcmd.Call) string {
+	if !p.pipe && p.listed && parallelHasElevatedScript(calls) &&
+		parallelArgumentsAffectScript(p, calls) && !parallelSourcesHarmless(p) {
+		return "parallel передаёт неизвестный аргумент скрипту за привилегированной командой"
+	}
+	if !p.pipe && (in.src == stdinPipe || in.src == stdinFile || in.src == stdinRedirect) &&
+		!knownHarmlessInput(in) && parallelHasElevatedScript(calls) && parallelArgumentsAffectScript(p, calls) {
+		return "оболочка -c за привилегированной командой получает строку parallel последним аргументом; неизвестный ввод может содержать сигнал"
+	}
+	return ""
+}
+
+func (s *killScan) parallelSystemdRunCalls(p parallelCommand, script string, calls, expanded []shellcmd.Call, in stdinSpan) (string, []shellcmd.Call) {
+	if p.pipe && parallelPkexecSystemdRunPipe(calls) {
+		return "parallel --pipe передаёт stdin через pkexec в systemd-run --pipe bash; ввод всё равно считается непросматриваемым для службы", calls
 	}
 	if r, found := p.replacedName(expanded); found {
 		return "systemd-run за parallel запускает команду, имя которой придёт из ввода (строка замены " + r + "): текст команды станет известен только при запуске" + hiddenTail, calls
@@ -248,9 +280,12 @@ func (s *killScan) parallelCalls(c shellcmd.Call, p parallelCommand, script stri
 }
 
 func parallelArgumentsAffectScript(p parallelCommand, calls []shellcmd.Call) bool {
-	return slices.ContainsFunc(calls, func(c shellcmd.Call) bool {
-		return parallelArgumentAffectsScript(p, c)
-	})
+	for i := range calls {
+		if parallelArgumentAffectsScript(p, calls[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 func parallelSourcesHarmless(p parallelCommand) bool {
@@ -322,7 +357,7 @@ func parallelHasElevatedScript(calls []shellcmd.Call) bool {
 		if !scriptCommandInput(x) {
 			continue
 		}
-		if x.Name == "script" {
+		if x.Name == "script" || (x.Name == "sudo" || x.Name == "doas") && privilegedInteractiveShell(x.Args) {
 			return true
 		}
 		for _, wrapper := range x.Via {
@@ -347,27 +382,92 @@ func parallelArgumentAffectsScript(p parallelCommand, c shellcmd.Call) bool {
 	return err == nil && p.replaced(script) && (scriptCommandInput(c) || slices.Contains(c.Via, "-c"))
 }
 
+func parallelImplicitInputHarmless(p parallelCommand, in stdinSpan) bool {
+	if p.pipe {
+		return false
+	}
+	if p.listed {
+		return parallelSourcesHarmless(p)
+	}
+	return (in.src == stdinPipe || in.src == stdinFile || in.src == stdinRedirect) && knownHarmlessInput(in)
+}
+
+func parallelScriptNeedsImplicitInput(p parallelCommand) bool {
+	text := strings.Join(p.words, " ")
+	if strings.Contains(text, "sudo -s") || strings.Contains(text, "sudo -i") ||
+		strings.Contains(text, "doas -s") {
+		return true
+	}
+	return parallelImplicitShellCommandRe.MatchString(text)
+}
+
 // parallelCallsInput отмечает поток, который parallel --pipe передаёт читающей
 // оболочке. У systemd-run/run0 вход проверяет их собственная логика.
 func (s *killScan) parallelCallsInput(c shellcmd.Call, p parallelCommand, calls []shellcmd.Call) (stdinSpan, bool) {
 	in := s.inputOf(c)
 	pipeInput := p.pipe && (in.src == stdinPipe || in.src == stdinFile || in.src == stdinRedirect)
 	via := "parallel"
+	canIgnoreImplicitInput := !slices.Contains(c.Via, "systemd-run") && !parallelHasSystemdRun(s.elevatedCalls(calls))
+	harmlessInput := canIgnoreImplicitInput && parallelImplicitInputHarmless(p, in)
 	if !p.pipe && p.listed && parallelHasExplicitSafeScript(p, calls) {
 		via = "parallel-args"
 	}
 	for i := range calls {
-		calls[i].Via = slices.Concat(c.Via, []string{via}, calls[i].Via)
-		calls[i].Offset = -1
-		// У вызовов parallel нет своего места в исходном тексте. Пометка
-		// передаёт ввод --pipe в обычную проверку elevated оболочки.
-		readsPipe := inputTaker(calls[i]) || shellcmd.IsShell(calls[i].Name) && shellReadsInput(calls[i].Args) ||
-			calls[i].Name == "parallel" && p.pipe
-		wrapperOwnsInput := parallelWrapperOwnsInput(calls[i])
-		calls[i].ScriptInput = calls[i].ScriptInput || pipeInput && readsPipe && !wrapperOwnsInput
-		calls[i].ScriptInput = calls[i].ScriptInput || !p.pipe && parallelArgumentAffectsScript(p, calls[i])
+		markParallelInputCall(&calls[i], c, p, via, canIgnoreImplicitInput, harmlessInput, pipeInput)
 	}
 	return in, pipeInput
+}
+
+func markParallelInputCall(call *shellcmd.Call, parallel shellcmd.Call, p parallelCommand, via string, canIgnoreImplicitInput, harmlessInput, pipeInput bool) {
+	call.Via = slices.Concat(parallel.Via, []string{via}, call.Via)
+	if harmlessInput {
+		call.Via = append(call.Via, "parallel-safe-input")
+	} else if canIgnoreImplicitInput && !p.pipe && !p.listed &&
+		scriptCommandInput(*call) && !parallelArgumentAffectsScript(p, *call) {
+		call.Via = append(call.Via, "parallel-arg-unused")
+	}
+	call.Offset = -1
+	// У вызовов parallel нет своего места в исходном тексте. Пометка
+	// передаёт ввод --pipe в обычную проверку elevated оболочки.
+	readsPipe := inputTaker(*call) || shellcmd.IsShell(call.Name) && shellReadsInput(call.Args) ||
+		call.Name == "parallel" && p.pipe
+	call.ScriptInput = call.ScriptInput || pipeInput && readsPipe && !parallelWrapperOwnsInput(*call)
+	call.ScriptInput = call.ScriptInput || !p.pipe && parallelArgumentAffectsScript(p, *call) && !harmlessInput
+}
+
+func parallelHasSiblingSignal(command string, p parallelCommand) (bool, error) {
+	if script, err := p.script(); err == nil {
+		if inner, err := shellcmd.Calls(script); err == nil {
+			for i := range inner {
+				if slices.Contains(signalNames, inner[i].Name) {
+					return false, nil
+				}
+			}
+		}
+	}
+	calls, err := shellcmd.Calls(command)
+	if err != nil {
+		return false, fmt.Errorf("parse calls around parallel: %w", err)
+	}
+	for i := range calls {
+		call := &calls[i]
+		if call.Name == "parallel" {
+			continue
+		}
+		if !slices.Contains(signalNames, call.Name) {
+			continue
+		}
+		if call.Name == "kill" && (slices.Contains(call.Args, "-l") || slices.Contains(call.Args, "--list")) {
+			continue
+		}
+		if call.Name == "pkill" && (slices.Contains(call.Args, "-l") || slices.Contains(call.Args, "--list-name")) {
+			continue
+		}
+		if slices.Contains(signalNames, call.Name) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func parallelHasExplicitSafeScript(p parallelCommand, calls []shellcmd.Call) bool {

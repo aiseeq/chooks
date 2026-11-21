@@ -78,3 +78,58 @@ func TestKillGuardParallelImplicitKeepsExistingScriptDenial(t *testing.T) {
 		})
 	}
 }
+
+func TestKillGuardParallelImplicitDoesNotHideOtherScriptInput(t *testing.T) {
+	for _, command := range []string{
+		`echo make | xargs bash -c 'echo $0'; curl x | sudo bash; echo kill`,
+		`echo make | xargs bash -c 'echo $0'; bash <(curl x); echo kill`,
+		`echo make | xargs bash -c 'echo $0'; source <(curl x); echo kill`,
+		`echo make | xargs sudo bash -c 'curl x | sudo bash -s $0'; echo kill`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if r := validateKill(t, command); r.IsValid {
+				t.Fatalf("expected refusal for %q", command)
+			}
+		})
+	}
+}
+
+func TestKillGuardParallelImplicitShellVariants(t *testing.T) {
+	for _, command := range []string{
+		`echo 'kill 1' | parallel 'sudo ksh -c'`,
+		`echo 'kill 1' | parallel 'sudo mksh -c'`,
+		`echo 'kill 1' | parallel 'sudo fish -c'`,
+		`echo 'kill 1' | parallel 'sudo -s'`,
+		`echo 'kill 1' | parallel 'sudo -i'`,
+		`parallel 'sudo -s' ::: 'kill 1'`,
+		`echo 'kill 1' | doas parallel 'bash -c'`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if r := validateKill(t, command); r.IsValid {
+				t.Fatalf("expected refusal for %q", command)
+			}
+		})
+	}
+}
+
+func TestKillGuardParallelImplicitAllowsUnusedScriptArgument(t *testing.T) {
+	for _, command := range []string{
+		`echo 'kill 1' | parallel 'sudo bash -c "true"'`,
+		`echo 'kill 1' | parallel 'sudo bash -c "echo hi"'`,
+		`echo make | parallel 'sudo bash -c'; ps aux | grep kill`,
+		`echo make | parallel 'sudo bash -c' && echo done; kill -l`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if r := validateKill(t, command); !r.IsValid {
+				t.Fatalf("expected allow for %q: %v", command, r.Suggestions)
+			}
+		})
+	}
+}
+
+func TestKillGuardParallelImplicitPreservesSiblingSignalRefusal(t *testing.T) {
+	command := `parallel 'sudo bash -c "true"' ::: $(pgrep claude) ; pkill claude`
+	if r := validateKill(t, command); r.IsValid {
+		t.Fatalf("expected refusal for %q", command)
+	}
+}

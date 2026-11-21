@@ -214,24 +214,10 @@ func scriptArgs(c shellcmd.Call) ([]string, bool) {
 	switch {
 	case slices.Contains(scriptRunners, c.Name):
 		return c.Args, true
+	case (c.Name == "sudo" || c.Name == "doas") && privilegedInteractiveShell(c.Args):
+		return nil, true
 	case c.Name == "script":
-		for i, a := range c.Args {
-			if a == "--command" || a == "-c" || strings.HasPrefix(a, "--command=") {
-				if strings.Contains(a, "=") {
-					return []string{strings.SplitN(a, "=", 2)[1]}, true
-				}
-				if i+1 < len(c.Args) {
-					return []string{c.Args[i+1]}, true
-				}
-				return nil, true
-			}
-			if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.Contains(a[1:], "c") {
-				if i+1 < len(c.Args) {
-					return []string{c.Args[i+1]}, true
-				}
-				return nil, true
-			}
-		}
+		return scriptCommandArgs(c.Args)
 	case c.Name == "env" && slices.ContainsFunc(c.Args, envSplitOption):
 		return c.Args, true
 	case shellcmd.IsShell(c.Name):
@@ -242,6 +228,27 @@ func scriptArgs(c shellcmd.Call) ([]string, bool) {
 			if (strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+")) && shellCommandOption(a) {
 				return nil, true
 			}
+		}
+	}
+	return nil, false
+}
+
+func scriptCommandArgs(args []string) ([]string, bool) {
+	for i, arg := range args {
+		if arg == "--command" || arg == "-c" || strings.HasPrefix(arg, "--command=") {
+			if strings.Contains(arg, "=") {
+				return []string{strings.SplitN(arg, "=", 2)[1]}, true
+			}
+			if i+1 < len(args) {
+				return []string{args[i+1]}, true
+			}
+			return nil, true
+		}
+		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg[1:], "c") {
+			if i+1 < len(args) {
+				return []string{args[i+1]}, true
+			}
+			return nil, true
 		}
 	}
 	return nil, false
@@ -360,9 +367,25 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if reason, hint := s.systemdRunSignalReason(c, calls, feed != nil); reason != "" {
 		s.addToolReason(reason, hint, false)
 	}
+	if err := s.callNested(c, calls, feed); err != nil {
+		return err
+	}
+	if !s.signalWord {
+		if s.implicitElevatedScriptInput(c) {
+			s.addReason(scriptInputReason(c.Name))
+		}
+		return s.signal(c, calls)
+	}
+	script, runner := scriptArgs(c)
+	if err := s.checkScriptCall(c, calls, script, runner); err != nil {
+		return err
+	}
+	return s.signal(c, calls)
+}
+
+func (s *killScan) callNested(c shellcmd.Call, calls, feed []shellcmd.Call) error {
 	for i := range feed {
-		f := &feed[i]
-		if err := s.call(*f, slices.Concat(calls, feed)); err != nil {
+		if err := s.call(feed[i], slices.Concat(calls, feed)); err != nil {
 			return err
 		}
 	}
@@ -371,30 +394,18 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	}
 	inner := s.parallelInnerCalls(c)
 	for i := range inner {
-		x := &inner[i]
-		if err := s.call(*x, slices.Concat(calls, inner)); err != nil {
+		if err := s.call(inner[i], slices.Concat(calls, inner)); err != nil {
 			return err
 		}
 	}
-	if !s.signalWord {
-		if s.implicitElevatedScriptInput(c, calls) {
-			s.addReason(scriptInputReason(c.Name))
-		}
-		return s.signal(c, calls)
-	}
-	script, runner := scriptArgs(c)
-	fed := ""
-	if runner || (slices.Contains(c.Via, "xargs") || slices.Contains(c.Via, "parallel")) &&
-		slices.Contains(c.Via, "-c") && implicitShellArgRe.MatchString(c.Raw) {
-		fed = fedIntoScript(c, calls)
-		if fed == "xargs" && !slices.ContainsFunc(xargsOptions(c, calls), replaceOption) &&
-			harmlessImplicitXargsInput(c, s.inputOf(c)) {
-			fed = ""
-		}
-	}
+	return nil
+}
+
+func (s *killScan) checkScriptCall(c shellcmd.Call, calls []shellcmd.Call, script []string, runner bool) error {
+	fed := s.fedScriptInput(c, calls, runner)
 	switch {
 	case c.ScriptInput:
-		if harmlessImplicitXargsScriptInput(c, calls, s) {
+		if harmlessImplicitXargsScriptInput(c, s) {
 			break
 		}
 		// оболочка исполняет текст из ввода или <(…) (bash <(…), source
@@ -408,19 +419,32 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 		// цели parallel берёт из списка ::: или ввода, а команду без :::
 		// shellcmd не снимает (pgrep foo | parallel kill): сигнал — слово
 		// среди аргументов parallel
-		for _, a := range c.Args {
-			if err := s.check(filepath.Base(a), nil, "parallel"); err != nil {
+		for i := range c.Args {
+			if err := s.check(filepath.Base(c.Args[i]), nil, "parallel"); err != nil {
 				return err
 			}
 		}
 	}
-	return s.signal(c, calls)
+	return nil
+}
+
+func (s *killScan) fedScriptInput(c shellcmd.Call, calls []shellcmd.Call, runner bool) string {
+	fed := ""
+	if runner || (slices.Contains(c.Via, "xargs") || slices.Contains(c.Via, "parallel")) &&
+		slices.Contains(c.Via, "-c") && implicitShellArgRe.MatchString(c.Raw) {
+		fed = fedIntoScript(c, calls)
+		if fed == "xargs" && !slices.ContainsFunc(xargsOptions(c, calls), replaceOption) &&
+			harmlessImplicitXargsInput(c, s.inputOf(c)) {
+			fed = ""
+		}
+	}
+	return fed
 }
 
 // implicitElevatedScriptInput covers an unread argument stream that xargs or
 // parallel appends to a privileged -c invocation. A visible literal stream
 // is handled by the ordinary script check; unknown input fails closed.
-func (s *killScan) implicitElevatedScriptInput(c shellcmd.Call, calls []shellcmd.Call) bool {
+func (s *killScan) implicitElevatedScriptInput(c shellcmd.Call) bool {
 	usesInput := scriptCommandInput(c) && scriptUsesImplicitArgument(c)
 	if !afterXargs(c) || c.ScriptInput || !usesInput {
 		return false
@@ -479,20 +503,12 @@ func harmlessImplicitXargsInput(c shellcmd.Call, in stdinSpan) bool {
 	return !slices.Contains(c.Via, "run0") && !slices.Contains(c.Via, "systemd-run")
 }
 
-func harmlessImplicitXargsScriptInput(c shellcmd.Call, calls []shellcmd.Call, s *killScan) bool {
-	if afterXargs(c) && slices.Contains(c.Via, "-c") && implicitShellArgRe.MatchString(c.Raw) &&
-		knownHarmlessInput(s.inputOf(c)) {
-		return true
-	}
-	for _, c := range calls {
-		args, ok := scriptArgs(c)
-		if !afterXargs(c) || !shellcmd.IsShell(c.Name) || !ok || len(args) == 0 ||
-			!scriptUsesImplicitArgument(c) || !harmlessImplicitXargsInput(c, s.inputOf(c)) {
-			continue
-		}
-		return true
-	}
-	return false
+func harmlessImplicitXargsScriptInput(c shellcmd.Call, s *killScan) bool {
+	// This exception applies only to the current shell call. Looking through
+	// the whole call list lets a safe xargs sibling mask unrelated ScriptInput
+	// calls elsewhere in the command.
+	return afterXargs(c) && scriptCommandInput(c) && scriptUsesImplicitArgument(c) &&
+		knownHarmlessInput(s.inputOf(c))
 }
 
 func (s *killScan) rewrittenCall(c shellcmd.Call, calls []shellcmd.Call) (bool, error) {
@@ -526,7 +542,12 @@ func elevatedCommand(c shellcmd.Call) (string, bool) {
 	case "machinectl":
 		return machinectlCommand(c.Args)
 	case "pkexec":
+	case "doas":
+		return doasCommand(c.Args)
 	default:
+		return "", false
+	}
+	if c.Name == "doas" {
 		return "", false
 	}
 	i := 0
@@ -548,6 +569,31 @@ func elevatedCommand(c shellcmd.Call) (string, bool) {
 		return "", false
 	}
 	return shellWords(c.Args[i:]), true
+}
+
+func doasCommand(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			args = args[i+1:]
+			break
+		}
+		if !strings.HasPrefix(a, "-") {
+			args = args[i:]
+			break
+		}
+		switch a {
+		case "-u", "--user", "-a", "--auth-type", "-C", "--config":
+			i++
+		}
+		if i == len(args)-1 {
+			return "", false
+		}
+	}
+	if len(args) == 0 {
+		return "", false
+	}
+	return shellWords(args), true
 }
 
 // shellWords слова команды текстом для разбора: слово с подстановкой — как
@@ -824,6 +870,9 @@ func (s *killScan) positionalSignal(calls []shellcmd.Call) error {
 // parallel всегда ({} или ввод в конце), xargs — с -I, -i или --replace
 func fedIntoScript(c shellcmd.Call, calls []shellcmd.Call) string {
 	if slices.Contains(c.Via, "parallel") {
+		if slices.Contains(c.Via, "parallel-safe-input") || slices.Contains(c.Via, "parallel-arg-unused") {
+			return ""
+		}
 		return "parallel"
 	}
 	options := xargsOptions(c, calls)
@@ -853,10 +902,29 @@ func scriptCommandInput(c shellcmd.Call) bool {
 	if shellcmd.IsShell(c.Name) || c.Name == "script" {
 		return true
 	}
+	if c.Name == "sudo" || c.Name == "doas" {
+		return privilegedInteractiveShell(c.Args)
+	}
 	if c.Name == "su" || c.Name == "runuser" {
 		return slices.ContainsFunc(c.Args, func(a string) bool {
 			return strings.HasPrefix(a, "-") && shellCommandOption(a)
 		})
+	}
+	return false
+}
+
+func privilegedInteractiveShell(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" || !strings.HasPrefix(a, "-") {
+			return false
+		}
+		if a == "-s" || a == "-i" || a == "--shell" || a == "--login" || a == "-si" || a == "-is" {
+			return true
+		}
+		if a == "-u" || a == "--user" || a == "-g" || a == "--group" || a == "-a" || a == "--auth-type" {
+			i++
+		}
 	}
 	return false
 }

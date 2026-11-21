@@ -90,6 +90,7 @@ func execute() int {
 		newSkillScanCmd(),
 
 		newSaidBenchCmd(),
+		newClaimCheckInputCmd(),
 		newUnderstandCasesCmd(),
 		newUnderstandBenchCmd(),
 		newCorpusSweepCmd(),

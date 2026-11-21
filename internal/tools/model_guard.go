@@ -105,6 +105,17 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 	return t.reject(strings.Join(reasons, "; "), models), nil
 }
 
+// CandidateModels exposes the model values found by the same parser used for
+// validation, for decision logging by runtime guards.
+func (t *ModelGuardTool) CandidateModels(input *core.ToolInput) []string {
+	candidates := modelCandidates(input, t.Logger())
+	values := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		values = append(values, candidate.value)
+	}
+	return values
+}
+
 func userOnlyReason(value, name string) string {
 	return fmt.Sprintf("модель %q (%s) запускает только пользователь: агент её не задаёт; в сессии, которую пользователь поднял на ней, поле model не задавай — суб-агент унаследует модель", value, name)
 }

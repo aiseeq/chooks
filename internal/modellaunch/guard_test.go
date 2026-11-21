@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
@@ -14,10 +15,13 @@ import (
 type fakeProcess struct {
 	parent  map[int]int
 	exe     map[int]string
+	exeErr  map[int]error
+	comm    map[int]string
 	environ map[int][]string
 	argv    map[int][]string
 	cwd     map[int]string
 	fail    bool
+	calls   map[string]int
 }
 
 func (f *fakeProcess) Parent(pid int) (int, error) {
@@ -26,7 +30,16 @@ func (f *fakeProcess) Parent(pid int) (int, error) {
 	}
 	return f.parent[pid], nil
 }
-func (f *fakeProcess) Exe(pid int) (string, error) { return f.exe[pid], nil }
+func (f *fakeProcess) Exe(pid int) (string, error) {
+	f.calls["exe:"+strconv.Itoa(pid)]++
+	return f.exe[pid], f.exeErr[pid]
+}
+func (f *fakeProcess) Comm(pid int) (string, error) {
+	if f.comm[pid] != "" {
+		return f.comm[pid], nil
+	}
+	return filepath.Base(f.exe[pid]), nil
+}
 func (f *fakeProcess) Environ(pid int) ([]string, error) {
 	if f.fail {
 		return nil, errors.New("proc unavailable")
@@ -59,11 +72,54 @@ func runtimeGuard(t *testing.T, proc *fakeProcess) *Guard {
 }
 
 func agentTree(argv []string, env ...string) *fakeProcess {
-	f := &fakeProcess{parent: map[int]int{}, exe: map[int]string{}, environ: map[int][]string{}, argv: map[int][]string{}, cwd: map[int]string{}}
+	f := &fakeProcess{parent: map[int]int{}, exe: map[int]string{}, exeErr: map[int]error{}, comm: map[int]string{}, environ: map[int][]string{}, argv: map[int][]string{}, cwd: map[int]string{}, calls: map[string]int{}}
 	f.add(100, 90, "/usr/bin/chooks", nil, []string{"chooks", "user-prompt-submit"})
 	f.add(90, 80, "/opt/claude/claude", env, argv)
 	f.add(80, 1, "/usr/bin/bash", nil, []string{"bash"})
 	return f
+}
+
+func TestRuntimeModelGuardSkipsUnreadableSystemdAncestor(t *testing.T) {
+	makeTree := func(env ...string) *fakeProcess {
+		f := agentTree([]string{"claude", "--model", "haiku"}, env...)
+		f.add(80, 70, "/usr/bin/bash", nil, []string{"bash"})
+		f.add(70, 1, "/usr/lib/systemd/systemd", nil, []string{"systemd", "--user"})
+		f.exeErr[70] = errors.New("permission denied")
+		f.comm[70] = "systemd"
+		return f
+	}
+
+	t.Run("agent environment classifies immediately", func(t *testing.T) {
+		f := makeTree("CLAUDECODE=1")
+		message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+		if err != nil || message == "" {
+			t.Fatalf("Check = %q, %v; want rejection", message, err)
+		}
+		if f.calls["exe:70"] != 0 {
+			t.Fatalf("read upper systemd exe %d times; environment should classify immediately", f.calls["exe:70"])
+		}
+	})
+
+	t.Run("user environment scans past unreadable ancestor", func(t *testing.T) {
+		f := makeTree("CLAUDE_BASE_DIR=/home/user/.claude", "CLAUDE_CODE_SHELL_PREFIX=x")
+		message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+		if err != nil || message != "" {
+			t.Fatalf("Check = %q, %v; want pass", message, err)
+		}
+		if f.calls["exe:70"] == 0 {
+			t.Fatal("unreadable systemd ancestor was not visited")
+		}
+	})
+}
+
+func TestRuntimeModelGuardIdentifiesClaudeByCommWithoutExe(t *testing.T) {
+	f := agentTree([]string{"claude", "--model", "haiku"}, "CLAUDECODE=1")
+	f.exeErr[90] = errors.New("permission denied")
+	f.comm[90] = "claude"
+	message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+	if err != nil || message == "" {
+		t.Fatalf("Check = %q, %v; want rejection", message, err)
+	}
 }
 
 func TestRuntimeModelGuardAgentCases(t *testing.T) {
@@ -140,10 +196,7 @@ func TestRuntimeModelGuardProcReadFailurePasses(t *testing.T) {
 }
 
 func TestLiteralCommandQuotesEveryWord(t *testing.T) {
-	got, err := literalCommand([]string{"claude", "--model", "a'b"}, []string{"HOME=/home/a user", "ANTHROPIC_MODEL=opus"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := literalCommand([]string{"claude", "--model", "a'b"}, []string{"HOME=/home/a user", "ANTHROPIC_MODEL=opus"})
 	want := "env 'ANTHROPIC_MODEL=opus' 'HOME=/home/a user' 'claude' '--model' 'a'\\''b'"
 	if got != want {
 		t.Fatalf("literalCommand = %q; want %q", got, want)

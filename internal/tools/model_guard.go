@@ -193,8 +193,11 @@ type modelFiles struct {
 // одобрение моделей в определениях — не предмет хука (fighter.md — model: opus)
 func agentDefinitionModels(name, cwd, home string, logger core.Logger) []modelCandidate {
 	var found []modelCandidate
-	walk := agentWalk{seen: map[string]bool{}, deadline: time.Now().Add(agentScanBudget), logger: logger}
+	walk := agentWalk{seen: map[string]bool{}, logger: logger}
 	for _, dir := range agentDirs(cwd, home) {
+		// срок — каждому корню, как в Claude Code: большое дерево одного
+		// каталога не снимает проверку остальных
+		walk.deadline, walk.late = time.Now().Add(agentScanBudget), false
 		walk.dir(dir)
 	}
 	for _, path := range walk.files {
@@ -212,12 +215,18 @@ func agentDefinitionModels(name, cwd, home string, logger core.Logger) []modelCa
 	return found
 }
 
-// agentDirs — каталоги определений агентов: .claude/agents в cwd и всех
-// его предках (Claude Code собирает их вверх до корня репозитория или ~,
-// хук — до /, это шире) и пользовательский: $CLAUDE_CONFIG_DIR/agents и
-// ~/.claude/agents
+// agentDirs — каталоги определений агентов: пользовательские первыми
+// ($CLAUDE_CONFIG_DIR/agents и ~/.claude/agents), затем .claude/agents в
+// cwd и всех его предках (Claude Code собирает их вверх до корня
+// репозитория или ~, хук — до /, это шире)
 func agentDirs(cwd, home string) []string {
 	var dirs []string
+	if config := os.Getenv("CLAUDE_CONFIG_DIR"); config != "" {
+		dirs = append(dirs, filepath.Join(config, "agents"))
+	}
+	if home != "" {
+		dirs = append(dirs, filepath.Join(home, ".claude", "agents"))
+	}
 	for dir := cwd; dir != ""; {
 		dirs = append(dirs, filepath.Join(dir, ".claude", "agents"))
 		parent := filepath.Dir(dir)
@@ -226,17 +235,12 @@ func agentDirs(cwd, home string) []string {
 		}
 		dir = parent
 	}
-	if config := os.Getenv("CLAUDE_CONFIG_DIR"); config != "" {
-		dirs = append(dirs, filepath.Join(config, "agents"))
-	}
-	if home != "" {
-		dirs = append(dirs, filepath.Join(home, ".claude", "agents"))
-	}
 	return dirs
 }
 
-// agentScanBudget — время на обход каталогов агентов: Claude Code свой
-// обход обрывает через 3 с, хук не ждёт дольше (таймаут хука 15 с)
+// agentScanBudget — время на обход одного корня каталогов агентов: Claude
+// Code обрывает обход каждого каталога через 3 с (AbortSignal.timeout на
+// вызов, 2.1.330), хук не ждёт дольше
 const agentScanBudget = 3 * time.Second
 
 // agentWalk — обход каталогов агентов: обычные файлы *.md во всех

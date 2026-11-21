@@ -67,7 +67,15 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 			reasons = append(reasons, fmt.Sprintf("определение агента %s не найдено: модель не проверить", c.value))
 			continue
 		}
+		if c.unknownCWD {
+			reasons = append(reasons, "каталог запуска неизвестен: модель не проверить")
+			continue
+		}
 		if c.userOnlyCheck {
+			if c.uncertainDynamic {
+				reasons = append(reasons, "модель задана динамически после неоднозначного присваивания переменной")
+				continue
+			}
 			// быстрая модель и модель определения агента одобрения не
 			// требуют, но модель «только пользователь» агент не задаёт и сюда
 			if name, ok := t.userOnlyModel(c.value, models); ok {
@@ -94,9 +102,12 @@ func userOnlyReason(value, name string) string {
 }
 
 type modelCandidate struct {
-	value        string
-	dynamic      bool
-	unknownAgent bool
+	value            string
+	dynamic          bool
+	unknownAgent     bool
+	unknownCWD       bool
+	uncertainDynamic bool
+	settingsModel    bool
 	// userOnlyCheck — модель быстрых запросов (переменные haiku) или
 	// определения агента: проверяется только на модель «только пользователь»
 	userOnlyCheck bool
@@ -106,6 +117,11 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 	if input.ToolName != "Agent" && !core.IsShellTool(input.ToolName) {
 		return nil
 	}
+	if input.CWD == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			input.CWD = cwd
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		// ~ в пути --settings не раскроется, определения агентов в ~ не
@@ -113,18 +129,23 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		logger.Warn("model_guard: домашний каталог неизвестен", "error", err)
 	}
 	agentModels := func(name string) []modelCandidate {
-		return agentDefinitionModels(name, input.CWD, home, nil, logger)
+		return agentDefinitionModels(name, input.CWD, home, nil, logger, false)
 	}
 	if input.ToolName == "Agent" {
 		return agentToolCandidates(input, agentModels, logger)
 	}
 	unresolvedTildeSettings := false
 	readSettings := func(path string, tilde shellcmd.Tilde, cwd string) []byte {
-		if tilde&shellcmd.TildeHome != 0 && home == "" {
+		commandHome, _, homeDynamic := commandHomeDir(input.Command, cwd, home)
+		if homeDynamic {
 			unresolvedTildeSettings = true
 			return nil
 		}
-		abs := absPath(tildePath(path, tilde, home), cwd)
+		if tilde&shellcmd.TildeHome != 0 && commandHome == "" {
+			unresolvedTildeSettings = true
+			return nil
+		}
+		abs := absPath(tildePath(path, tilde, commandHome), cwd)
 		if abs == "" {
 			return nil
 		}
@@ -140,9 +161,19 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		}
 		return data
 	}
-	settingsAt := func(cwd string) []modelCandidate { return settingsForCWD(cwd, input.Command, home, logger) }
+	settingsAt := func(cwd string) []modelCandidate {
+		commandHome, _, dynamic := commandHomeDir(input.Command, cwd, home)
+		if dynamic {
+			return []modelCandidate{{value: "HOME", dynamic: true}}
+		}
+		return settingsForCWD(cwd, input.Command, commandHome, logger)
+	}
 	candidates := bashModelCandidatesAt(input.Command, input.CWD, modelFiles{settings: readSettings, agent: agentModels}, settingsAt, func(name, cwd string, extra []string) []modelCandidate {
-		if configDir, found, dynamic := commandConfigDir(input.Command); found {
+		commandHome, _, homeDynamic := commandHomeDir(input.Command, cwd, home)
+		if homeDynamic {
+			return []modelCandidate{{value: "HOME", dynamic: true}}
+		}
+		if configDir, found, dynamic := commandConfigDir(input.Command, cwd, commandHome); found {
 			if dynamic {
 				return []modelCandidate{{value: "CLAUDE_CONFIG_DIR", dynamic: true}}
 			}
@@ -150,7 +181,8 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		} else if configDir := os.Getenv("CLAUDE_CONFIG_DIR"); configDir != "" {
 			extra = append(extra, filepath.Join(configDir, "agents"))
 		}
-		return agentDefinitionModels(name, cwd, home, extra, logger)
+		extra = append(extra, filepath.Join(commandHome, ".claude", "agents"))
+		return agentDefinitionModels(name, cwd, commandHome, extra, logger, true)
 	}, logger)
 	candidates = resolveAssignedModelValues(input.Command, candidates)
 	if unresolvedTildeSettings {
@@ -161,20 +193,21 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 
 func settingsForCWD(cwd, command, home string, logger core.Logger) []modelCandidate {
 	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
-	if value, found, dynamic := commandConfigDir(command); found {
+	if value, found, dynamic := commandConfigDir(command, cwd, home); found {
 		if dynamic {
 			return []modelCandidate{{value: "CLAUDE_CONFIG_DIR", dynamic: true}}
 		}
 		configDir = value
 	}
-	paths := []string{filepath.Join(cwd, ".claude", "settings.json"), filepath.Join(cwd, ".claude", "settings.local.json"), managedSettingsPath}
+	paths := append(projectSettingsPaths(cwd), filepath.Join(home, ".claude", "settings.json"), managedSettingsPath)
 	var agentDirsForSettings []string
 	if configDir != "" {
 		paths = append(paths, filepath.Join(configDir, "settings.json"))
 		agentDirsForSettings = append(agentDirsForSettings, filepath.Join(configDir, "agents"))
 	}
+	agentDirsForSettings = append(agentDirsForSettings, filepath.Join(home, ".claude", "agents"))
 	lookupAgent := func(name string) []modelCandidate {
-		return agentDefinitionModels(name, cwd, home, agentDirsForSettings, logger)
+		return agentDefinitionModels(name, cwd, home, agentDirsForSettings, logger, true)
 	}
 	var candidates []modelCandidate
 	for _, path := range paths {
@@ -189,27 +222,87 @@ func settingsForCWD(cwd, command, home string, logger core.Logger) []modelCandid
 	return candidates
 }
 
-var configDirAssignment = regexp.MustCompile(`(?:^|[;|&\n]\s*|\s)CLAUDE_CONFIG_DIR=([^\s;|&]+)`)
+func projectSettingsPaths(cwd string) []string {
+	var paths []string
+	cwd = filepath.Clean(cwd)
+	for dir := cwd; dir != ""; {
+		paths = append(paths, filepath.Join(dir, ".claude", "settings.json"), filepath.Join(dir, ".claude", "settings.local.json"))
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return paths
+}
 
-func commandConfigDir(command string) (string, bool, bool) {
-	m := configDirAssignment.FindStringSubmatch(command)
-	if len(m) != 2 {
+var commandEnvAssignment = regexp.MustCompile(`(?:^|[;|&\n\s])(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;|&]+)`)
+
+func commandEnvPath(command, name, cwd, home string) (string, bool, bool) {
+	matches := commandEnvAssignment.FindAllStringSubmatch(command, -1)
+	var value string
+	found := false
+	for _, match := range matches {
+		if match[1] == name {
+			value, found = strings.Trim(match[2], "'\""), true
+		}
+	}
+	if !found {
 		return "", false, false
 	}
-	value := strings.Trim(m[1], "'\"")
 	if strings.ContainsAny(value, "$`*?[") {
 		return "", true, true
 	}
-	return value, true, false
+	if after, ok := strings.CutPrefix(value, "~/"); ok {
+		value = filepath.Join(home, after)
+	}
+	return resolvePath(value, 0, cwd, home), true, false
 }
 
-var literalShellAssignment = regexp.MustCompile(`(?:^|[;|&\n]\s*|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&]+)`)
+func commandConfigDir(command, cwd, home string) (string, bool, bool) {
+	return commandEnvPath(command, "CLAUDE_CONFIG_DIR", cwd, home)
+}
+
+func commandHomeDir(command, cwd, defaultHome string) (string, bool, bool) {
+	value, found, dynamic := commandEnvPath(command, "HOME", cwd, defaultHome)
+	if !found {
+		return defaultHome, false, false
+	}
+	return value, true, dynamic
+}
+
+var literalShellAssignment = regexp.MustCompile(`(?:^|[;|&(\n]\s*|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&()]+)`)
+var shellVariableReference = regexp.MustCompile(`\$(?:\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|([A-Za-z_][A-Za-z0-9_]*))`)
+var taintedVariableWrite = regexp.MustCompile(`\b(?:for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in|read\s+(?:-[a-zA-Z]+\s+)?([A-Za-z_][A-Za-z0-9_]*)|printf\s+-v\s+([A-Za-z_][A-Za-z0-9_]*))\b`)
 
 func resolveAssignedModelValues(command string, candidates []modelCandidate) []modelCandidate {
 	assigned := map[string]string{}
+	counts := map[string]int{}
+	unsafe := map[string]bool{}
+	positions := map[string]int{}
+	for _, m := range literalShellAssignment.FindAllStringSubmatchIndex(command, -1) {
+		name := command[m[2]:m[3]]
+		value := command[m[4]:m[5]]
+		counts[name]++
+		positions[name] = m[0]
+		if strings.ContainsAny(value, "$`") || strings.LastIndex(command[:m[0]], "(") > strings.LastIndex(command[:m[0]], ")") {
+			unsafe[name] = true
+		}
+	}
+	for _, m := range taintedVariableWrite.FindAllStringSubmatch(command, -1) {
+		for _, name := range m[1:] {
+			if name != "" {
+				unsafe[name] = true
+				counts[name]++
+			}
+		}
+	}
 	for _, m := range literalShellAssignment.FindAllStringSubmatch(command, -1) {
 		v := strings.Trim(m[2], "'\"")
-		if !strings.ContainsAny(v, "$`*?[]") {
+		if counts[m[1]] == 1 && !unsafe[m[1]] && !strings.ContainsAny(v, "$`*?[]") {
 			assigned[m[1]] = v
 		}
 	}
@@ -218,9 +311,24 @@ func resolveAssignedModelValues(command string, candidates []modelCandidate) []m
 			continue
 		}
 		v := strings.Trim(candidates[i].value, "'\"")
-		name := strings.TrimPrefix(v, "$")
-		name = strings.Trim(name, "{}")
-		if resolved, ok := assigned[name]; ok {
+		name := ""
+		if ref := shellVariableReference.FindStringSubmatch(v); len(ref) == 3 {
+			name = ref[1]
+			if name == "" {
+				name = ref[2]
+			}
+		}
+		if name == "" {
+			continue
+		}
+		if counts[name] > 0 && (counts[name] != 1 || unsafe[name]) {
+			candidates[i].uncertainDynamic = true
+		}
+		refAt := strings.Index(command, "$"+name)
+		if refAt < 0 {
+			refAt = strings.Index(command, "${"+name)
+		}
+		if resolved, ok := assigned[name]; ok && positions[name] < refAt {
 			candidates[i].value, candidates[i].dynamic = resolved, false
 		}
 	}
@@ -276,7 +384,7 @@ type modelFiles struct {
 // точно и нормализованным, как в Claude Code 2.1.330 (приёмка 21.11).
 // Модель определения проверяется только на «только пользователь»:
 // одобрение моделей в определениях — не предмет хука (fighter.md — model: opus)
-func agentDefinitionModels(name, cwd, home string, extra []string, logger core.Logger) []modelCandidate {
+func agentDefinitionModels(name, cwd, home string, extra []string, logger core.Logger, rejectMissing bool) []modelCandidate {
 	var found []modelCandidate
 	definitionFound := false
 	walk := agentWalk{seen: map[string]bool{}, logger: logger}
@@ -302,7 +410,7 @@ func agentDefinitionModels(name, cwd, home string, extra []string, logger core.L
 			}
 		}
 	}
-	if !definitionFound && !builtinAgent(name) {
+	if rejectMissing && !definitionFound && !builtinAgent(name) {
 		return []modelCandidate{{value: name, unknownAgent: true}}
 	}
 	return found
@@ -320,10 +428,8 @@ func agentNameMatches(defName, name string) bool {
 	if sameAgentName(defName, name) {
 		return true
 	}
-	if pluginName, ok := strings.CutPrefix(name, "plugin:"); ok {
-		return sameAgentName(defName, pluginName)
-	}
-	return false
+	_, pluginName, ok := strings.Cut(name, ":")
+	return ok && sameAgentName(defName, pluginName)
 }
 
 // agentDirs — каталоги определений агентов: пользовательские первыми
@@ -332,6 +438,7 @@ func agentNameMatches(defName, name string) bool {
 // репозитория или ~, хук — до /, это шире)
 func agentDirs(cwd, home string) []string {
 	var dirs []string
+	cwd = filepath.Clean(cwd)
 	if config := os.Getenv("CLAUDE_CONFIG_DIR"); config != "" {
 		dirs = append(dirs, filepath.Join(config, "agents"))
 	}
@@ -528,20 +635,42 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 	var found []modelCandidate
 	claude := false
 	cwd := initialCWD
+	cwdKnown := cwd != ""
 	for i := range calls {
 		call := &calls[i]
 		if call.Name == "cd" || call.Name == "pushd" {
-			cwd = changeDir(call, cwd, homeForPaths())
+			var known bool
+			previousKnown := cwdKnown
+			cwd, known = changeDirKnown(call, cwd, homeForPaths())
+			cwdKnown = known && (previousKnown || absoluteChangePath(call))
 			continue
 		}
-		if !slices.Contains(modelClients, call.Name) {
+		if call.Name == "env" {
+			if dir, found, known := envChdir(call.Args, cwd, homeForPaths()); found {
+				previousKnown := cwdKnown
+				if known {
+					cwd = dir
+				}
+				cwdKnown = known && (previousKnown || envChdirAbsolute(call.Args))
+			}
 			continue
 		}
-		args := make([]word, len(call.Args))
-		for i, a := range call.Args {
+		isNpxClaude := call.Name == "npx" && npxClaudeCode(call.Args)
+		if !slices.Contains(modelClients, call.Name) && !isNpxClaude {
+			continue
+		}
+		callArgs := call.Args
+		if isNpxClaude {
+			callArgs = npxClaudeArgs(call.Args)
+		}
+		args := make([]word, len(callArgs))
+		for i, a := range callArgs {
 			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`"), tilde: call.ArgTilde(i)}
 		}
 		dialect := clientDialect(call.Name)
+		if isNpxClaude {
+			dialect = "claude"
+		}
 		callExtraDirs := []string{}
 		localFiles := files
 		if localFiles.settings != nil {
@@ -551,21 +680,31 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		if agentAt != nil {
 			localFiles.agent = func(name string) []modelCandidate { return agentAt(name, cwd, callExtraDirs) }
 		}
-		if call.Name == "claude" {
+		if dialect == "claude" {
+			if !cwdKnown {
+				found = append(found, modelCandidate{value: "cwd", unknownCWD: true})
+			}
 			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
 			if settingsAt != nil {
-				if !hasExplicitModelFlag(args) {
-					found = append(found, settingsAt(cwd)...)
+				settings := settingsAt(cwd)
+				if hasExplicitModelFlag(args) {
+					settings = slices.DeleteFunc(settings, func(c modelCandidate) bool { return c.settingsModel })
 				}
+				found = append(found, settings...)
 			}
 		}
-		found = append(found, candidatesFromArgs(dialect, args, localFiles)...)
+		callCandidates := candidatesFromArgs(dialect, args, localFiles)
+		if dialect == "claude" && hasExplicitModelFlag(args) {
+			callCandidates = slices.DeleteFunc(callCandidates, func(c modelCandidate) bool { return c.settingsModel })
+		}
+		found = append(found, callCandidates...)
 		if dialect == "claude" {
 			claude = true
 		}
 	}
 	if claude {
 		found = append(found, envModelCandidates(command, calls, logger)...)
+		found = append(found, writtenProtectedFileCandidates(command)...)
 	}
 	if err != nil {
 		// вызовы найдены не все: вложенный скрипт, который akit не разобрал
@@ -579,7 +718,109 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		logger.Warn("model_guard: shellcmd разобрал команду не целиком, модели ищутся и в тексте", "error", err)
 		found = append(found, textModelCandidates(text)...)
 	}
+	if whichClaudeSubstitution.MatchString(command) {
+		replaced := whichClaudeSubstitution.ReplaceAllString(command, "claude")
+		found = append(found, textModelCandidates(replaced)...)
+	}
 	return found
+}
+
+var whichClaudeSubstitution = regexp.MustCompile(`\$\(\s*which\s+claude\s*\)`)
+
+var protectedSettingsTarget = regexp.MustCompile(`(?i)(?:settings(?:\.local)?\.json|agents/[^\s"';&|<>]+\.md)`)
+var fileWriterCommand = regexp.MustCompile(`\b(?:tee|cp|mv|install)\b|>`)
+
+func writtenProtectedFileCandidates(command string) []modelCandidate {
+	if !protectedSettingsTarget.MatchString(command) || !fileWriterCommand.MatchString(command) {
+		return nil
+	}
+	decoded := strings.ReplaceAll(command, "\\\"", "\"")
+	decoded = strings.ReplaceAll(decoded, "\\\\n", "\n")
+	var found []modelCandidate
+	for _, match := range writtenModel.FindAllStringSubmatch(decoded, -1) {
+		if match[1] == "model" {
+			found = append(found, modelCandidate{value: match[2]})
+		} else if c, ok := envCandidate(match[1], match[2], false); ok {
+			found = append(found, c)
+		}
+	}
+	for _, match := range regexp.MustCompile(`(?m)^\s*model:\s*([^\s#]+)`).FindAllStringSubmatch(decoded, -1) {
+		found = append(found, modelCandidate{value: strings.Trim(match[1], `"'`), userOnlyCheck: true})
+	}
+	if len(found) == 0 {
+		return []modelCandidate{{value: "written settings or agent contents", dynamic: true}}
+	}
+	return found
+}
+
+func envChdir(args []string, cwd, home string) (string, bool, bool) {
+	for i := 0; i < len(args); i++ {
+		var value string
+		switch {
+		case args[i] == "-C" || args[i] == "--chdir":
+			if i+1 >= len(args) {
+				return "", true, false
+			}
+			i++
+			value = args[i]
+		case strings.HasPrefix(args[i], "--chdir="):
+			value = strings.TrimPrefix(args[i], "--chdir=")
+		default:
+			continue
+		}
+		path, known := knownPath(value, home)
+		if !known {
+			return "", true, false
+		}
+		return resolvePath(path, 0, cwd, home), true, true
+	}
+	return "", false, false
+}
+
+func envChdirAbsolute(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		var value string
+		if args[i] == "-C" || args[i] == "--chdir" {
+			if i+1 < len(args) {
+				i++
+				value = args[i]
+			}
+		} else if after, ok := strings.CutPrefix(args[i], "--chdir="); ok {
+			value = after
+		}
+		if value != "" {
+			return filepath.IsAbs(value) || strings.HasPrefix(value, "~") || strings.HasPrefix(value, "$HOME")
+		}
+	}
+	return false
+}
+
+func absoluteChangePath(call *shellcmd.Call) bool {
+	i := 0
+	for i < len(call.Args) && (call.Args[i] == "-P" || call.Args[i] == "-L") {
+		i++
+	}
+	if i < len(call.Args) && call.Args[i] == "--" {
+		i++
+	}
+	if i >= len(call.Args) {
+		return call.Name == "cd"
+	}
+	path := call.Args[i]
+	return filepath.IsAbs(path) || strings.HasPrefix(path, "~") || strings.HasPrefix(path, "$HOME") || strings.HasPrefix(path, "${HOME}")
+}
+
+func npxClaudeCode(args []string) bool {
+	return slices.Contains(args, "@anthropic-ai/claude-code")
+}
+
+func npxClaudeArgs(args []string) []string {
+	for i, arg := range args {
+		if arg == "@anthropic-ai/claude-code" {
+			return args[i+1:]
+		}
+	}
+	return nil
 }
 
 func claudeAddedAgentDirs(args []word, cwd, home string) []string {
@@ -587,10 +828,15 @@ func claudeAddedAgentDirs(args []word, cwd, home string) []string {
 	for i := 0; i < len(args); i++ {
 		var path string
 		var tilde shellcmd.Tilde
-		if args[i].text == "--add-dir" && i+1 < len(args) {
+		if (args[i].text == "--add-dir" || args[i].text == "--plugin-dir") && i+1 < len(args) {
 			i++
 			path, tilde = args[i].text, args[i].tilde
 		} else if value, ok := strings.CutPrefix(args[i].text, "--add-dir="); ok {
+			if strings.ContainsAny(value, "$`") {
+				continue
+			}
+			path = value
+		} else if value, ok := strings.CutPrefix(args[i].text, "--plugin-dir="); ok {
 			if strings.ContainsAny(value, "$`") {
 				continue
 			}
@@ -895,6 +1141,8 @@ func modelValueFlag(name, flag string) bool {
 		return true
 	case "-m":
 		return name == "codex" || name == "opencode"
+	case "-model":
+		return name == "worker"
 	case "--fallback-model":
 		return name == "claude"
 	}
@@ -903,11 +1151,22 @@ func modelValueFlag(name, flag string) bool {
 
 func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandidate {
 	var found []modelCandidate
+	inlineAgents := inlineAgentModels(args)
 	if name == "claude" {
 		args = splitValueFlags(args)
 	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if name == "opencode" || name == "worker" {
+			if value, ok := strings.CutPrefix(a.text, "-m="); ok && name == "opencode" {
+				found = append(found, modelCandidate{value: value, dynamic: !a.literal})
+				continue
+			}
+			if value, ok := strings.CutPrefix(a.text, "-model="); ok && name == "worker" {
+				found = append(found, modelCandidate{value: value, dynamic: !a.literal})
+				continue
+			}
+		}
 		if name == "codex" {
 			if value, ok := strings.CutPrefix(a.text, "-m="); ok {
 				found = append(found, modelCandidate{value: value, dynamic: !a.literal})
@@ -934,7 +1193,13 @@ func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandi
 		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
 			found = append(found, jsonModelCandidates(a.text, next, files.settings, files.agent)...)
 		case name == "claude" && a.text == "--agent":
-			found = append(found, agentFlagCandidates(next, files)...)
+			if model, exists := inlineAgents[next.text]; exists {
+				if model != "" && model != "inherit" {
+					found = append(found, modelCandidate{value: model})
+				}
+			} else {
+				found = append(found, agentFlagCandidates(next, files)...)
+			}
 		case name == "codex" && (a.text == "-c" || a.text == "--config"):
 			if candidate, ok := codexConfigCandidate(next); ok {
 				found = append(found, candidate)
@@ -945,6 +1210,24 @@ func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandi
 		i++
 	}
 	return found
+}
+
+func inlineAgentModels(args []word) map[string]string {
+	models := map[string]string{}
+	for i := 0; i+1 < len(args); i++ {
+		if args[i].text != "--agents" || !args[i+1].literal {
+			continue
+		}
+		var agents map[string]struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal([]byte(args[i+1].text), &agents) == nil {
+			for name, agent := range agents {
+				models[name] = agent.Model
+			}
+		}
+	}
+	return models
 }
 
 // jsonModelKey — ключ модели в исходном тексте JSON, в том числе с
@@ -1017,6 +1300,12 @@ func (found *jsonModels) add(model string) {
 	}
 }
 
+func (found *jsonModels) addSettingModel(model string) {
+	if strings.TrimSpace(model) != "" && model != "inherit" {
+		*found = append(*found, modelCandidate{value: model, settingsModel: true})
+	}
+}
+
 // addField — поле настроек: model или переменная модели из env
 func (found *jsonModels) addField(field, value string) {
 	if field == "model" {
@@ -1041,7 +1330,7 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 	}
 	var model string
 	if json.Unmarshal(settings["model"], &model) == nil {
-		found.add(model)
+		found.addSettingModel(model)
 	}
 	var agent struct {
 		Model string `json:"model"`

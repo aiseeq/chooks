@@ -524,6 +524,106 @@ func TestModelGuardSettingsAgentReference(t *testing.T) {
 	}
 }
 
+func TestModelGuardRoundTwo(t *testing.T) {
+	home, root, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	approved := filepath.Join(t.TempDir(), "approved")
+	if err := os.WriteFile(approved, []byte("opus claude-opus-5-5\nfable claude-fable-5-2\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MODELS_APPROVED", approved)
+	oldManaged := managedSettingsPath
+	managedSettingsPath = filepath.Join(t.TempDir(), "managed-settings.json")
+	t.Cleanup(func() { managedSettingsPath = oldManaged })
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	write := func(path, contents string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project := filepath.Join(root, "repo")
+	write(filepath.Join(project, ".git", "HEAD"), "ref: refs/heads/test\n")
+	sub := filepath.Join(project, "sub")
+	write(filepath.Join(sub, "keep"), "")
+	write(filepath.Join(project, ".claude/settings.json"), `{"model":"opus","env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}`)
+	plain := filepath.Join(t.TempDir(), "plain")
+	write(filepath.Join(plain, ".claude/settings.json"), `{"model":"fable"}`)
+	normalized := t.TempDir()
+	write(filepath.Join(normalized, ".claude/settings.json"), `{"model":"opus"}`)
+	write(filepath.Join(normalized, "opusenv/.claude/settings.json"), `{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}`)
+	unnormalizedCWD := normalized + string(filepath.Separator) + "opusenv" + string(filepath.Separator) + ".."
+	for _, path := range projectSettingsPaths(unnormalizedCWD) {
+		if path == filepath.Join(normalized, "opusenv", ".claude", "settings.json") {
+			t.Fatal("settings from a child of normalized cwd were included")
+		}
+	}
+	homeFable := filepath.Join(t.TempDir(), "fakehome")
+	write(filepath.Join(homeFable, ".claude/settings.json"), `{"model":"fable"}`)
+	plugOpus, plugFable := filepath.Join(t.TempDir(), "plug-opus"), filepath.Join(t.TempDir(), "plug-fable")
+	write(filepath.Join(plugOpus, "agents/rev.md"), "---\nname: rev\nmodel: opus\n---\n")
+	write(filepath.Join(plugFable, "agents/rev.md"), "---\nname: rev\nmodel: fable\n---\n")
+	cases := []struct {
+		name, tool, cwd, command, raw string
+		reject                        bool
+	}{
+		{"for variable assignment", "Bash", outside, `M=opus; for M in fable; do claude --model "$M" -p hi; done`, "", true},
+		{"command substitution reassignment", "Bash", outside, `M=opus; M=$(echo fable); claude --model "$M" -p hi`, "", true},
+		{"prefix reassignment", "Bash", outside, `export M=fable; M=opus claude --model "$M" -p hi`, "", true},
+		{"read reassignment", "Bash", outside, `M=opus; read M <<< fable; claude --model $M -p hi`, "", true},
+		{"printf reassignment", "Bash", outside, `M=opus; printf -v M fable; claude --model $M -p hi`, "", true},
+		{"subshell assignment", "Bash", outside, `(M=fable; claude --model $M -p hi)`, "", true},
+		{"fast model reassignment", "Bash", outside, `F=opus; F=$(echo fable); ANTHROPIC_SMALL_FAST_MODEL=$F claude`, "", true},
+		{"single prior assignment", "Bash", outside, `M=opus; claude --model $M -p hi`, "", false},
+		{"cd -P", "Bash", outside, "cd -P " + plain + " && claude", "", true},
+		{"cd dash separator", "Bash", outside, "cd -- " + plain + " && claude", "", true},
+		{"env -C", "Bash", outside, "env -C " + plain + " claude", "", true},
+		{"env chdir equals", "Bash", outside, "env --chdir=" + plain + " claude", "", true},
+		{"unknown cwd", "Bash", outside, "cd $D && claude --model opus", "", true},
+		{"HOME settings", "Bash", outside, "HOME=" + homeFable + " claude", "", true},
+		{"repo settings env ignores model override", "Bash", sub, "claude --model opus", "", true},
+		{"project model key overridden", "Bash", outside, "cd " + plain + " && claude --model opus", "", false},
+		{"cwd parent path excludes child settings", "Bash", unnormalizedCWD, "claude", "", false},
+		{"write settings", "Bash", outside, `echo '{"model":"fable"}' > ` + filepath.Join(outside, "settings.json") + "; claude", "", true},
+		{"write agent definition", "Bash", outside, "printf -- '---\\nname: x\\nmodel: fable\\n---\\n' > " + filepath.Join(outside, "agents/x.md") + "; claude --agent x", "", true},
+		{"copy unknown settings", "Bash", outside, "cp /not/readable/source " + filepath.Join(outside, "settings.json") + "; claude", "", true},
+		{"worker -model", "Bash", outside, "worker run -model fable --brief b --dir d --class c", "", true},
+		{"worker equals model", "Bash", outside, "worker ask -model=fable --class c --msg hi", "", true},
+		{"opencode equals model", "Bash", outside, "opencode -m=fable run hi", "", true},
+		{"npx Claude", "Bash", outside, "npx @anthropic-ai/claude-code --model fable -p hi", "", true},
+		{"which Claude substitution", "Bash", outside, "$(which claude) --model fable -p hi", "", true},
+		{"echo data", "Bash", outside, "echo fable", "", false},
+		{"grep data", "Bash", outside, "grep -r fable docs", "", false},
+		{"inline agents opus", "Bash", outside, `claude --agents '{"rev":{"model":"opus"}}' --agent rev -p hi`, "", false},
+		{"inline agents fable", "Bash", outside, `claude --agents '{"rev":{"model":"fable"}}' --agent rev -p hi`, "", true},
+		{"plugin-dir opus", "Bash", outside, "claude --plugin-dir " + plugOpus + " --agent myplug:rev -p hi", "", false},
+		{"plugin-dir fable", "Bash", outside, "claude --plugin-dir " + plugFable + " --agent myplug:rev -p hi", "", true},
+		{"unknown Agent plugin allowed", "Agent", outside, "", `{"subagent_type":"frontend-design:frontend-design"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: tc.tool, CWD: tc.cwd, Command: tc.command, ToolInput: []byte(tc.raw)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid == tc.reject {
+				t.Fatalf("reject=%v want=%v violations=%+v", !result.IsValid, tc.reject, result.Violations)
+			}
+			if tc.name == "unknown cwd" && !strings.Contains(fmt.Sprint(result.Violations), "каталог запуска неизвестен: модель не проверить") {
+				t.Fatalf("unknown cwd did not produce its dedicated refusal: %+v", result.Violations)
+			}
+		})
+	}
+}
+
 func TestModelGuardAgentDefinition(t *testing.T) {
 	home, project := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
@@ -597,13 +697,13 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	}{
 		{"Agent fx", "Agent", `{"subagent_type":"fx"}`, "", home, true},
 		{"Agent по name во вложенной папке", "Agent", `{"subagent_type":"other-name"}`, "", home, true},
-		{"Agent по имени файла при другом name", "Agent", `{"subagent_type":"fy"}`, "", home, true},
+		{"Agent по имени файла при другом name", "Agent", `{"subagent_type":"fy"}`, "", home, false},
 		{"Agent без name — имя файла", "Agent", `{"subagent_type":"byfile"}`, "", home, true},
 		{"Agent opus в frontmatter, fable в теле", "Agent", `{"subagent_type":"ok"}`, "", home, false},
 		{"Agent haiku CRLF", "Agent", `{"subagent_type":"hk"}`, "", home, false},
 		{"Agent inherit", "Agent", `{"subagent_type":"in"}`, "", home, false},
 		{"Agent без frontmatter", "Agent", `{"subagent_type":"nofm"}`, "", home, false},
-		{"Agent не .md", "Agent", `{"subagent_type":"txt"}`, "", home, true},
+		{"Agent не .md", "Agent", `{"subagent_type":"txt"}`, "", home, false},
 		{"Agent незакрытый frontmatter", "Agent", `{"subagent_type":"unclosed"}`, "", home, false},
 		{"Agent frontmatter не с начала", "Agent", `{"subagent_type":"noprefix"}`, "", home, false},
 		{"Agent пустой name — имя файла", "Agent", `{"subagent_type":"emptyname"}`, "", home, true},
@@ -619,7 +719,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent блочный скаляр", "Agent", `{"subagent_type":"fblock"}`, "", home, true},
 		{"Agent вложенный name не подменяет", "Agent", `{"subagent_type":"fnn"}`, "", home, true},
 		{"Agent вложенный model не считается", "Agent", `{"subagent_type":"fnm"}`, "", home, false},
-		{"Agent файл больше 1 МБ — Claude Code не загрузит", "Agent", `{"subagent_type":"fbig"}`, "", home, true},
+		{"Agent файл больше 1 МБ — Claude Code не загрузит", "Agent", `{"subagent_type":"fbig"}`, "", home, false},
 		{"Agent frontmatter больше 64 КБ", "Agent", `{"subagent_type":"flong"}`, "", home, true},
 		{"Agent имя с тире U+2013", "Agent", `{"subagent_type":"f–dash"}`, "", home, true},
 		{"Agent глубже 16 каталогов", "Agent", `{"subagent_type":"fdeep"}`, "", home, true},
@@ -628,12 +728,12 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent из CLAUDE_CONFIG_DIR", "Agent", `{"subagent_type":"fconfig"}`, "", home, true},
 		{"Agent FABLE", "Agent", `{"subagent_type":"caseupper"}`, "", home, true},
 		{"Agent fable [1m]", "Agent", `{"subagent_type":"onemillion"}`, "", home, true},
-		{"Agent нет такого", "Agent", `{"subagent_type":"absent"}`, "", home, true},
+		{"Agent нет такого", "Agent", `{"subagent_type":"absent"}`, "", home, false},
 		{"Agent встроенный", "Agent", `{"subagent_type":"general-purpose"}`, "", home, false},
 		{"Agent fx с model opus", "Agent", `{"subagent_type":"fx","model":"opus"}`, "", home, false},
 		{"Agent fx с пустым model", "Agent", `{"subagent_type":"fx","model":""}`, "", home, true},
 		{"Agent проекта", "Agent", `{"subagent_type":"px"}`, "", project, true},
-		{"Agent проекта из другого каталога", "Agent", `{"subagent_type":"px"}`, "", home, true},
+		{"Agent проекта из другого каталога", "Agent", `{"subagent_type":"px"}`, "", home, false},
 		{"Agent override opus", "Agent", `{"subagent_type":"override"}`, "", home, false},
 		{"claude --agent fx", "Bash", "", "claude -p --agent fx hi", home, true},
 		{"cl --agent=fx", "Bash", "", "cl --agent=fx", home, true},
@@ -669,7 +769,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		struct {
 			name, tool, raw, command, cwd string
 			reject                        bool
-		}{"explicit model overrides settings", "Bash", "", "cd " + project + " && claude --model opus", home, false},
+		}{"explicit model overrides settings model but not agent", "Bash", "", "cd " + project + " && claude --model opus", home, true},
 		struct {
 			name, tool, raw, command, cwd string
 			reject                        bool

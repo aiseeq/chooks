@@ -719,6 +719,13 @@ func readSettingsFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+// CheckSettingsFile reports whether a runtime --settings target is an ordinary
+// readable settings file accepted by model_guard.
+func CheckSettingsFile(path string) error {
+	_, err := readSettingsFile(path)
+	return err
+}
+
 // modelClients — программы, которым модель задают в командной строке: cl
 // передаёт флаги claude, worker run|ask|continue берёт --model
 var modelClients = []string{"claude", "cl", "codex", "opencode", "worker"}

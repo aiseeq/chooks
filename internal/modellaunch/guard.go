@@ -39,7 +39,7 @@ func New(proc ProcessReader, models *tools.ModelGuardTool, logger core.Logger) *
 // Check returns a rejection message only when an agent launched Claude with a
 // model that model_guard does not approve. Proc read failures fail open.
 func (g *Guard) Check(ctx context.Context, hookPID int) (string, error) {
-	claudePID, cmdline, cmdlineErr, err := g.findClaude(hookPID)
+	claudePID, cmdline, cmdlineErr, err := g.findSessionClaude(hookPID)
 	if err != nil {
 		g.logDecision(0, "unknown", "ancestry_unreadable", "unknown", "skipped")
 		return "", nil
@@ -106,6 +106,12 @@ func (g *Guard) checkModel(ctx context.Context, pid int, agent bool, basis strin
 		g.logDecision(pid, "user", basis, model, "allowed")
 		return "", nil
 	}
+	if badPath, settingsErr := unreadableSettingsPath(cmdline, procEnv, cwd); badPath != "" {
+		model = "unreadable_settings"
+		g.logger.Warn("modellaunch: модель из --settings не удалось проверить", "pid", pid, "path", badPath, "error", settingsErr)
+		g.logDecision(pid, "agent", basis, model, "rejected_settings_unreadable")
+		return rejectionPrefix + ": модель из --settings не удалось проверить: " + badPath, nil
+	}
 	result, err := g.models.ValidateTool(ctx, input)
 	if err != nil {
 		g.logDecision(pid, "agent", basis, model, "error")
@@ -122,27 +128,58 @@ func (g *Guard) checkModel(ctx context.Context, pid int, agent bool, basis strin
 	return rejectionPrefix + ": " + result.Violations[0].Message, nil
 }
 
-func (g *Guard) findClaude(hookPID int) (int, []string, error, error) {
-	seen := map[int]bool{}
-	pid := hookPID
-	for pid > 0 && !seen[pid] {
-		seen[pid] = true
-		parent, err := g.proc.Parent(pid)
-		if err != nil {
-			return 0, nil, nil, fmt.Errorf("parent %d: %w", pid, err)
-		}
-		if parent <= 1 || seen[parent] {
-			break
-		}
-		exe, exeErr := g.proc.Exe(parent)
-		comm, commErr := g.proc.Comm(parent)
-		argv, argvErr := g.proc.Cmdline(parent)
-		if isClaude(exe, exeErr, comm, commErr, argv, argvErr) {
-			return parent, argv, argvErr, nil
-		}
-		pid = parent
+func (g *Guard) findSessionClaude(hookPID int) (int, []string, error, error) {
+	parent, err := g.proc.Parent(hookPID)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("hook parent %d: %w", hookPID, err)
 	}
-	return 0, nil, nil, nil
+	if parent <= 1 {
+		return 0, nil, nil, nil
+	}
+	exe, exeErr := g.proc.Exe(parent)
+	comm, commErr := g.proc.Comm(parent)
+	argv, argvErr := g.proc.Cmdline(parent)
+	if isHookShell(exe, exeErr, comm, commErr, argv, argvErr) {
+		shellPID := parent
+		parent, err = g.proc.Parent(shellPID)
+		if err != nil {
+			return 0, nil, nil, fmt.Errorf("hook shell parent %d: %w", shellPID, err)
+		}
+		if parent <= 1 {
+			return 0, nil, nil, nil
+		}
+		argv, argvErr = g.proc.Cmdline(parent)
+	}
+	return parent, argv, argvErr, nil
+}
+
+func isHookShell(exe string, exeErr error, comm string, commErr error, argv []string, argvErr error) bool {
+	if argvErr != nil || len(argv) < 3 {
+		return false
+	}
+	base := ""
+	if exeErr == nil {
+		base = filepath.Base(exe)
+	}
+	if base == "" && commErr == nil {
+		base = strings.TrimSpace(comm)
+	}
+	if base == "" && len(argv) > 0 {
+		base = filepath.Base(argv[0])
+	}
+	shell := base == "sh" || base == "bash" || base == "dash"
+	if !shell {
+		return false
+	}
+	for i := range argv {
+		if i == 0 || i+1 >= len(argv) {
+			continue
+		}
+		if argv[i] == "-c" && strings.Contains(argv[i+1], "user-prompt-submit") {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Guard) hasClaudeAncestor(pid int) (bool, bool) {
@@ -221,10 +258,7 @@ func literalCommand(argv, env []string) string {
 	if len(argv) == 0 {
 		return ""
 	}
-	args := argv
-	if filepath.Base(argv[0]) != "claude" && len(argv) > 1 && (filepath.Base(argv[1]) == "claude" || filepath.Base(argv[1]) == "claude.js") {
-		args = argv[1:]
-	}
+	args := normalizedClaudeArgs(argv)
 	values := make(map[string]string, len(env))
 	for _, item := range env {
 		key, value, ok := strings.Cut(item, "=")
@@ -239,10 +273,78 @@ func literalCommand(argv, env []string) string {
 			words = append(words, shellQuote(key+"="+value))
 		}
 	}
+	words = append(words, shellQuote("claude"))
 	for _, arg := range args {
 		words = append(words, shellQuote(arg))
 	}
 	return "env " + strings.Join(words, " ")
+}
+
+func normalizedClaudeArgs(argv []string) []string {
+	start := 1 // argv[0] may be changed by exec -a; command name is always claude
+	if len(argv) > 1 && isInterpreter(filepath.Base(argv[0])) {
+		start = 2 // discard interpreter script path too
+	}
+	if start > len(argv) {
+		return nil
+	}
+	return argv[start:]
+}
+
+func isInterpreter(name string) bool {
+	name = strings.ToLower(name)
+	for _, interpreter := range []string{"node", "nodejs", "bun", "deno", "python", "python2", "python3", "ruby", "perl", "php", "lua"} {
+		if name == interpreter || strings.HasPrefix(name, interpreter+".") {
+			return true
+		}
+	}
+	return false
+}
+
+func unreadableSettingsPath(argv, env []string, cwd string) (string, error) {
+	args := normalizedClaudeArgs(argv)
+	values := make(map[string]string, len(env))
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	for i := range args {
+		value := ""
+		switch {
+		case args[i] == "--settings" && i+1 < len(args):
+			value = args[i+1]
+		case strings.HasPrefix(args[i], "--settings="):
+			value = strings.TrimPrefix(args[i], "--settings=")
+		default:
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(value), "{") {
+			continue // inline JSON settings
+		}
+		if relativeHome, ok := strings.CutPrefix(value, "~/"); ok {
+			value = filepath.Join(values["HOME"], relativeHome)
+		}
+		if specialSettingsPath(value) {
+			return value, fmt.Errorf("необычный путь настроек")
+		}
+		if !filepath.IsAbs(value) {
+			value = filepath.Join(cwd, value)
+		}
+		if err := tools.CheckSettingsFile(value); err != nil {
+			return value, err
+		}
+	}
+	return "", nil
+}
+
+func specialSettingsPath(path string) bool {
+	clean := filepath.Clean(path)
+	if clean == "/dev/fd" || strings.HasPrefix(clean, "/dev/fd/") {
+		return true
+	}
+	return strings.HasPrefix(clean, "/proc/") && (strings.HasSuffix(clean, "/fd") || strings.Contains(clean, "/fd/"))
 }
 
 func shellQuote(value string) string {

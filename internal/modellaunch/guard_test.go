@@ -122,6 +122,66 @@ func TestRuntimeModelGuardIdentifiesClaudeByCommWithoutExe(t *testing.T) {
 	}
 }
 
+func TestRuntimeModelGuardSessionParentNameIsIrrelevant(t *testing.T) {
+	t.Run("version path and comm", func(t *testing.T) {
+		f := agentTree([]string{"2.1.999", "--model", "haiku"}, "CLAUDECODE=1")
+		f.exe[90] = "/home/user/.local/share/claude/versions/2.1.999"
+		f.comm[90] = "2.1.999"
+		message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+		if err != nil || message == "" {
+			t.Fatalf("Check = %q, %v; want rejection", message, err)
+		}
+	})
+
+	t.Run("shell -c wrapper", func(t *testing.T) {
+		f := agentTree(nil)
+		f.add(90, 80, "/bin/sh", nil, []string{"sh", "-c", `"$HOME/bin/chooks" user-prompt-submit < "$FAKE_IN"`})
+		f.add(80, 70, "/home/review/bin/fake", []string{"CLAUDECODE=1"}, []string{"renamed-fake", "--model", "haiku"})
+		f.add(70, 1, "/usr/bin/bash", nil, []string{"bash"})
+		message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+		if err != nil || message == "" {
+			t.Fatalf("Check = %q, %v; want rejection", message, err)
+		}
+	})
+
+	t.Run("exec -a", func(t *testing.T) {
+		f := agentTree([]string{"foo", "--model", "haiku"}, "CLAUDECODE=1")
+		message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+		if err != nil || message == "" {
+			t.Fatalf("Check = %q, %v; want rejection", message, err)
+		}
+	})
+}
+
+func TestRuntimeModelGuardRejectsNonRegularSettingsPath(t *testing.T) {
+	f := agentTree([]string{"claude", "--settings", "/dev/fd/63"}, "CLAUDECODE=1")
+	message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+	if err != nil || message == "" {
+		t.Fatalf("Check = %q, %v; want rejection", message, err)
+	}
+}
+
+func TestRuntimeModelGuardUserParentCanHaveAnyName(t *testing.T) {
+	f := agentTree([]string{"fake-client", "--model", "fable"}, "CLAUDE_BASE_DIR=/home/user/.claude")
+	f.exe[90] = "/tmp/renamed-client"
+	f.comm[90] = "renamed-client"
+	message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+	if err != nil || message != "" {
+		t.Fatalf("Check = %q, %v; want pass", message, err)
+	}
+}
+
+func TestRuntimeModelGuardSessionIDAndPIDMarkers(t *testing.T) {
+	for _, env := range []string{"CLAUDE_CODE_SESSION_ID=abc", "CLAUDE_PID=55"} {
+		t.Run(env, func(t *testing.T) {
+			message, err := runtimeGuard(t, agentTree([]string{"claude", "--model", "haiku"}, env)).Check(context.Background(), 100)
+			if err != nil || message == "" {
+				t.Fatalf("Check = %q, %v; want rejection", message, err)
+			}
+		})
+	}
+}
+
 func TestRuntimeModelGuardAgentCases(t *testing.T) {
 	cases := []struct {
 		name string
@@ -165,6 +225,19 @@ func TestRuntimeModelGuardClaudeAncestorMarksAgent(t *testing.T) {
 	f := agentTree([]string{"claude", "--model", "haiku"})
 	f.add(80, 70, "/opt/claude/claude", nil, []string{"claude", "-p", "nested"})
 	f.add(70, 1, "/usr/bin/bash", nil, []string{"bash"})
+	message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+	if err != nil || message == "" {
+		t.Fatalf("Check = %q, %v; want rejection", message, err)
+	}
+}
+
+func TestRuntimeModelGuardFindsClaudeAncestorPastUnreadableExe(t *testing.T) {
+	f := agentTree([]string{"renamed-client", "--model", "haiku"})
+	f.add(80, 75, "/usr/bin/sudo", nil, []string{"sudo", "-u", "user", "renamed-client"})
+	f.exeErr[80] = errors.New("permission denied")
+	f.comm[80] = "sudo"
+	f.add(75, 70, "/usr/bin/bash", nil, []string{"bash"})
+	f.add(70, 1, "/opt/claude/claude", nil, []string{"claude", "-p", "parent"})
 	message, err := runtimeGuard(t, f).Check(context.Background(), 100)
 	if err != nil || message == "" {
 		t.Fatalf("Check = %q, %v; want rejection", message, err)

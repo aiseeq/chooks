@@ -67,17 +67,13 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 			reasons = append(reasons, fmt.Sprintf("определение агента %s не найдено: модель не проверить", c.value))
 			continue
 		}
-		if c.unknownCWD {
-			reasons = append(reasons, "каталог запуска неизвестен: модель не проверить")
-			continue
-		}
 		if c.unknownWrite {
 			reasons = append(reasons, "содержимое изменяемого файла настроек не проверить")
 			continue
 		}
 		if c.userOnlyCheck {
-			if c.uncertainDynamic {
-				reasons = append(reasons, "модель задана динамически после неоднозначного присваивания переменной")
+			if c.dynamic {
+				reasons = append(reasons, "модель задана переменной, назови её литералом")
 				continue
 			}
 			// быстрая модель и модель определения агента одобрения не
@@ -106,13 +102,11 @@ func userOnlyReason(value, name string) string {
 }
 
 type modelCandidate struct {
-	value            string
-	dynamic          bool
-	unknownAgent     bool
-	unknownCWD       bool
-	unknownWrite     bool
-	uncertainDynamic bool
-	settingsModel    bool
+	value         string
+	dynamic       bool
+	unknownAgent  bool
+	unknownWrite  bool
+	settingsModel bool
 	// userOnlyCheck — модель быстрых запросов (переменные haiku) или
 	// определения агента: проверяется только на модель «только пользователь»
 	userOnlyCheck bool
@@ -166,12 +160,12 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		}
 		return data
 	}
-	settingsAt := func(cwd string) []modelCandidate {
+	settingsAt := func(cwd string, includeProject bool) []modelCandidate {
 		commandHome, _, dynamic := commandHomeDir(input.Command, cwd, home)
 		if dynamic {
 			return []modelCandidate{{value: "HOME", dynamic: true}}
 		}
-		return settingsForCWD(cwd, input.Command, commandHome, logger)
+		return settingsForCWD(cwd, input.Command, commandHome, logger, includeProject)
 	}
 	candidates := bashModelCandidatesAt(input.Command, input.CWD, modelFiles{settings: readSettings, agent: agentModels}, settingsAt, func(name, cwd string, extra []string) []modelCandidate {
 		commandHome, _, homeDynamic := commandHomeDir(input.Command, cwd, home)
@@ -189,14 +183,13 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		extra = append(extra, filepath.Join(commandHome, ".claude", "agents"))
 		return agentDefinitionModels(name, cwd, commandHome, extra, logger, true)
 	}, logger)
-	candidates = resolveAssignedModelValues(input.Command, candidates)
 	if unresolvedTildeSettings {
 		candidates = append(candidates, modelCandidate{value: "settings path with unknown home", dynamic: true})
 	}
 	return candidates
 }
 
-func settingsForCWD(cwd, command, home string, logger core.Logger) []modelCandidate {
+func settingsForCWD(cwd, command, home string, logger core.Logger, includeProject bool) []modelCandidate {
 	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if value, found, dynamic := commandConfigDir(command, cwd, home); found {
 		if dynamic {
@@ -204,15 +197,23 @@ func settingsForCWD(cwd, command, home string, logger core.Logger) []modelCandid
 		}
 		configDir = value
 	}
-	paths := append(projectSettingsPaths(cwd), filepath.Join(home, ".claude", "settings.json"), managedSettingsPath)
+	var paths []string
+	if includeProject {
+		paths = append(paths, projectSettingsPaths(cwd)...)
+	}
+	paths = append(paths, filepath.Join(home, ".claude", "settings.json"), managedSettingsPath)
 	var agentDirsForSettings []string
 	if configDir != "" {
 		paths = append(paths, filepath.Join(configDir, "settings.json"))
 		agentDirsForSettings = append(agentDirsForSettings, filepath.Join(configDir, "agents"))
 	}
 	agentDirsForSettings = append(agentDirsForSettings, filepath.Join(home, ".claude", "agents"))
+	lookupCWD := cwd
+	if !includeProject {
+		lookupCWD = ""
+	}
 	lookupAgent := func(name string) []modelCandidate {
-		return agentDefinitionModels(name, cwd, home, agentDirsForSettings, logger, true)
+		return agentDefinitionModels(name, lookupCWD, home, agentDirsForSettings, logger, true)
 	}
 	var candidates []modelCandidate
 	for _, path := range paths {
@@ -277,168 +278,6 @@ func commandHomeDir(command, cwd, defaultHome string) (string, bool, bool) {
 		return defaultHome, false, false
 	}
 	return value, true, dynamic
-}
-
-var literalShellAssignment = regexp.MustCompile(`(?:^|[;|&(\n]\s*|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&()]+)`)
-var shellVariableReference = regexp.MustCompile(`\$(?:\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|([A-Za-z_][A-Za-z0-9_]*))`)
-var fullShellVariableReference = regexp.MustCompile(`^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$`)
-var simpleShellVariableReference = regexp.MustCompile(`\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))`)
-var taintedVariableWrite = regexp.MustCompile(`\b(?:for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in|read\s+(?:-[a-zA-Z]+\s+)?([A-Za-z_][A-Za-z0-9_]*)|printf\s+-v\s+([A-Za-z_][A-Za-z0-9_]*))\b`)
-
-type shellAssignmentInfo struct {
-	value    string
-	count    int
-	position int
-	unsafe   bool
-}
-
-func shellAssignments(command string) map[string]shellAssignmentInfo {
-	assignments := map[string]shellAssignmentInfo{}
-	for _, m := range literalShellAssignment.FindAllStringSubmatchIndex(command, -1) {
-		name := command[m[2]:m[3]]
-		value := command[m[4]:m[5]]
-		info := assignments[name]
-		info.count++
-		info.value = strings.Trim(value, "'\"")
-		info.position = m[0]
-		if strings.ContainsAny(value, "$`*?[]") || strings.LastIndex(command[:m[0]], "(") > strings.LastIndex(command[:m[0]], ")") {
-			info.unsafe = true
-		}
-		assignments[name] = info
-	}
-	for _, m := range taintedVariableWrite.FindAllStringSubmatch(command, -1) {
-		for _, name := range m[1:] {
-			if name != "" {
-				info := assignments[name]
-				info.count++
-				info.unsafe = true
-				assignments[name] = info
-			}
-		}
-	}
-	return assignments
-}
-
-func resolveAssignedModelValues(command string, candidates []modelCandidate) []modelCandidate {
-	assignments := shellAssignments(command)
-	for i := range candidates {
-		if !candidates[i].dynamic {
-			continue
-		}
-		v := strings.Trim(candidates[i].value, "'\"")
-		ref := fullShellVariableReference.FindStringSubmatch(v)
-		if len(ref) != 3 {
-			if shellVariableReference.MatchString(v) {
-				candidates[i].uncertainDynamic = true
-			}
-			continue
-		}
-		name := ref[1]
-		if name == "" {
-			name = ref[2]
-		}
-		assignment, hasAssignment := assignments[name]
-		if !hasAssignment {
-			continue
-		}
-		if assignment.count != 1 || assignment.unsafe {
-			candidates[i].uncertainDynamic = true
-			continue
-		}
-		refAt := strings.Index(command, "$"+name)
-		if refAt < 0 {
-			refAt = strings.Index(command, "${"+name)
-		}
-		if assignment.position < refAt {
-			candidates[i].value, candidates[i].dynamic = assignment.value, false
-		} else {
-			candidates[i].uncertainDynamic = true
-		}
-	}
-	return candidates
-}
-
-func resolveAssignedPath(command, value string, referenceAt int) (string, bool) {
-	assignments := shellAssignments(command)
-	matches := simpleShellVariableReference.FindAllStringSubmatchIndex(value, -1)
-	if len(matches) == 0 {
-		return value, !strings.ContainsAny(value, "$`")
-	}
-	var resolved strings.Builder
-	last := 0
-	for _, match := range matches {
-		start, end := match[0], match[1]
-		name := ""
-		if match[2] >= 0 {
-			name = value[match[2]:match[3]]
-		}
-		if name == "" && match[4] >= 0 {
-			name = value[match[4]:match[5]]
-		}
-		assignment, ok := assignments[name]
-		if !ok || assignment.count != 1 || assignment.unsafe || assignment.position >= referenceAt+start {
-			return "", false
-		}
-		resolved.WriteString(value[last:start])
-		resolved.WriteString(assignment.value)
-		last = end
-	}
-	resolved.WriteString(value[last:])
-	return resolved.String(), !strings.ContainsAny(resolved.String(), "$`")
-}
-
-func expandedChangeDirCall(command string, call *shellcmd.Call) (*shellcmd.Call, bool, bool) {
-	copyCall := *call
-	copyCall.Args = slices.Clone(call.Args)
-	i := 0
-	for i < len(copyCall.Args) && (copyCall.Args[i] == "-P" || copyCall.Args[i] == "-L") {
-		i++
-	}
-	if i < len(copyCall.Args) && copyCall.Args[i] == "--" {
-		i++
-	}
-	if i >= len(copyCall.Args) {
-		return &copyCall, false, false
-	}
-	path := copyCall.Args[i]
-	rawAt := strings.Index(call.Raw, path)
-	if rawAt < 0 {
-		rawAt = strings.Index(command[call.Offset:], path)
-	}
-	if rawAt < 0 {
-		return &copyCall, false, false
-	}
-	referenceAt := call.Offset + rawAt
-	resolved, known := resolveAssignedPath(command, path, referenceAt)
-	if known {
-		copyCall.Args[i] = resolved
-		return &copyCall, true, false
-	}
-	if emptyMktempAssignmentBefore(command, path, referenceAt) {
-		copyCall.Args[i] = filepath.Join(os.TempDir(), ".chooks-model-guard-empty-mktemp")
-		return &copyCall, true, true
-	}
-	return &copyCall, false, false
-}
-
-var shellVariableWord = regexp.MustCompile(`^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$`)
-var mktempDirectoryAssignment = regexp.MustCompile(`(?:^|[;|&\n\s'"])([A-Za-z_][A-Za-z0-9_]*)=\$\(\s*mktemp\s+-d\s*\)`)
-
-func emptyMktempAssignmentBefore(command, value string, referenceAt int) bool {
-	ref := shellVariableWord.FindStringSubmatch(value)
-	if len(ref) != 3 {
-		return false
-	}
-	name := ref[1]
-	if name == "" {
-		name = ref[2]
-	}
-	assignments := mktempDirectoryAssignment.FindAllStringSubmatchIndex(command, -1)
-	if len(assignments) != 1 {
-		return false
-	}
-	match := assignments[0]
-	return command[match[2]:match[3]] == name && match[0] < referenceAt
 }
 
 // maxSettingsSize — предел файла --settings: настройки — килобайты
@@ -544,7 +383,9 @@ func agentNameMatches(defName, name string) bool {
 // репозитория или ~, хук — до /, это шире)
 func agentDirs(cwd, home string) []string {
 	var dirs []string
-	cwd = filepath.Clean(cwd)
+	if cwd != "" {
+		cwd = filepath.Clean(cwd)
+	}
 	if config := os.Getenv("CLAUDE_CONFIG_DIR"); config != "" {
 		dirs = append(dirs, filepath.Join(config, "agents"))
 	}
@@ -552,13 +393,15 @@ func agentDirs(cwd, home string) []string {
 		dirs = append(dirs, filepath.Join(home, ".claude", "agents"))
 		dirs = append(dirs, filepath.Join(home, ".claude", "plugins"))
 	}
-	for dir := cwd; dir != ""; {
-		dirs = append(dirs, filepath.Join(dir, ".claude", "agents"))
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
+	if cwd != "" {
+		for dir := cwd; dir != ""; {
+			dirs = append(dirs, filepath.Join(dir, ".claude", "agents"))
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
 		}
-		dir = parent
 	}
 	return dirs
 }
@@ -732,7 +575,7 @@ func clientDialect(name string) string {
 // присваивание переменной модели), чтобы ошибка разбора akit не пропустила
 // неодобренную. readSettings читает файл --settings по пути из команды, nil —
 // не прочесть; файла нет — текст команды, которая может его написать
-func bashModelCandidatesAt(command, initialCWD string, files modelFiles, settingsAt func(string) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) []modelCandidate {
+func bashModelCandidatesAt(command, initialCWD string, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) []modelCandidate {
 	calls, err := shellcmd.Calls(command)
 	if calls == nil && err != nil {
 		logger.Warn("model_guard: shellcmd не разобрал команду, модели ищутся в тексте", "error", err)
@@ -745,14 +588,10 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 	for i := range calls {
 		call := &calls[i]
 		if call.Name == "cd" || call.Name == "pushd" {
-			change, _, emptyTemp := expandedChangeDirCall(command, call)
 			var known bool
 			previousKnown := cwdKnown
-			cwd, known = changeDirKnown(change, cwd, homeForPaths())
-			if emptyTemp {
-				known = true
-			}
-			cwdKnown = known && (previousKnown || absoluteChangePath(change))
+			cwd, known = changeDirKnown(call, cwd, homeForPaths())
+			cwdKnown = known && (previousKnown || absoluteChangePath(call))
 			continue
 		}
 		if call.Name == "env" {
@@ -783,20 +622,21 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		}
 		callExtraDirs := []string{}
 		localFiles := files
+		lookupCWD := cwd
+		if !cwdKnown {
+			lookupCWD = ""
+		}
 		if localFiles.settings != nil {
 			read := localFiles.settings
 			localFiles.settings = func(path string, tilde shellcmd.Tilde, _ string) []byte { return read(path, tilde, cwd) }
 		}
 		if agentAt != nil {
-			localFiles.agent = func(name string) []modelCandidate { return agentAt(name, cwd, callExtraDirs) }
+			localFiles.agent = func(name string) []modelCandidate { return agentAt(name, lookupCWD, callExtraDirs) }
 		}
 		if dialect == "claude" {
-			if !cwdKnown {
-				found = append(found, modelCandidate{value: "cwd", unknownCWD: true})
-			}
 			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
 			if settingsAt != nil {
-				settings := settingsAt(cwd)
+				settings := settingsAt(cwd, cwdKnown)
 				if hasExplicitModelFlag(args) {
 					settings = slices.DeleteFunc(settings, func(c modelCandidate) bool { return c.settingsModel })
 				}

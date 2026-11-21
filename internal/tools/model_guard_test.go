@@ -468,7 +468,7 @@ func TestModelGuardUserOnly(t *testing.T) {
 		{"SMALL_FAST fable", "Bash", "", "ANTHROPIC_SMALL_FAST_MODEL=fable claude -p hi", true},
 		{"HAIKU в settings env", "Bash", "", `claude -p --settings '{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}' hi`, true},
 		{"HAIKU своя модель", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5 claude -p hi", false},
-		{"HAIKU из переменной", "Bash", "", `ANTHROPIC_SMALL_FAST_MODEL="$H" claude -p hi`, false},
+		{"HAIKU из переменной", "Bash", "", `ANTHROPIC_SMALL_FAST_MODEL="$H" claude -p hi`, true},
 		{"присваивание, потом export", "Bash", "", "ANTHROPIC_MODEL=fable; export ANTHROPIC_MODEL; claude -p hi", true},
 		{"присваивание opus, потом export", "Bash", "", "ANTHROPIC_MODEL=opus; export ANTHROPIC_MODEL; claude -p hi", false},
 		{"классификатор fable", "Bash", "", "CLAUDE_CODE_AUTO_MODE_MODEL=fable claude -p hi", true},
@@ -582,12 +582,12 @@ func TestModelGuardRoundTwo(t *testing.T) {
 		{"printf reassignment", "Bash", outside, `M=opus; printf -v M fable; claude --model $M -p hi`, "", true},
 		{"subshell assignment", "Bash", outside, `(M=fable; claude --model $M -p hi)`, "", true},
 		{"fast model reassignment", "Bash", outside, `F=opus; F=$(echo fable); ANTHROPIC_SMALL_FAST_MODEL=$F claude`, "", true},
-		{"single prior assignment", "Bash", outside, `M=opus; claude --model $M -p hi`, "", false},
+		{"single prior assignment remains dynamic", "Bash", outside, `M=opus; claude --model $M -p hi`, "", true},
 		{"cd -P", "Bash", outside, "cd -P " + plain + " && claude", "", true},
 		{"cd dash separator", "Bash", outside, "cd -- " + plain + " && claude", "", true},
 		{"env -C", "Bash", outside, "env -C " + plain + " claude", "", true},
 		{"env chdir equals", "Bash", outside, "env --chdir=" + plain + " claude", "", true},
-		{"unknown cwd", "Bash", outside, "cd $D && claude --model opus", "", true},
+		{"dynamic cwd does not refuse", "Bash", outside, "cd $D && claude --model opus", "", false},
 		{"HOME settings", "Bash", outside, "HOME=" + homeFable + " claude", "", true},
 		{"repo settings env ignores model override", "Bash", sub, "claude --model opus", "", true},
 		{"project model key overridden", "Bash", outside, "cd " + plain + " && claude --model opus", "", false},
@@ -616,9 +616,6 @@ func TestModelGuardRoundTwo(t *testing.T) {
 			}
 			if result.IsValid == tc.reject {
 				t.Fatalf("reject=%v want=%v violations=%+v", !result.IsValid, tc.reject, result.Violations)
-			}
-			if tc.name == "unknown cwd" && !strings.Contains(fmt.Sprint(result.Violations), "каталог запуска неизвестен: модель не проверить") {
-				t.Fatalf("unknown cwd did not produce its dedicated refusal: %+v", result.Violations)
 			}
 		})
 	}
@@ -652,6 +649,8 @@ func TestModelGuardRoundThree(t *testing.T) {
 	}
 	write(filepath.Join(cwd, ".claude/settings.json"), `{"model":"opus"}`)
 	write(filepath.Join(cwd, "proj/.claude/settings.json"), `{"model":"opus"}`)
+	dynamicProject := t.TempDir()
+	write(filepath.Join(dynamicProject, ".claude/settings.json"), `{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}`)
 	cases := []struct {
 		name, tool, command string
 		reject              bool
@@ -668,10 +667,11 @@ func TestModelGuardRoundThree(t *testing.T) {
 		{"fast model with suffix", "Bash", `F=fa; ANTHROPIC_SMALL_FAST_MODEL=${F}ble claude -p hi`, true},
 		{"fast model with two variables", "Bash", `A=fa; B=ble; ANTHROPIC_SMALL_FAST_MODEL=$A$B claude -p hi`, true},
 		{"fast model with replacement operator", "Bash", `F=opus; ANTHROPIC_SMALL_FAST_MODEL=${F/opus/fable} claude -p hi`, true},
-		{"full variable reference allowed", "Bash", `M=opus; claude --model "${M}" -p hi`, false},
+		{"full variable reference remains dynamic", "Bash", `M=opus; claude --model "${M}" -p hi`, true},
 		{"cd literal assignment", "Bash", "D=" + cwd + `; cd $D && claude -p --model opus hi`, false},
 		{"cd quoted assignment", "Bash", "P=" + cwd + `; cd "$P" && claude -p --model opus hi`, false},
 		{"cd variable prefix", "Bash", "P=" + cwd + `; cd $P/proj && claude -p --model opus hi`, false},
+		{"dynamic cd skips stale project settings", "Bash", "P=" + dynamicProject + `; cd $P && claude -p --model opus hi`, false},
 		{"mktemp empty cwd", "Bash", `bash -c 'd=$(mktemp -d); cd $d && claude -p --model opus hi'`, false},
 		{"prompt mentions settings redirection elsewhere", "Bash", `claude -p "проверь .claude/settings.json" > /tmp/out.txt`, false},
 		{"settings source with output redirection", "Bash", `claude --settings ` + filepath.Join(cwd, ".claude/settings.json") + ` -p hi > /tmp/out.txt`, false},
@@ -692,6 +692,15 @@ func TestModelGuardRoundThree(t *testing.T) {
 			}
 		})
 	}
+	t.Run("dynamic cd does not inspect stale project settings", func(t *testing.T) {
+		result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", CWD: dynamicProject, Command: `cd $P && claude -p --model opus hi`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.IsValid {
+			t.Fatalf("dynamic cwd should leave project settings unchecked: %+v", result.Violations)
+		}
+	})
 }
 
 func TestModelGuardAgentDefinition(t *testing.T) {

@@ -1032,3 +1032,40 @@ func TestModelGuardRoundTenPaths(t *testing.T) {
 		})
 	}
 }
+
+// Цель cd — именованный канал: хук не ждёт писателя (ревью 14f14ed)
+func TestModelGuardFIFOCandidate(t *testing.T) {
+	cwd := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	fifo := filepath.Join(cwd, "p")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		command string
+		reject  bool
+	}{
+		{"cd " + fifo + " 2>/dev/null; claude -p --model fable hi", true},
+		{"env -C " + fifo + " true; claude -p --model opus hi", false},
+	}
+	for _, tc := range cases {
+		done := make(chan *core.ValidationResult, 1)
+		go func() {
+			result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", CWD: cwd, Command: tc.command})
+			if err != nil {
+				t.Error(err)
+			}
+			done <- result
+		}()
+		select {
+		case result := <-done:
+			if result != nil && result.IsValid == tc.reject {
+				t.Fatalf("%s: reject=%v want=%v", tc.command, !result.IsValid, tc.reject)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s: hook hangs on FIFO", tc.command)
+		}
+	}
+}

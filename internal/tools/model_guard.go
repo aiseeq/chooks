@@ -758,7 +758,13 @@ func commandCWDs(command, initial string, homes []string, logger core.Logger) []
 	return paths
 }
 
+// usableDirectory — каталог, в который cd выполнится. Stat идёт первым:
+// открытие FIFO на чтение ждёт писателя и вешает хук
 func usableDirectory(path string, logger core.Logger) bool {
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		logger.Warn("model_guard: каталог запуска недоступен или не каталог и не рассматривается", "path", path, "error", err)
+		return false
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		logger.Warn("model_guard: каталог запуска недоступен и не рассматривается", "path", path, "error", err)

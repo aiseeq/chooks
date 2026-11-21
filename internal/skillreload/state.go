@@ -1,6 +1,7 @@
 package skillreload
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -144,7 +145,9 @@ func safeName(id string) string {
 
 // lockedState — открытая под блокировкой запись сессии
 type lockedState struct {
-	file  *os.File
+	file *os.File
+	// size — длина файла: save не делает его короче
+	size  int
 	State sessionState
 	Fresh bool // записи не было: сессия встречена впервые
 	// Recovered — запись была испорчена (оборванная запись) и заменена
@@ -173,7 +176,7 @@ func openState(dir, name string, lockDeadline time.Time) (*lockedState, error) {
 		file.Close()
 		return nil, fmt.Errorf("cannot read state %s: %w", path, err)
 	}
-	locked := &lockedState{file: file}
+	locked := &lockedState{file: file, size: len(data)}
 	if len(data) == 0 {
 		locked.Fresh = true
 		locked.State = newSessionState()
@@ -213,18 +216,23 @@ func migrate(old sessionState) sessionState {
 	return state
 }
 
-// save записывает запись на место старой, не снимая блокировку
+// save записывает запись на место старой, не снимая блокировку. Размер файла
+// не уменьшается: короче прежней запись добивается пробелами, которые JSON
+// пропускает. Truncate на btrfs /home стоял секунды, когда ФС занята
+// (замер 21.11 за 55 мин: truncate до 3,2 с, запись на месте — до 50 мс; тикет
+// hook-slow-1120)
 func (l *lockedState) save() error {
 	data, err := json.Marshal(l.State)
 	if err != nil {
 		return fmt.Errorf("cannot encode state: %w", err)
 	}
-	if err := l.file.Truncate(0); err != nil {
-		return fmt.Errorf("cannot truncate state %s: %w", l.file.Name(), err)
+	if pad := l.size - len(data); pad > 0 {
+		data = append(data, bytes.Repeat([]byte{' '}, pad)...)
 	}
 	if _, err := l.file.WriteAt(data, 0); err != nil {
 		return fmt.Errorf("cannot write state %s: %w", l.file.Name(), err)
 	}
+	l.size = len(data)
 	return nil
 }
 
@@ -261,7 +269,7 @@ var ErrNoState = errors.New("skill reload state not found")
 // скилл из names. Запись ведут UserPromptSubmit и PostToolBatch: вызов прошлого
 // хода виден по PostToolBatch того же хода; снимок, подложенный сжатием,
 // вызов не отменяет. Субагенты пишут свои записи, их вызовы не в счёт.
-// save перезаписывает файл на месте (Truncate и WriteAt), поэтому чтение —
+// save перезаписывает файл на месте (WriteAt), поэтому чтение —
 // под той же блокировкой, ожидая её не дольше deadline. Файл не создаётся:
 // нет записи — ErrNoState
 func SkillCalled(dir, sessionID string, names []string, deadline time.Time) (bool, error) {

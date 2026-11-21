@@ -1281,3 +1281,56 @@ func TestSkillCalledLockBounded(t *testing.T) {
 		t.Errorf("ждали блокировку %s при сроке 150ms", waited)
 	}
 }
+
+// Короткая запись поверх длинной не укорачивает файл (без Truncate: на btrfs
+// он стоял секунды) и читается без хвоста прежней
+func TestSaveShorterStateKeepsSizeAndReads(t *testing.T) {
+	dir := t.TempDir()
+	long, err := openState(dir, "s.json", time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	long.State.Transcript = strings.Repeat("x", 500)
+	long.State.Offset = 123456789
+	if err := long.save(); err != nil {
+		t.Fatal(err)
+	}
+	long.close()
+	before, err := os.Stat(filepath.Join(dir, "s.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	short, err := openState(dir, "s.json", time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	short.State.Transcript = "t"
+	short.State.Offset = 7
+	if err := short.save(); err != nil {
+		t.Fatal(err)
+	}
+	short.close()
+	after, err := os.Stat(filepath.Join(dir, "s.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("размер записи %d, ждали прежний %d", after.Size(), before.Size())
+	}
+
+	again, err := openState(dir, "s.json", time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Recovered != nil || again.Fresh {
+		t.Fatalf("запись не прочитана: fresh=%v recovered=%v", again.Fresh, again.Recovered)
+	}
+	if again.State.Transcript != "t" || again.State.Offset != 7 {
+		t.Fatalf("прочитано %q/%d, ждали t/7", again.State.Transcript, again.State.Offset)
+	}
+	again.close()
+	if called, err := SkillCalled(dir, "s", []string{"x"}, time.Now().Add(time.Second)); err != nil || called {
+		t.Fatalf("SkillCalled по добитой записи: %v, %v", called, err)
+	}
+}

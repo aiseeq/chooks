@@ -517,9 +517,20 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		filepath.Join(home, ".claude/agents/notes.txt"):     "---\nname: txt\nmodel: fable\n---\n",
 		filepath.Join(home, ".claude/agents/unclosed.md"):   "---\nname: unclosed\nmodel: fable\n",
 		filepath.Join(home, ".claude/agents/noprefix.md"):   "name: noprefix\n---\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/emptyname.md"):  "---\nname:\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/emptyname.md"):  "---\nname: \"\"\nmodel: fable\n---\n",
 		filepath.Join(home, ".claude/agents/nokey.md"):      "---\njust text\nname: nokey\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/spaced.md"):     "---\n name : spaced-x \nmodel:  'fable' \n---\n",
+		filepath.Join(home, ".claude/agents/spaced.md"):     "---\nname:   spaced-x  \nmodel:  'fable' \n---\n",
+		filepath.Join(home, ".claude/agents/badyaml.md"):    "---\nname : fb\nmodel: fable\nbad: [unclosed\n  name: other\n---\n",
+		filepath.Join(home, ".claude/agents/norm.md"):       "---\nname: f-dash\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/comment.md"):    "---\nname: fcomment\nmodel: fable # by user\n---\n",
+		filepath.Join(home, ".claude/agents/bom.md"):        "\xef\xbb\xbf---\nname: fbom\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/trail.md"):      "---  \nname: ftrail\nmodel: fable\n---  \n",
+		filepath.Join(home, ".claude/agents/block.md"):      "---\nname: fblock\nmodel: >-\n  fable\n---\n",
+		filepath.Join(home, ".claude/agents/nested.md"):     "---\nname: fnn\nmetadata:\n  name: other\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/nestmodel.md"):  "---\nname: fnm\nmodel: opus\nsrv:\n  model: fable\n---\n",
+		filepath.Join(home, ".claude/agents/big.md"):        "---\nname: fbig\ndescription: " + strings.Repeat("д", 3000) + "\nmodel: fable\n---\n" + strings.Repeat("тело\n", 300000),
+		filepath.Join(project, "outside/fl.md"):             "---\nname: flink\nmodel: fable\n---\n",
+		filepath.Join(project, "cfg/agents/fc.md"):          "---\nname: fconfig\nmodel: fable\n---\n",
 		filepath.Join(home, ".claude/agents/crlf.md"):       "---\r\nname: crlf\r\nmodel: fable\r\n---\r\n",
 		filepath.Join(home, ".claude/agents/override.md"):   "---\nname: override\nmodel: opus\n---\n",
 		filepath.Join(home, ".claude/agents/caseupper.md"):  "---\nname: caseupper\nmodel: FABLE\n---\n",
@@ -533,6 +544,17 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.Symlink(filepath.Join(project, "outside"), filepath.Join(home, ".claude/agents/linkdir")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".claude/agents"), filepath.Join(home, ".claude/agents/sub/loop")); err != nil {
+		t.Fatal(err)
+	}
+	deep := filepath.Join(project, "a", "b")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(project, "cfg"))
 	t.Setenv("MODELS_APPROVED", approvedPath)
 	logger, err := core.NewLogger(core.DefaultLoggerConfig())
 	if err != nil {
@@ -558,6 +580,19 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent строка без двоеточия", "Agent", `{"subagent_type":"nokey"}`, "", home, true},
 		{"Agent пробелы и кавычки", "Agent", `{"subagent_type":"spaced-x"}`, "", home, true},
 		{"Agent CRLF fable", "Agent", `{"subagent_type":"crlf"}`, "", home, true},
+		{"Agent YAML не разобрался — ключи верхнего уровня", "Agent", `{"subagent_type":"fb"}`, "", home, true},
+		{"Agent нормализованное имя", "Agent", `{"subagent_type":"F_Dash"}`, "", home, true},
+		{"Agent имя NFKC", "Agent", `{"subagent_type":"ｆ-ｄａｓｈ"}`, "", home, true},
+		{"Agent комментарий YAML", "Agent", `{"subagent_type":"fcomment"}`, "", home, true},
+		{"Agent BOM", "Agent", `{"subagent_type":"fbom"}`, "", home, true},
+		{"Agent пробелы после ---", "Agent", `{"subagent_type":"ftrail"}`, "", home, true},
+		{"Agent блочный скаляр", "Agent", `{"subagent_type":"fblock"}`, "", home, true},
+		{"Agent вложенный name не подменяет", "Agent", `{"subagent_type":"fnn"}`, "", home, true},
+		{"Agent вложенный model не считается", "Agent", `{"subagent_type":"fnm"}`, "", home, false},
+		{"Agent большой файл", "Agent", `{"subagent_type":"fbig"}`, "", home, true},
+		{"Agent в симлинке на каталог", "Agent", `{"subagent_type":"flink"}`, "", home, true},
+		{"Agent проекта из подкаталога", "Agent", `{"subagent_type":"px"}`, "", deep, true},
+		{"Agent из CLAUDE_CONFIG_DIR", "Agent", `{"subagent_type":"fconfig"}`, "", home, true},
 		{"Agent FABLE", "Agent", `{"subagent_type":"caseupper"}`, "", home, true},
 		{"Agent fable [1m]", "Agent", `{"subagent_type":"onemillion"}`, "", home, true},
 		{"Agent нет такого", "Agent", `{"subagent_type":"absent"}`, "", home, false},
@@ -569,7 +604,8 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"claude --agent fx", "Bash", "", "claude -p --agent fx hi", home, true},
 		{"cl --agent=fx", "Bash", "", "cl --agent=fx", home, true},
 		{"claude --agent ok", "Bash", "", "claude -p --agent ok hi", home, false},
-		{"claude --agent из переменной", "Bash", "", `claude -p --agent "$A" hi`, home, false},
+		{"claude --agent из переменной", "Bash", "", `claude -p --agent "$A" hi`, home, true},
+		{"claude --agent проекта из подкаталога", "Bash", "", "claude -p --agent px hi", deep, true},
 		{"codex --agent fx", "Bash", "", "codex exec --agent fx hi", home, false},
 	}
 	for _, c := range cases {

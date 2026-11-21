@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -12,10 +13,13 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/approved"
 	"github.com/aiseeq/chooks/internal/core"
+	"golang.org/x/text/unicode/norm"
+	"gopkg.in/yaml.v3"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -164,6 +168,15 @@ func agentToolCandidates(input *core.ToolInput, agentModels func(string) []model
 	return nil
 }
 
+// agentFlagCandidates — модель агента claude --agent: имя из переменной не
+// прочесть — модель переменной, как у --model
+func agentFlagCandidates(agent word, files modelFiles) []modelCandidate {
+	if !agent.literal {
+		return []modelCandidate{{value: agent.text, dynamic: true}}
+	}
+	return files.agent(agent.text)
+}
+
 // modelFiles — файлы, откуда клиент берёт модель: --settings по пути и
 // определение агента по имени
 type modelFiles struct {
@@ -171,77 +184,176 @@ type modelFiles struct {
 	agent    func(name string) []modelCandidate
 }
 
-// agentDefinitionModels — модель из определения агента name (frontmatter
-// name и model, *.md в <cwd>/.claude/agents и ~/.claude/agents): Agent без
-// model и claude --agent берут её оттуда. Модель определения проверяется
-// только на «только пользователь»: одобрение моделей в определениях — не
-// предмет хука (fighter.md — model: opus)
+// agentDefinitionModels — модель из определения агента name: Agent без
+// model и claude --agent берут её оттуда. Определения — *.md в
+// agentDirs, по симлинкам тоже; имя — поле name frontmatter, сравнивается
+// точно и нормализованным, как в Claude Code 2.1.330 (приёмка 21.11).
+// Модель определения проверяется только на «только пользователь»:
+// одобрение моделей в определениях — не предмет хука (fighter.md — model: opus)
 func agentDefinitionModels(name, cwd, home string, logger core.Logger) []modelCandidate {
-	var dirs []string
-	for _, root := range []string{cwd, home} {
-		if root != "" {
-			dirs = append(dirs, filepath.Join(root, ".claude", "agents"))
-		}
-	}
 	var found []modelCandidate
-	for _, dir := range dirs {
-		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				// нет каталога — определений в нём нет
-				if !errors.Is(err, fs.ErrNotExist) {
-					logger.Warn("model_guard: каталог агентов не читается, модели определений не проверены", "path", path, "error", err)
-				}
-				return nil
-			}
-			if d.IsDir() || !strings.HasSuffix(path, ".md") {
-				return nil
-			}
-			data, err := readSettingsFile(path)
+	for _, dir := range agentDirs(cwd, home) {
+		for _, path := range agentFiles(dir, logger) {
+			data, err := readAgentHeader(path)
 			if err != nil {
 				logger.Warn("model_guard: определение агента не читается, модель из него не проверена", "path", path, "error", err)
-				return nil
+				continue
 			}
 			// inherit и прочие не-модели проверку «только пользователь» проходят сами
-			if defName, model := agentFrontmatter(data, path); defName == name && model != "" {
+			if defName, model := agentFrontmatter(data, path); sameAgentName(defName, name) && model != "" {
 				found = append(found, modelCandidate{value: model, userOnlyCheck: true})
 			}
-			return nil
-		})
-		if err != nil {
-			logger.Warn("model_guard: каталог агентов не обойдён", "dir", dir, "error", err)
 		}
 	}
 	return found
 }
 
-// agentFrontmatter — name и model из frontmatter определения агента; без
-// name — имя файла
+// agentDirs — каталоги определений агентов: .claude/agents в cwd и всех
+// его предках (Claude Code собирает их вверх до корня репозитория или ~,
+// хук — до /, это шире) и пользовательский: $CLAUDE_CONFIG_DIR/agents и
+// ~/.claude/agents
+func agentDirs(cwd, home string) []string {
+	var dirs []string
+	for dir := cwd; dir != ""; {
+		dirs = append(dirs, filepath.Join(dir, ".claude", "agents"))
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	if config := os.Getenv("CLAUDE_CONFIG_DIR"); config != "" {
+		dirs = append(dirs, filepath.Join(config, "agents"))
+	}
+	if home != "" {
+		dirs = append(dirs, filepath.Join(home, ".claude", "agents"))
+	}
+	return dirs
+}
+
+// maxAgentDirDepth — глубина вложенных каталогов агентов, дальше не обходится
+const maxAgentDirDepth = 16
+
+// agentFiles — обычные файлы *.md в dir и его подкаталогах, по симлинкам
+// на файлы и каталоги, как Claude Code; каталог обходится один раз по
+// реальному пути (петли симлинков)
+func agentFiles(dir string, logger core.Logger) []string {
+	var files []string
+	seen := map[string]bool{}
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		real, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			// нет каталога — определений в нём нет
+			if !errors.Is(err, fs.ErrNotExist) {
+				logger.Warn("model_guard: каталог агентов не читается, модели определений не проверены", "path", dir, "error", err)
+			}
+			return
+		}
+		if seen[real] || depth > maxAgentDirDepth {
+			return
+		}
+		seen[real] = true
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			logger.Warn("model_guard: каталог агентов не читается, модели определений не проверены", "path", dir, "error", err)
+			return
+		}
+		for _, e := range entries {
+			path := filepath.Join(dir, e.Name())
+			info, err := os.Stat(path)
+			if err != nil {
+				// битый симлинк Claude Code тоже не прочтёт
+				if !errors.Is(err, fs.ErrNotExist) {
+					logger.Warn("model_guard: файл в каталоге агентов не читается, модель из него не проверена", "path", path, "error", err)
+				}
+				continue
+			}
+			if info.IsDir() {
+				walk(path, depth+1)
+			} else if info.Mode().IsRegular() && strings.HasSuffix(e.Name(), ".md") {
+				files = append(files, path)
+			}
+		}
+	}
+	walk(dir, 0)
+	return files
+}
+
+// maxAgentHeader — сколько байт начала определения агента читается: frontmatter
+// в начале файла, тело любого размера не нужно
+const maxAgentHeader = 64 << 10
+
+func readAgentHeader(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("определение агента %s: %w", path, err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxAgentHeader))
+	if err != nil {
+		return nil, fmt.Errorf("определение агента %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// sameAgentName — имя subagent_type или --agent указывает на определение:
+// точно или после нормализации Claude Code (NFKC, нижний регистр, без
+// пробелов, дефисов и _). Claude Code берёт нормализованное только при
+// единственном совпадении — хук отказывает при любом, это шире
+func sameAgentName(defName, name string) bool {
+	return defName == name || normalizeAgentName(defName) == normalizeAgentName(name)
+}
+
+func normalizeAgentName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || r == '-' || r == '_' {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, norm.NFKC.String(name))
+}
+
+// agentFrontmatterBlock — frontmatter в начале определения, как в Claude
+// Code: ^---\s*\n … \n---
+var agentFrontmatterBlock = regexp.MustCompile(`^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)`)
+
+// agentFrontmatter — name и model верхнего уровня frontmatter определения
+// агента (YAML, как в Claude Code; BOM и CRLF снимаются); без name — имя
+// файла. YAML не разобрался — ключи верхнего уровня построчно
 func agentFrontmatter(data []byte, path string) (name, model string) {
 	name = strings.TrimSuffix(filepath.Base(path), ".md")
-	rest, ok := strings.CutPrefix(strings.ReplaceAll(string(data), "\r\n", "\n"), "---\n")
-	if !ok {
+	text := strings.ReplaceAll(strings.TrimPrefix(string(data), "\uFEFF"), "\r\n", "\n")
+	m := agentFrontmatterBlock.FindStringSubmatch(text)
+	if m == nil {
 		return name, ""
 	}
-	head, _, ok := strings.Cut(rest, "\n---")
-	if !ok {
-		return name, ""
+	fields := map[string]any{}
+	if yaml.Unmarshal([]byte(m[1]), &fields) != nil {
+		fields = topLevelFields(m[1])
 	}
-	for line := range strings.Lines(head) {
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		switch strings.TrimSpace(key) {
-		case "name":
-			if value != "" {
-				name = value
-			}
-		case "model":
-			model = value
-		}
+	if v, ok := fields["name"].(string); ok && strings.TrimSpace(v) != "" {
+		name = strings.TrimSpace(v)
+	}
+	if v, ok := fields["model"].(string); ok {
+		model = strings.TrimSpace(v)
 	}
 	return name, model
+}
+
+// topLevelFields — ключи верхнего уровня frontmatter, который YAML не
+// разобрал: строки без отступа key: value
+func topLevelFields(text string) map[string]any {
+	fields := map[string]any{}
+	for line := range strings.Lines(text) {
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		if key, value, ok := strings.Cut(line, ":"); ok {
+			fields[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"'`)
+		}
+	}
+	return fields
 }
 
 // readSettingsFile читает файл настроек, только обычный и не больше
@@ -620,7 +732,7 @@ func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandi
 		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
 			found = append(found, jsonModelCandidates(a.text, next, files.settings)...)
 		case name == "claude" && a.text == "--agent":
-			found = append(found, files.agent(next.text)...)
+			found = append(found, agentFlagCandidates(next, files)...)
 		case name == "codex" && (a.text == "-c" || a.text == "--config"):
 			if candidate, ok := codexConfigCandidate(next); ok {
 				found = append(found, candidate)

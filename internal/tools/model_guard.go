@@ -80,19 +80,19 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 				reasons = append(reasons, "модель задана переменной, назови её литералом")
 				continue
 			}
-			// быстрая модель и модель определения агента одобрения не
-			// требуют, но модель «только пользователь» агент не задаёт и сюда
+			// Переменная быстрой модели здесь проверяется только на ограничение
+			// user_only, без проверки списка одобренных моделей.
 			if name, ok := t.userOnlyModel(c.value, models); ok {
 				reasons = append(reasons, userOnlyReason(c.value, name))
 			}
 			continue
 		}
 		if c.dynamic {
-			reasons = append(reasons, modelFlagOrderHint("модель задана переменной, назови её литералом", c.modelFlagHint))
+			reasons = append(reasons, "модель задана переменной, назови её литералом")
 		} else if !isApproved(c.value, models) {
-			reasons = append(reasons, modelFlagOrderHint(fmt.Sprintf("модель %q не одобрена", c.value), c.modelFlagHint))
+			reasons = append(reasons, fmt.Sprintf("модель %q не одобрена", c.value))
 		} else if name, ok := t.userOnlyModel(c.value, models); ok {
-			reasons = append(reasons, modelFlagOrderHint(userOnlyReason(c.value, name), c.modelFlagHint))
+			reasons = append(reasons, userOnlyReason(c.value, name))
 		}
 	}
 	if len(reasons) == 0 {
@@ -105,23 +105,14 @@ func userOnlyReason(value, name string) string {
 	return fmt.Sprintf("модель %q (%s) запускает только пользователь: агент её не задаёт; в сессии, которую пользователь поднял на ней, поле model не задавай — суб-агент унаследует модель", value, name)
 }
 
-func modelFlagOrderHint(message string, show bool) string {
-	if show {
-		return message + "; чтобы перекрыть settings, поставь --model первым: claude --model opus -p \"$(cat prompt)\""
-	}
-	return message
-}
-
 type modelCandidate struct {
 	value         string
 	dynamic       bool
 	unknownAgent  bool
 	unknownWrite  bool
 	unknownAgents bool
-	settingsModel bool
-	modelFlagHint bool
-	// userOnlyCheck — модель быстрых запросов (переменные haiku) или
-	// определения агента: проверяется только на модель «только пользователь»
+	// userOnlyCheck — переменные модели быстрых запросов проверяются только
+	// на ограничение user_only.
 	userOnlyCheck bool
 }
 
@@ -340,13 +331,16 @@ type modelFiles struct {
 // model и claude --agent берут её оттуда. Определения — *.md в
 // agentDirs, по симлинкам тоже; имя — поле name frontmatter, сравнивается
 // точно и нормализованным, как в Claude Code 2.1.330 (приёмка 21.11).
-// Модель определения проверяется только на «только пользователь»:
-// одобрение моделей в определениях — не предмет хука (fighter.md — model: opus)
+// Модель определения проверяется по обычному списку одобренных моделей.
 func agentDefinitionModels(name, cwd, home string, extra []string, logger core.Logger, rejectMissing bool) []modelCandidate {
 	var found []modelCandidate
 	definitionFound := false
 	walk := agentWalk{seen: map[string]bool{}, logger: logger}
 	dirs := append(agentDirs(cwd, home), extra...)
+	if builtinAgent(name) {
+		pluginDir := filepath.Join(home, ".claude", "plugins")
+		dirs = slices.DeleteFunc(dirs, func(dir string) bool { return filepath.Clean(dir) == pluginDir })
+	}
 	for _, dir := range dirs {
 		// срок — каждому корню, как в Claude Code: большое дерево одного
 		// каталога не снимает проверку остальных
@@ -359,12 +353,12 @@ func agentDefinitionModels(name, cwd, home string, extra []string, logger core.L
 			logger.Warn("model_guard: определение агента не читается, модель из него не проверена", "path", path, "error", err)
 			continue
 		}
-		// больше maxAgentFile Claude Code определение не загружает;
-		// inherit и прочие не-модели проверку «только пользователь» проходят сами
+		// больше maxAgentFile Claude Code определение не загружает; inherit
+		// не задаёт отдельную модель и проверку проходит.
 		if defName, model := agentFrontmatter(data, path); ok && agentNameMatches(defName, name) {
 			definitionFound = true
-			if model != "" {
-				found = append(found, modelCandidate{value: model, userOnlyCheck: true})
+			if model != "" && model != "inherit" {
+				found = append(found, modelCandidate{value: model})
 			}
 		}
 	}
@@ -596,7 +590,6 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 	}
 	var found []modelCandidate
 	claude := false
-	definedClients := shellDefinedModelClients(command)
 	cwd := initialCWD
 	cwdKnown := cwd != ""
 	for i := range calls {
@@ -658,26 +651,13 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		if agentAt != nil {
 			localFiles.agent = func(name string) []modelCandidate { return agentAt(name, lookupCWD, callExtraDirs) }
 		}
-		modelOverride, modelFlagHint := false, false
-		if dialect == "claude" {
-			modelOverride, modelFlagHint = claudeModelFlagStatus(args)
-			if definedClients[call.Name] {
-				modelOverride, modelFlagHint = false, false
-			}
-		}
 		if dialect == "claude" {
 			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
 			if settingsAt != nil {
-				settings := settingsAt(cwd, cwdKnown)
-				markModelFlagHint(settings, modelFlagHint)
-				found = appendSettingsCandidates(found, settings, modelOverride)
+				found = append(found, settingsAt(cwd, cwdKnown)...)
 			}
 		}
 		callCandidates := candidatesFromArgs(dialect, args, localFiles)
-		markModelFlagHint(callCandidates, modelFlagHint)
-		if modelOverride {
-			callCandidates = withoutSettingsModel(callCandidates)
-		}
 		found = append(found, callCandidates...)
 		if dialect == "claude" {
 			claude = true
@@ -1177,42 +1157,20 @@ func assignedModelWord(w string) []modelCandidate {
 	return nil
 }
 
-type claudeOptionKind uint8
+// valueFlags — флаги Claude, которые model_guard анализирует как пару.
+var valueFlags = []string{"--settings", "--agents", "--agent", "--fallback-model"}
 
-const (
-	claudeOptionUnknown claudeOptionKind = iota
-	claudeOptionValue
-	claudeOptionBool
-)
-
-// claudeOptions is shared by option splitting and --model recognition.
-var claudeOptions = map[string]claudeOptionKind{
-	"--add-dir": claudeOptionValue, "--agent": claudeOptionValue, "--agents": claudeOptionValue,
-	"--allow-dangerously-skip-permissions": claudeOptionBool, "--allowedTools": claudeOptionValue, "--allowed-tools": claudeOptionValue,
-	"--append-system-prompt": claudeOptionValue, "--autocompact": claudeOptionValue, "--ax-screen-reader": claudeOptionBool,
-	"--background": claudeOptionBool, "--bare": claudeOptionBool, "--betas": claudeOptionValue, "--bg": claudeOptionBool,
-	"--brief": claudeOptionBool, "--chrome": claudeOptionBool, "--cloud": claudeOptionValue,
-	"--continue": claudeOptionBool, "-c": claudeOptionBool, "--dangerously-skip-permissions": claudeOptionBool,
-	"--debug": claudeOptionValue, "-d": claudeOptionBool, "--debug-file": claudeOptionValue,
-	"--desktop": claudeOptionBool, "--disable-slash-commands": claudeOptionBool, "--disallowedTools": claudeOptionValue,
-	"--disallowed-tools": claudeOptionValue, "--effort": claudeOptionValue, "--environment": claudeOptionValue,
-	"--exclude-dynamic-system-prompt-sections": claudeOptionBool, "--fallback-model": claudeOptionValue,
-	"--file": claudeOptionValue, "--fork-session": claudeOptionBool, "--forward-subagent-text": claudeOptionBool,
-	"--from-pr": claudeOptionValue, "--help": claudeOptionBool, "-h": claudeOptionBool, "--ide": claudeOptionBool,
-	"--include-hook-events": claudeOptionBool, "--include-partial-messages": claudeOptionBool,
-	"--input-format": claudeOptionValue, "--json-schema": claudeOptionValue, "--max-budget-usd": claudeOptionValue,
-	"--mcp-config": claudeOptionValue, "--model": claudeOptionValue, "-n": claudeOptionValue, "--name": claudeOptionValue,
-	"--no-chrome": claudeOptionBool, "--no-session-persistence": claudeOptionBool, "--output-format": claudeOptionValue,
-	"--permission-mode": claudeOptionValue, "--permission-prompts": claudeOptionValue, "--plugin-dir": claudeOptionValue,
-	"--plugin-url": claudeOptionValue, "--print": claudeOptionBool, "-p": claudeOptionBool,
-	"--prompt-suggestions": claudeOptionValue, "--remote-control": claudeOptionValue,
-	"--remote-control-session-name-prefix": claudeOptionValue, "--replay-user-messages": claudeOptionBool,
-	"--restricted": claudeOptionBool, "--resume": claudeOptionValue, "-r": claudeOptionValue,
-	"--safe-mode": claudeOptionBool, "--session-id": claudeOptionValue, "--setting-sources": claudeOptionValue,
-	"--settings": claudeOptionValue, "--strict-mcp-config": claudeOptionBool, "--system-prompt": claudeOptionValue,
-	"--system-prompt-snapshot": claudeOptionValue, "--teleport": claudeOptionValue, "--tmux": claudeOptionBool,
-	"--tools": claudeOptionValue, "--verbose": claudeOptionBool, "--version": claudeOptionBool, "-v": claudeOptionBool,
-	"--worktree": claudeOptionValue, "-w": claudeOptionValue,
+// splitValueFlags разбивает --flag=value для флагов Claude со значением.
+func splitValueFlags(args []word) []word {
+	out := make([]word, 0, len(args))
+	for _, a := range args {
+		if flag, value, ok := strings.Cut(a.text, "="); ok && slices.Contains(valueFlags, flag) {
+			out = append(out, word{text: flag, literal: true, shellLiteral: true, shellLiteralKnown: true}, word{text: value, literal: a.literal, shellLiteral: a.shellLiteral, shellLiteralKnown: a.shellLiteralKnown, tilde: a.tilde})
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func claudeArgIsLiteral(arg word) bool {
@@ -1288,91 +1246,6 @@ func shellWordSourceLiteral(source string) bool {
 		}
 	}
 	return quote == 0
-}
-
-func claudeModelFlagStatus(args []word) (effective, needsFirst bool) {
-	waitingForValue := false
-	allLiteral := true
-	for _, arg := range args {
-		text := arg.text
-		if text == "--" {
-			return false, false
-		}
-		if waitingForValue {
-			waitingForValue = false
-			if text == "--model" || strings.HasPrefix(text, "--model=") {
-				return false, true
-			}
-			allLiteral = allLiteral && claudeArgIsLiteral(arg)
-			continue
-		}
-		if text == "--model" || strings.HasPrefix(text, "--model=") {
-			return allLiteral, !allLiteral
-		}
-		if !strings.HasPrefix(text, "-") || text == "-" || strings.Contains(text, "=") {
-			allLiteral = allLiteral && claudeArgIsLiteral(arg)
-			continue
-		}
-		if kind, known := claudeOptions[text]; !known || kind == claudeOptionValue {
-			waitingForValue = true
-		}
-		allLiteral = allLiteral && claudeArgIsLiteral(arg)
-	}
-	return false, false
-}
-
-func shellDefinedModelClients(command string) map[string]bool {
-	defined := make(map[string]bool)
-	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
-	if err != nil {
-		return defined
-	}
-	syntax.Walk(file, func(node syntax.Node) bool {
-		switch declaration := node.(type) {
-		case *syntax.FuncDecl:
-			if declaration.Name != nil && slices.Contains(modelClients, declaration.Name.Value) {
-				defined[declaration.Name.Value] = true
-			}
-			for _, name := range declaration.Names {
-				if slices.Contains(modelClients, name.Value) {
-					defined[name.Value] = true
-				}
-			}
-		case *syntax.CallExpr:
-			if len(declaration.Args) < 2 {
-				return true
-			}
-			commandName, ok := literalValue(declaration.Args[0])
-			if !ok || commandName != "alias" {
-				return true
-			}
-			for _, arg := range declaration.Args[1:] {
-				value, literal := literalValue(arg)
-				if !literal || strings.HasPrefix(value, "-") {
-					continue
-				}
-				name, _, assignment := strings.Cut(value, "=")
-				if assignment && slices.Contains(modelClients, name) {
-					defined[name] = true
-				}
-			}
-		}
-		return true
-	})
-	return defined
-}
-
-// splitValueFlags разбивает --flag=value для опций Claude со значением.
-func splitValueFlags(args []word) []word {
-	out := make([]word, 0, len(args))
-	for _, a := range args {
-		if flag, value, ok := strings.Cut(a.text, "="); ok && claudeOptions[flag] == claudeOptionValue {
-			out = append(out, word{text: flag, literal: true, shellLiteral: true, shellLiteralKnown: true}, word{text: value, literal: a.literal, shellLiteral: a.shellLiteral, shellLiteralKnown: a.shellLiteralKnown, tilde: a.tilde})
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
 }
 
 // modelValueFlag — флаг клиента name, значение которого в следующем слове —
@@ -1563,34 +1436,6 @@ func settingsCandidates(raw []byte, agent func(string) []modelCandidate) []model
 	return found
 }
 
-func withoutSettingsModel(candidates []modelCandidate) []modelCandidate {
-	filtered := candidates[:0]
-	for _, candidate := range candidates {
-		if !candidate.settingsModel {
-			filtered = append(filtered, candidate)
-		}
-	}
-	return filtered
-}
-
-func appendSettingsCandidates(dst, candidates []modelCandidate, modelOverride bool) []modelCandidate {
-	if modelOverride {
-		candidates = withoutSettingsModel(candidates)
-	}
-	return append(dst, candidates...)
-}
-
-func markModelFlagHint(candidates []modelCandidate, hint bool) {
-	if !hint {
-		return
-	}
-	for i := range candidates {
-		if candidates[i].settingsModel {
-			candidates[i].modelFlagHint = true
-		}
-	}
-}
-
 // jsonModels — модели из JSON флага claude
 type jsonModels []modelCandidate
 
@@ -1598,12 +1443,6 @@ func (found *jsonModels) add(model string) {
 	// inherit — модель агента из основного вызова, она проверена отдельно
 	if strings.TrimSpace(model) != "" && model != "inherit" {
 		*found = append(*found, modelCandidate{value: model})
-	}
-}
-
-func (found *jsonModels) addSettingsModel(model string) {
-	if strings.TrimSpace(model) != "" && model != "inherit" {
-		*found = append(*found, modelCandidate{value: model, settingsModel: true})
 	}
 }
 
@@ -1631,7 +1470,7 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 	}
 	var model string
 	if json.Unmarshal(settings["model"], &model) == nil {
-		found.addSettingsModel(model)
+		found.add(model)
 	}
 	var agent struct {
 		Model string `json:"model"`

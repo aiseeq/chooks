@@ -608,9 +608,9 @@ func TestModelGuardRoundTwo(t *testing.T) {
 		{"dynamic cwd does not refuse", "Bash", outside, "cd $D && claude --model opus", "", false},
 		{"HOME settings", "Bash", outside, "HOME=" + homeFable + " claude", "", true},
 		{"repo settings env ignores model override", "Bash", sub, "claude --model opus", "", true},
-		{"explicit model overrides project settings model", "Bash", outside, "cd " + plain + " && claude --model opus", "", false},
-		{"explicit model overrides settings after boolean flag", "Bash", outside, `claude --settings '{"model":"fable"}' -p --model opus`, "", false},
-		{"explicit model overrides settings after verbose", "Bash", outside, `claude --settings '{"model":"fable"}' --verbose --model opus`, "", false},
+		{"explicit model does not override project settings model", "Bash", outside, "cd " + plain + " && claude --model opus", "", true},
+		{"explicit model does not override settings after boolean flag", "Bash", outside, `claude --settings '{"model":"fable"}' -p --model opus`, "", true},
+		{"explicit model does not override settings after verbose", "Bash", outside, `claude --settings '{"model":"fable"}' --verbose --model opus`, "", true},
 		{"unknown flag value does not expose model flag", "Bash", outside, `claude --settings '{"model":"fable"}' --future-option --model opus`, "", true},
 		{"dynamic variable before model keeps settings active", "Bash", outside, "X=--name; claude -p $X --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
 		{"env wrapper preserves dynamic prefix before model", "Bash", outside, "env -- claude -p $X --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
@@ -619,7 +619,7 @@ func TestModelGuardRoundTwo(t *testing.T) {
 		{"argv expansion before model keeps settings active", "Bash", outside, "claude -p \"$@\" --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
 		{"brace expansion before model keeps settings active", "Bash", outside, "claude -p {--name,} --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
 		{"glob before model keeps settings active", "Bash", outside, "claude -p [-]-name --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
-		{"quoted extglob is a literal prompt", "Bash", outside, `claude -p '@(--name)' --model opus --settings '{"model":"fable"}'`, "", false},
+		{"quoted prompt does not override settings", "Bash", outside, `claude -p '@(--name)' --model opus --settings '{"model":"fable"}'`, "", true},
 		{"extglob at sign before model keeps settings active", "Bash", outside, `claude -p @(--name) --model opus --settings '{"model":"fable"}' hi`, "", true},
 		{"extglob exclamation before model keeps settings active", "Bash", outside, `claude -p !(zz) --model opus --settings '{"model":"fable"}' hi`, "", true},
 		{"extglob plus before model keeps settings active", "Bash", outside, `claude -p +(--name) --model opus --settings '{"model":"haiku"}' hi`, "", true},
@@ -628,7 +628,7 @@ func TestModelGuardRoundTwo(t *testing.T) {
 		{"function keyword keeps settings active", "Bash", outside, `function claude { command claude --name "$@"; }; claude --model opus --settings '{"model":"fable"}' -p hi`, "", true},
 		{"cl function keeps settings active", "Bash", outside, `cl() { claude -n "$@"; }; cl --model opus --settings '{"model":"fable"}' -p hi`, "", true},
 		{"claude alias keeps settings active", "Bash", outside, "alias claude='claude -n'\nclaude --model opus --settings '{\"model\":\"fable\"}' -p hi", "", true},
-		{"model first overrides settings before dynamic prompt", "Bash", outside, "claude --model opus -p \"$(cat prompt)\" --settings " + filepath.Join(plain, ".claude/settings.json"), "", false},
+		{"explicit model does not override settings before dynamic prompt", "Bash", outside, "claude --model opus -p \"$(cat prompt)\" --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
 		{"fable explicit model remains denied", "Bash", outside, `claude --settings '{"model":"opus"}' --model fable -p hi`, "", true},
 		{"project settings remain active after prompt separator", "Bash", plain, "claude -p -- --model", "", true},
 		{"inline settings remain active after prompt separator", "Bash", outside, `claude --settings '{"model":"fable"}' -p -- --model`, "", true},
@@ -647,6 +647,7 @@ func TestModelGuardRoundTwo(t *testing.T) {
 		{"grep data", "Bash", outside, "grep -r fable docs", "", false},
 		{"inline agents opus", "Bash", outside, `claude --agents '{"rev":{"model":"opus"}}' --agent rev -p hi`, "", false},
 		{"inline agents fable", "Bash", outside, `claude --agents '{"rev":{"model":"fable"}}' --agent rev -p hi`, "", true},
+		{"inline agents unapproved model", "Bash", outside, `claude --agents '{"rev":{"model":"haiku"}}' --agent rev -p hi`, "", true},
 		{"inline opus cannot mask project agent fable", "Bash", agentProject, `claude --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
 		{"inline fable is accumulated with file agent", "Bash", agentProject, `claude --agents '{"other":{"description":"review","prompt":"inspect","model":"fable"}}' --agent other -p hi`, "", true},
 		{"invalid inline agents cannot hide project agent", "Bash", agentProject, `claude --agents '{"rev":{"description":"","prompt":"inspect","effort":"impossible","model":"opus"}}' --agent rev -p hi`, "", true},
@@ -667,9 +668,6 @@ func TestModelGuardRoundTwo(t *testing.T) {
 			}
 			if result.IsValid == tc.reject {
 				t.Fatalf("reject=%v want=%v violations=%+v", !result.IsValid, tc.reject, result.Violations)
-			}
-			if tc.reject && strings.Contains(tc.name, "before model") && !strings.Contains(result.Violations[0].Message, "поставь --model первым") {
-				t.Fatalf("missing --model ordering hint: %+v", result.Violations)
 			}
 			if tc.reject && (strings.Contains(tc.name, "unreadable agents file") || strings.Contains(tc.name, "dynamic agents file")) && !strings.Contains(result.Violations[0].Message, "файл --agents не прочитать") {
 				t.Fatalf("missing unreadable agents-file reason: %+v", result.Violations)
@@ -773,6 +771,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		filepath.Join(home, ".claude/agents/in.md"):                                "---\nname: in\nmodel: inherit\n---\n",
 		filepath.Join(home, ".claude/agents/nofm.md"):                              "model: fable\n",
 		filepath.Join(project, ".claude/agents/px.md"):                             "---\nname: px\nmodel: fable\n---\n",
+		filepath.Join(project, ".claude/agents/general-purpose.md"):                "---\nname: general-purpose\nmodel: haiku\n---\n",
 		filepath.Join(project, ".claude/agents/settings-agent.md"):                 "---\nname: settings-agent\nmodel: fable\n---\n",
 		filepath.Join(home, ".claude/agents/byfile.md"):                            "---\nmodel: fable\n---\n",
 		filepath.Join(home, ".claude/agents/notes.txt"):                            "---\nname: txt\nmodel: fable\n---\n",
@@ -836,7 +835,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent по имени файла при другом name", "Agent", `{"subagent_type":"fy"}`, "", home, false},
 		{"Agent без name — имя файла", "Agent", `{"subagent_type":"byfile"}`, "", home, true},
 		{"Agent opus в frontmatter, fable в теле", "Agent", `{"subagent_type":"ok"}`, "", home, false},
-		{"Agent haiku CRLF", "Agent", `{"subagent_type":"hk"}`, "", home, false},
+		{"Agent haiku CRLF is not approved", "Agent", `{"subagent_type":"hk"}`, "", home, true},
 		{"Agent inherit", "Agent", `{"subagent_type":"in"}`, "", home, false},
 		{"Agent без frontmatter", "Agent", `{"subagent_type":"nofm"}`, "", home, false},
 		{"Agent не .md", "Agent", `{"subagent_type":"txt"}`, "", home, false},
@@ -866,6 +865,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent fable [1m]", "Agent", `{"subagent_type":"onemillion"}`, "", home, true},
 		{"Agent нет такого", "Agent", `{"subagent_type":"absent"}`, "", home, false},
 		{"Agent встроенный", "Agent", `{"subagent_type":"general-purpose"}`, "", home, false},
+		{"Agent project definition overrides builtin name", "Agent", `{"subagent_type":"general-purpose"}`, "", project, true},
 		{"Agent fx с model opus", "Agent", `{"subagent_type":"fx","model":"opus"}`, "", home, false},
 		{"Agent fx с пустым model", "Agent", `{"subagent_type":"fx","model":""}`, "", home, true},
 		{"Agent проекта", "Agent", `{"subagent_type":"px"}`, "", project, true},
@@ -874,6 +874,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"claude --agent fx", "Bash", "", "claude -p --agent fx hi", home, true},
 		{"cl --agent=fx", "Bash", "", "cl --agent=fx", home, true},
 		{"claude --agent ok", "Bash", "", "claude -p --agent ok hi", home, false},
+		{"claude --agent hk model is not approved", "Bash", "", "claude -p --agent hk hi", home, true},
 		{"claude --agent из переменной", "Bash", "", `claude -p --agent "$A" hi`, home, true},
 		{"claude --agent проекта из подкаталога", "Bash", "", "claude -p --agent px hi", deep, true},
 		{"claude dynamic cd falls back to session cwd agent", "Bash", "", `cd "$PWD" && claude --agent px -p hi`, project, true},

@@ -88,15 +88,11 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 			continue
 		}
 		if c.dynamic {
-			reasons = append(reasons, "модель задана переменной, назови её литералом")
+			reasons = append(reasons, modelFlagOrderHint("модель задана переменной, назови её литералом", c.modelFlagHint))
 		} else if !isApproved(c.value, models) {
-			reasons = append(reasons, fmt.Sprintf("модель %q не одобрена", c.value))
+			reasons = append(reasons, modelFlagOrderHint(fmt.Sprintf("модель %q не одобрена", c.value), c.modelFlagHint))
 		} else if name, ok := t.userOnlyModel(c.value, models); ok {
-			message := userOnlyReason(c.value, name)
-			if c.modelFlagHint {
-				message += "; чтобы перекрыть settings, поставь --model первым: claude --model opus -p \"$(cat prompt)\""
-			}
-			reasons = append(reasons, message)
+			reasons = append(reasons, modelFlagOrderHint(userOnlyReason(c.value, name), c.modelFlagHint))
 		}
 	}
 	if len(reasons) == 0 {
@@ -107,6 +103,13 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 
 func userOnlyReason(value, name string) string {
 	return fmt.Sprintf("модель %q (%s) запускает только пользователь: агент её не задаёт; в сессии, которую пользователь поднял на ней, поле model не задавай — суб-агент унаследует модель", value, name)
+}
+
+func modelFlagOrderHint(message string, show bool) string {
+	if show {
+		return message + "; чтобы перекрыть settings, поставь --model первым: claude --model opus -p \"$(cat prompt)\""
+	}
+	return message
 }
 
 type modelCandidate struct {
@@ -593,6 +596,7 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 	}
 	var found []modelCandidate
 	claude := false
+	definedClients := shellDefinedModelClients(command)
 	cwd := initialCWD
 	cwdKnown := cwd != ""
 	for i := range calls {
@@ -657,6 +661,9 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		modelOverride, modelFlagHint := false, false
 		if dialect == "claude" {
 			modelOverride, modelFlagHint = claudeModelFlagStatus(args)
+			if definedClients[call.Name] {
+				modelOverride, modelFlagHint = false, false
+			}
 		}
 		if dialect == "claude" {
 			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
@@ -1272,7 +1279,7 @@ func shellWordSourceLiteral(source string) bool {
 			i++
 		case '\'', '"':
 			quote = ch
-		case '$', '`', '*', '?', '[', '{', '}':
+		case '$', '`', '*', '?', '[', '{', '}', '(':
 			return false
 		case '<', '>':
 			if i+1 < len(source) && source[i+1] == '(' {
@@ -1312,6 +1319,47 @@ func claudeModelFlagStatus(args []word) (effective, needsFirst bool) {
 		allLiteral = allLiteral && claudeArgIsLiteral(arg)
 	}
 	return false, false
+}
+
+func shellDefinedModelClients(command string) map[string]bool {
+	defined := make(map[string]bool)
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return defined
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch declaration := node.(type) {
+		case *syntax.FuncDecl:
+			if declaration.Name != nil && slices.Contains(modelClients, declaration.Name.Value) {
+				defined[declaration.Name.Value] = true
+			}
+			for _, name := range declaration.Names {
+				if slices.Contains(modelClients, name.Value) {
+					defined[name.Value] = true
+				}
+			}
+		case *syntax.CallExpr:
+			if len(declaration.Args) < 2 {
+				return true
+			}
+			commandName, ok := literalValue(declaration.Args[0])
+			if !ok || commandName != "alias" {
+				return true
+			}
+			for _, arg := range declaration.Args[1:] {
+				value, literal := literalValue(arg)
+				if !literal || strings.HasPrefix(value, "-") {
+					continue
+				}
+				name, _, assignment := strings.Cut(value, "=")
+				if assignment && slices.Contains(modelClients, name) {
+					defined[name] = true
+				}
+			}
+		}
+		return true
+	})
+	return defined
 }
 
 // splitValueFlags разбивает --flag=value для опций Claude со значением.

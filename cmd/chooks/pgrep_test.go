@@ -17,7 +17,7 @@ func TestRewritePgrepMonitor(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	rewritePgrep(input, config, logger, &out)
+	writeAllowedOutput(input, config, logger, &out)
 
 	var got preToolUseOutput
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
@@ -46,7 +46,7 @@ func TestRewritePgrepSilent(t *testing.T) {
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			var out bytes.Buffer
-			rewritePgrep(c.input, c.config, logger, &out)
+			writeAllowedOutput(c.input, c.config, logger, &out)
 			if out.Len() != 0 {
 				t.Errorf("output = %q, want none", out.String())
 			}
@@ -58,7 +58,7 @@ func TestRewritePgrepSilent(t *testing.T) {
 func TestRewritePgrepNoContext(t *testing.T) {
 	config, logger := silentConfig(t)
 	var out bytes.Buffer
-	rewritePgrep(&core.ToolInput{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"pgrep -f x"}`)}, config, logger, &out)
+	writeAllowedOutput(&core.ToolInput{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"pgrep -f x"}`)}, config, logger, &out)
 	if out.Len() == 0 || bytes.Contains(out.Bytes(), []byte("additionalContext")) {
 		t.Errorf("output = %q", out.String())
 	}
@@ -68,7 +68,7 @@ func TestRewritePgrepNoContext(t *testing.T) {
 func TestRewritePgrepBesideMalformedNestedScript(t *testing.T) {
 	config, logger := silentConfig(t)
 	var out bytes.Buffer
-	rewritePgrep(&core.ToolInput{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"pgrep -f x; sh -c 'echo \"y'"}`)}, config, logger, &out)
+	writeAllowedOutput(&core.ToolInput{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"pgrep -f x; sh -c 'echo \"y'"}`)}, config, logger, &out)
 	var got preToolUseOutput
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("output %q: %v", out.String(), err)

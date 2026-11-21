@@ -12,7 +12,7 @@ import (
 // него (подмена pgrep и сверка понимания): новая проверка без строки в
 // справке — красный тест
 func TestPreToolUseHelpNamesEveryCheck(t *testing.T) {
-	names := append(processor.ToolNames(), pgrepAncestorsTool, understandCheckTool)
+	names := append(processor.ToolNames(), pgrepAncestorsTool, wideSearchHintTool, understandCheckTool)
 	if len(names) < 9 {
 		t.Fatalf("проверок меньше ожидаемого: %v", names)
 	}
@@ -42,7 +42,7 @@ func TestPreToolUseHelpDefaultOn(t *testing.T) {
 			got = append(got, name)
 		}
 	}
-	want := append(processor.DefaultOnNames(), pgrepAncestorsTool, understandCheckTool)
+	want := append(processor.DefaultOnNames(), pgrepAncestorsTool, wideSearchHintTool, understandCheckTool)
 	slices.Sort(got)
 	slices.Sort(want)
 	if !slices.Equal(got, want) {

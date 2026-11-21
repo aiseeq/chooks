@@ -6,7 +6,7 @@ package main
 const preToolUseLong = `Проверки перед вызовом инструмента (PreToolUse). Отказ проверки движка — код 2,
 причина и подсказка — в stderr, их читает модель. Проверку включает ключ
 tools.<имя>.enabled в config.yaml. Без ключа включены git_guard, rsync_guard,
-pgrep_ancestors и understand_check, остальные выключены.
+pgrep_ancestors, wide_search_hint и understand_check, остальные выключены.
 
 Отказывают:
   kill_guard (Bash, Monitor) — kill, pkill, killall, killall5, цель которых до
@@ -44,6 +44,11 @@ pgrep_ancestors и understand_check, остальные выключены.
   pgrep_ancestors (Bash, Monitor) — дописывает -A к pgrep -f (подмена входа
     в stdout): иначе pgrep находит оболочку своей же команды, и цикл «ждать,
     пока процесс кончится» не кончается.
+  wide_search_hint (Bash, Monitor) — подсказка модели (additionalContext в
+    stdout), вызов не прерывается: grep -r, rg, find, du, ls -R по ~, ~/.cache,
+    ~/.cache/claude-tmp, ~/git, ~/work, ~/.local/state или их предку (путь и
+    вызов без пути — от cwd) фризят диск; взамен git grep, tl, plocate или
+    путь уже.
 
 Отдельной подкомандой, своей строкой хука в settings.json:
   understand-check (ключ understand_check; SendMessage, Edit, Write, Bash) —

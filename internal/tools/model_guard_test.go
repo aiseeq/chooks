@@ -90,7 +90,7 @@ func TestModelGuard(t *testing.T) {
 		{"запасной поиск", "Bash", "", `claude --model sonnet -p "hi`, true},
 		{"запасной поиск, переменная", "Bash", "", `ANTHROPIC_MODEL=sonnet claude -p "hi`, true},
 		{"agents inherit", "Bash", "", `claude -p hi --agents '{"r":{"description":"d","prompt":"p","model":"inherit"}}'`, false},
-		{"agents не JSON", "Bash", "", `claude -p hi --agents agents.json`, false},
+		{"agents file path unreadable", "Bash", "", `claude -p hi --agents agents.json`, true},
 		{"settings=", "Bash", "", `claude -p hi --settings='{"model":"sonnet"}'`, true},
 		{"fallback-model=", "Bash", "", "claude -p hi --fallback-model=sonnet", true},
 		{"agents=", "Bash", "", `claude -p hi --agents='{"r":{"description":"d","prompt":"p","model":"haiku"}}'`, true},
@@ -524,6 +524,19 @@ func TestModelGuardSettingsAgentReference(t *testing.T) {
 	}
 }
 
+func TestModelGuardUserOnlyModelRemainsRestrictedWhenRemovedFromApprovedList(t *testing.T) {
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	for _, candidate := range []string{"fable", "FABLE", "claude-fable-5-2", "Claude-Fable-5-2[1m]", "anthropic/claude-fable-5-2"} {
+		if name, ok := tool.userOnlyModel(candidate, []approvedModel{{name: "opus", id: "claude-opus-5-5"}}); !ok || name != "fable" {
+			t.Errorf("user-only model %q was not matched: name=%q ok=%v", candidate, name, ok)
+		}
+	}
+}
+
 func TestModelGuardRoundTwo(t *testing.T) {
 	home, root, outside := t.TempDir(), t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
@@ -571,6 +584,11 @@ func TestModelGuardRoundTwo(t *testing.T) {
 	plugOpus, plugFable := filepath.Join(t.TempDir(), "plug-opus"), filepath.Join(t.TempDir(), "plug-fable")
 	write(filepath.Join(plugOpus, "agents/rev.md"), "---\nname: rev\nmodel: opus\n---\n")
 	write(filepath.Join(plugFable, "agents/rev.md"), "---\nname: rev\nmodel: fable\n---\n")
+	agentProject := t.TempDir()
+	write(filepath.Join(agentProject, ".claude/agents/rev.md"), "---\nname: rev\nmodel: fable\n---\n")
+	write(filepath.Join(agentProject, ".claude/agents/other.md"), "---\nname: other\nmodel: opus\n---\n")
+	agentFile := filepath.Join(t.TempDir(), "agents.json")
+	write(agentFile, `{"rev":{"description":"review","prompt":"inspect","model":"fable"}}`)
 	cases := []struct {
 		name, tool, cwd, command, raw string
 		reject                        bool
@@ -594,6 +612,14 @@ func TestModelGuardRoundTwo(t *testing.T) {
 		{"explicit model overrides settings after boolean flag", "Bash", outside, `claude --settings '{"model":"fable"}' -p --model opus`, "", false},
 		{"explicit model overrides settings after verbose", "Bash", outside, `claude --settings '{"model":"fable"}' --verbose --model opus`, "", false},
 		{"unknown flag value does not expose model flag", "Bash", outside, `claude --settings '{"model":"fable"}' --future-option --model opus`, "", true},
+		{"dynamic variable before model keeps settings active", "Bash", outside, "X=--name; claude -p $X --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"env wrapper preserves dynamic prefix before model", "Bash", outside, "env -- claude -p $X --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"command substitution before model keeps settings active", "Bash", outside, "claude -p $(echo --name) --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"backticks before model keep settings active", "Bash", outside, "claude -p `echo --name` --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"argv expansion before model keeps settings active", "Bash", outside, "claude -p \"$@\" --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"brace expansion before model keeps settings active", "Bash", outside, "claude -p {--name,} --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"glob before model keeps settings active", "Bash", outside, "claude -p [-]-name --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"model first overrides settings before dynamic prompt", "Bash", outside, "claude --model opus -p \"$(cat prompt)\" --settings " + filepath.Join(plain, ".claude/settings.json"), "", false},
 		{"fable explicit model remains denied", "Bash", outside, `claude --settings '{"model":"opus"}' --model fable -p hi`, "", true},
 		{"project settings remain active after prompt separator", "Bash", plain, "claude -p -- --model", "", true},
 		{"inline settings remain active after prompt separator", "Bash", outside, `claude --settings '{"model":"fable"}' -p -- --model`, "", true},
@@ -612,6 +638,14 @@ func TestModelGuardRoundTwo(t *testing.T) {
 		{"grep data", "Bash", outside, "grep -r fable docs", "", false},
 		{"inline agents opus", "Bash", outside, `claude --agents '{"rev":{"model":"opus"}}' --agent rev -p hi`, "", false},
 		{"inline agents fable", "Bash", outside, `claude --agents '{"rev":{"model":"fable"}}' --agent rev -p hi`, "", true},
+		{"inline opus cannot mask project agent fable", "Bash", agentProject, `claude --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
+		{"inline fable is accumulated with file agent", "Bash", agentProject, `claude --agents '{"other":{"description":"review","prompt":"inspect","model":"fable"}}' --agent other -p hi`, "", true},
+		{"invalid inline agents cannot hide project agent", "Bash", agentProject, `claude --agents '{"rev":{"description":"","prompt":"inspect","effort":"impossible","model":"opus"}}' --agent rev -p hi`, "", true},
+		{"first repeated agents definition is retained", "Bash", agentProject, `claude --agents '{"rev":{"description":"review","prompt":"inspect","model":"fable"}}' --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
+		{"safe mode does not hide project agent", "Bash", agentProject, `claude --safe-mode --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
+		{"agents file fable model", "Bash", outside, "claude --agents " + agentFile + " -p hi", "", true},
+		{"unreadable agents file is refused", "Bash", outside, "claude --agents " + filepath.Join(t.TempDir(), "missing-agents.json") + " -p hi", "", true},
+		{"dynamic agents file is refused", "Bash", outside, `claude --agents "$AGENTS_FILE" -p hi`, "", true},
 		{"plugin-dir opus", "Bash", outside, "claude --plugin-dir " + plugOpus + " --agent myplug:rev -p hi", "", false},
 		{"plugin-dir fable", "Bash", outside, "claude --plugin-dir " + plugFable + " --agent myplug:rev -p hi", "", true},
 		{"unknown Agent plugin allowed", "Agent", outside, "", `{"subagent_type":"frontend-design:frontend-design"}`, false},
@@ -624,6 +658,12 @@ func TestModelGuardRoundTwo(t *testing.T) {
 			}
 			if result.IsValid == tc.reject {
 				t.Fatalf("reject=%v want=%v violations=%+v", !result.IsValid, tc.reject, result.Violations)
+			}
+			if tc.reject && strings.Contains(tc.name, "before model") && !strings.Contains(result.Violations[0].Message, "поставь --model первым") {
+				t.Fatalf("missing --model ordering hint: %+v", result.Violations)
+			}
+			if tc.reject && (strings.Contains(tc.name, "unreadable agents file") || strings.Contains(tc.name, "dynamic agents file")) && !strings.Contains(result.Violations[0].Message, "файл --agents не прочитать") {
+				t.Fatalf("missing unreadable agents-file reason: %+v", result.Violations)
 			}
 		})
 	}

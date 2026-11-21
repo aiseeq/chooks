@@ -71,6 +71,10 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 			reasons = append(reasons, "содержимое изменяемого файла настроек не проверить")
 			continue
 		}
+		if c.unknownAgents {
+			reasons = append(reasons, "файл --agents не прочитать: модель агента не проверить")
+			continue
+		}
 		if c.userOnlyCheck {
 			if c.dynamic {
 				reasons = append(reasons, "модель задана переменной, назови её литералом")
@@ -88,7 +92,11 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 		} else if !isApproved(c.value, models) {
 			reasons = append(reasons, fmt.Sprintf("модель %q не одобрена", c.value))
 		} else if name, ok := t.userOnlyModel(c.value, models); ok {
-			reasons = append(reasons, userOnlyReason(c.value, name))
+			message := userOnlyReason(c.value, name)
+			if c.modelFlagHint {
+				message += "; чтобы перекрыть settings, поставь --model первым: claude --model opus -p \"$(cat prompt)\""
+			}
+			reasons = append(reasons, message)
 		}
 	}
 	if len(reasons) == 0 {
@@ -106,7 +114,9 @@ type modelCandidate struct {
 	dynamic       bool
 	unknownAgent  bool
 	unknownWrite  bool
+	unknownAgents bool
 	settingsModel bool
+	modelFlagHint bool
 	// userOnlyCheck — модель быстрых запросов (переменные haiku) или
 	// определения агента: проверяется только на модель «только пользователь»
 	userOnlyCheck bool
@@ -612,9 +622,20 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		if isNpxClaude {
 			callArgs = npxClaudeArgs(call.Args)
 		}
+		literalArgs := shellCallArgumentLiterals(call.Raw, call.Name)
+		literalOffset := 0
+		if isNpxClaude {
+			for i, arg := range call.Args {
+				if arg == "@anthropic-ai/claude-code" {
+					literalOffset = i + 1
+					break
+				}
+			}
+		}
 		args := make([]word, len(callArgs))
 		for i, a := range callArgs {
-			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`"), tilde: call.ArgTilde(i)}
+			shellLiteral := i+literalOffset < len(literalArgs) && literalArgs[i+literalOffset]
+			args[i] = word{text: a, literal: !strings.ContainsAny(a, "$`"), shellLiteral: shellLiteral, shellLiteralKnown: true, tilde: call.ArgTilde(i + literalOffset)}
 		}
 		dialect := clientDialect(call.Name)
 		if isNpxClaude {
@@ -633,14 +654,20 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		if agentAt != nil {
 			localFiles.agent = func(name string) []modelCandidate { return agentAt(name, lookupCWD, callExtraDirs) }
 		}
-		modelOverride := dialect == "claude" && claudeHasEffectiveModelFlag(args)
+		modelOverride, modelFlagHint := false, false
+		if dialect == "claude" {
+			modelOverride, modelFlagHint = claudeModelFlagStatus(args)
+		}
 		if dialect == "claude" {
 			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
 			if settingsAt != nil {
-				found = appendSettingsCandidates(found, settingsAt(cwd, cwdKnown), modelOverride)
+				settings := settingsAt(cwd, cwdKnown)
+				markModelFlagHint(settings, modelFlagHint)
+				found = appendSettingsCandidates(found, settings, modelOverride)
 			}
 		}
 		callCandidates := candidatesFromArgs(dialect, args, localFiles)
+		markModelFlagHint(callCandidates, modelFlagHint)
 		if modelOverride {
 			callCandidates = withoutSettingsModel(callCandidates)
 		}
@@ -1181,28 +1208,110 @@ var claudeOptions = map[string]claudeOptionKind{
 	"--worktree": claudeOptionValue, "-w": claudeOptionValue,
 }
 
-func claudeHasEffectiveModelFlag(args []word) bool {
+func claudeArgIsLiteral(arg word) bool {
+	if arg.shellLiteralKnown {
+		return arg.shellLiteral
+	}
+	return arg.literal
+}
+
+func shellCallArgumentLiterals(raw, commandName string) []bool {
+	file, err := syntax.NewParser().Parse(strings.NewReader(raw), "")
+	if err != nil {
+		return nil
+	}
+	var flags []bool
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if len(flags) != 0 {
+			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		commandWord := call.Args[0]
+		start, end := int(commandWord.Pos().Offset()), int(commandWord.End().Offset())
+		if start < 0 || end < start || end > len(raw) || filepath.Base(strings.Trim(raw[start:end], "'\"")) != commandName {
+			return true
+		}
+		flags = make([]bool, len(call.Args)-1)
+		for i, arg := range call.Args[1:] {
+			start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
+			if start >= 0 && end >= start && end <= len(raw) {
+				flags[i] = shellWordSourceLiteral(raw[start:end])
+			}
+		}
+		return false
+	})
+	return flags
+}
+
+func shellWordSourceLiteral(source string) bool {
+	var quote byte
+	for i := 0; i < len(source); i++ {
+		ch := source[i]
+		if quote == '\'' {
+			if ch == '\'' {
+				quote = 0
+			}
+			continue
+		}
+		if quote == '"' {
+			switch ch {
+			case '"':
+				quote = 0
+			case '$', '`':
+				return false
+			case '\\':
+				i++
+			}
+			continue
+		}
+		switch ch {
+		case '\\':
+			i++
+		case '\'', '"':
+			quote = ch
+		case '$', '`', '*', '?', '[', '{', '}':
+			return false
+		case '<', '>':
+			if i+1 < len(source) && source[i+1] == '(' {
+				return false
+			}
+		}
+	}
+	return quote == 0
+}
+
+func claudeModelFlagStatus(args []word) (effective, needsFirst bool) {
 	waitingForValue := false
+	allLiteral := true
 	for _, arg := range args {
 		text := arg.text
 		if text == "--" {
-			return false
+			return false, false
 		}
 		if waitingForValue {
 			waitingForValue = false
+			if text == "--model" || strings.HasPrefix(text, "--model=") {
+				return false, true
+			}
+			allLiteral = allLiteral && claudeArgIsLiteral(arg)
 			continue
 		}
 		if text == "--model" || strings.HasPrefix(text, "--model=") {
-			return true
+			return allLiteral, !allLiteral
 		}
 		if !strings.HasPrefix(text, "-") || text == "-" || strings.Contains(text, "=") {
+			allLiteral = allLiteral && claudeArgIsLiteral(arg)
 			continue
 		}
 		if kind, known := claudeOptions[text]; !known || kind == claudeOptionValue {
 			waitingForValue = true
 		}
+		allLiteral = allLiteral && claudeArgIsLiteral(arg)
 	}
-	return false
+	return false, false
 }
 
 // splitValueFlags разбивает --flag=value для опций Claude со значением.
@@ -1210,7 +1319,7 @@ func splitValueFlags(args []word) []word {
 	out := make([]word, 0, len(args))
 	for _, a := range args {
 		if flag, value, ok := strings.Cut(a.text, "="); ok && claudeOptions[flag] == claudeOptionValue {
-			out = append(out, word{text: flag, literal: true}, word{text: value, literal: a.literal})
+			out = append(out, word{text: flag, literal: true, shellLiteral: true, shellLiteralKnown: true}, word{text: value, literal: a.literal, shellLiteral: a.shellLiteral, shellLiteralKnown: a.shellLiteralKnown, tilde: a.tilde})
 			continue
 		}
 		out = append(out, a)
@@ -1278,13 +1387,12 @@ func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandi
 		case name == "claude" && (a.text == "--settings" || a.text == "--agents"):
 			found = append(found, jsonModelCandidates(a.text, next, files.settings, files.agent)...)
 		case name == "claude" && a.text == "--agent":
-			if model, exists := inlineAgents[next.text]; exists {
-				if model != "" && model != "inherit" {
-					found = append(found, modelCandidate{value: model})
-				}
-			} else {
-				found = append(found, agentFlagCandidates(next, files)...)
+			found = append(found, inlineAgents[next.text]...)
+			definitions := agentFlagCandidates(next, files)
+			if len(inlineAgents[next.text]) > 0 {
+				definitions = slices.DeleteFunc(definitions, func(candidate modelCandidate) bool { return candidate.unknownAgent })
 			}
+			found = append(found, definitions...)
 		case name == "codex" && (a.text == "-c" || a.text == "--config"):
 			if candidate, ok := codexConfigCandidate(next); ok {
 				found = append(found, candidate)
@@ -1297,22 +1405,45 @@ func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandi
 	return found
 }
 
-func inlineAgentModels(args []word) map[string]string {
-	models := map[string]string{}
+func inlineAgentModels(args []word) map[string][]modelCandidate {
+	models := map[string][]modelCandidate{}
+	args = splitValueFlags(args)
 	for i := 0; i+1 < len(args); i++ {
 		if args[i].text != "--agents" || !args[i+1].literal {
 			continue
 		}
-		var agents map[string]struct {
-			Model string `json:"model"`
-		}
-		if json.Unmarshal([]byte(args[i+1].text), &agents) == nil {
-			for name, agent := range agents {
-				models[name] = agent.Model
+		if parsed, ok := parseAgentsJSON([]byte(args[i+1].text)); ok {
+			for name, candidates := range parsed {
+				models[name] = append(models[name], candidates...)
 			}
 		}
 	}
 	return models
+}
+
+func parseAgentsJSON(raw []byte) (map[string][]modelCandidate, bool) {
+	var agents map[string]json.RawMessage
+	if json.Unmarshal(raw, &agents) != nil || agents == nil {
+		return nil, false
+	}
+	models := make(map[string][]modelCandidate, len(agents))
+	for name, rawAgent := range agents {
+		var agent struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(rawAgent, &agent) == nil && strings.TrimSpace(agent.Model) != "" && agent.Model != "inherit" {
+			models[name] = append(models[name], modelCandidate{value: agent.Model})
+		}
+	}
+	return models, true
+}
+
+func flattenAgentModels(models map[string][]modelCandidate) []modelCandidate {
+	var found []modelCandidate
+	for _, name := range slices.Sorted(maps.Keys(models)) {
+		found = append(found, models[name]...)
+	}
+	return found
 }
 
 // jsonModelKey — ключ модели в исходном тексте JSON, в том числе с
@@ -1328,6 +1459,27 @@ var writtenModel = regexp.MustCompile(`"(model|` + modelEnvPattern() + `)"\s*:\s
 // Файла --settings ещё нет — модели в тексте команды, которая его пишет.
 // Не JSON — моделей нет: такой запуск claude сам не начнётся
 func jsonModelCandidates(flag string, arg word, readSettings func(string, shellcmd.Tilde, string) []byte, agent func(string) []modelCandidate) []modelCandidate {
+	if flag == "--agents" {
+		inlineJSON := strings.HasPrefix(strings.TrimSpace(arg.text), "{")
+		if !arg.literal || (!inlineJSON && !claudeArgIsLiteral(arg)) {
+			return []modelCandidate{{value: arg.text, unknownAgents: true}}
+		}
+		raw := []byte(arg.text)
+		if !inlineJSON {
+			if arg.tilde&(shellcmd.TildeOther|shellcmd.TildeModeUnknown) != 0 {
+				return []modelCandidate{{value: arg.text, unknownAgents: true}}
+			}
+			raw = readSettings(arg.text, arg.tilde, "")
+			if raw == nil {
+				return []modelCandidate{{value: arg.text, unknownAgents: true}}
+			}
+		}
+		models, ok := parseAgentsJSON(raw)
+		if !ok && !inlineJSON {
+			return []modelCandidate{{value: arg.text, unknownAgents: true}}
+		}
+		return flattenAgentModels(models)
+	}
 	if !arg.literal {
 		// Путь файла из переменной не прочесть, а JSON с подстановкой — модель
 		// переменной, если в нём есть поле модели
@@ -1347,18 +1499,6 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string, shellc
 		if raw = readSettings(arg.text, arg.tilde, ""); raw == nil {
 			return nil
 		}
-	}
-	var found jsonModels
-	if flag == "--agents" {
-		var agents map[string]struct {
-			Model string `json:"model"`
-		}
-		if json.Unmarshal(raw, &agents) == nil {
-			for _, a := range agents {
-				found.add(a.Model)
-			}
-		}
-		return found
 	}
 	return settingsCandidates(raw, agent)
 }
@@ -1390,6 +1530,17 @@ func appendSettingsCandidates(dst, candidates []modelCandidate, modelOverride bo
 		candidates = withoutSettingsModel(candidates)
 	}
 	return append(dst, candidates...)
+}
+
+func markModelFlagHint(candidates []modelCandidate, hint bool) {
+	if !hint {
+		return
+	}
+	for i := range candidates {
+		if candidates[i].settingsModel {
+			candidates[i].modelFlagHint = true
+		}
+	}
 }
 
 // jsonModels — модели из JSON флага claude
@@ -1502,6 +1653,17 @@ func (t *ModelGuardTool) userOnlyModel(candidate string, models []approvedModel)
 		if slices.ContainsFunc(t.userOnly, func(name string) bool { return strings.EqualFold(name, m.name) }) &&
 			isApproved(candidate, []approvedModel{m}) {
 			return m.name, true
+		}
+	}
+	name := normalizeModel(candidate)
+	for _, restricted := range t.userOnly {
+		if strings.EqualFold(name, restricted) {
+			return restricted, true
+		}
+		for _, token := range strings.FieldsFunc(name, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+			if strings.EqualFold(token, restricted) {
+				return restricted, true
+			}
 		}
 	}
 	return "", false

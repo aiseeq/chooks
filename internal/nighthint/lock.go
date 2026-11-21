@@ -65,3 +65,23 @@ func ScreenLocked(ctx context.Context) (bool, error) {
 	}
 	return locked, nil
 }
+
+// LidClosed возвращает LidClosed менеджера logind по системной шине.
+func LidClosed(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
+	defer cancel()
+	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
+	if err != nil {
+		return false, fmt.Errorf("connect system bus: %w", err)
+	}
+	defer conn.Close()
+	var hint dbus.Variant
+	if err := conn.Object(login1Service, dbus.ObjectPath("/org/freedesktop/login1")).CallWithContext(ctx, propertiesGet, 0, "org.freedesktop.login1.Manager", "LidClosed").Store(&hint); err != nil {
+		return false, fmt.Errorf("LidClosed: %w", err)
+	}
+	closed, ok := hint.Value().(bool)
+	if !ok {
+		return false, fmt.Errorf("LidClosed %s: not a bool", hint)
+	}
+	return closed, nil
+}

@@ -497,3 +497,22 @@ func TestRunNightHintSkillWaitWithinDeadline(t *testing.T) {
 		}
 	})
 }
+
+func TestPresenceSkipLoggedOncePerNight(t *testing.T) {
+	t.Setenv("CLAUDE_PID", "")
+	deps := nightTestDeps(t, time.Date(2026, 11, 19, 23, 0, 0, 0, time.Local), false, nil)
+	deps.LidClosed = func(context.Context) (bool, error) { return false, nil }
+	logger, logPath := nightTestLogger(t)
+	input := []byte(`{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"AskUserQuestion"}`)
+	for range 2 {
+		var out bytes.Buffer
+		runNightHint(context.Background(), input, core.DefaultConfig(), logger, &out, deps)
+		if out.Len() != 0 {
+			t.Fatalf("unexpected hint: %s", out.String())
+		}
+	}
+	log := readLog(t, logPath)
+	if n := strings.Count(log, `level=INFO msg="night hint skipped"`); n != 1 {
+		t.Fatalf("info logs %d: %s", n, log)
+	}
+}

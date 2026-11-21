@@ -31,7 +31,8 @@ var ErrRecordDamaged = errors.New("night-hint record damaged, replaced")
 type record struct {
 	// Night — ночь (NightOf), в которую дана подсказка SessionStart или
 	// UserPromptSubmit
-	Night string `json:"night,omitempty"`
+	Night             string `json:"night,omitempty"`
+	PresenceSkipNight string `json:"presence_skip_night,omitempty"`
 	// StopHinted — подсказка на Stop дана в этом ходе; снимает её
 	// следующий UserPromptSubmit
 	StopHinted bool `json:"stop_hinted,omitempty"`
@@ -63,6 +64,17 @@ func (s Store) MarkNight(sessionID, night string) (bool, error) {
 			return false
 		}
 		rec.Night = night
+		return true
+	})
+}
+
+// MarkPresenceSkip отмечает первый за ночь пропуск по присутствию.
+func (s Store) MarkPresenceSkip(sessionID, night string) (bool, error) {
+	return s.update(sessionID, func(rec *record) bool {
+		if rec.PresenceSkipNight == night {
+			return false
+		}
+		rec.PresenceSkipNight = night
 		return true
 	})
 }

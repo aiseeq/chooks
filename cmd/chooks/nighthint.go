@@ -47,7 +47,7 @@ func nightHintDeps(config *core.Config, deadline time.Time) (nighthint.Deps, err
 	if err != nil {
 		return nighthint.Deps{}, err
 	}
-	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, Store: nighthint.Store{Dir: dir}, SkillCalled: autonomousSkillCalled(config, deadline)}, nil
+	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: dir}, SkillCalled: autonomousSkillCalled(config, deadline)}, nil
 }
 
 // autonomousSkillCalled — признак вызова скилла autonomous-work в сессии по
@@ -111,7 +111,7 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   hookNightHint,
 		Short: "Ночью при заблокированном экране подсказать сессии: пользователь спит, вопрос — тикетом админу пространства (SessionStart, UserPromptSubmit, PreToolUse AskUserQuestion, Stop с ❓)",
-		Long: "Подсказка в additionalContext, не отказ. Признак «спит» — экран заблокирован (LockedHint сессии seat0 в logind) и местное время 22:00–09:00. " +
+		Long: "Подсказка в additionalContext, не отказ. Признак «спит» — экран заблокирован (LockedHint сессии seat0) или крышка закрыта (LidClosed logind), и местное время 22:00–09:00. " +
 			"SessionStart — раз за ночь на сессию и после сжатия и /clear; UserPromptSubmit — на каждом ходе, пока в сессии не вызван скилл autonomous-work или night-work (sc2go) (по записи skill-reload; записи нет — не вызван), после вызова, при выключенном skill_reload, сбое чтения записи или исчерпанном сроке хука — раз за ночь; " +
 			"PreToolUse AskUserQuestion — на каждый вызов, Stop — если в последнем ответе есть строка с ❓, раз за ход. " +
 			"--probe печатает признак блокировки и время его получения.",
@@ -187,10 +187,18 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 		}
 	}
 	if result.LockErr != nil {
-		logger.Warn("night hint skipped: screen lock state unknown", "event", input.HookEventName, "session", input.SessionID, "error", result.LockErr)
+		message := "night hint skipped: screen lock state unknown"
+		if result.Skip == "признак крышки не получен" {
+			message = "night hint skipped: lid state unknown"
+		}
+		logger.Warn(message, "event", input.HookEventName, "session", input.SessionID, "reason", result.Skip, "error", result.LockErr)
 		return
 	}
 	if result.Context == "" {
+		if result.PresenceSkipInfo {
+			logger.Info("night hint skipped", "event", input.HookEventName, "session", input.SessionID, "reason", result.Skip)
+			return
+		}
 		logger.Debug("night hint skipped", "event", input.HookEventName, "session", input.SessionID, "reason", result.Skip)
 		return
 	}

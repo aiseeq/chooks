@@ -577,3 +577,51 @@ func TestTextOrdersSkillCall(t *testing.T) {
 		}
 	}
 }
+
+func TestLidAndPresenceSkip(t *testing.T) {
+	fake := newFake(t, at(19, 23, 0), false)
+	deps := fake.deps()
+	closed := false
+	var lidErr error
+	calls := 0
+	deps.LidClosed = func(context.Context) (bool, error) { calls++; return closed, lidErr }
+	event := eventOf(EventSessionStart)
+	run := func() Result {
+		t.Helper()
+		result, err := Run(context.Background(), deps, event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	if r := run(); r.Context != "" || !r.PresenceSkipInfo {
+		t.Fatalf("first open: %+v", r)
+	}
+	if r := run(); r.Context != "" || r.PresenceSkipInfo {
+		t.Fatalf("second open: %+v", r)
+	}
+	closed = true
+	if r := run(); r.Context == "" {
+		t.Fatalf("closed: %+v", r)
+	}
+	fake.locked = true
+	callsBefore := calls
+	if r := run(); r.Context != "" || calls != callsBefore {
+		t.Fatalf("locked: %+v, lid calls %d", r, calls)
+	}
+	fake.locked = false
+	closed = false
+	lidErr = errors.New("lid unavailable")
+	if r := run(); r.Context != "" || !errors.Is(r.LockErr, lidErr) {
+		t.Fatalf("unknown: %+v", r)
+	}
+	lidErr = nil
+	fake.now = at(20, 23, 0)
+	if r := run(); !r.PresenceSkipInfo {
+		t.Fatalf("next night: %+v", r)
+	}
+	event.SessionID = "s2"
+	if r := run(); !r.PresenceSkipInfo {
+		t.Fatalf("different session: %+v", r)
+	}
+}

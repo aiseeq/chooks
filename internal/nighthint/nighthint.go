@@ -5,8 +5,8 @@
 // что-то спросить - глянь на время. Если ночь - кидай свои вопросы в Сон»,
 // «Когда я сплю я лочу комп. Обычно я доступен где-то до 22-23, а
 // просыпаюсь в 8-9» (тикет chooks night-autonomous-work-hint). Признак «спит» —
-// экран заблокирован и местное время 22:00–09:00: час без блокировки
-// подсказку не включает, блокировка днём — тоже. Адрес вопроса с 16.11 —
+// экран заблокирован или крышка закрыта, и местное время 22:00–09:00.
+// Днём подсказка не включается. Адрес вопроса с 16.11 —
 // админ пространства, не Сон: пользователь 16.11 — «Я буду отвечать на вопросы
 // Админам пространств» (tl 13d1062b:15130), «можно всё в эту доку писать»
 // (tl 13d1062b:15683); п.3 autonomous-work с этим адресом — «да» на текст
@@ -90,9 +90,10 @@ func (e Event) contextReset() bool {
 // Deps — время, признак блокировки экрана, записи сессий и признак вызова
 // скилла; в тестах подменяются
 type Deps struct {
-	Now    func() time.Time
-	Locked func(ctx context.Context) (bool, error)
-	Store  Store
+	Now       func() time.Time
+	Locked    func(ctx context.Context) (bool, error)
+	LidClosed func(ctx context.Context) (bool, error)
+	Store     Store
 	// SkillCalled — вызван ли в сессии главного агента AutonomousSkill (или
 	// другой из AutonomousSkills).
 	// Ошибка или nil — неизвестно: UserPromptSubmit идёт по правилу «раз
@@ -103,9 +104,10 @@ type Deps struct {
 // Result — подсказка для контекста агента или причина, почему её нет.
 // LockErr — признак блокировки не получен: подсказки нет, причина — в лог
 type Result struct {
-	Context string
-	Skip    string
-	LockErr error
+	Context          string
+	Skip             string
+	LockErr          error
+	PresenceSkipInfo bool
 	// Damaged — запись сессии была испорчена и заменена (ErrRecordDamaged):
 	// решение принято, причина — в лог
 	Damaged error
@@ -179,7 +181,23 @@ func Run(ctx context.Context, deps Deps, event Event) (Result, error) {
 		return Result{Skip: "признак блокировки экрана не получен", LockErr: err, Damaged: damaged}, nil
 	}
 	if !locked {
-		return Result{Skip: "экран не заблокирован", Damaged: damaged}, nil
+		if deps.LidClosed != nil {
+			closed, lidErr := deps.LidClosed(ctx)
+			if lidErr != nil {
+				return Result{Skip: "признак крышки не получен", LockErr: lidErr, Damaged: damaged}, nil
+			}
+			locked = closed
+		}
+		if !locked {
+			first, markErr := deps.Store.MarkPresenceSkip(event.SessionID, NightOf(now))
+			if errors.Is(markErr, ErrRecordDamaged) {
+				damaged, markErr = markErr, nil
+			}
+			if markErr != nil {
+				return Result{}, fmt.Errorf("mark presence skip: %w", markErr)
+			}
+			return Result{Skip: "экран не заблокирован и крышка открыта", PresenceSkipInfo: first, Damaged: damaged}, nil
+		}
 	}
 
 	fresh := true

@@ -994,6 +994,7 @@ func TestModelGuardRoundTenPaths(t *testing.T) {
 	badCWD := t.TempDir()
 	write(filepath.Join(badCWD, ".claude/settings.json"), `{"model":"haiku"}`)
 	write(filepath.Join(home, "s.json"), `{"model":"opus"}`)
+	write(filepath.Join(home, ".claude/settings.json"), `{"model":"opus"}`)
 	write(filepath.Join(decoyHome, "s.json"), `{"model":"haiku"}`)
 	cases := []struct {
 		name, command string
@@ -1013,6 +1014,11 @@ func TestModelGuardRoundTenPaths(t *testing.T) {
 		{"echo HOME text is not assignment", "echo HOME=" + decoyHome + "; claude --settings ~/s.json -p hi", cwd, false},
 		{"comment HOME text is not assignment", "claude --settings ~/s.json -p hi # HOME=" + decoyHome, cwd, false},
 		{"prompt HOME text is not assignment", `claude --settings ~/s.json -p 'explain HOME=$PATH'`, cwd, false},
+		{"HOME self assignment is unchanged", `HOME="$HOME" claude -p --model opus hi`, cwd, false},
+		{"non-directory cd is not a candidate", "cd " + filepath.Join(cwd, "s.json") + " 2>/dev/null; claude -p --model opus hi", cwd, false},
+		{"failed cd does not replace candidate before next cd", "cd " + filepath.Join(cwd, "s.json") + " 2>/dev/null || cd " + cwd + "; claude -p --model opus hi", cwd, false},
+		{"command text model checked with existing settings", `printf '{"model":"fable"}' | dd of=s.json; claude -p --settings s.json hi`, cwd, true},
+		{"sponge text model checked with existing settings", `printf '{"model":"haiku"}' | sponge s.json; claude -p --settings s.json hi`, cwd, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

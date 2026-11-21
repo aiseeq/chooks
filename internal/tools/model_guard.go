@@ -144,9 +144,9 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 	if input.ToolName == "Agent" {
 		return agentToolCandidates(input, agentModels, logger)
 	}
-	cwdCandidates := commandCWDs(input.Command, input.CWD, []string{home})
+	cwdCandidates := commandCWDs(input.Command, input.CWD, []string{home}, logger)
 	homes := commandPathCandidates(input.Command, "HOME", cwdCandidates, []string{home}, home, logger)
-	cwdCandidates = commandCWDs(input.Command, input.CWD, homes.paths)
+	cwdCandidates = commandCWDs(input.Command, input.CWD, homes.paths, logger)
 	homes = commandPathCandidates(input.Command, "HOME", cwdCandidates, []string{home}, home, logger)
 	configs := commandPathCandidates(input.Command, "CLAUDE_CONFIG_DIR", cwdCandidates, nonEmpty(os.Getenv("CLAUDE_CONFIG_DIR")), home, logger)
 	unresolvedTildeSettings := false
@@ -166,10 +166,12 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 				}
 			}
 		}
+		// Проверяем текст команды вместе с файлами: запись может обновлять
+		// уже существующий settings.json через dd, sponge и другие команды.
+		if writtenModel.Match([]byte(input.Command)) {
+			contents = append(contents, []byte(input.Command))
+		}
 		if len(contents) == 0 {
-			if writtenModel.Match([]byte(input.Command)) {
-				return [][]byte{[]byte(input.Command)}
-			}
 			unresolvedTildeSettings = true
 			return nil
 		}
@@ -309,12 +311,14 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 	}
 	var values []string
 	dynamic := false
-	add := func(key, value string, literal bool) {
+	add := func(key, value string, literal, selfReference bool) {
 		if key != name {
 			return
 		}
 		if !literal {
-			dynamic = true
+			if !selfReference {
+				dynamic = true
+			}
 			return
 		}
 		values = append(values, value)
@@ -324,11 +328,11 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 			return
 		}
 		if assign.Value == nil {
-			add(assign.Name.Value, "", false)
+			add(assign.Name.Value, "", false, false)
 			return
 		}
 		value, literal := literalValue(assign.Value)
-		add(assign.Name.Value, value, literal)
+		add(assign.Name.Value, value, literal, name == "HOME" && homeSelfReference(command, assign.Value))
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch n := node.(type) {
@@ -347,14 +351,14 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 				value, literal := literalValue(arg)
 				if !literal {
 					start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
-					if start >= 0 && end >= start && end <= len(command) && strings.HasPrefix(command[start:end], name+"=") {
+					if start >= 0 && end >= start && end <= len(command) && strings.HasPrefix(command[start:end], name+"=") && !(name == "HOME" && homeSelfReference(command, arg)) {
 						dynamic = true
 					}
 					continue
 				}
 				key, val, assigned := strings.Cut(value, "=")
 				if assigned {
-					add(key, val, true)
+					add(key, val, true, false)
 				}
 			}
 		case *syntax.DeclClause:
@@ -368,6 +372,19 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 		return true
 	})
 	return values, dynamic
+}
+
+func homeSelfReference(source string, node syntax.Node) bool {
+	start, end := int(node.Pos().Offset()), int(node.End().Offset())
+	if start < 0 || end < start || end > len(source) {
+		return false
+	}
+	value := strings.TrimSpace(source[start:end])
+	value = strings.Trim(value, `"'`)
+	if key, rhs, ok := strings.Cut(value, "="); ok && key == "HOME" {
+		value = strings.Trim(rhs, `"'`)
+	}
+	return value == "$HOME" || value == "${HOME}"
 }
 
 // maxSettingsSize — предел файла --settings: настройки — килобайты
@@ -704,7 +721,7 @@ func clientDialect(name string) string {
 }
 
 // commandCWDs возвращает cwd сессии и все известные цели cd, pushd и env -C.
-func commandCWDs(command, initial string, homes []string) []string {
+func commandCWDs(command, initial string, homes []string, logger core.Logger) []string {
 	paths := []string{}
 	add := func(path string) {
 		if path != "" && !slices.Contains(paths, path) {
@@ -722,7 +739,7 @@ func commandCWDs(command, initial string, homes []string) []string {
 		if call.Name == "cd" || call.Name == "pushd" {
 			for _, home := range homes {
 				dir, known := changeDirKnown(call, cwd, home)
-				if known {
+				if known && usableDirectory(dir, logger) {
 					add(dir)
 					cwd = dir
 					break
@@ -730,7 +747,7 @@ func commandCWDs(command, initial string, homes []string) []string {
 			}
 		} else if call.Name == "env" {
 			for _, home := range homes {
-				if dir, found, known := envChdir(call.Args, cwd, home); found && known {
+				if dir, found, known := envChdir(call.Args, cwd, home); found && known && usableDirectory(dir, logger) {
 					add(dir)
 					cwd = dir
 					break
@@ -739,6 +756,21 @@ func commandCWDs(command, initial string, homes []string) []string {
 		}
 	}
 	return paths
+}
+
+func usableDirectory(path string, logger core.Logger) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		logger.Warn("model_guard: каталог запуска недоступен и не рассматривается", "path", path, "error", err)
+		return false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		logger.Warn("model_guard: не удалось проверить каталог запуска", "path", path, "error", err)
+		return false
+	}
+	return info.IsDir()
 }
 
 // bashModelCandidatesAt — модели вызовов агентов в команде оболочки. Вызовы
@@ -758,14 +790,14 @@ func bashModelCandidatesAt(command, initialCWD string, cwdCandidates []string, h
 	for i := range calls {
 		call := &calls[i]
 		if call.Name == "cd" || call.Name == "pushd" {
-			if next, known := changeDirKnown(call, cwd, homeForPaths()); known {
+			if next, known := changeDirKnown(call, cwd, homeForPaths()); known && usableDirectory(next, logger) {
 				cwd = next
 			}
 			continue
 		}
 		if call.Name == "env" {
 			if dir, found, known := envChdir(call.Args, cwd, homeForPaths()); found {
-				if known {
+				if known && usableDirectory(dir, logger) {
 					cwd = dir
 				}
 			}

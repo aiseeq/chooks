@@ -590,7 +590,11 @@ func TestModelGuardRoundTwo(t *testing.T) {
 		{"dynamic cwd does not refuse", "Bash", outside, "cd $D && claude --model opus", "", false},
 		{"HOME settings", "Bash", outside, "HOME=" + homeFable + " claude", "", true},
 		{"repo settings env ignores model override", "Bash", sub, "claude --model opus", "", true},
-		{"project model key overridden", "Bash", outside, "cd " + plain + " && claude --model opus", "", false},
+		{"project settings remain active with explicit model", "Bash", outside, "cd " + plain + " && claude --model opus", "", true},
+		{"project settings remain active after prompt separator", "Bash", plain, "claude -p -- --model", "", true},
+		{"inline settings remain active after prompt separator", "Bash", outside, `claude --settings '{"model":"fable"}' -p -- --model`, "", true},
+		{"inline settings remain active beside model-like prompt text", "Bash", outside, `claude --settings '{"model":"fable"}' -p hi --append-system-prompt --model=opus`, "", true},
+		{"settings file remains active beside model-like prompt text", "Bash", outside, "claude --settings " + filepath.Join(plain, ".claude/settings.json") + " -p hi --append-system-prompt --model=opus", "", true},
 		{"cwd parent path excludes child settings", "Bash", unnormalizedCWD, "claude", "", false},
 		{"write settings", "Bash", outside, `echo '{"model":"fable"}' > ` + filepath.Join(outside, "settings.json") + "; claude", "", true},
 		{"write agent definition", "Bash", outside, "printf -- '---\\nname: x\\nmodel: fable\\n---\\n' > " + filepath.Join(outside, "agents/x.md") + "; claude --agent x", "", true},
@@ -819,6 +823,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"claude --agent ok", "Bash", "", "claude -p --agent ok hi", home, false},
 		{"claude --agent из переменной", "Bash", "", `claude -p --agent "$A" hi`, home, true},
 		{"claude --agent проекта из подкаталога", "Bash", "", "claude -p --agent px hi", deep, true},
+		{"claude dynamic cd falls back to session cwd agent", "Bash", "", `cd "$PWD" && claude --agent px -p hi`, project, true},
 		{"claude cd к проекту", "Bash", "", "cd " + project + " && claude -p --agent px hi", home, true},
 		{"claude add-dir", "Bash", "", "claude --add-dir " + project + " -p --agent px hi", home, true},
 		{"claude неизвестный агент", "Bash", "", "claude --agent missing-agent", home, true},
@@ -875,6 +880,9 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 			}
 			if c.reject && (strings.Contains(c.name, "нет такого") || strings.Contains(c.name, "неизвестный") || strings.Contains(c.name, "missing-agent")) && !strings.Contains(result.Violations[0].Message, "определение агента") {
 				t.Fatalf("причина неизвестного агента: %+v", result.Violations)
+			}
+			if c.name == "claude dynamic cd falls back to session cwd agent" && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+				t.Fatalf("session cwd agent definition was not used: %+v", result.Violations)
 			}
 			if c.reject && (strings.Contains(c.name, "cd к проекту") || strings.Contains(c.name, "add-dir") || strings.Contains(c.name, "project settings")) && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
 				t.Fatalf("модель агента/settings не распознана: %+v", result.Violations)

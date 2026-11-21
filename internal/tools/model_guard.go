@@ -102,11 +102,10 @@ func userOnlyReason(value, name string) string {
 }
 
 type modelCandidate struct {
-	value         string
-	dynamic       bool
-	unknownAgent  bool
-	unknownWrite  bool
-	settingsModel bool
+	value        string
+	dynamic      bool
+	unknownAgent bool
+	unknownWrite bool
 	// userOnlyCheck — модель быстрых запросов (переменные haiku) или
 	// определения агента: проверяется только на модель «только пользователь»
 	userOnlyCheck bool
@@ -624,7 +623,7 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		localFiles := files
 		lookupCWD := cwd
 		if !cwdKnown {
-			lookupCWD = ""
+			lookupCWD = initialCWD
 		}
 		if localFiles.settings != nil {
 			read := localFiles.settings
@@ -636,17 +635,10 @@ func bashModelCandidatesAt(command, initialCWD string, files modelFiles, setting
 		if dialect == "claude" {
 			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
 			if settingsAt != nil {
-				settings := settingsAt(cwd, cwdKnown)
-				if hasExplicitModelFlag(args) {
-					settings = slices.DeleteFunc(settings, func(c modelCandidate) bool { return c.settingsModel })
-				}
-				found = append(found, settings...)
+				found = append(found, settingsAt(cwd, cwdKnown)...)
 			}
 		}
 		callCandidates := candidatesFromArgs(dialect, args, localFiles)
-		if dialect == "claude" && hasExplicitModelFlag(args) {
-			callCandidates = slices.DeleteFunc(callCandidates, func(c modelCandidate) bool { return c.settingsModel })
-		}
 		found = append(found, callCandidates...)
 		if dialect == "claude" {
 			claude = true
@@ -890,15 +882,6 @@ func claudeAddedAgentDirs(args []word, cwd, home string) []string {
 		dirs = append(dirs, resolved, filepath.Join(resolved, ".claude", "agents"))
 	}
 	return dirs
-}
-
-func hasExplicitModelFlag(args []word) bool {
-	for _, arg := range args {
-		if arg.text == "--model" || strings.HasPrefix(arg.text, "--model=") {
-			return true
-		}
-	}
-	return false
 }
 
 func homeForPaths() string { return os.Getenv("HOME") }
@@ -1338,12 +1321,6 @@ func (found *jsonModels) add(model string) {
 	}
 }
 
-func (found *jsonModels) addSettingModel(model string) {
-	if strings.TrimSpace(model) != "" && model != "inherit" {
-		*found = append(*found, modelCandidate{value: model, settingsModel: true})
-	}
-}
-
 // addField — поле настроек: model или переменная модели из env
 func (found *jsonModels) addField(field, value string) {
 	if field == "model" {
@@ -1368,7 +1345,7 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 	}
 	var model string
 	if json.Unmarshal(settings["model"], &model) == nil {
-		found.addSettingModel(model)
+		found.add(model)
 	}
 	var agent struct {
 		Model string `json:"model"`

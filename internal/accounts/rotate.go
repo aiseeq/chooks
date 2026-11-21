@@ -13,6 +13,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // Сроки ротации
@@ -611,7 +612,26 @@ func Forget(p Paths, name string) (string, error) {
 // Code, а прерванная таймаутом строки статуса ротация потеряла бы токен.
 // executable — свой бинарь, args — подкоманда ротации
 func MaybeRotate(p Paths, s *Store, usage map[string]Usage, now time.Time, executable string, args ...string) (string, error) {
-	why, err := pending(p, s, usage, now)
+	return maybeRotate(p, s, usage, now, executable, nil, args...)
+}
+
+// MaybeRotateForRequest starts the background command with the hook's process state.
+func MaybeRotateForRequest(p Paths, s *Store, usage map[string]Usage, now time.Time, executable string, request hookctx.Context, args ...string) (string, error) {
+	return maybeRotate(p, s, usage, now, executable, &request, args...)
+}
+
+func maybeRotate(p Paths, s *Store, usage map[string]Usage, now time.Time, executable string, request *hookctx.Context, args ...string) (string, error) {
+	var why string
+	var err error
+	if request != nil {
+		home := request.Getenv("HOME")
+		if home != "" {
+			home = request.Abs(home)
+		}
+		why, err = pendingWithUnit(p, s, usage, now, func() Unit { return s.PlanUnitForHome(now, home) })
+	} else {
+		why, err = pending(p, s, usage, now)
+	}
 	if err != nil || why == "" {
 		return "", err
 	}
@@ -627,7 +647,12 @@ func MaybeRotate(p Paths, s *Store, usage map[string]Usage, now time.Time, execu
 	if err := os.Chtimes(p.spawnMark(), now, now); err != nil {
 		return "", fmt.Errorf("cannot mark the rotation start: %w", err)
 	}
-	if err := desktop.StartDetached(exec.Command(executable, args...)); err != nil {
+	cmd := exec.Command(executable, args...)
+	if request != nil {
+		cmd.Env = append([]string{}, request.Env...)
+		cmd.Dir = request.Cwd
+	}
+	if err := desktop.StartDetached(cmd); err != nil {
 		return "", fmt.Errorf("rotation not started: %w", err)
 	}
 	return why, nil
@@ -635,6 +660,10 @@ func MaybeRotate(p Paths, s *Store, usage map[string]Usage, now time.Time, execu
 
 // pending — причина запустить ротацию или пусто
 func pending(p Paths, s *Store, usage map[string]Usage, now time.Time) (string, error) {
+	return pendingWithUnit(p, s, usage, now, nil)
+}
+
+func pendingWithUnit(p Paths, s *Store, usage map[string]Usage, now time.Time, unit func() Unit) (string, error) {
 	if now.Before(s.RetryAt) {
 		return "", nil
 	}
@@ -668,8 +697,12 @@ func pending(p Paths, s *Store, usage map[string]Usage, now time.Time) (string, 
 	if activeAlive && now.Sub(s.LastSwitch) < switchCooldown {
 		return "", nil
 	}
-	if target, reason := choose(s, usage, now); target != nil && target.UUID != s.Active {
-		return reason, nil
+	if unit == nil {
+		if target, reason := choose(s, usage, now); target != nil && target.UUID != s.Active {
+			return reason, nil
+		}
+	} else if result := chooseResultWithUnit(s, usage, now, unit); result.account != nil && result.account.UUID != s.Active {
+		return result.reason, nil
 	}
 	return "", nil
 }

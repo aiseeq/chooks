@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,9 +50,47 @@ type ToolConfig struct {
 // Если файл отсутствует, возвращается конфигурация по умолчанию без записи на диск:
 // хук вызывается часто и параллельно, поэтому побочные эффекты здесь недопустимы
 func LoadConfig(configPath string) (*Config, error) {
+	return loadConfig(configPath, DefaultConfigPath, expandConfigPaths)
+}
+
+// LoadConfigForRequest resolves config and log paths using the hook's environment.
+func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, error) {
+	defaultPath := func() (string, error) {
+		dir := request.Getenv("XDG_CONFIG_HOME")
+		if dir == "" {
+			home := request.Getenv("HOME")
+			if home == "" {
+				return "", fmt.Errorf("failed to resolve default config path: neither $XDG_CONFIG_HOME nor $HOME are defined")
+			}
+			dir = filepath.Join(home, ".config")
+		}
+		return request.Abs(filepath.Join(dir, "chooks", "config.yaml")), nil
+	}
+	expand := func(config *Config) error {
+		path := config.Logger.LogFile
+		if strings.HasPrefix(path, "~/") {
+			home := request.Getenv("HOME")
+			if home == "" {
+				return fmt.Errorf("cannot expand ~ in %q: $HOME is not defined", path)
+			}
+			path = filepath.Join(home, path[2:])
+		}
+		if path != "" {
+			path = request.Abs(path)
+		}
+		config.Logger.LogFile = path
+		return nil
+	}
+	if configPath != "" {
+		configPath = request.Abs(configPath)
+	}
+	return loadConfig(configPath, defaultPath, expand)
+}
+
+func loadConfig(configPath string, defaultPath func() (string, error), expand func(*Config) error) (*Config, error) {
 	if configPath == "" {
 		var err error
-		if configPath, err = DefaultConfigPath(); err != nil {
+		if configPath, err = defaultPath(); err != nil {
 			return nil, err
 		}
 	}
@@ -75,7 +114,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	applyLoggerDefaults(&config.Logger)
-	if err := expandConfigPaths(&config); err != nil {
+	if err := expand(&config); err != nil {
 		return nil, fmt.Errorf("failed to expand paths in %s: %w", configPath, err)
 	}
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // RmGuardTool отклоняет rm и rmdir, на которые Claude Code сам остановит
@@ -43,9 +44,18 @@ type RmGuardTool struct {
 
 // NewRmGuardTool создает проверку rm по переменной
 func NewRmGuardTool(config core.ToolConfig, logger core.Logger) (*RmGuardTool, error) {
+	return newRmGuardTool(config, logger, os.LookupEnv)
+}
+
+// NewRmGuardToolForRequest uses only the hook's environment.
+func NewRmGuardToolForRequest(config core.ToolConfig, logger core.Logger, request hookctx.Context) (*RmGuardTool, error) {
+	return newRmGuardTool(config, logger, request.LookupEnv)
+}
+
+func newRmGuardTool(config core.ToolConfig, logger core.Logger, lookupEnv func(string) (string, bool)) (*RmGuardTool, error) {
 	return &RmGuardTool{
 		BaseTool:  NewBaseTool("rm_guard", config.Enabled, core.ShellTools, logger),
-		lookupEnv: os.LookupEnv,
+		lookupEnv: lookupEnv,
 		addDirs:   core.SessionAddDirs,
 	}, nil
 }
@@ -93,7 +103,12 @@ var (
 )
 
 // ValidateTool проверяет цели rm и rmdir в команде Bash
-func (t *RmGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+func (t *RmGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+	if request, ok := hookctx.Request(ctx); ok {
+		local := *t
+		local.lookupEnv = request.LookupEnv
+		t = &local
+	}
 	cmd := input.Command
 	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(cmd, "rm") {
 		return &core.ValidationResult{IsValid: true}, nil
@@ -351,7 +366,8 @@ func (v *rmVars) trackDerived(b binding, cwd string) {
 		return
 	}
 	inner, ok := substBody(value)
-	if !ok || !printsDir(inner, cwd) {
+	home, _ := v.lookupEnv("HOME")
+	if !ok || !printsDir(inner, cwd, home) {
 		delete(v.derived, b.name)
 		return
 	}
@@ -376,7 +392,7 @@ func substBody(value string) (string, bool) {
 
 // printsDir подстановка печатает каталог, который может оказаться рабочей
 // папкой, корнем репозитория или системной папкой
-func printsDir(inner, cwd string) bool {
+func printsDir(inner, cwd, home string) bool {
 	m := dirPrinting.FindStringSubmatch(inner)
 	if m == nil {
 		return false
@@ -389,7 +405,7 @@ func printsDir(inner, cwd string) bool {
 		return true
 	}
 	if m[1] == "dirname" {
-		return criticalDir(parentDir(unquoteWord(arg[1])), cwd)
+		return criticalDir(parentDir(unquoteWord(arg[1])), cwd, home)
 	}
 	parts := strings.Split(inner[len(arg[0]):], "&&")
 	if strings.TrimSpace(parts[0]) != "" {
@@ -416,13 +432,12 @@ func parentDir(p string) string {
 }
 
 // criticalDir корень, каталог верхнего уровня, домашний, рабочий или его предок
-func criticalDir(p, cwd string) bool {
+func criticalDir(p, cwd, home string) bool {
 	if !path.IsAbs(p) {
 		p = path.Join(cwd, p)
 	}
 	p = path.Clean(p)
-	home, err := os.UserHomeDir()
-	if err == nil && p == path.Clean(home) {
+	if home != "" && p == path.Clean(home) {
 		return true
 	}
 	return p == "/" || path.Dir(p) == "/" || p == path.Clean(cwd) || strings.HasPrefix(path.Clean(cwd)+"/", p+"/")

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 const (
@@ -229,8 +231,18 @@ func open(ctx context.Context, rawURL string, noDirect bool, run Runner) (report
 	if !rep.OK {
 		return rep, "", nil
 	}
-	text, err := os.ReadFile(rep.Path)
+	path := rep.Path
+	if request, ok := hookctx.Request(ctx); ok {
+		path = request.Abs(path)
+	}
+	text, err := os.ReadFile(path)
 	if err != nil {
+		var pathErr *os.PathError
+		if path != rep.Path && errors.As(err, &pathErr) {
+			copy := *pathErr
+			copy.Path = rep.Path
+			err = &copy
+		}
 		return rep, "", fmt.Errorf("webtext text: %w", err)
 	}
 	return rep, string(text), nil
@@ -348,11 +360,22 @@ func LogURL(raw string) string {
 // ExecRunner запускает webtext из PATH, а без него — ~/bin/webtext: хук
 // наследует PATH сессии, а у фоновых claude -p он бывает урезан
 func ExecRunner(ctx context.Context, args []string) ([]byte, int, error) {
-	path, err := webtextPath()
+	request, hasRequest := hookctx.Request(ctx)
+	var path string
+	var err error
+	if hasRequest {
+		path, err = webtextPathForRequest(request)
+	} else {
+		path, err = webtextPath()
+	}
 	if err != nil {
 		return nil, 0, err
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
+	if hasRequest {
+		cmd.Env = append([]string{}, request.Env...)
+		cmd.Dir = request.Cwd
+	}
 	cmd.WaitDelay = time.Second
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -365,6 +388,19 @@ func ExecRunner(ctx context.Context, args []string) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("run webtext: %w", err)
 	}
 	return stdout.Bytes(), 0, nil
+}
+
+func webtextPathForRequest(request hookctx.Context) (string, error) {
+	if path, err := request.LookPath("webtext"); err == nil {
+		return path, nil
+	}
+	if home := request.Getenv("HOME"); home != "" {
+		path := filepath.Join(request.Abs(home), "bin", "webtext")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, nil
+		}
+	}
+	return "", ErrNoWebtext
 }
 
 func webtextPath() (string, error) {

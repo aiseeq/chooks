@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/akit/transcript"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/questioncheck"
 	"github.com/aiseeq/chooks/internal/tailscan"
 )
@@ -114,7 +115,24 @@ func (h Hook) Run(ctx context.Context, call Call) Outcome {
 	if call.AgentID != "" {
 		return Outcome{Skip: "суб-агент"}
 	}
-	kind, file, action, ok := classify(call.Tool, call.Input)
+	var kind Kind
+	var file, action string
+	var ok bool
+	if request, hasRequest := hookctx.Request(ctx); hasRequest {
+		home := request.Getenv("HOME")
+		if home != "" {
+			home = request.Abs(home)
+		}
+		kind, file, action, ok = classifyWithBash(call.Tool, call.Input, func(command string) string {
+			return bashRuleFileForHome(command, home, func(err error) {
+				if h.Warn != nil {
+					h.Warn("не удалось разобрать команду Bash для поиска правки инструкции", "error", err)
+				}
+			})
+		})
+	} else {
+		kind, file, action, ok = classify(call.Tool, call.Input)
+	}
 	if !ok {
 		return Outcome{Skip: "действие не проверяется"}
 	}

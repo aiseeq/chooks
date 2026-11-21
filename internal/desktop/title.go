@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -51,6 +52,32 @@ func SetTerminalTitle(title string) error {
 	return nil
 }
 
+// SetTerminalTitleForRequest uses the hook's terminal and process tree.
+func SetTerminalTitleForRequest(title string, request hookctx.Context) error {
+	title = sanitizeTitle(title)
+	if title == "" {
+		return nil
+	}
+	service := request.Getenv("KONSOLE_DBUS_SERVICE")
+	session := request.Getenv("KONSOLE_DBUS_SESSION")
+	if service != "" && session != "" {
+		names, err := processNames(request.PID)
+		if err != nil {
+			return fmt.Errorf("konsole tab owner unknown: %w", err)
+		}
+		if ownsKonsoleTab(names) {
+			conn, err := requestSessionBus(request)
+			if err != nil {
+				return fmt.Errorf("session bus unavailable: %w", err)
+			}
+			defer conn.Close()
+			return setKonsoleTitleOn(conn, service, session, title)
+		}
+	}
+	fmt.Fprintf(request.Stderr, "\033]0;%s\007", title)
+	return nil
+}
+
 // konsoleSession сообщает адрес D-Bus сессии Konsole, из которой запущен
 // процесс, если это Konsole
 func konsoleSession() (service, session string, ok bool) {
@@ -66,6 +93,10 @@ func setKonsoleTitle(service, session, title string) error {
 		return fmt.Errorf("session bus unavailable: %w", err)
 	}
 
+	return setKonsoleTitleOn(conn, service, session, title)
+}
+
+func setKonsoleTitleOn(conn *dbus.Conn, service, session, title string) error {
 	object := conn.Object(service, dbus.ObjectPath(session))
 
 	// Шаблон переживёт перерисовку заголовка, но применяется не сразу:

@@ -846,3 +846,21 @@ func TestKillGuardGroupHint(t *testing.T) {
 		t.Errorf("init: подсказка группы лишняя: %q", plain)
 	}
 }
+
+func TestKillGuardRequestPID(t *testing.T) {
+	tree := newKillGuard(t)
+	for _, tc := range []struct {
+		pid   int
+		valid bool
+	}{{2200, false}, {600, true}} {
+		guard, err := NewKillGuardToolForPID(core.ToolConfig{Enabled: true}, testLogger(t), tc.pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		guard.procRoot = tree.procRoot
+		result, err := guard.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "kill 2100"})
+		if err != nil || result.IsValid != tc.valid {
+			t.Errorf("pid %d: result=%+v err=%v", tc.pid, result, err)
+		}
+	}
+}

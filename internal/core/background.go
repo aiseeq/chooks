@@ -98,12 +98,17 @@ func artifactWatch(task BackgroundTask) bool {
 // сбое учёта возвращается только ошибка: брошенные задачи не отличить от
 // живых, и чем заменить отбор, решает вызывающий
 func RecordBackground(sessionID string, tasks []BackgroundTask, crons []SessionCron, now time.Time) ([]BackgroundTask, error) {
+	return RecordBackgroundIn(RuntimeDir(), sessionID, tasks, crons, now)
+}
+
+// RecordBackgroundIn records tasks in the request's runtime directory.
+func RecordBackgroundIn(runtimeDir, sessionID string, tasks []BackgroundTask, crons []SessionCron, now time.Time) ([]BackgroundTask, error) {
 	tasks = slices.DeleteFunc(slices.Clone(tasks), artifactWatch)
 	if sessionID == "" {
 		return tasks, nil
 	}
 
-	statePath, err := sessionStatePath(sessionID)
+	statePath, err := sessionStatePathIn(filepath.Join(runtimeDir, "sessions"), sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +154,12 @@ func RecordBackground(sessionID string, tasks []BackgroundTask, crons []SessionC
 // LoadBackground читает фоновую работу сессии на конец последнего хода.
 // Нет записи — работы нет
 func LoadBackground(sessionID string) (Background, error) {
-	statePath, err := sessionStatePath(sessionID)
+	return LoadBackgroundIn(RuntimeDir(), sessionID)
+}
+
+// LoadBackgroundIn reads background tasks from a request's runtime directory.
+func LoadBackgroundIn(runtimeDir, sessionID string) (Background, error) {
+	statePath, err := sessionStatePathIn(filepath.Join(runtimeDir, "sessions"), sessionID)
 	if err != nil {
 		return Background{}, err
 	}

@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/questioncheck"
 	"github.com/aiseeq/chooks/internal/understandcheck"
 )
@@ -52,12 +54,15 @@ func runUnderstandCheck(ctx context.Context, data []byte, config *core.Config, l
 		logger.Warn("understand check input unreadable, call let through", "error", err)
 		return
 	}
-	hook, err := newUnderstandHook(logger)
+	if request, ok := hookctx.Request(ctx); ok {
+		resolveHookInput(input, request)
+	}
+	hook, err := newUnderstandHook(ctx, logger)
 	if err != nil {
 		logger.Warn("understand check unavailable", "error", err)
 		return
 	}
-	outcome := hook.Run(ctx, understandCall(input, logger))
+	outcome := hook.Run(ctx, understandCall(ctx, input, logger))
 	writeUnderstandOutcome(outcome, input, logger, out)
 }
 
@@ -83,7 +88,7 @@ func writeUnderstandOutcome(outcome understandcheck.Outcome, input *core.ToolInp
 
 // understandCall — вызов из входа PreToolUse; имя сессии — по CLAUDE_PID,
 // только для журнала
-func understandCall(input *core.ToolInput, logger core.Logger) understandcheck.Call {
+func understandCall(ctx context.Context, input *core.ToolInput, logger core.Logger) understandcheck.Call {
 	call := understandcheck.Call{
 		SessionID:      input.SessionID,
 		TranscriptPath: input.TranscriptPath,
@@ -91,8 +96,25 @@ func understandCall(input *core.ToolInput, logger core.Logger) understandcheck.C
 		Tool:           input.ToolName,
 		Input:          input.ToolInput,
 	}
-	if pid := os.Getenv("CLAUDE_PID"); pid != "" {
-		home, err := os.UserHomeDir()
+	request, hasRequest := hookctx.Request(ctx)
+	pid := ""
+	if hasRequest {
+		pid = request.Getenv("CLAUDE_PID")
+	} else {
+		pid = os.Getenv("CLAUDE_PID")
+	}
+	if pid != "" {
+		var home string
+		var err error
+		if hasRequest {
+			home = request.Getenv("HOME")
+			if home == "" {
+				return call
+			}
+			home = request.Abs(home)
+		} else {
+			home, err = os.UserHomeDir()
+		}
 		if err == nil {
 			call.Name, err = questioncheck.SessionName(filepath.Join(home, ".claude"), pid)
 		}
@@ -104,12 +126,29 @@ func understandCall(input *core.ToolInput, logger core.Logger) understandcheck.C
 }
 
 // newUnderstandHook собирает проверку с путями по умолчанию
-func newUnderstandHook(logger core.Logger) (understandcheck.Hook, error) {
-	journal, denied, err := understandcheck.DefaultPaths()
-	if err != nil {
-		return understandcheck.Hook{}, err
+func newUnderstandHook(ctx context.Context, logger core.Logger) (understandcheck.Hook, error) {
+	request, ok := hookctx.Request(ctx)
+	var journal, denied string
+	var judge questioncheck.CLIJudge
+	var err error
+	if ok {
+		base := request.Getenv("XDG_STATE_HOME")
+		if base == "" {
+			home := request.Getenv("HOME")
+			if home == "" {
+				return understandcheck.Hook{}, fmt.Errorf("cannot resolve home dir: $HOME is not defined")
+			}
+			base = filepath.Join(home, ".local", "state")
+		}
+		dir := filepath.Join(request.Abs(base), "chooks")
+		journal, denied = filepath.Join(dir, "understand-check.jsonl"), filepath.Join(dir, "understand-check")
+		judge, err = newJudgeForRequest(understandModel, understandEffort, request)
+	} else {
+		journal, denied, err = understandcheck.DefaultPaths()
+		if err == nil {
+			judge, err = newJudge(understandModel, understandEffort)
+		}
 	}
-	judge, err := newJudge(understandModel, understandEffort)
 	if err != nil {
 		return understandcheck.Hook{}, err
 	}

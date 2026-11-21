@@ -77,10 +77,24 @@ func RatesFile() (string, error) {
 // подтверждена, перевода нет. Колонки нет — тариф не сверяется (план в
 // курсах назван иначе)
 func (s *Store) PlanUnit(now time.Time) Unit {
+	return s.planUnit(now, RatesFile)
+}
+
+// PlanUnitForHome reads rates from the hook request's home directory.
+func (s *Store) PlanUnitForHome(now time.Time, home string) Unit {
+	return s.planUnit(now, func() (string, error) {
+		if home == "" {
+			return "", fmt.Errorf("home dir: $HOME is not defined")
+		}
+		return filepath.Join(home, ".claude", "improve", "rates.tsv"), nil
+	})
+}
+
+func (s *Store) planUnit(now time.Time, ratesFile func() (string, error)) Unit {
 	if s != nil && s.MixedTiers() {
 		return Unit{Why: "тарифы учёток разные, а цена плана в курсах одна"}
 	}
-	path, err := RatesFile()
+	path, err := ratesFile()
 	if err != nil {
 		return Unit{Why: err.Error()}
 	}

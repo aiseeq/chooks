@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // WatchCommand имя скрытой подкоманды, которая доставляет оповещение в фоне
@@ -27,6 +28,14 @@ type Notifier struct {
 	sound           bool
 	desktop         bool
 	activateOnClick bool
+	request         *hookctx.Context
+}
+
+// NewForRequest binds notifications to the originating hook process.
+func NewForRequest(config core.ToolConfig, logger core.Logger, request hookctx.Context) *Notifier {
+	notifier := New(config, logger)
+	notifier.request = &request
+	return notifier
 }
 
 // New создает notifier по конфигурации
@@ -57,8 +66,14 @@ func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision De
 	// Значок — по новому состоянию, как в строке статуса: минутное
 	// напоминание без конца хода — это «готово», а не вопрос.
 	// Без заголовка уведомление всё равно уходит
-	if err := desktop.SetTerminalTitle(decision.State.Marker() + " " + projectName); err != nil {
-		n.logger.Warn("terminal title not set", "error", err)
+	var titleErr error
+	if n.request != nil {
+		titleErr = desktop.SetTerminalTitleForRequest(decision.State.Marker()+" "+projectName, *n.request)
+	} else {
+		titleErr = desktop.SetTerminalTitle(decision.State.Marker() + " " + projectName)
+	}
+	if titleErr != nil {
+		n.logger.Warn("terminal title not set", "error", titleErr)
 	}
 
 	if !decision.Alert || !(alert.Sound || alert.Desktop) {
@@ -69,7 +84,12 @@ func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision De
 	if err != nil {
 		return fmt.Errorf("failed to locate own executable: %w", err)
 	}
-	if err := desktop.DeliverInBackground(executable, WatchCommand, alert); err != nil {
+	if n.request != nil {
+		err = desktop.DeliverInBackgroundForRequest(executable, WatchCommand, alert, *n.request)
+	} else {
+		err = desktop.DeliverInBackground(executable, WatchCommand, alert)
+	}
+	if err != nil {
 		return err
 	}
 
@@ -96,7 +116,13 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 
 	if n.activateOnClick {
 		// Окно принадлежит одному из предков: сам хук окна не имеет
-		ancestors, err := desktop.ProcessAncestors(os.Getpid())
+		pid := 0
+		if n.request != nil {
+			pid = n.request.PID
+		} else {
+			pid = os.Getpid()
+		}
+		ancestors, err := desktop.ProcessAncestors(pid)
 		if err != nil {
 			// Best effort: собранная часть цепочки — настоящие PID, окно может
 			// быть у них; без окна клик просто ничего не активирует
@@ -139,17 +165,31 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 // кодирует каталог транскрипта. Текущий каталог (cwd) агент меняет по ходу
 // работы, поэтому он только запасной вариант
 func (n *Notifier) ProjectName(input *core.ToolInput) string {
+	projectName := core.ProjectNameForDir
+	if n.request != nil {
+		home := n.request.Getenv("HOME")
+		if home != "" {
+			home = n.request.Abs(home)
+		}
+		projectName = func(dir string) string { return core.ProjectNameForDirWithHome(dir, home) }
+	}
 	if transcriptPath := input.TranscriptPath; transcriptPath != "" {
 		encoded := filepath.Base(filepath.Dir(transcriptPath))
 		if dir := decodeProjectDir(encoded, n.logger); dir != "" {
-			return core.ProjectNameForDir(dir)
+			return projectName(dir)
 		}
 	}
 
 	if input.CWD != "" {
-		return core.ProjectNameForDir(input.CWD)
+		return projectName(input.CWD)
 	}
 
+	if n.request != nil {
+		if n.request.Cwd != "" {
+			return projectName(n.request.Cwd)
+		}
+		return "unknown"
+	}
 	if wd, err := os.Getwd(); err == nil {
 		return core.ProjectNameForDir(wd)
 	}

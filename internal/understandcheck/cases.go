@@ -100,11 +100,20 @@ var bashRedirect = regexp.MustCompile(`>{1,2}\s*["']?(` + bashPath.String() + `)
 // bashRuleFile — файл инструкций, который меняет команда Bash; пусто — команда
 // такой файл не меняет
 func bashRuleFile(command string) string {
-	file, ok, err := parsedBashRuleFile(command)
-	if err != nil {
+	home, _ := os.UserHomeDir()
+	return bashRuleFileForHome(command, home, func(err error) {
 		logger, logErr := core.NewLogger(core.DefaultLoggerConfig())
 		if logErr == nil {
 			logger.Warn("не удалось разобрать команду Bash для поиска правки инструкции", "error", err)
+		}
+	})
+}
+
+func bashRuleFileForHome(command, home string, warn func(error)) string {
+	file, ok, err := parsedBashRuleFile(command, home)
+	if err != nil {
+		if warn != nil {
+			warn(err)
 		}
 		return textBashRuleFile(command)
 	}
@@ -121,7 +130,7 @@ func bashRuleFile(command string) string {
 
 // parsedBashRuleFile ищет видимую запись в командах оболочки. false означает,
 // что разбор не дал надёжного ответа и нужен прежний консервативный поиск.
-func parsedBashRuleFile(command string) (string, bool, error) {
+func parsedBashRuleFile(command, home string) (string, bool, error) {
 	calls, err := shellcmd.Calls(command)
 	if err != nil {
 		return "", false, fmt.Errorf("разбор команды оболочки: %w", err)
@@ -132,7 +141,7 @@ func parsedBashRuleFile(command string) (string, bool, error) {
 	cwd := ""
 	for i := range calls {
 		call := &calls[i]
-		if file := massEdit(calls, i, cwd); file != "" {
+		if file := massEdit(calls, i, cwd, home); file != "" {
 			return file, true, nil
 		}
 		if call.Name == "cd" {
@@ -140,7 +149,7 @@ func parsedBashRuleFile(command string) (string, bool, error) {
 			for _, arg := range call.Args {
 				if !strings.HasPrefix(arg, "-") {
 					// второй cd считается от первого: cd ~/.claude && cd rules
-					next = shellAbs(arg, cwd)
+					next = shellAbs(arg, cwd, home)
 					break
 				}
 			}
@@ -148,11 +157,11 @@ func parsedBashRuleFile(command string) (string, bool, error) {
 			continue
 		}
 		if call.Name == "git" {
-			if file := gitRuleWrite(*call, cwd); file != "" {
+			if file := gitRuleWrite(*call, cwd, home); file != "" {
 				return file, true, nil
 			}
 		}
-		if file := shellWrite(*call, cwd); file != "" {
+		if file := shellWrite(*call, cwd, home); file != "" {
 			return file, true, nil
 		}
 	}
@@ -190,7 +199,7 @@ func knownReadOnlyShellCommand(calls []shellcmd.Call) bool {
 // fd с -exec редактора (find ~/.claude/rules -exec sed -i … {} \;) и
 // редактор под xargs (grep -rl x ~/.claude/rules | xargs sed -i …). Цель —
 // каталог поиска или файл инструкций в словах поиска (find . -name CLAUDE.md)
-func massEdit(calls []shellcmd.Call, index int, cwd string) string {
+func massEdit(calls []shellcmd.Call, index int, cwd, home string) string {
 	c := calls[index]
 	var search []string
 	switch {
@@ -221,8 +230,8 @@ func massEdit(calls []shellcmd.Call, index int, cwd string) string {
 		if strings.HasPrefix(w, "-") {
 			continue
 		}
-		if isRulePath(w, cwd) || isRulePath(filepath.Join(w, "x"), cwd) {
-			return shellAbs(w, cwd)
+		if isRulePath(w, cwd, home) || isRulePath(filepath.Join(w, "x"), cwd, home) {
+			return shellAbs(w, cwd, home)
 		}
 	}
 	return ""
@@ -277,10 +286,10 @@ func textBashRuleFile(command string) string {
 	return ""
 }
 
-func shellAbs(file, cwd string) string {
+func shellAbs(file, cwd, home string) string {
 	file = strings.Trim(strings.TrimSpace(file), "\"'")
 	if strings.HasPrefix(file, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home != "" {
 			return filepath.Clean(filepath.Join(home, file[2:]))
 		}
 		return file
@@ -294,8 +303,8 @@ func shellAbs(file, cwd string) string {
 	return file
 }
 
-func isRulePath(file, cwd string) bool {
-	path := shellAbs(file, cwd)
+func isRulePath(file, cwd, home string) bool {
+	path := shellAbs(file, cwd, home)
 	if !filepath.IsAbs(path) {
 		// .claude/rules/x.md от неизвестного каталога: шаблоны путей
 		// инструкций ждут / перед .claude
@@ -304,8 +313,8 @@ func isRulePath(file, cwd string) bool {
 	return IsInstructionFile(path)
 }
 
-func shellWrite(c shellcmd.Call, cwd string) string {
-	if file := redirectRuleWrite(c.Redirs, cwd); file != "" {
+func shellWrite(c shellcmd.Call, cwd, home string) string {
+	if file := redirectRuleWrite(c.Redirs, cwd, home); file != "" {
 		return file
 	}
 	args := make([]string, 0, len(c.Args))
@@ -314,16 +323,16 @@ func shellWrite(c shellcmd.Call, cwd string) string {
 			args = append(args, arg)
 		}
 	}
-	candidates := shellWriteCandidates(c, args, cwd)
+	candidates := shellWriteCandidates(c, args, cwd, home)
 	for _, file := range candidates {
-		if isRulePath(file, cwd) {
-			return shellAbs(file, cwd)
+		if isRulePath(file, cwd, home) {
+			return shellAbs(file, cwd, home)
 		}
 	}
 	return ""
 }
 
-func redirectRuleWrite(redirs []shellcmd.Redir, cwd string) string {
+func redirectRuleWrite(redirs []shellcmd.Redir, cwd, home string) string {
 	for _, redir := range redirs {
 		switch redir.Op {
 		case ">", ">>", ">|", "&>", "&>>", ">&":
@@ -331,19 +340,19 @@ func redirectRuleWrite(redirs []shellcmd.Redir, cwd string) string {
 			if strings.Trim(redir.Target, "0123456789-") == "" {
 				continue
 			}
-			if isRulePath(redir.Target, cwd) {
-				return shellAbs(redir.Target, cwd)
+			if isRulePath(redir.Target, cwd, home) {
+				return shellAbs(redir.Target, cwd, home)
 			}
 		}
 	}
 	return ""
 }
 
-func shellWriteCandidates(c shellcmd.Call, args []string, cwd string) []string {
+func shellWriteCandidates(c shellcmd.Call, args []string, cwd, home string) []string {
 	var candidates []string
 	switch c.Name {
 	case "cp", "mv", "install", "ln":
-		candidates = copyTargets(c.Args, args, cwd)
+		candidates = copyTargets(c.Args, args, cwd, home)
 	case "tee", "sponge":
 		candidates = args
 	case "sub":
@@ -430,12 +439,12 @@ var scriptJoinedPath = regexp.MustCompile(`['"]\.claude['"]\s*[/,]\s*['"](skills
 var scriptPathAlias = regexp.MustCompile(`(?m)^\s*([A-Za-z_]\w*)\s*=\s*['"]([^'"]+)['"]`)
 var scriptVariableWrite = regexp.MustCompile(`(?:open\s*\(\s*([A-Za-z_]\w*)\s*,\s*['"][wax+])|Path\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\.write_text\s*\(`)
 
-func gitRuleWrite(c shellcmd.Call, cwd string) string {
+func gitRuleWrite(c shellcmd.Call, cwd, home string) string {
 	args := c.Args
 	gitDir := cwd
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "-C" {
-			gitDir = shellAbs(args[i+1], cwd)
+			gitDir = shellAbs(args[i+1], cwd, home)
 			i++
 		}
 	}
@@ -451,14 +460,14 @@ func gitRuleWrite(c shellcmd.Call, cwd string) string {
 		}
 	}
 	if sep >= 0 && verb != "" {
-		return rulePathInArgs(args[sep+1:], gitDir)
+		return rulePathInArgs(args[sep+1:], gitDir, home)
 	}
 	if sep < 0 {
 		for i, arg := range args {
 			// git checkout HEAD~1 CLAUDE.md: без -- ревизия и пути вперемешку,
 			// ревизия на файл инструкций не похожа
 			if arg == "restore" || arg == "checkout" {
-				return rulePathInArgs(args[i+1:], gitDir)
+				return rulePathInArgs(args[i+1:], gitDir, home)
 			}
 		}
 	}
@@ -469,7 +478,7 @@ func gitRuleWrite(c shellcmd.Call, cwd string) string {
 // а если это каталог инструкций (cp x.md ~/.claude/rules/, -t DIR,
 // --target-directory=DIR) — файлы в нём. CLAUDE.md, скопированный в /tmp,
 // правкой не считается: каталог-цель сам не из инструкций
-func copyTargets(all, operands []string, cwd string) []string {
+func copyTargets(all, operands []string, cwd, home string) []string {
 	dir := ""
 	for i, a := range all {
 		switch {
@@ -488,7 +497,7 @@ func copyTargets(all, operands []string, cwd string) []string {
 		sources = operands[:len(operands)-1]
 	}
 	targets := []string{dir}
-	if !isRulePath(filepath.Join(dir, "x"), cwd) {
+	if !isRulePath(filepath.Join(dir, "x"), cwd, home) {
 		return targets
 	}
 	for _, src := range sources {
@@ -500,10 +509,10 @@ func copyTargets(all, operands []string, cwd string) []string {
 	return targets
 }
 
-func rulePathInArgs(args []string, cwd string) string {
+func rulePathInArgs(args []string, cwd, home string) string {
 	for _, path := range args {
-		if isRulePath(path, cwd) {
-			return shellAbs(path, cwd)
+		if isRulePath(path, cwd, home) {
+			return shellAbs(path, cwd, home)
 		}
 	}
 	return ""
@@ -662,6 +671,10 @@ func (c *Collector) Turn() Turn {
 // classify решает, уносит ли вызов инструмента слово пользователя дальше, и
 // собирает текст действия для судьи
 func classify(tool string, raw json.RawMessage) (Kind, string, string, bool) {
+	return classifyWithBash(tool, raw, bashRuleFile)
+}
+
+func classifyWithBash(tool string, raw json.RawMessage, bashFile func(string) string) (Kind, string, string, bool) {
 	var in map[string]any
 	if json.Unmarshal(raw, &in) != nil {
 		return "", "", "", false
@@ -692,7 +705,7 @@ func classify(tool string, raw json.RawMessage) (Kind, string, string, bool) {
 		return KindRule, file, "Файл: " + file + " (записан целиком)\n" + str("content"), true
 	case "Bash":
 		command := str("command")
-		file := bashRuleFile(command)
+		file := bashFile(command)
 		if file == "" {
 			return "", "", "", false
 		}

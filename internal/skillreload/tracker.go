@@ -43,9 +43,10 @@ const compactWindow = time.Minute
 
 // tracker ведёт запись сессии по событиям транскрипта
 type tracker struct {
-	state *sessionState
-	store textStore
-	view  viewer
+	state       *sessionState
+	store       textStore
+	view        viewer
+	resolvePath func(string) (string, error)
 }
 
 // apply применяет событие транскрипта к записи
@@ -368,7 +369,11 @@ func (t tracker) check(w *watched) (candidate, bool, error) {
 		w.Deferred = ""
 		return candidate{}, false, nil
 	}
-	if t.announcedBySchema1(w, view) {
+	announced, err := t.announcedBySchema1(w, view)
+	if err != nil {
+		return candidate{}, false, err
+	}
+	if announced {
 		base, err := t.store.put(view.Text)
 		w.Base = base
 		return candidate{}, false, err
@@ -419,14 +424,22 @@ func (t tracker) check(w *watched) (candidate, bool, error) {
 
 // announcedBySchema1 — эту правку уже объявила хук схемы 1 («вызови
 // заново»): второй раз её не показывать
-func (t tracker) announcedBySchema1(w *watched, view fileView) bool {
+func (t tracker) announcedBySchema1(w *watched, view fileView) (bool, error) {
 	notified, ok := t.state.Announced[w.Path]
 	if !ok {
-		return false
+		return false, nil
 	}
 	delete(t.state.Announced, w.Path)
-	raw, err := readSkillFile(filepath.Dir(w.Path))
-	return err == nil && contentHash(raw.Raw) == notified && renderBody(raw.Raw, w.Dir) == view.Text
+	path := w.Path
+	if t.resolvePath != nil {
+		var err error
+		path, err = t.resolvePath(path)
+		if err != nil {
+			return false, err
+		}
+	}
+	raw, err := readSkillFile(filepath.Dir(path))
+	return err == nil && contentHash(raw.Raw) == notified && renderBody(raw.Raw, w.Dir) == view.Text, nil
 }
 
 // label — имя файла в заголовке diff

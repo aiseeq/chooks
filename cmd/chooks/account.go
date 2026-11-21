@@ -50,7 +50,7 @@ func newAccountSaveCmd() *cobra.Command {
 		Short: "Сохранить текущий вход Claude Code в хранилище",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := newRotator()
+			r, err := newRotator(commandConfigPath(cmd))
 			if err != nil {
 				return err
 			}
@@ -77,7 +77,7 @@ func newAccountSwitchCmd() *cobra.Command {
 		Short: "Переключить Claude Code на учётку и выключить автопереключение",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := newRotator()
+			r, err := newRotator(commandConfigPath(cmd))
 			if err != nil {
 				return err
 			}
@@ -145,7 +145,7 @@ func newAccountRotateCmd() *cobra.Command {
 		Short: "Сверить хранилище и переключить по правилу (запускает строка статуса)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := newRotator()
+			r, err := newRotator(commandConfigPath(cmd))
 			if err != nil {
 				return err
 			}
@@ -158,7 +158,7 @@ func newAccountRotateCmd() *cobra.Command {
 }
 
 // newRotator собирает ротацию с логгером из конфигурации хуков
-func newRotator() (*accounts.Rotator, error) {
+func newRotator(configPath string) (*accounts.Rotator, error) {
 	config, err := core.LoadConfig(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)

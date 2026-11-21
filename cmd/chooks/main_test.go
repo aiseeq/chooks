@@ -128,13 +128,15 @@ func TestRunSessionEvent_BrokenTaskBookkeepingKeepsPause(t *testing.T) {
 // runStyle запускает команду style и возвращает её вывод и exit-код
 func runStyle(t *testing.T, stdin string, args ...string) (string, int) {
 	t.Helper()
+	configPath := os.Getenv("CHOOKS_TEST_CONFIG")
 	if configPath == "" {
 		// Конфиг пользователя (его префиксы ключей) не влияет на тесты:
 		// файла нет — значения по умолчанию
-		useConfig(t, filepath.Join(t.TempDir(), "none.yaml"))
+		configPath = filepath.Join(t.TempDir(), "none.yaml")
 	}
 	exitCode := exitAllowed
 	cmd := newStyleCmd(&exitCode)
+	cmd.PersistentFlags().String("config", configPath, "test config")
 	var out strings.Builder
 	cmd.SetIn(strings.NewReader(stdin))
 	cmd.SetOut(&out)
@@ -277,9 +279,7 @@ func TestStyleCmdDocKeys(t *testing.T) {
 // useConfig — путь конфига, как у --config, до конца теста
 func useConfig(t *testing.T, path string) {
 	t.Helper()
-	saved := configPath
-	configPath = path
-	t.Cleanup(func() { configPath = saved })
+	t.Setenv("CHOOKS_TEST_CONFIG", path)
 }
 
 // styleConfig кладёт конфиг chooks с телом body и делает его конфигом теста
@@ -363,6 +363,7 @@ func TestStyleCmdBadConfig(t *testing.T) {
 	styleConfig(t, "style:\n  key_prefix: [PROJ]\n")
 	exitCode := exitAllowed
 	cmd := newStyleCmd(&exitCode)
+	cmd.PersistentFlags().String("config", os.Getenv("CHOOKS_TEST_CONFIG"), "test config")
 	cmd.SetIn(strings.NewReader("текст\n"))
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)

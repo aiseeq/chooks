@@ -2,6 +2,7 @@ package statusline
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/accounts"
 	"github.com/aiseeq/chooks/internal/atomicfile"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // WeeklyLimit — доля недельного лимита подписки, как её отдаёт Claude Code
@@ -156,6 +158,38 @@ func LimitsFile() (string, error) {
 		base = filepath.Join(home, ".local", "state")
 	}
 	return filepath.Join(base, "chooks", "limits.json"), nil
+}
+
+func limitsFileForContext(ctx context.Context) (string, error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return LimitsFile()
+	}
+	base := request.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home := request.Getenv("HOME")
+		if home == "" {
+			return "", fmt.Errorf("no home directory for the limits snapshot: $HOME is not defined")
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(request.Abs(base), "chooks", "limits.json"), nil
+}
+
+func recordLimitsForContext(ctx context.Context, smp sample, now time.Time) (mergeResult, error) {
+	path, err := limitsFileForContext(ctx)
+	if err != nil {
+		return mergeResult{verdict: weekChanged}, err
+	}
+	return mergeLimits(path, smp, now)
+}
+
+func diskLimitsForContext(ctx context.Context) (*limitsSnapshot, error) {
+	path, err := limitsFileForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return loadLimits(path)
 }
 
 // limitsHistory — журнал шагов рядом со снимком. Строка — изменение доли

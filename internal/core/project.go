@@ -13,13 +13,19 @@ import (
 // показывается и родительский каталог. Домашний каталог и корень своего имени
 // не имеют — для них возвращаются понятные обозначения, а не имя пользователя
 func ProjectNameForDir(dir string) string {
+	home, _ := os.UserHomeDir()
+	return ProjectNameForDirWithHome(dir, home)
+}
+
+// ProjectNameForDirWithHome resolves the label using the request's HOME.
+func ProjectNameForDirWithHome(dir, home string) string {
 	dir = filepath.Clean(dir)
 
 	if dir == string(filepath.Separator) {
 		return "/"
 	}
 
-	if home, err := os.UserHomeDir(); err == nil {
+	if home != "" {
 		home = filepath.Clean(home)
 		if dir == home {
 			return "~"

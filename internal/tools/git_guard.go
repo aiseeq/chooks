@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // gitGuardHint — что делать суб-агенту вместо запрещённой команды
@@ -44,8 +45,21 @@ func NewGitGuardTool(config core.ToolConfig, logger core.Logger) (*GitGuardTool,
 	return &GitGuardTool{BaseTool: NewBaseTool("git_guard", config.Enabled, core.ShellTools, logger), tempRoots: tempRoots()}, nil
 }
 
+// NewGitGuardToolForRequest uses the hook's temporary directories.
+func NewGitGuardToolForRequest(config core.ToolConfig, logger core.Logger, request hookctx.Context) (*GitGuardTool, error) {
+	tmp := request.Getenv("TMPDIR")
+	if tmp == "" {
+		tmp = "/tmp"
+	}
+	roots := []string{request.Abs(tmp), "/tmp"}
+	if dir := request.Getenv("CLAUDE_CODE_TMPDIR"); dir != "" {
+		roots = append(roots, request.Abs(dir))
+	}
+	return &GitGuardTool{BaseTool: NewBaseTool("git_guard", config.Enabled, core.ShellTools, logger), tempRoots: roots}, nil
+}
+
 // ValidateTool проверяет git-вызовы команды суб-агента
-func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+func (t *GitGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
 	if !t.IsEnabled() || input == nil || input.AgentID == "" || !strings.Contains(input.Command, "git") {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
@@ -57,21 +71,32 @@ func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*
 		}
 		return &core.ValidationResult{IsValid: true}, nil
 	}
-	home, err := os.UserHomeDir()
-	//nolint:fallback-return // home нужен только для ~: без него путь с ~ неизвестен, а неизвестный каталог — чужое дерево, то есть отказ (безопасная сторона)
-	if err != nil {
-		t.Logger().Warn("git_guard: домашний каталог неизвестен", "error", err)
+	var home string
+	var homeErr error
+	if request, ok := hookctx.Request(ctx); ok {
+		home = request.Getenv("HOME")
+		if home == "" {
+			homeErr = errors.New("$HOME is not defined")
+		} else {
+			home = request.Abs(home)
+		}
+	} else {
+		home, homeErr = os.UserHomeDir()
 	}
-	gits, ctx := gitCalls(input, calls, home)
+	//nolint:fallback-return // home нужен только для ~: без него путь с ~ неизвестен, а неизвестный каталог — чужое дерево, то есть отказ (безопасная сторона)
+	if homeErr != nil {
+		t.Logger().Warn("git_guard: домашний каталог неизвестен", "error", homeErr)
+	}
+	gitCallsByIndex, callContext := gitCalls(input, calls, home)
 	var reasons []string
 	for i := range calls {
 		c := &calls[i]
 		if c.Name != "git" {
 			continue
 		}
-		g := gits[i]
+		g := gitCallsByIndex[i]
 		why, shared := g.destructive()
-		if why == "" || t.ownTree(g, shared, ctx) {
+		if why == "" || t.ownTree(g, shared, callContext) {
 			continue
 		}
 		reasons = append(reasons, fmt.Sprintf("git %s — %s", g.sub, why))

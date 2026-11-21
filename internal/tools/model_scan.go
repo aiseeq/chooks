@@ -142,7 +142,7 @@ func recordRejectedModel(input *core.ToolInput, timestamp, path, project string,
 }
 
 func recordModelMentions(command, timestamp, path string, validator *ModelGuardTool, result *ModelScanResult) {
-	for _, m := range unguardedModelMentions(command, validator.approvedPath()) {
+	for _, m := range unguardedModelMentions(command, validator.approvedPath(context.Background())) {
 		result.Mentions++
 		if len(result.MentionExamples) < 5 {
 			result.MentionExamples = append(result.MentionExamples, modelScanExample{path, timestamp, firstCommand(command) + " [" + m + "]"})
@@ -151,12 +151,12 @@ func recordModelMentions(command, timestamp, path string, validator *ModelGuardT
 }
 
 func reportedModel(input *core.ToolInput, validator *ModelGuardTool) string {
-	candidates := modelCandidates(input, validator.Logger())
+	candidates := modelCandidates(context.Background(), input, validator.Logger())
 	for _, c := range candidates {
 		if c.dynamic {
 			return "<переменная>"
 		}
-		if !isApproved(c.value, mustReadModels(validator.approvedPath())) {
+		if !isApproved(c.value, mustReadModels(validator.approvedPath(context.Background()))) {
 			return normalizeModel(c.value)
 		}
 	}

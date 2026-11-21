@@ -174,6 +174,10 @@ type chooseResultValue struct {
 }
 
 func chooseResult(s *Store, usage map[string]Usage, now time.Time) chooseResultValue {
+	return chooseResultWithUnit(s, usage, now, func() Unit { return s.PlanUnit(now) })
+}
+
+func chooseResultWithUnit(s *Store, usage map[string]Usage, now time.Time, unitForRequest func() Unit) chooseResultValue {
 	best, all := pick(s, usage, now)
 	if best == nil {
 		if active := s.byUUID(s.Active); active != nil {
@@ -186,7 +190,7 @@ func chooseResult(s *Store, usage map[string]Usage, now time.Time) chooseResultV
 	}
 	// Доли в причине — в % недели подписки за $100, как в строке статуса и
 	// chooks limits (лид 12.11 17:39 по слову пользователя «вот прям везде»)
-	unit := s.PlanUnit(now)
+	unit := unitForRequest()
 	reason := "неделя не начата"
 	if best.weekKnown {
 		reason = fmt.Sprintf("сброс %s, неделя %s", ShortTime(best.resets), unit.Percent(best.week.Used))

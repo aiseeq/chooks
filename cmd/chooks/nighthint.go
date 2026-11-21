@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/nighthint"
 	"github.com/aiseeq/chooks/internal/skillreload"
 )
@@ -50,6 +51,16 @@ func nightHintDeps(config *core.Config, deadline time.Time) (nighthint.Deps, err
 	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: dir}, SkillCalled: autonomousSkillCalled(config, deadline)}, nil
 }
 
+func nightHintDepsForRequest(config *core.Config, deadline time.Time, request hookctx.Context) (nighthint.Deps, error) {
+	state, err := request.StateDir()
+	if err != nil {
+		return nighthint.Deps{}, err
+	}
+	skillDir := filepath.Join(state, "skill-reload")
+	skillCalled := autonomousSkillCalledIn(config, deadline, func() (string, error) { return skillDir, nil })
+	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: filepath.Join(state, "night-hint")}, SkillCalled: skillCalled}, nil
+}
+
 // autonomousSkillCalled — признак вызова скилла autonomous-work в сессии по
 // записи хука skill-reload. Записи нет — скилл не вызван: вызов Skill всегда
 // даёт PostToolBatch, а он запись создаёт. Первый ход новой сессии записи ещё
@@ -64,6 +75,10 @@ func nightHintDeps(config *core.Config, deadline time.Time) (nighthint.Deps, err
 // 3 с из settings.json (тикет night-hint-night-work-budget). Срок наступил —
 // запись не читается, подсказка идёт по правилу «раз за ночь», причина — в лог
 func autonomousSkillCalled(config *core.Config, deadline time.Time) func(sessionID string) (bool, error) {
+	return autonomousSkillCalledIn(config, deadline, skillreload.DefaultStateDir)
+}
+
+func autonomousSkillCalledIn(config *core.Config, deadline time.Time, stateDir func() (string, error)) func(sessionID string) (bool, error) {
 	return func(sessionID string) (bool, error) {
 		if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
 			return false, fmt.Errorf("%s disabled in config: %w", skillReloadTool, nighthint.ErrSkillUnknown)
@@ -72,7 +87,7 @@ func autonomousSkillCalled(config *core.Config, deadline time.Time) func(session
 		if !now.Before(deadline) {
 			return false, fmt.Errorf("skill-reload record not read, hook deadline %s passed: %w", deadline.Format("15:04:05.000"), skillreload.ErrNoTime)
 		}
-		dir, err := skillreload.DefaultStateDir()
+		dir, err := stateDir()
 		if err != nil {
 			return false, err
 		}
@@ -119,7 +134,7 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 			if probe {
 				return probeNightHint(cmd.Context(), cmd.OutOrStdout())
 			}
-			code, err := runHook(cmd.Context(), hookNightHint)
+			code, err := runHook(hookCommandContext(cmd), hookNightHint)
 			*exitCode = code
 			return err
 		},
@@ -224,11 +239,11 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 }
 
 // defaultNightHint — обработчик для runHook: живые зависимости
-func defaultNightHint(ctx context.Context, data []byte, config *core.Config, logger core.Logger, deadline time.Time) {
-	deps, err := nightHintDeps(config, deadline)
+func defaultNightHint(ctx context.Context, data []byte, config *core.Config, logger core.Logger, deadline time.Time, request hookctx.Context) {
+	deps, err := nightHintDepsForRequest(config, deadline, request)
 	if err != nil {
 		logger.Warn("night hint state dir unavailable", "error", err)
 		return
 	}
-	runNightHint(ctx, data, config, logger, os.Stdout, deps)
+	runNightHint(ctx, data, config, logger, request.Stdout, deps)
 }

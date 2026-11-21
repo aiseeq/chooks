@@ -70,15 +70,20 @@ const stateTTL = 24 * time.Hour
 // давно завершившихся сессий. Пустой идентификатор — событие без сессии,
 // запоминать нечего
 func SaveSessionState(sessionID string, state SessionState) error {
+	return SaveSessionStateIn(RuntimeDir(), sessionID, state)
+}
+
+// SaveSessionStateIn writes to the runtime directory of one hook request.
+func SaveSessionStateIn(runtimeDir, sessionID string, state SessionState) error {
 	if sessionID == "" {
 		return nil
 	}
 
-	path, err := sessionStatePath(sessionID)
+	path, err := sessionStatePathIn(filepath.Join(runtimeDir, "sessions"), sessionID)
 	if err != nil {
 		return err
 	}
-	err = withStateLock(func() error {
+	err = withStateLock(filepath.Dir(path), func() error {
 		if err := os.WriteFile(path, []byte(state), 0o644); err != nil {
 			return fmt.Errorf("cannot write session state: %w", err)
 		}
@@ -95,15 +100,20 @@ func SaveSessionState(sessionID string, state SessionState) error {
 // процессов: без сверки под блокировкой «посмотрел» затёр бы «работает»
 // от только что отправленного сообщения
 func SwapSessionState(sessionID string, from, to SessionState) (bool, error) {
+	return SwapSessionStateIn(RuntimeDir(), sessionID, from, to)
+}
+
+// SwapSessionStateIn uses the runtime directory of one hook request.
+func SwapSessionStateIn(runtimeDir, sessionID string, from, to SessionState) (bool, error) {
 	if sessionID == "" {
 		return false, nil
 	}
-	path, err := sessionStatePath(sessionID)
+	path, err := sessionStatePathIn(filepath.Join(runtimeDir, "sessions"), sessionID)
 	if err != nil {
 		return false, err
 	}
 	swapped := false
-	err = withStateLock(func() error {
+	err = withStateLock(filepath.Dir(path), func() error {
 		data, err := os.ReadFile(path)
 		if os.IsNotExist(err) {
 			return nil
@@ -128,8 +138,7 @@ func SwapSessionState(sessionID string, from, to SessionState) (bool, error) {
 const stateLockWait = time.Second
 
 // withStateLock выполняет fn под блокировкой каталога состояний
-func withStateLock(fn func() error) error {
-	dir := stateDir()
+func withStateLock(dir string, fn func() error) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("cannot create session state dir: %w", err)
 	}
@@ -148,7 +157,12 @@ func withStateLock(fn func() error) error {
 // возвращается StateWorking: раз хук ещё не отработал, работа идёт.
 // Нечитаемая запись — ошибка без состояния: чем её заменить, решает вызывающий
 func LoadSessionState(sessionID string) (SessionState, error) {
-	state, recorded, err := LookupSessionState(sessionID)
+	return LoadSessionStateIn(RuntimeDir(), sessionID)
+}
+
+// LoadSessionStateIn reads state from a request's runtime directory.
+func LoadSessionStateIn(runtimeDir, sessionID string) (SessionState, error) {
+	state, recorded, err := LookupSessionStateIn(runtimeDir, sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -162,11 +176,16 @@ func LoadSessionState(sessionID string) (SessionState, error) {
 // у сессии, где ещё не было ни одного запроса: новая или сброшенная /clear —
 // у неё новый идентификатор. Пустой идентификатор — тоже без записи
 func LookupSessionState(sessionID string) (SessionState, bool, error) {
+	return LookupSessionStateIn(RuntimeDir(), sessionID)
+}
+
+// LookupSessionStateIn reads a session from a request's runtime directory.
+func LookupSessionStateIn(runtimeDir, sessionID string) (SessionState, bool, error) {
 	if sessionID == "" {
 		return "", false, nil
 	}
 
-	path, err := sessionStatePath(sessionID)
+	path, err := sessionStatePathIn(filepath.Join(runtimeDir, "sessions"), sessionID)
 	if err != nil {
 		return "", false, err
 	}
@@ -197,13 +216,17 @@ func LookupSessionState(sessionID string) (SessionState, bool, error) {
 
 // sessionStatePath возвращает путь к файлу состояния сессии
 func sessionStatePath(sessionID string) (string, error) {
+	return sessionStatePathIn(stateDir(), sessionID)
+}
+
+func sessionStatePathIn(dir, sessionID string) (string, error) {
 	// Имя сессии приходит извне и в путь попадать не должно
 	safeID := filepath.Base(strings.TrimSpace(sessionID))
 	if safeID == "" || safeID == "." || safeID == string(filepath.Separator) {
 		return "", fmt.Errorf("invalid session id %q: %w", sessionID, os.ErrInvalid)
 	}
 
-	return filepath.Join(stateDir(), safeID), nil
+	return filepath.Join(dir, safeID), nil
 }
 
 // stateDir возвращает каталог для состояний сессий

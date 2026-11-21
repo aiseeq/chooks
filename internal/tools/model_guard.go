@@ -19,6 +19,7 @@ import (
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/approved"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 	"mvdan.cc/sh/v3/syntax"
@@ -48,15 +49,15 @@ func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardT
 }
 
 // ValidateTool проверяет модель лишь у вызовов, которые её явно задают.
-func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
 	if !t.IsEnabled() || input == nil {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
-	candidates := modelCandidates(input, t.Logger())
+	candidates := modelCandidates(ctx, input, t.Logger())
 	if len(candidates) == 0 {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
-	path := t.approvedPath()
+	path := t.approvedPath(ctx)
 	models, reason := readApprovedModels(path)
 	if reason != "" {
 		return t.reject(reason, nil), nil
@@ -97,18 +98,18 @@ type modelCandidate struct {
 	userOnlyCheck bool
 }
 
-func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate {
+func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
 	if input.ToolName != "Agent" && !core.IsShellTool(input.ToolName) {
 		return nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := hookctx.UserHomeDir(ctx)
 	if err != nil {
 		// ~ в пути --settings не раскроется, определения агентов в ~ не
 		// читаются: остальное проверяется
 		logger.Warn("model_guard: домашний каталог неизвестен", "error", err)
 	}
 	agentModels := func(name string) []modelCandidate {
-		return agentDefinitionModels(name, input.CWD, home, logger)
+		return agentDefinitionModels(ctx, name, input.CWD, home, logger)
 	}
 	if input.ToolName == "Agent" {
 		return agentToolCandidates(input, agentModels, logger)
@@ -191,10 +192,10 @@ type modelFiles struct {
 // точно и нормализованным, как в Claude Code 2.1.330 (приёмка 21.11).
 // Модель определения проверяется только на «только пользователь»:
 // одобрение моделей в определениях — не предмет хука (fighter.md — model: opus)
-func agentDefinitionModels(name, cwd, home string, logger core.Logger) []modelCandidate {
+func agentDefinitionModels(ctx context.Context, name, cwd, home string, logger core.Logger) []modelCandidate {
 	var found []modelCandidate
 	walk := agentWalk{seen: map[string]bool{}, logger: logger}
-	for _, dir := range agentDirs(cwd, home) {
+	for _, dir := range agentDirs(ctx, cwd, home) {
 		// срок — каждому корню, как в Claude Code: большое дерево одного
 		// каталога не снимает проверку остальных
 		walk.deadline, walk.late = time.Now().Add(agentScanBudget), false
@@ -219,9 +220,18 @@ func agentDefinitionModels(name, cwd, home string, logger core.Logger) []modelCa
 // ($CLAUDE_CONFIG_DIR/agents и ~/.claude/agents), затем .claude/agents в
 // cwd и всех его предках (Claude Code собирает их вверх до корня
 // репозитория или ~, хук — до /, это шире)
-func agentDirs(cwd, home string) []string {
+func agentDirs(ctx context.Context, cwd, home string) []string {
 	var dirs []string
-	if config := os.Getenv("CLAUDE_CONFIG_DIR"); config != "" {
+	var config string
+	if request, ok := hookctx.Request(ctx); ok {
+		config = request.Getenv("CLAUDE_CONFIG_DIR")
+		if config != "" {
+			config = request.Abs(config)
+		}
+	} else {
+		config = os.Getenv("CLAUDE_CONFIG_DIR")
+	}
+	if config != "" {
 		dirs = append(dirs, filepath.Join(config, "agents"))
 	}
 	if home != "" {
@@ -867,7 +877,20 @@ func codexConfigCandidate(config word) (modelCandidate, bool) {
 	return modelCandidate{value: strings.TrimPrefix(config.text, "model="), dynamic: !config.literal}, true
 }
 
-func (t *ModelGuardTool) approvedPath() string {
+func (t *ModelGuardTool) approvedPath(ctx context.Context) string {
+	if request, ok := hookctx.Request(ctx); ok {
+		if path := request.Getenv("MODELS_APPROVED"); path != "" {
+			return request.Abs(path)
+		}
+		if t.path != "" {
+			return request.Abs(t.path)
+		}
+		if home := request.Getenv("HOME"); home != "" {
+			return filepath.Join(request.Abs(home), ".config", "models", "approved")
+		}
+		t.Logger().Warn("не удалось определить домашний каталог для списка моделей", "error", errors.New("$HOME is not defined"))
+		return request.Abs(defaultApprovedModelsPath)
+	}
 	if os.Getenv("MODELS_APPROVED") == "" && t.path != "" {
 		return t.path
 	}

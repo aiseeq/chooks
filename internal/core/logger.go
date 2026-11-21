@@ -67,9 +67,14 @@ type slogLogger struct {
 
 // NewLogger создает logger по конфигурации
 func NewLogger(config LoggerConfig) (Logger, error) {
+	return NewLoggerTo(config, os.Stderr)
+}
+
+// NewLoggerTo sends console logs and rotation errors to the request's stderr.
+func NewLoggerTo(config LoggerConfig, stderr io.Writer) (Logger, error) {
 	applyLoggerDefaults(&config)
 
-	writer, err := openLogWriter(config)
+	writer, err := openLogWriter(config, stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -127,11 +132,11 @@ func parseLogLevel(level string) slog.Level {
 }
 
 // openLogWriter открывает поток вывода логов
-func openLogWriter(config LoggerConfig) (io.Writer, error) {
+func openLogWriter(config LoggerConfig, stderr io.Writer) (io.Writer, error) {
 	switch config.Output {
 	case "stdout":
 		// stdout зарезервирован под протокол обмена с Claude Code
-		return os.Stderr, nil
+		return stderr, nil
 	case "file":
 		if config.LogFile == "" {
 			return nil, fmt.Errorf("log file path is required when output is 'file'")
@@ -141,7 +146,7 @@ func openLogWriter(config LoggerConfig) (io.Writer, error) {
 		}
 		// Неудавшаяся ротация логирование не останавливает: лог просто растёт дальше
 		if err := rotateLogIfNeeded(config.LogFile, config.MaxSizeMB); err != nil {
-			fmt.Fprintf(os.Stderr, "chooks: log rotation failed: %v\n", err)
+			fmt.Fprintf(stderr, "chooks: log rotation failed: %v\n", err)
 		}
 
 		file, err := os.OpenFile(config.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -150,7 +155,7 @@ func openLogWriter(config LoggerConfig) (io.Writer, error) {
 		}
 		return file, nil
 	default:
-		return os.Stderr, nil
+		return stderr, nil
 	}
 }
 

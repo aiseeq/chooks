@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // Paths — файлы Claude Code и хранилища. Тесты подставляют свои каталоги
@@ -51,6 +53,26 @@ func DefaultPaths() (Paths, error) {
 		state = filepath.Join(home, ".local", "state")
 	}
 	paths.StateDir = filepath.Join(state, "chooks")
+	return paths, nil
+}
+
+// PathsForRequest resolves account paths in the hook's environment.
+func PathsForRequest(request hookctx.Context) (Paths, error) {
+	home := request.Getenv("HOME")
+	if home == "" {
+		return Paths{}, fmt.Errorf("no home directory: $HOME is not defined")
+	}
+	home = request.Abs(home)
+	paths := Paths{ClaudeDir: filepath.Join(home, ".claude"), GlobalConfig: filepath.Join(home, ".claude.json")}
+	if dir := request.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		paths.ClaudeDir = request.Abs(dir)
+		paths.GlobalConfig = filepath.Join(paths.ClaudeDir, ".claude.json")
+	}
+	state := request.Getenv("XDG_STATE_HOME")
+	if state == "" {
+		state = filepath.Join(home, ".local", "state")
+	}
+	paths.StateDir = filepath.Join(request.Abs(state), "chooks")
 	return paths, nil
 }
 

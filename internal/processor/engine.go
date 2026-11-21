@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/tools"
 )
 
@@ -18,9 +19,24 @@ type Engine struct {
 
 // New создает процессор хуков по конфигурации
 func New(config *core.Config, logger core.Logger) (*Engine, error) {
+	return newEngineForPID(config, logger, nil, nil)
+}
+
+// NewForRequest creates guards with the hook's process and environment.
+func NewForRequest(config *core.Config, logger core.Logger, request hookctx.Context) (*Engine, error) {
+	return newEngineForPID(config, logger, &request.PID, &request)
+}
+
+func newEngineForPID(config *core.Config, logger core.Logger, pid *int, request *hookctx.Context) (*Engine, error) {
 	engine := &Engine{logger: logger.With("component", "engine")}
 
-	if err := engine.initTools(config); err != nil {
+	var err error
+	if pid == nil {
+		err = engine.initTools(config)
+	} else {
+		err = engine.initToolsForPID(config, pid, request)
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -84,6 +100,10 @@ func DefaultOnNames() []string {
 
 // initTools инициализирует проверки вызовов инструментов
 func (e *Engine) initTools(config *core.Config) error {
+	return e.initToolsForPID(config, nil, nil)
+}
+
+func (e *Engine) initToolsForPID(config *core.Config, pid *int, request *hookctx.Context) error {
 	for _, constructor := range constructors {
 		toolConfig, exists := config.Tools[constructor.name]
 		if !exists && constructor.onWhenAbsent {
@@ -93,7 +113,17 @@ func (e *Engine) initTools(config *core.Config) error {
 			continue
 		}
 
-		tool, err := constructor.new(toolConfig, e.logger)
+		var tool core.ToolValidator
+		var err error
+		if constructor.name == "git_guard" && request != nil {
+			tool, err = tools.NewGitGuardToolForRequest(toolConfig, e.logger, *request)
+		} else if constructor.name == "rm_guard" && request != nil {
+			tool, err = tools.NewRmGuardToolForRequest(toolConfig, e.logger, *request)
+		} else if constructor.name == "kill_guard" && pid != nil {
+			tool, err = tools.NewKillGuardToolForPID(toolConfig, e.logger, *pid)
+		} else {
+			tool, err = constructor.new(toolConfig, e.logger)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to create %s tool: %w", constructor.name, err)
 		}

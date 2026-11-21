@@ -22,6 +22,11 @@ func PrintModeSession() (bool, error) {
 	return printModeCmdline(os.Getenv("CLAUDE_PID"))
 }
 
+// PrintModeSessionForPID reads the Claude process identified by the request.
+func PrintModeSessionForPID(pid string) (bool, error) {
+	return printModeCmdline(pid)
+}
+
 // printModeCmdline читает аргументы процесса через /proc (Linux).
 // Пустой pid — сессия без CLAUDE_PID, считается интерактивной
 func printModeCmdline(pid string) (bool, error) {

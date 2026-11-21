@@ -26,6 +26,7 @@ type parallelCommand struct {
 	customArgSep                bool
 	semaphore, wait             bool
 	complexSource               bool
+	sqlMode                     bool
 	failed                      bool
 	replaces                    []string
 }
@@ -83,6 +84,9 @@ func (p *parallelCommand) applyOption(o parallelSet, logins *[]string, files *bo
 	case o.name == "arg-sep" || o.name == "arg-file-sep":
 		p.customArgSep = true
 		p.complexSource = true
+	case slices.Contains([]string{"sql", "sql-master", "sql-and-worker", "sql-worker"}, o.name):
+		p.sqlMode = true
+		p.complexSource = true
 	case o.name == "arg-file" && parallelStdinFile(o.value):
 		p.argInput = true
 	case parallelComplexOption(o.name):
@@ -90,38 +94,6 @@ func (p *parallelCommand) applyOption(o parallelSet, logins *[]string, files *bo
 	case o.name == "wait":
 		p.wait = true
 	}
-}
-
-func parallelComplexOption(name string) bool {
-	switch name {
-	case "col-sep", "delimiter", "null", "link", "quote", "arg-sep", "arg-file-sep",
-		"max-replace-args", "max-args", "max-lines", "X", "m", "header", "csv":
-		return true
-	default:
-		return slices.Contains(parallelReplaceOptions, name) || name == "rpl"
-	}
-}
-
-func parallelComplexSources(p parallelCommand, sets []parallelSet) bool {
-	stdinSources, files := parallelArgFileCounts(sets)
-	listSources, wordStdin, wordFiles, linked, combinations := parallelWordSourceCounts(p)
-	stdinSources += wordStdin
-	files += wordFiles
-	return p.complexSource || linked || files > 0 || stdinSources > 1 || stdinSources > 0 && listSources > 0 || combinations > maxParallelSourceCombinations
-}
-
-func parallelArgFileCounts(sets []parallelSet) (stdin, files int) {
-	for _, o := range sets {
-		if o.name != "arg-file" {
-			continue
-		}
-		if parallelStdinFile(o.value) {
-			stdin++
-		} else {
-			files++
-		}
-	}
-	return stdin, files
 }
 
 func parallelWordSourceCounts(p parallelCommand) (lists, stdin, files int, linked bool, combinations int) {
@@ -228,6 +200,9 @@ func parallelComplexSourceReason(s *killScan, c shellcmd.Call) string {
 		return ""
 	}
 	if p.argInput && (!parallelLiteralInputSource(s, c) || parallelInputRedirectCount(c) > 1) {
+		p.complexSource = true
+	}
+	if parallelSourceWrapper(p) {
 		p.complexSource = true
 	}
 	if !p.complexSource {
@@ -368,6 +343,12 @@ func parallelLiteralInputSource(s *killScan, c shellcmd.Call) bool {
 }
 
 func parallelSourcesDefineCommand(p parallelCommand) (bool, error) {
+	if p.sqlMode && p.semaphore && p.wait {
+		return true, nil
+	}
+	if parallelSourceWrapper(p) {
+		return true, nil
+	}
 	if !(p.listed || p.argInput || p.customArgSep || len(p.replaces) > 0) {
 		return false, nil
 	}
@@ -375,17 +356,22 @@ func parallelSourcesDefineCommand(p parallelCommand) (bool, error) {
 		return true, nil
 	}
 	commandText := strings.Join(p.words, " ")
-	if parallelReplacementCommand(p, commandText) {
-		return true, nil
-	}
-	first := p.words[0]
-	if replacementRe.MatchString(first) || slices.Contains(p.replaces, first) {
+	if parallelReplacementWord(p, commandText) {
 		return true, nil
 	}
 	end := slices.IndexFunc(p.words, p.sourceWord)
 	if end < 0 {
 		return p.customArgSep || p.argInput && parallelShellCRe.MatchString(commandText), nil
 	}
+	return parallelSourceWordDefinesCommand(p, commandText, end)
+}
+
+func parallelReplacementWord(p parallelCommand, commandText string) bool {
+	first := p.words[0]
+	return replacementRe.MatchString(first) || slices.Contains(p.replaces, first) || parallelReplacementCommand(p, commandText)
+}
+
+func parallelSourceWordDefinesCommand(p parallelCommand, commandText string, end int) (bool, error) {
 	prefix := strings.Join(p.words[:end], " ")
 	if strings.TrimSpace(prefix) == "" {
 		return true, nil
@@ -394,17 +380,14 @@ func parallelSourcesDefineCommand(p parallelCommand) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parallel shell source: %w", err)
 	}
-	if readsSource {
-		return true, nil
-	}
-	if p.listed {
-		readsSource, err := parallelShellReadsSource(commandText)
-		if err != nil {
-			return false, fmt.Errorf("parallel listed shell source: %w", err)
-		}
+	if readsSource || !p.listed {
 		return readsSource, nil
 	}
-	return false, nil
+	readsSource, err = parallelShellReadsSource(commandText)
+	if err != nil {
+		return false, fmt.Errorf("parallel listed shell source: %w", err)
+	}
+	return readsSource, nil
 }
 
 func parallelReplacementCommand(p parallelCommand, commandText string) bool {
@@ -428,7 +411,8 @@ func parallelShellReadsSource(text string) (bool, error) {
 }
 
 func parallelComplexSourceNeedsRefusal(s *killScan, c shellcmd.Call, p parallelCommand) bool {
-	return parallelServiceContext(c) || parallelCommandHasSensitiveText(p) || parallelInputHasSensitiveText(s, c) || parallelSourceValuesHaveSensitiveText(p)
+	return parallelServiceContext(c) || parallelCommandHasSensitiveText(p) || parallelInputHasSensitiveText(s, c) ||
+		parallelSourceValuesHaveSensitiveText(p) || p.sqlMode && p.semaphore && p.wait && parallelSensitiveText(strings.Join(p.words, " "))
 }
 
 func parallelServiceContext(c shellcmd.Call) bool {
@@ -437,7 +421,10 @@ func parallelServiceContext(c shellcmd.Call) bool {
 
 func parallelCommandHasSensitiveText(p parallelCommand) bool {
 	end := slices.IndexFunc(p.words, p.sourceWord)
-	command := strings.Join(p.words[:max(end, 0)], " ")
+	if end < 0 {
+		return false
+	}
+	command := strings.Join(p.words[:end], " ")
 	if parallelProtectedCommandRe.MatchString(command) || parallelShellCRe.MatchString(command) {
 		return true
 	}
@@ -492,10 +479,6 @@ func parallelSourceValuesHaveSensitiveText(p parallelCommand) bool {
 
 func parallelWordsHaveSensitiveText(words []string) bool {
 	return slices.ContainsFunc(words, parallelSensitiveText)
-}
-
-func parallelSensitiveText(text string) bool {
-	return parallelProtectedCommandRe.MatchString(text) || parallelShellCRe.MatchString(text)
 }
 
 // parallelCalls проверка разобранной команды parallel (parallelSystemdRun)

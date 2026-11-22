@@ -11,26 +11,15 @@ import (
 	"github.com/aiseeq/akit/shellcmd"
 )
 
-// sessionToolWordRe отдельное слово средства, которое гасит процессы или
-// сессию, а слова kill в команде может не быть (loginctl terminate-user,
-// systemctl --user stop, fuser -k, busctl call … StopUnit, kquitapp6
-// plasmashell). У skill, tmux kill-* и os.kill в
-// python -c подстрока kill есть всегда
-// busAddressRe присваивание адреса шины D-Bus в команде (префиксом,
-// через env, export): системная шина может оказаться шиной сессии и
-// наоборот — менеджер systemd по флагам не виден
+// sessionToolWordRe names session-ending tools without a `kill` word;
+// busAddressRe detects address overrides that can swap systemd managers.
 var busAddressRe = regexp.MustCompile(`DBUS_(SYSTEM|SESSION)_BUS_ADDRESS=`)
 
 var sessionToolWordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])(loginctl|systemctl|fuser|busctl|gdbus|dbus-send|qdbus(6|-qt[56])?|kquitapp[56]?|systemd-run)([^[:alnum:]_.-]|$)`)
 
-// sessionTool проверяет вызов средств, гасящих процессы или сессию, кроме
-// kill, pkill и killall: loginctl, systemctl, вызов тех же действий по
-// D-Bus (busctl, gdbus, dbus-send, qdbus), fuser -k, skill, os.kill в
-// скрипте python, tmux kill-*. Широта цели — как у kill: названная узко
-// (юнит, порт, PID, сессия tmux) — можно, всё, группа, сессия, юнит предка
-// — отказ. via — обёртка, подающая аргументы из ввода (xargs). Вызов в
-// скрипте ssh исполнится на другой машине: сессию здесь он не тронет
-// (ssh host 'sudo systemctl reboot')
+// sessionTool checks session-ending tools other than kill/pkill/killall.
+// Narrow literal targets may pass; broad, ancestor, and input-fed targets
+// are refused. Calls through ssh affect the remote host, not this session.
 func (s *killScan) sessionTool(c shellcmd.Call, args []word, via string) error {
 	if slices.Contains(c.Via, "ssh") {
 		return nil
@@ -102,12 +91,8 @@ func (s *killScan) toolReason(c shellcmd.Call, args []word, via string) (reason,
 	return reason, hint, group, nil
 }
 
-// computedNames средства (systemctl, loginctl, busctl, qdbus…), с которыми
-// разбор связывает вычисляемое имя вызова: средство названо в тексте
-// подстановки имени ($(echo busctl), `which systemctl`) или в значении,
-// которое команда присваивает переменной имени (export X=systemctl; $X,
-// X="sudo busctl"). Прочее вычисляемое имя ("$ADB" reboot, $(which grep)
-// -r stop) средством не считается: его аргументы — не повод для отказа
+// computedNames are tools recognized when a command name comes from a
+// substitution or variable assignment; unrelated dynamic names are ignored.
 func computedNames(c shellcmd.Call, command string) []string {
 	texts := append([]string{c.Name}, assignedValues(c.Name, command)...)
 	if c.Name == "" {
@@ -182,22 +167,18 @@ var toolHints = map[string]string{
 
 // systemctlHint подсказка к отказу systemctl с менеджером scope (systemctl
 // или systemctl --user): юнит из переменной, шаблона или ввода — назвать
-// литералом; юнит назван, но задевает сессию, — остановить юнит без
-// процессов сессии или лишний процесс по PID. Команде без юнита, гасящей
+// литералом; юнит назван, но задевает сессию, — выбрать юнит без
+// защищённых процессов. Команде без юнита, гасящей
 // сессию целиком (systemctlEndVerbs), — systemctlEndHint
 func systemctlHint(scope string, named bool) string {
 	if !named {
 		return "Назови юнит литералом и проверь, что он не держит сессию: " + scope + " status юнит"
 	}
-	return "Останавливай юнит, где нет процессов сессии: посмотри их (" + scope + " status юнит) и убей лишний процесс литералом: kill 12345"
+	return "Останавливай юнит только если в нём нет защищённых процессов: проверь их (" + scope + " status юнит). Если в юните все процессы защищены, остановить его этим guard нельзя — заверши тестовый процесс штатным способом или управляй сессией штатно"
 }
 
-// systemctlEndEffect что делает команда из systemctlEndVerbs по man
-// systemctl: смена цели (isolate, default, rescue, emergency) — у любого
-// менеджера; exit у менеджера --user гасит сам менеджер; прочее — то, что
-// пишет systemctlSystemEffects, и с --user тоже: эти действия поддерживает
-// только системный менеджер, и systemctl может уйти в logind и погасить
-// машину. Одна фраза на отказ и подсказку, чтобы они не расходились
+// systemctlEndEffect describes the effect documented by systemctl. User
+// manager calls may still reach logind; one phrase feeds both refusal and hint.
 func systemctlEndEffect(scope, verb string) string {
 	if slices.Contains(systemctlTargetVerbs, verb) {
 		if scope == "systemctl" {
@@ -355,15 +336,10 @@ func restartableComm(name string) string {
 // unitSuffixes типы юнитов: имя без них systemctl дополняет .service
 var unitSuffixes = []string{".service", ".socket", ".target", ".scope", ".slice", ".timer", ".mount", ".automount", ".path", ".device", ".swap"}
 
-// systemctlReason отказ на systemctl, который гасит юнит, где идёт предок
-// этой сессии или процесс, на котором держится сессия пользователя (по
-// cgroup процесса: user.slice/…/user@1000.service/app.slice/app-…scope),
-// а также на юнит из переменной, шаблон юнитов, цель (.target: что
-// остановится с ней, не видно) и команды, гасящие весь менеджер. Юниты,
-// пришедшие из ввода (xargs), — тоже отказ. hint — подсказка к отказу.
-// Решение — unitActionReason, общее с вызовом тех же действий по D-Bus
-// anyBus — адрес шины подменён в окружении (busAddressRe): systemctl
-// попадёт в менеджер по адресу, проверка — по обоим
+// systemctlReason rejects actions affecting session ancestors, protected
+// processes, broad targets, and input-fed units. unitActionReason shares the
+// decision with D-Bus calls. If the bus address is overridden, check both
+// managers because systemctl follows the request environment.
 func (t *KillGuardTool) systemctlReason(args []word, via string, anyBus bool, procs []procInfo) (reason, hint string) {
 	a := systemctlFlags(args)
 	ops := optionOperands(args, systemctlValues)

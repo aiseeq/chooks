@@ -18,7 +18,7 @@ import (
 // init и менеджеры служб, шина, графическая оболочка, звук, вход по ssh
 var protectedComms = map[string]bool{
 	"systemd": true, "init": true, "systemd-logind": true,
-	"dbus-daemon": true, "dbus-broker": true, "sshd": true, "sshd-session": true,
+	"dbus-broker": true, "sshd": true, "sshd-session": true,
 	"Xwayland": true, "Xorg": true, "kwin_wayland": true, "kwin_x11": true,
 	"plasmashell": true, "gnome-shell": true, "sway": true, "Hyprland": true,
 	"sddm": true, "gdm": true, "pipewire": true, "wireplumber": true,
@@ -43,13 +43,15 @@ func NewKillGuardToolForPID(config core.ToolConfig, logger core.Logger, pid int)
 }
 
 const killGuardHint = "Найди PID отдельной командой (ps -o pid,ppid,comm,args -p … или pgrep -a '[x]yz'), посмотри на вывод и убей литералом: kill 12345"
+const protectedProcessHint = "Процесс защищён: не посылай ему сигнал. Если это тестовый процесс, заверши его штатным механизмом теста; для сессии используй её штатное управление"
+const protectedProcessMarker = "\x00protected-process"
 
 // killGroupHint подсказка к отказу на сигнал группе: отдельные PID группу не
 // заменяют — процесс, который группа породит после перечисления, сигнал не получит
 const killGroupHint = "Сигнал отдельным PID — не то же, что группе: процессы, которые появятся в группе после перечисления, его не получат. Перечисли группу отдельной командой (pgrep -a -g 12345), посмотри на вывод, убей её PID литералами (kill 12346 12347) и проверь группу снова"
 
 // ValidateTool проверяет команды, посылающие сигналы процессам
-func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+func (t *KillGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
 	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
@@ -66,7 +68,8 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 			t.Logger().Warn("kill_guard: systemd-run --shell не переписан в тексте, проверен текстом systemdRunShellCommand", "error", err)
 		}
 	}
-	scan := killScan{tool: t, command: command, source: input.Command, killText: killText,
+	busAddress := requestSessionBusAddress(ctx)
+	scan := killScan{tool: t, command: command, source: input.Command, killText: killText, busAddress: busAddress,
 		signalWord: signalWordRe.MatchString(text), zsh: zshWordRe.MatchString(text),
 		anyBus: busAddressRe.MatchString(text)}
 	if err := scan.parsedCalls(); err != nil {
@@ -111,7 +114,8 @@ func unquoted(command string) string {
 
 // killScan проверка вызовов команды, найденных разбором оболочки
 type killScan struct {
-	tool *KillGuardTool
+	tool       *KillGuardTool
+	busAddress string
 	// command — команда целиком, где systemd-run --shell заменён на
 	// systemd-run --pipe bash (rewriteSystemdRunShell): её разбирают
 	// правила; source — как её прислал агент: этот текст стоит в cmdline
@@ -920,6 +924,9 @@ func (s *killScan) loadProcs() error {
 	if err != nil {
 		return err
 	}
+	for i := range procs {
+		procs[i].protected = protectedComms[procs[i].comm] || dbusSessionBus(procs[i], s.busAddress)
+	}
 	s.procs = procs
 	return nil
 }
@@ -946,7 +953,11 @@ func (s *killScan) check(name string, args []word, via string) error {
 		reason, group = s.tool.checkPattern(name, args, s.source, s.procs)
 	}
 	if reason != "" {
-		s.addReason(reason)
+		if before, _, ok := strings.Cut(reason, protectedProcessMarker); ok {
+			s.addToolReason(before, protectedProcessHint, false)
+		} else {
+			s.addReason(reason)
+		}
 	}
 	if group && !slices.Contains(s.groupReasons, reason) {
 		s.groupReasons = append(s.groupReasons, reason)
@@ -988,7 +999,7 @@ func (t *KillGuardTool) checkKill(args []word, procs []procInfo) (reason string,
 			return "kill 0: сигнал своей группе процессов — той, где идёт сама эта команда", false
 		}
 		if reason := t.dangerous(pid, procs, ancestors); reason != "" {
-			return fmt.Sprintf("kill %d: %s", pid, reason), false
+			return fmt.Sprintf("kill %d: %s", pid, reason) + protectedProcessMarker, false
 		}
 	}
 	return "", false
@@ -1003,7 +1014,7 @@ func (t *KillGuardTool) dangerous(pid int, procs []procInfo, ancestors map[int]b
 		return "предок этой сессии Claude (claude, оболочка, терминал или менеджер сессии)"
 	}
 	for _, p := range procs {
-		if p.pid == pid && protectedComms[p.comm] {
+		if p.pid == pid && (p.protected || protectedComms[p.comm]) {
 			return fmt.Sprintf("%s — на нём держится сессия пользователя", p.comm)
 		}
 	}
@@ -1014,6 +1025,7 @@ func (t *KillGuardTool) dangerous(pid int, procs []procInfo, ancestors map[int]b
 type procInfo struct {
 	pid, ppid     int
 	comm, cmdline string
+	protected     bool
 }
 
 // listProcs читает все процессы из procRoot. Процесс, завершившийся между

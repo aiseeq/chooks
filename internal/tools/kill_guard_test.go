@@ -828,14 +828,14 @@ func TestKillGuardGroupReasons(t *testing.T) {
 }
 
 // Подсказка к отказу на группу не выдаёт завершение отдельных PID за то же
-// самое; к прочим отказам — обычная подсказка про литеральный PID
+// самое; отказ на защищённый PID не предлагает повторить этот сигнал
 func TestKillGuardGroupHint(t *testing.T) {
 	group := validateKill(t, `kill -TERM -- -1447549`).Suggestions
 	if slices.Contains(group, killGuardHint) || !slices.Contains(group, killGroupHint) {
 		t.Errorf("группа: ждали только подсказку группы, получили %q", group)
 	}
 	mixed := validateKill(t, `kill -TERM -- -1447549; kill 1`).Suggestions
-	if !slices.Contains(mixed, killGuardHint) || !slices.Contains(mixed, killGroupHint) {
+	if !slices.Contains(mixed, protectedProcessHint) || !slices.Contains(mixed, killGroupHint) {
 		t.Errorf("группа и init: ждали обе подсказки, получили %q", mixed)
 	}
 	if plain := validateKill(t, `kill 1`).Suggestions; slices.Contains(plain, killGroupHint) {

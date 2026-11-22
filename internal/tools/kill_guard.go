@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,6 +33,7 @@ type KillGuardTool struct {
 	procRoot    string
 	selfPID     int
 	resolvePath func(string) (string, error)
+	lstatPath   func(string) (fs.FileInfo, error)
 }
 
 // NewKillGuardToolForPID protects the process tree of this hook request.
@@ -41,6 +43,7 @@ func NewKillGuardToolForPID(config core.ToolConfig, logger core.Logger, pid int)
 		procRoot:    "/proc",
 		selfPID:     pid,
 		resolvePath: filepath.EvalSymlinks,
+		lstatPath:   os.Lstat,
 	}, nil
 }
 
@@ -927,7 +930,7 @@ func (s *killScan) loadProcs() error {
 		return err
 	}
 	for i := range procs {
-		bus, err := dbusSessionBus(procs[i], s.busAddress, s.tool.resolvePath)
+		bus, err := dbusSessionBus(procs[i], s.busAddress, s.tool.resolvePath, s.tool.lstatPath)
 		if err != nil {
 			s.tool.Logger().Debug("D-Bus address path could not be resolved; process remains protected", "pid", procs[i].pid, "error", err)
 			procs[i].protected = true

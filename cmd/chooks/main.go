@@ -253,6 +253,16 @@ func validateHookRequest(ctx context.Context, request hookctx.Context) error {
 	return nil
 }
 
+// closeRequestLogger закрывает файл лога запроса. Ошибку закрытия не
+// показывает: строки уже записаны без буфера (O_APPEND), а у CLI база файл не
+// закрывала вовсе, и лишней строки в stderr у неё не было
+func closeRequestLogger(logger core.FileLogger) {
+	if logger == nil {
+		return
+	}
+	_ = logger.Close()
+}
+
 // runHook выполняет основную логику хука
 func runHook(ctx context.Context, hookType string) (code int, err error) {
 	request, ok := hookctx.Request(ctx)
@@ -266,12 +276,16 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	if exit, ok := ctx.Value(cliTerminationKey{}).(func(int)); ok {
 		timer.watchTermination(exit)
 	}
+	// Файл лога запроса закрывается последним, после строк таймера: и на
+	// пути ошибки, и при выходе из любой ветки хука
+	var logger core.FileLogger
 	defer func() {
 		status := "ok"
 		if err != nil || code == exitError {
 			status = "error"
 		}
 		timer.finish(status)
+		closeRequestLogger(logger)
 	}()
 
 	data, err := io.ReadAll(request.Stdin)
@@ -287,7 +301,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		return exitError, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	logger, err := core.NewLoggerTo(config.Logger, request.Stderr)
+	logger, err = core.NewLoggerTo(config.Logger, request.Stderr)
 	if err != nil {
 		return exitError, fmt.Errorf("failed to create logger: %w", err)
 	}
@@ -861,6 +875,7 @@ func runStatusLine(ctx context.Context, request hookctx.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
+	defer closeRequestLogger(logger)
 	line, err := statusline.Render(ctx, request.Stdin, logger)
 	if err != nil {
 		return err

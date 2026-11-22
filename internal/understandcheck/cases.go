@@ -103,6 +103,8 @@ func warnBashError(stderr io.Writer, err error) {
 	}
 	logger, logErr := core.NewLoggerTo(core.DefaultLoggerConfig(), stderr)
 	if logErr == nil {
+		// Вывод по умолчанию — stderr запроса: файла нет, Close ничего не закрывает
+		defer logger.Close()
 		logger.Warn("не удалось разобрать команду Bash для поиска правки инструкции", "error", err)
 	}
 }

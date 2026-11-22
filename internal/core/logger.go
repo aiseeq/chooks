@@ -60,9 +60,18 @@ type Logger interface {
 	With(args ...any) Logger
 }
 
-// slogLogger обертка вокруг slog.Logger
+// FileLogger — логгер запроса, который владеет открытым им файлом лога.
+// Close закрывает файл по концу обработки запроса: в долгоживущем процессе
+// дескриптор иначе висит до финализатора GC. Вывод в stderr Close не трогает
+type FileLogger interface {
+	Logger
+	Close() error
+}
+
+// slogLogger обертка вокруг slog.Logger; file — открытый им файл лога или nil
 type slogLogger struct {
 	logger *slog.Logger
+	file   io.Closer
 }
 
 // NewLogger создает logger по конфигурации
@@ -71,7 +80,8 @@ func NewLogger(config LoggerConfig) (Logger, error) {
 }
 
 // NewLoggerTo sends console logs and rotation errors to the request's stderr.
-func NewLoggerTo(config LoggerConfig, stderr io.Writer) (Logger, error) {
+// Файл лога (output: file) закрывает вызывающий через Close
+func NewLoggerTo(config LoggerConfig, stderr io.Writer) (FileLogger, error) {
 	applyLoggerDefaults(&config)
 
 	writer, err := openLogWriter(config, stderr)
@@ -97,7 +107,25 @@ func NewLoggerTo(config LoggerConfig, stderr io.Writer) (Logger, error) {
 		handler = slog.NewTextHandler(writer, opts)
 	}
 
-	return &slogLogger{logger: slog.New(handler)}, nil
+	logger := &slogLogger{logger: slog.New(handler)}
+	if file, ok := writer.(*os.File); ok && config.Output == "file" {
+		logger.file = file
+	}
+	return logger, nil
+}
+
+// Close закрывает файл лога, открытый NewLoggerTo; у вывода в stderr — ничего.
+// Логгеры от With делят файл с родителем и его не закрывают
+func (l *slogLogger) Close() error {
+	if l.file == nil {
+		return nil
+	}
+	file := l.file
+	l.file = nil
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close log file: %w", err)
+	}
+	return nil
 }
 
 // maskAttr скрывает секреты в значении поля: журнал читают обходы и суб-агенты, а поля

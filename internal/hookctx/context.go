@@ -54,6 +54,9 @@ type Context struct {
 	ConfigPath string
 	Verbose    bool
 	Timeout    time.Duration
+	// process marks the request of this very process (FromProcess): its Cwd
+	// is the process cwd, so relative paths need no resolving
+	process bool
 }
 
 // New constructs a request context from values supplied by the caller.
@@ -65,7 +68,9 @@ func New(stdin io.Reader, stdout, stderr io.Writer, env []string, cwd string, pi
 // FromProcess captures the current process for the standalone CLI.
 func FromProcess() (Context, error) {
 	cwd, err := os.Getwd()
-	return New(os.Stdin, os.Stdout, os.Stderr, os.Environ(), cwd, os.Getpid(), os.Getppid()), err
+	request := New(os.Stdin, os.Stdout, os.Stderr, os.Environ(), cwd, os.Getpid(), os.Getppid())
+	request.process = true
+	return request, err
 }
 
 // LookupEnv distinguishes an absent variable from one set to an empty value.
@@ -85,10 +90,17 @@ func (c Context) Getenv(key string) string {
 	return value
 }
 
-// Abs resolves a relative path using the hook's working directory.
+// Abs resolves a relative path using the hook's working directory. A request
+// of this very process (FromProcess) keeps the path relative: the OS resolves
+// it from the same cwd, and error texts name it as the env or config gave it,
+// as the CLI always did. Any other request (a daemon serving a hook) joins it
+// to the request cwd, since the executor's cwd belongs to nobody's hook.
 func (c Context) Abs(path string) string {
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path)
+	}
+	if c.process {
+		return path
 	}
 	return filepath.Join(c.Cwd, path)
 }

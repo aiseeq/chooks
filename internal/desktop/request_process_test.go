@@ -117,6 +117,8 @@ func waitProbe(t *testing.T, out string) map[string]string {
 // исполнителя хука
 func TestDeliverInBackgroundRequestEnvDir(t *testing.T) {
 	t.Setenv("CHOOKS_PROBE", "process")
+	// Переменная есть только у процесса: в окружение ребёнка она не попадает
+	t.Setenv("CHOOKS_PROCESS_ONLY", "leak")
 	cwd, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -130,5 +132,8 @@ func TestDeliverInBackgroundRequestEnvDir(t *testing.T) {
 	seen := waitProbe(t, out)
 	if seen["CHOOKS_PROBE"] != "request" || seen["PATH"] != "/usr/bin:/bin" || seen["CWD"] != cwd {
 		t.Fatalf("child saw CHOOKS_PROBE=%q PATH=%q CWD=%q, want request, /usr/bin:/bin, %q", seen["CHOOKS_PROBE"], seen["PATH"], seen["CWD"], cwd)
+	}
+	if value, leaked := seen["CHOOKS_PROCESS_ONLY"]; leaked {
+		t.Fatalf("child inherited the process-only CHOOKS_PROCESS_ONLY=%q", value)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,9 +67,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	return finishConfig(config, configPath)
 }
 
-// LoadConfigForRequest загружает конфигурацию по окружению запроса. Путь к
-// файлу в ошибках — как его дал запрос (флаг или $XDG_CONFIG_HOME по правилам
-// UserConfigDir из пакета os), а открывается он от cwd запроса
+// LoadConfigForRequest загружает конфигурацию по окружению запроса (флаг или
+// $XDG_CONFIG_HOME по правилам UserConfigDir из пакета os). Относительный путь
+// открывается от cwd запроса (hookctx.Context.Abs), в ошибках — открытый путь
 func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, error) {
 	if configPath == "" {
 		dir := request.Getenv("XDG_CONFIG_HOME")
@@ -86,6 +85,7 @@ func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, 
 		}
 		configPath = filepath.Join(dir, "chooks", "config.yaml")
 	}
+	configPath = request.Abs(configPath)
 	expand := func(config *Config) error {
 		path := config.Logger.LogFile
 		if strings.HasPrefix(path, "~/") {
@@ -101,7 +101,7 @@ func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, 
 		config.Logger.LogFile = path
 		return nil
 	}
-	config, present, err := loadConfigAt(request.Abs(configPath), configPath)
+	config, present, err := loadConfig(configPath)
 	if err != nil || !present {
 		return config, err
 	}
@@ -111,23 +111,14 @@ func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, 
 	return finishConfig(config, configPath)
 }
 
+// loadConfig читает файл; present — файл есть, иначе значения по умолчанию
 func loadConfig(configPath string) (*Config, bool, error) {
-	return loadConfigAt(configPath, configPath)
-}
-
-// loadConfigAt читает файл path; в ошибках он назван shown
-func loadConfigAt(path, shown string) (*Config, bool, error) {
-
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return DefaultConfig(), false, nil
 		}
-		var pathErr *fs.PathError
-		if errors.As(err, &pathErr) {
-			pathErr.Path = shown
-		}
-		return nil, false, fmt.Errorf("failed to read config file %s: %w", shown, err)
+		return nil, false, fmt.Errorf("failed to read config file %s: %w", configPath, err)
 	}
 
 	// Неизвестные ключи — ошибка: молча проигнорированная опечатка в имени поля
@@ -137,7 +128,7 @@ func loadConfigAt(path, shown string) (*Config, bool, error) {
 	decoder.KnownFields(true)
 	// io.EOF означает пустой файл — работаем на значениях по умолчанию
 	if err := decoder.Decode(&config); err != nil && !errors.Is(err, io.EOF) {
-		return nil, false, fmt.Errorf("failed to parse config file %s: %w", shown, err)
+		return nil, false, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 	}
 
 	applyLoggerDefaults(&config.Logger)

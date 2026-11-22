@@ -15,6 +15,8 @@ import (
 // исполнителя: в демоне это были бы его HOME и CLAUDE_CONFIG_DIR
 func TestMaybeRotateRequestEnvDir(t *testing.T) {
 	t.Setenv("CHOOKS_PROBE", "process")
+	// Переменная есть только у процесса: в окружение ребёнка она не попадает
+	t.Setenv("CHOOKS_PROCESS_ONLY", "leak")
 	root := t.TempDir()
 	cwd, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -63,5 +65,8 @@ func TestMaybeRotateRequestEnvDir(t *testing.T) {
 	}
 	if seen["CHOOKS_PROBE"] != "request" || seen["HOME"] != root || seen["CWD"] != cwd {
 		t.Fatalf("child saw CHOOKS_PROBE=%q HOME=%q CWD=%q, want request, %q, %q", seen["CHOOKS_PROBE"], seen["HOME"], seen["CWD"], root, cwd)
+	}
+	if value, leaked := seen["CHOOKS_PROCESS_ONLY"]; leaked {
+		t.Fatalf("child inherited the process-only CHOOKS_PROCESS_ONLY=%q", value)
 	}
 }

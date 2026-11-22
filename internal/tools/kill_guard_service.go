@@ -696,10 +696,10 @@ func run0Options(args []string) (props []word, start int, viaShell bool) {
 			return props, i + 1, viaShell
 		case a == "--via-shell" || a == "-i":
 			viaShell = true
-		case strings.HasPrefix(a, "--property="):
-			v := strings.TrimPrefix(a, "--property=")
+		case strings.HasPrefix(a, "--") && strings.Contains(a, "=") && uniqueLongOptionName(strings.SplitN(a, "=", 2)[0], run0ValueOptions, []string{"--via-shell", "--help", "--version"}) == "--property":
+			v := strings.SplitN(a, "=", 2)[1]
 			props = append(props, word{text: v, literal: !computedArg(v)})
-		case a == "--property" && i+1 < len(args):
+		case uniqueLongOptionName(a, run0ValueOptions, []string{"--via-shell", "--help", "--version"}) == "--property" && i+1 < len(args):
 			i++
 			props = append(props, word{text: args[i], literal: !computedArg(args[i])})
 		case slices.Contains(run0ValueOptions, a):

@@ -193,7 +193,7 @@ func (s *killScan) systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call
 // c: его строки станут аргументами c (-c и скрипт)
 func (s *killScan) unreadInput(c shellcmd.Call, calls []shellcmd.Call) bool {
 	switch {
-	case systemdRunScopeOnly(c, calls) || scriptBodyParsed(c, calls) || inputCallsParsed(c, calls):
+	case !slices.Contains(c.Via, "run0") && systemdRunScopeOnly(c, calls) || scriptBodyParsed(c, calls) || inputCallsParsed(c, calls):
 		return false
 	case afterXargs(c):
 		// ввод у xargs и parallel перед c — не скрипт c, а его аргументы

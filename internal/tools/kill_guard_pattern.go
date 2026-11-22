@@ -8,7 +8,6 @@ import (
 	"strings"
 )
 
-// patternArgs разобранные аргументы pkill или killall
 type patternArgs struct {
 	full, exact, isRegex, ignoreCase bool
 	// info — справка, версия или список сигналов: никто не будет завершён
@@ -55,13 +54,8 @@ var (
 	withValue = patternOption{value: true}
 )
 
-// pkillOptions опции pkill (procps-ng 4.0.6, pkill --help): короткие —
-// одной буквой, длинные — с --. -e у pkill — echo (печать убитых), а не
-// точное совпадение; -r — состояния процессов со значением, не regexp;
-// --inverse (у pkill только длинная, -v — у pgrep) обращает выбор. Таблица
-// длинных опций у pkill и pgrep общая: опции pgrep (--delimiter, --list-name,
-// --list-full, --lightweight, --quiet) делают начало неоднозначным так же,
-// как у pgrep (pgrep --li: list-name, list-full, lightweight)
+// pkillOptions: -e означает echo, -r — состояния процесса, --inverse меняет
+// выбор. Имена длинных опций, общие с pgrep, сохраняют его неоднозначность.
 var pkillOptions = map[string]patternOption{
 	"inverse": {apply: setInverse},
 	"f":       {apply: setFull}, "full": {apply: setFull},
@@ -81,9 +75,7 @@ var pkillOptions = map[string]patternOption{
 	"delimiter": withValue, "list-name": flag, "list-full": flag, "lightweight": flag, "quiet": flag,
 }
 
-// killallOptions опции killall (psmisc 23.7, killall --help): -e — точное
-// совпадение длинных имён (без -r killall и так сравнивает имя целиком),
-// -i — вопрос перед каждым, -I — без учёта регистра
+// killallOptions: -e требует полное длинное имя, -i спрашивает, -I игнорирует регистр.
 var killallOptions = map[string]patternOption{
 	"r": {apply: setRegex}, "regexp": {apply: setRegex},
 	"I": {apply: setIgnoreCase}, "ignore-case": {apply: setIgnoreCase},
@@ -206,10 +198,6 @@ func (pa patternArgs) regexp(p string) (*regexp.Regexp, error) {
 	}
 	return regexp.Compile(expr)
 }
-
-// checkPattern прикидывает, что заденет pkill или killall сейчас: шаблон
-// сверяется с теми же полями процессов, что у самой утилиты, PID из -p — с
-// сессией. group — отказ из-за сигнала группе (killall -g)
 func (t *KillGuardTool) checkPattern(name string, args []word, command string, procs []procInfo) (reason string, group bool) {
 	pa, reason := parsePatternArgs(name, args)
 	if reason != "" || pa.noSignal() {
@@ -237,6 +225,9 @@ func (t *KillGuardTool) checkPattern(name string, args []word, command string, p
 			// glibc читает шаблон иначе, чем Go (pkill 'claud\e' совпадает с
 			// claude): кого он заденет, не видно
 			return fmt.Sprintf("%s %q: шаблон не разбирается так, как его читает утилита (%v), проверить, кого он заденет, нельзя; упрости шаблон", name, p, err), false
+		}
+		if re.MatchString("claude") {
+			return fmt.Sprintf("%s %q может задеть процесс Claude", name, p), false
 		}
 		if pa.full && re.MatchString(command) {
 			return fmt.Sprintf("%s -f %q совпадает с текстом самой команды и убьёт оболочку, которая её исполняет; шаблон вида '[x]yz' себя не ловит", name, p), false

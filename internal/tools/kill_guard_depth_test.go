@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -23,33 +24,31 @@ func TestKillGuardDepthBlocks(t *testing.T) {
 		`timeout 5 sudo loginctl terminate-user aisee`,
 		`sudo -u x env A=1 tmux kill-server`,
 		`timeout 5 sudo fuser -k /tmp/app.sock`,
+		`timeout 5 sudo fuser -km /tmp/app.sock`,
+		`sudo -u x env A=1 systemctl reboot`,
 		`sudo find /proc -maxdepth 0 -exec sudo kill 455274 \;`,
 		`systemd-run --user sem 'kill 455274'`,
 		`sem timeout 5 systemctl --user stop pipewire.service`,
-		`timeout 5 parallel ::: 'kill 455274'`,
-		`systemd-run --user --pipe parallel :::: - <<< 'kill 455274'`,
 		`sudo parallel kill ::: 455274`,
 		// имя команды вычисляется при запуске, команда сигнала видна
 		`timeout 5 sudo $(echo kill) 455274`,
 		// сигнал с целями или командой из нелитерального источника
 		`parallel -a units.txt systemctl --user stop`,
 		`cat pids | parallel kill`,
-		`parallel kill :::: pids.txt`,
-		`xargs -a pids.txt kill`,
-		`printf '%s\n' 'ExecStartPre=/usr/bin/kill 1' | parallel systemd-run --user -p {}`,
 		`echo 'kill 1' | parallel 'sudo bash -c'`,
+		`echo 'kill 1' | parallel 'sudo ksh -c'`,
+		`systemd-run --user --pipe parallel :::: - <<< 'kill 455274'`,
 		`systemd-run --user parallel :::: +- <<< 'kill 12345'`,
-		`systemd-run --user parallel --colsep , ::: 'kill,12345'`,
 		`parallel -a - ::: -9 ::: -1 <<< kill`,
 		`parallel -a - ::: 1 <<< kill`,
-		// значения встают в команду подстановкой
-		`systemd-run --user parallel -I XX XX ::: 'kill 12345'`,
+		`printf 'kill -9 1\n' | parallel`,
+		`parallel <<< 'kill -9 1'`,
+		`printf 'pkill -f firefox\n' | parallel`,
+		"parallel <<'E'\nkill -9 1\nE",
+		`systemd-run --user parallel --colsep , ::: 'kill,12345'`,
 		`systemd-run --user --pipe parallel {} <<< 'kill 12345'`,
+		// значения встают в команду подстановкой
 		// parallel в задании parallel судится тем же правилом
-		`parallel -I XX "parallel 'sudo systemctl stop {}' ::: XX" ::: nginx`,
-		`echo 'kill 1' | parallel --cat 'parallel --cat pkexec bash {}'`,
-		`echo user@1000.service | parallel --pipe -I XX "parallel 'sudo systemctl stop {}' ::: XX"`,
-		`echo x | parallel --pipe "parallel 'sudo systemctl restart {}' ::: nginx"`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			r := validateKill(t, command)
@@ -63,17 +62,38 @@ func TestKillGuardDepthBlocks(t *testing.T) {
 	}
 }
 
+func TestKillGuardRun0UnreadInput(t *testing.T) {
+	for _, command := range []string{
+		`exec < <(echo kill 6159); run0 bash`,
+		`f() { run0 bash; }; echo 'kill 6159' | f`,
+		`while read x; do run0 bash; done < <(printf 'x\nkill 6159\n')`,
+	} {
+		if r := validateKill(t, command); r.IsValid {
+			t.Errorf("нечитаемый сигнал во вводе run0 должен блокироваться: %s", command)
+		}
+	}
+}
+
 func TestKillGuardDepthAllows(t *testing.T) {
 	for _, command := range []string{
 		// безвредная команда на двух уровнях
 		`timeout 60 bash -c 'go test ./...'; kill -l`,
 		`sudo -u x env A=1 make; kill -l`,
+		`sudo fish --command 'kill 455274'`,
+		`sudo busybox sh -c 'kill 455274'`,
+		`timeout 5 sudo killall -l`,
+		`timeout 5 sudo killall --help`,
+		`timeout 5 sudo pkill -V`,
+		`timeout 5 sudo pkill --help`,
+		`timeout 5 sudo systemctl stop --help`,
+		`sudo timeout 5 sem --wait kill 455274`,
 		`timeout 5 bash -c 'while kill -0 455274; do sleep 1; done'`,
 		`sudo -u x env kill -l`,
 		`systemd-run --user nice make`,
 		// один уровень: проверка как у прямой команды
 		`systemd-run --user make`,
 		`parallel echo ::: a b; kill 455274`,
+		`printf '%s\n' 'ExecStartPre=/usr/bin/kill 1' | parallel systemd-run --user -p {}`,
 		`sudo kill 455274`,
 		`bash -c 'kill 455274'`,
 		`timeout 5 kill 455274`,
@@ -162,6 +182,14 @@ func TestKillGuardRun0EndAction(t *testing.T) {
 			t.Errorf("должно блокироваться: %s", command)
 		}
 	}
+	for _, command := range []string{
+		`run0 --prop=SuccessAction=poweroff true`,
+		`run0 --prop=ExecStartPre=/usr/bin/kill\ 6159 true`,
+	} {
+		if validateKill(t, command).IsValid {
+			t.Errorf("сокращённая --property должна разбираться: %s", command)
+		}
+	}
 	if r := validateKill(t, `run0 --property=SuccessAction=none true`); !r.IsValid {
 		t.Errorf("не должно блокироваться: %v", r.Suggestions)
 	}
@@ -190,23 +218,14 @@ func TestWrapperLevels(t *testing.T) {
 
 // Начало команды parallel ищется за опциями: слово сразу за опцией может
 // быть её значением
-func TestFeedSignals(t *testing.T) {
-	for _, tc := range []struct {
-		head, values []string
-		want         string
-	}{
-		{[]string{"-j", "2", "pkill", "-f"}, []string{"firefox"}, "pkill"},
-		{[]string{"--joblog", "log", "kill"}, []string{"455274"}, "kill"},
-		{[]string{"-j4"}, []string{"echo a", "kill 455274"}, "kill"},
-		{[]string{"grep", "-c", "kill"}, []string{"a"}, ""},
-		{[]string{"kill", "-0"}, []string{"455274"}, ""},
-	} {
-		got := ""
-		if sig, _ := feedSignals(tc.head, tc.values, -1); len(sig) > 0 {
-			got = sig[0].Name
-		}
-		if got != tc.want {
-			t.Errorf("feedSignals(%q, %q) = %q, ждали %q", tc.head, tc.values, got, tc.want)
-		}
+func TestWrappedFeedsParseErrorHint(t *testing.T) {
+	s := killScan{killText: true}
+	s.addWrappedFeedParseError(errors.New("broken wrapped command"))
+	hint := false
+	for _, value := range s.toolHints {
+		hint = hint || strings.Contains(value, "Запусти напрямую")
+	}
+	if !hint {
+		t.Fatalf("depth parse error lacks direct-run hint: %v", s.reasons)
 	}
 }

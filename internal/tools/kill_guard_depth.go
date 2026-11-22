@@ -57,6 +57,9 @@ func depthSignal(c shellcmd.Call) (name string, ok bool) {
 	return c.Name, false
 }
 func (s *killScan) depthReason(c shellcmd.Call, calls []shellcmd.Call) string {
+	if c.Name == "run0" && c.Offset < 0 && strings.ContainsAny(c.Raw, "$`") && visibleRun0Signal(c) {
+		return "имя команды вычисляется при запуске, а в тексте видна команда сигнала: такую форму хук не разбирает"
+	}
 	if wrapperLevels(c.Via) < 2 || slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
 		return ""
 	}
@@ -171,6 +174,14 @@ func signalWords(text string) (string, bool) {
 	}
 	return "", false
 }
+func visibleRun0Signal(c shellcmd.Call) bool {
+	calls, _ := shellcmd.Calls(literalShellWords(c.Args))
+	for _, r := range c.Redirs {
+		more, _ := shellcmd.Calls(r.Target + "\n" + r.Body)
+		calls = append(calls, more...)
+	}
+	return slices.ContainsFunc(calls, func(c shellcmd.Call) bool { _, ok := depthSignal(c); return ok && !harmlessDepthSignal(c) })
+}
 func (s *killScan) feedCall(c shellcmd.Call, calls []shellcmd.Call) error {
 	if !slices.Contains(feeders, c.Name) || slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
 		return nil
@@ -199,19 +210,14 @@ func (s *killScan) feedCall(c shellcmd.Call, calls []shellcmd.Call) error {
 				s.addToolReason(via+": видимая команда "+name+" из ввода feeder не разобрана", depthHint, false)
 			}
 		} else {
-			var sourceSignals []shellcmd.Call
-			visiblePattern := false
-			for i := range source {
-				if _, ok := depthSignal(source[i]); ok {
-					sourceSignals = append(sourceSignals, source[i])
-					visiblePattern = visiblePattern || source[i].Name != "kill" && !harmlessDepthSignal(source[i])
-				}
-			}
-			before := len(s.reasons)
+			sourceSignals := slices.DeleteFunc(source, func(c shellcmd.Call) bool {
+				_, ok := depthSignal(c)
+				return !ok || harmlessDepthSignal(c)
+			})
 			if err := s.callFeedSignals(c, calls, sourceSignals); err != nil {
 				return err
 			}
-			if len(s.reasons) > before || visiblePattern {
+			if len(sourceSignals) > 0 {
 				s.feedDeny(c, sourceSignals, text)
 			}
 		}
@@ -246,13 +252,10 @@ func (s *killScan) feedShownInput(c shellcmd.Call) string {
 }
 func (s *killScan) scanFeederCalls(c shellcmd.Call, calls []shellcmd.Call, head, values []string, sig []shellcmd.Call, literal bool, text string) error {
 	if !literal {
-		before := len(s.reasons)
 		if err := s.callFeedSignals(c, calls, sig); err != nil {
 			return err
 		}
-		if len(s.reasons) == before {
-			s.feedDeny(c, sig, text)
-		}
+		s.feedDeny(c, sig, text)
 		return nil
 	}
 	if len(sig) == 0 && slices.ContainsFunc(head, func(a string) bool {

@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"errors"
 	"strings"
 	"testing"
 )
@@ -32,6 +31,9 @@ func TestKillGuardDepthBlocks(t *testing.T) {
 		`sudo parallel kill ::: 455274`,
 		// имя команды вычисляется при запуске, команда сигнала видна
 		`timeout 5 sudo $(echo kill) 455274`,
+		`R=run0; $R bash <<< 'kill 1'`,
+		"R=run0; $R bash <<'E'\nkill 1\nE",
+		`R=run0; $R bash -c 'kill 1'`,
 		// сигнал с целями или командой из нелитерального источника
 		`parallel -a units.txt systemctl --user stop`,
 		`cat pids | parallel kill`,
@@ -41,6 +43,8 @@ func TestKillGuardDepthBlocks(t *testing.T) {
 		`systemd-run --user parallel :::: +- <<< 'kill 12345'`,
 		`parallel -a - ::: -9 ::: -1 <<< kill`,
 		`parallel -a - ::: 1 <<< kill`,
+		`parallel :::: - <<< 'kill 455274'`,
+		`xargs kill <<< 1`,
 		`printf 'kill -9 1\n' | parallel`,
 		`parallel <<< 'kill -9 1'`,
 		`printf 'pkill -f firefox\n' | parallel`,
@@ -98,7 +102,6 @@ func TestKillGuardDepthAllows(t *testing.T) {
 		`bash -c 'kill 455274'`,
 		`timeout 5 kill 455274`,
 		`parallel kill ::: 455274`,
-		`parallel :::: - <<< 'kill 455274'`,
 		`parallel -I XX 'systemctl --user restart XX' ::: foo`,
 		`echo make | parallel 'pkexec bash -c'; kill -l`,
 		`systemd-run --user parallel ::: echo ::: a b`,
@@ -219,13 +222,11 @@ func TestWrapperLevels(t *testing.T) {
 // Начало команды parallel ищется за опциями: слово сразу за опцией может
 // быть её значением
 func TestWrappedFeedsParseErrorHint(t *testing.T) {
-	s := killScan{killText: true}
-	s.addWrappedFeedParseError(errors.New("broken wrapped command"))
-	hint := false
-	for _, value := range s.toolHints {
-		hint = hint || strings.Contains(value, "Запусти напрямую")
+	r := validateKill(t, "# kill\nbash -c 'echo \"oops' parallel true")
+	if r.IsValid {
+		t.Fatal("unparseable nested wrapper should be rejected")
 	}
-	if !hint {
-		t.Fatalf("depth parse error lacks direct-run hint: %v", s.reasons)
+	if !strings.Contains(strings.Join(r.Suggestions, "\n"), "Запусти напрямую") {
+		t.Fatalf("pre-tool-use parse refusal lacks direct-run hint: %v", r.Suggestions)
 	}
 }

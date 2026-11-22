@@ -113,7 +113,6 @@ func TestKillGuardFeederDepthAndSources(t *testing.T) {
 		}
 	}
 	for _, command := range []string{
-		`parallel :::: - <<< 'kill 12345'`,
 		`cat a.sh | parallel systemd-run --user --pipe bash`,
 		`systemd-run --user sem --wait kill 12345`,
 		`ssh host systemd-run --user parallel kill 12345`,

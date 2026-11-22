@@ -7,6 +7,8 @@ gate:
   # glint падает кодом выхода на находках high и выше (fail_on по умолчанию).
   - task: glint
 
+staticcheck: {enabled: true}
+
 tools:
   glint:
     go_install: github.com/aiseeq/glint/cmd/glint

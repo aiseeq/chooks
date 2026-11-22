@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/hookctx"
 )
@@ -94,12 +95,9 @@ var (
 	dirnameOrCd    = regexp.MustCompile(`^\s*(?:cd|dirname)\s+(?:--?\w*\s+)*([^\s;&|]*)`)
 	normallySet    = map[string]bool{"HOME": true, "USERPROFILE": true, "XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_CACHE_HOME": true, "XDG_STATE_HOME": true, "XDG_RUNTIME_DIR": true, "PWD": true, "OLDPWD": true, "TMPDIR": true, "TMP": true, "TEMP": true}
 	rmKeywords     = map[string]bool{"do": true, "then": true, "else": true, "elif": true, "if": true, "while": true, "until": true, "!": true, "coproc": true, "done": true, "fi": true, "esac": true}
-	rmWrappers     = map[string]bool{"sudo": true, "doas": true, "exec": true, "command": true, "env": true, "nice": true, "nohup": true, "busybox": true, "time": true, "timeout": true, "stdbuf": true, "setsid": true, "ionice": true, "pkexec": true, "runuser": true, "xargs": true, "unbuffer": true}
 	inlineShells   = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true}
 	declarers      = map[string]bool{"export": true, "declare": true, "typeset": true, "readonly": true, "local": true}
 	dirChangers    = map[string]bool{"cd": true, "pushd": true, "popd": true, "chdir": true}
-	cdWrappers     = map[string]bool{"time": true, "timeout": true, "nice": true, "nohup": true, "env": true, "command": true, "builtin": true, "stdbuf": true, "noglob": true}
-	duration       = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?[smhd]?$`)
 )
 
 // ValidateTool проверяет цели rm и rmdir в команде Bash
@@ -517,11 +515,7 @@ func commandWords(words []shWord) []shWord {
 		strings.HasPrefix(words[i].raw, "$") || strings.HasPrefix(words[i].raw, string(substMark))) {
 		i++
 	}
-	i = skipWrappers(words, i)
-	if i >= len(words) {
-		return nil
-	}
-	return words[i:]
+	return wrappedCommandWords(words, i, false)
 }
 
 // checkCommand возвращает причины отказа для одной простой команды
@@ -552,45 +546,84 @@ func (t *RmGuardTool) checkCommand(words []shWord, v *rmVars, src inline) []stri
 	return nil
 }
 
-// skipWrappers пропускает sudo, timeout, xargs и подобные с их флагами
-func skipWrappers(words []shWord, i int) int {
-	for i < len(words) && rmWrappers[commandName(words[i].raw)] {
-		i++
-		for n := wrapperArgLen(words, i); n > 0; n = wrapperArgLen(words, i) {
-			i += n
+// wrappedCommandWords пропускает только ведущие слова оболочки, после которых
+// shellcmd сообщает реальный вызов и его смещение. Слова остаются исходными
+// shWord, чтобы проверки целей использовали прежнее представление кавычек и
+// подстановок.
+func wrappedCommandWords(words []shWord, start int, cdRule bool) []shWord {
+	if start >= len(words) {
+		return nil
+	}
+	var source strings.Builder
+	offsets := make(map[int]int, len(words)-start)
+	for i := start; i < len(words); i++ {
+		if i > start {
+			source.WriteByte(' ')
+		}
+		offsets[source.Len()] = i
+		source.WriteString(words[i].raw)
+	}
+	calls, err := shellcmd.Calls(source.String())
+	if err != nil {
+		return words[start:]
+	}
+	// shellcmd также возвращает вызовы из `sh -c` и `find -exec`. Эти
+	// вложенные команды rm guard разбирает собственными проверками и не должен
+	// принимать за снятие внешней обёртки.
+	var root *shellcmd.Call
+	for i := range calls {
+		call := &calls[i]
+		if call.Offset < 0 || len(call.Via) != 0 {
+			continue
+		}
+		if root == nil || call.Offset < root.Offset {
+			root = call
 		}
 	}
-	return i
-}
-
-// wrapperArgLen сколько слов с позиции i — флаги и значения обёртки
-// (sudo -u root, timeout 5), 0 — дальше сама команда
-func wrapperArgLen(words []shWord, i int) int {
-	if i >= len(words) || startsCommand(words[i].raw) {
-		return 0
+	if root != nil && (shellcmd.IsShell(root.Name) || root.Name == "find") {
+		return words[start:]
 	}
-	w := words[i].raw
-	switch {
-	case words[i].redirect:
-		return 1
-	case strings.HasPrefix(w, "-"):
-		if i+1 < len(words) {
-			next := words[i+1].raw
-			if !strings.HasPrefix(next, "-") && !strings.Contains(next, "=") && !startsCommand(next) {
-				return 2 // флаг со значением
+	var first *shellcmd.Call
+	for i := range calls {
+		call := &calls[i]
+		if len(call.Via) == 0 || call.Offset < 0 {
+			continue
+		}
+		if cdRule {
+			preserve := false
+			for _, wrapper := range call.Via {
+				if wrapper == "sudo" || wrapper == "xargs" {
+					preserve = true
+					break
+				}
+			}
+			if preserve {
+				return words[start:]
 			}
 		}
-		return 1
-	case assignWord.MatchString(w) || (w != "" && w[0] >= '0' && w[0] <= '9') || strings.HasPrefix(w, "$"):
-		return 1
+		if first == nil || len(call.Via) < len(first.Via) || len(call.Via) == len(first.Via) && call.Offset < first.Offset {
+			first = call
+		}
 	}
-	return 0
-}
-
-// startsCommand слово — rm, rmdir или ещё одна обёртка
-func startsCommand(raw string) bool {
-	name := commandName(raw)
-	return name == "rm" || name == "rmdir" || rmWrappers[name]
+	if first == nil {
+		return words[start:]
+	}
+	wordIndex, ok := offsets[first.Offset]
+	if !ok {
+		// Offset может указывать внутрь токена после раскрытия shellcmd;
+		// сопоставляем его с началом содержащего слова.
+		bestOffset := -1
+		for offset, index := range offsets {
+			if offset <= first.Offset && offset > bestOffset {
+				wordIndex, ok = index, true
+				bestOffset = offset
+			}
+		}
+	}
+	if !ok || wordIndex < start {
+		return words[start:]
+	}
+	return words[wordIndex:]
 }
 
 // checkInline разбирает строку eval, trap или sh -c как отдельную команду
@@ -1037,16 +1070,7 @@ func cdCommandWords(words []shWord) []shWord {
 	for i < len(words) && (assignWord.MatchString(words[i].raw) || words[i].redirect) {
 		i++
 	}
-	for i < len(words) && cdWrappers[commandName(words[i].raw)] {
-		i++
-		for i < len(words) && (strings.HasPrefix(words[i].raw, "-") || assignWord.MatchString(words[i].raw) || duration.MatchString(words[i].raw)) {
-			i++
-		}
-	}
-	if i >= len(words) {
-		return nil
-	}
-	return words[i:]
+	return wrappedCommandWords(words, i, true)
 }
 
 // withInlineScripts команды вместе с командами скриптов sh -c '…': Claude Code

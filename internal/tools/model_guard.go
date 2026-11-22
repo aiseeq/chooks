@@ -371,7 +371,9 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
 		logger.Warn("model_guard: присваивания пути не разобраны", "name", name, "error", err)
-		return nil, false
+		// bash исполнит разобранное начало (незакрытый here-doc): имя в
+		// неразобранной команде — «не проверить», без имени присваивания нет
+		return nil, strings.Contains(command, name)
 	}
 	var values []string
 	dynamic := false
@@ -487,12 +489,12 @@ func shellEnvCallDeclaration(call *syntax.CallExpr, command, name string, add fu
 
 func shellEnvCallValues(command, name string) ([]string, bool, error) {
 	calls, err := shellcmd.Calls(command)
-	if err != nil {
-		return nil, false, fmt.Errorf("shellcmd calls: %w", err)
-	}
 	via := shellEnvWrapperVia(calls)
 	if !via["env"] && !via["sudo"] && !via["systemd-run"] {
 		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("shellcmd calls: %w", err)
 	}
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
@@ -639,10 +641,10 @@ func systemdRunAssignments(args []*syntax.Word) []string {
 		if arg == "-E" || arg == "--setenv" {
 			i++
 			if i < len(args) {
-			value, ok := literalValue(args[i])
-			if ok {
-				assignments = append(assignments, value)
-			}
+				value, ok := literalValue(args[i])
+				if ok {
+					assignments = append(assignments, value)
+				}
 			}
 			continue
 		}

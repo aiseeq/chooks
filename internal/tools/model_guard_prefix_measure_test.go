@@ -57,6 +57,10 @@ func TestMeasureShellPrefix(t *testing.T) {
 		{"unset CLAUDE_CODE_SHELL_PREFIX", true},
 		{"echo " + bad, true},
 		{"env CLAUDE_CODE_SHELL_PREFIX= bash launch.sh", true},
+		// неразобранный хвост не прячет присваивание: bash исполнит начало
+		{"env " + bad + " bash launch.sh <<EOF", false},
+		{"env " + bad + " bash launch.sh; echo $((", false},
+		{"echo ok <<EOF", true},
 		// env за обёртками, которые его прячут от поиска по имени вызова
 		{"exec env " + bad + " bash launch.sh", false},
 		{"exec env -i HOME=/home/x " + bad + " bash launch.sh", false},

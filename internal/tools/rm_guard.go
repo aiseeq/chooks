@@ -716,7 +716,7 @@ func cdGlobReasons(s *shScript, cwd string) []string {
 			if w.redirect || strings.HasPrefix(w.raw, "-") || !relativeDirGlob(w.text) {
 				continue
 			}
-			if claude330AllowsCdGlob(cmds, w, cwd, rmCommandIndex) {
+			if !multiLevelDirGlob(w.text) && claude330AllowsCdGlob(cmds, w, cwd, rmCommandIndex) {
 				continue
 			}
 			absolute := "/полный/путь/" + strings.TrimPrefix(unquoteWord(w.text), "./")
@@ -746,6 +746,16 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 	if cdCount > 1 {
 		for _, c := range cmds[1:] {
 			if c.sep != "&&" {
+				return false
+			}
+		}
+	}
+	// dIe проверяет всю цепочку, в том числе операции после rm. Для
+	// абсолютного cd отдельная проверка может пропустить форму с одним ';'
+	// между cd и rm, но не восстанавливает цепочку cd && rm; следующая команда.
+	if cdCount == 1 && cmds[rmIndex].sep == "&&" {
+		for _, c := range cmds[rmIndex+1:] {
+			if c.sep == ";" || c.sep == "\n" || c.sep == "||" || c.sep == "&" {
 				return false
 			}
 		}
@@ -807,7 +817,26 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 	if mode == "relative" && (strings.HasSuffix(target.text, "/") || hasParentSegment(globPath)) {
 		return false
 	}
+	if mode == "absolute" && cmds[rmIndex].sep != "&&" && strings.HasSuffix(globPath, "/") {
+		return false
+	}
 	return !(mode == "absolute" && strings.HasSuffix(target.text, "/") && hasParentSegment(globPath))
+}
+
+// multiLevelDirGlob соответствует g0: к числу завершающих /* прибавляется
+// число компонентов с глобом в оставшейся относительной части пути.
+func multiLevelDirGlob(text string) bool {
+	p := path.Clean(unquoteWord(text))
+	base := globTail.ReplaceAllString(p, "")
+	if base == p {
+		return false
+	}
+	for part := range strings.SplitSeq(base, "/") {
+		if strings.ContainsAny(part, "*?[") {
+			return true
+		}
+	}
+	return strings.Count(strings.TrimPrefix(p, base), "/") > 1
 }
 
 func pathWithin(base, p string) bool {

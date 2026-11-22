@@ -629,6 +629,42 @@ func TestRmGuard330HomeWorkspace(t *testing.T) {
 			t.Errorf("cwd=%s: deny=%v, ожидалось %v", tc.cwd, !result.IsValid, tc.deny)
 		}
 	}
+	const sandboxHome = "/home/aisee/.cache/claude-tmp/rmcc330/home"
+	tool.lookupEnv = func(name string) (string, bool) {
+		if name == "HOME" {
+			return sandboxHome, true
+		}
+		return "", false
+	}
+	r := validateRmWith(t, tool, `false && rm -rf $HOME/.cache/*`, sandboxHome+"/.cache/w")
+	if r.IsValid {
+		t.Error("удаление предка cwd песочницы должно отклоняться")
+	}
+}
+
+// TestRmGuard330SingleCdChainAndGlobs проверяет три условия из g0 и dIe.
+func TestRmGuard330SingleCdChainAndGlobs(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		deny    bool
+	}{
+		{`cd /home/u/proj/build && rm -f logs/*; echo done`, true},
+		{`cd ./build && rmdir cache/*; printf done`, true},
+		{`cd ./build && rm -f logs/* && echo done`, false},
+		{`cd /home/u/proj/build; rm -rf logs/*/`, true},
+		{`cd /home/u/proj/work; rmdir cache/*/`, true},
+		{`cd /home/u/proj/build; rm -rf logs/*`, false},
+		{`cd /home/u/proj/build && rm -rf logs/*/`, false},
+		{`cd . && rm -f */logs/*`, true},
+		{`cd . && rmdir ?/cache/*`, true},
+		{`cd . && rm -f */logs`, false},
+		{`cd . && rm -f logs/*.txt`, false},
+	} {
+		r := validateRm(t, tc.command)
+		if r.IsValid == tc.deny {
+			t.Errorf("deny=%v, ожидалось %v: %q %v", !r.IsValid, tc.deny, tc.command, r.Suggestions)
+		}
+	}
 }
 
 // TestRmGuardCdGlobStricter сохраняет намеренно строгие формы, не входившие

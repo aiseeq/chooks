@@ -58,7 +58,7 @@ func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Con
 		return
 	}
 
-	checker := skillreload.Checker{StateDir: stateDir, CWD: request.Cwd, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
+	checker := skillreload.Checker{StateDir: stateDir, Abs: request.Abs, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
 	var result skillreload.Result
 	err = nil
 	if awaitSkillCheck(timer, logger, eventName, input, func() {

@@ -46,7 +46,7 @@ type tracker struct {
 	state       *sessionState
 	store       textStore
 	view        viewer
-	resolvePath func(string) (string, error)
+	resolvePath func(string) string
 }
 
 // apply применяет событие транскрипта к записи
@@ -369,11 +369,7 @@ func (t tracker) check(w *watched) (candidate, bool, error) {
 		w.Deferred = ""
 		return candidate{}, false, nil
 	}
-	announced, err := t.announcedBySchema1(w, view)
-	if err != nil {
-		return candidate{}, false, err
-	}
-	if announced {
+	if t.announcedBySchema1(w, view) {
 		base, err := t.store.put(view.Text)
 		w.Base = base
 		return candidate{}, false, err
@@ -424,22 +420,14 @@ func (t tracker) check(w *watched) (candidate, bool, error) {
 
 // announcedBySchema1 — эту правку уже объявила хук схемы 1 («вызови
 // заново»): второй раз её не показывать
-func (t tracker) announcedBySchema1(w *watched, view fileView) (bool, error) {
+func (t tracker) announcedBySchema1(w *watched, view fileView) bool {
 	notified, ok := t.state.Announced[w.Path]
 	if !ok {
-		return false, nil
+		return false
 	}
 	delete(t.state.Announced, w.Path)
-	path := w.Path
-	if t.resolvePath != nil {
-		var err error
-		path, err = t.resolvePath(path)
-		if err != nil {
-			return false, err
-		}
-	}
-	raw, err := readSkillFile(filepath.Dir(path))
-	return err == nil && contentHash(raw.Raw) == notified && renderBody(raw.Raw, w.Dir) == view.Text, nil
+	raw, err := readSkillFile(filepath.Dir(pathFor(t.resolvePath, w.Path)))
+	return err == nil && contentHash(raw.Raw) == notified && renderBody(raw.Raw, w.Dir) == view.Text
 }
 
 // label — имя файла в заголовке diff

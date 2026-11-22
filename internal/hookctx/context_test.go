@@ -1,7 +1,6 @@
 package hookctx
 
 import (
-	"path/filepath"
 	"testing"
 )
 
@@ -21,10 +20,11 @@ func TestRequestEnvironmentSnapshot(t *testing.T) {
 	if got := ctx.Getenv("VALUE"); got != "a=b" {
 		t.Fatalf("VALUE = %q", got)
 	}
-	if got := ctx.Abs("a/../b"); got != filepath.Join("/request", "b") {
+	// Без чистки: что значит .., решает ОС по симлинкам (TestAbsOpensWhatOSOpens)
+	if got := ctx.Abs("a/../b"); got != "/request/a/../b" {
 		t.Fatalf("relative path = %q", got)
 	}
-	if got := ctx.Abs("/other"); got != "/other" {
+	if got := ctx.Abs("/other//x/.."); got != "/other//x/.." {
 		t.Fatalf("absolute path = %q", got)
 	}
 }

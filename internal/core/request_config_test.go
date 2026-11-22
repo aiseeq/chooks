@@ -57,3 +57,33 @@ func TestLoadConfigForRequestRelativeFromRequestCwd(t *testing.T) {
 		t.Errorf("got %+v, want the request cwd config", got.Logger)
 	}
 }
+
+// --config link/../config.yaml запроса демона: ОС идёт через цель симлинка,
+// и конфиг читается оттуда, а не из лексически очищенного cwd/config.yaml
+func TestLoadConfigForRequestSymlinkDotDot(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	inside := filepath.Join(root, "other", "inside")
+	if err := os.MkdirAll(inside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(inside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	for path, level := range map[string]string{filepath.Join(root, "other", "config.yaml"): "error", filepath.Join(root, "config.yaml"): "warn"} {
+		if err := os.WriteFile(path, []byte("logger:\n  level: "+level+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := hookctx.New(nil, nil, nil, []string{"HOME=" + root}, root, 1, 2)
+	got, err := LoadConfigForRequest("link/../config.yaml", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Logger.Level != "error" {
+		t.Errorf("level %q: read the lexically cleaned config, want the one behind the symlink", got.Logger.Level)
+	}
+}

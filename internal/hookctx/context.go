@@ -90,19 +90,32 @@ func (c Context) Getenv(key string) string {
 	return value
 }
 
-// Abs resolves a relative path using the hook's working directory. A request
-// of this very process (FromProcess) keeps the path relative: the OS resolves
-// it from the same cwd, and error texts name it as the env or config gave it,
-// as the CLI always did. Any other request (a daemon serving a hook) joins it
-// to the request cwd, since the executor's cwd belongs to nobody's hook.
+// Abs gives the path that opens, from the executor, the file the OS would open
+// for this path from the hook's cwd. Nothing is cleaned: with a symlink
+// link/../x is not x. An absolute path and any path of this very process's
+// request (FromProcess, the CLI) stay exactly as given: the OS resolves a
+// relative one from the same cwd, and error texts name it as the env or
+// config gave it. A relative path of another request (a daemon serving a
+// hook) is appended to the request cwd with the symlinks of the cwd itself
+// resolved: callers join and clean further (filepath.Join(home, ".claude")),
+// and a leading .. then must step out of the directory the OS stands in, not
+// out of a symlink's name. A cwd that does not resolve is used as given.
 func (c Context) Abs(path string) string {
 	if filepath.IsAbs(path) {
-		return filepath.Clean(path)
+		return path
 	}
 	if c.process {
 		return path
 	}
-	return filepath.Join(c.Cwd, path)
+	if c.Cwd == "" {
+		return path
+	}
+	dir, err := filepath.EvalSymlinks(c.Cwd)
+	if err != nil {
+		//nolint:fallback-return // cwd без каталога или прав берётся как дал запрос: ОС от него откроет путь или вернёт ошибку открытия, симлинки cwd нужны лишь для чистки у вызывающих
+		dir = c.Cwd
+	}
+	return strings.TrimSuffix(dir, "/") + "/" + path
 }
 
 // RuntimeDir resolves the short-lived state directory from this request.

@@ -30,14 +30,11 @@ type fileView struct {
 // viewer — файл в момент проверки: на диске у хука, по истории в сухом прогоне
 type viewer func(kind, path string) (fileView, error)
 
-func pathForCWD(cwd, path string) (string, error) {
-	if filepath.IsAbs(path) {
-		return path, nil
+func pathFor(abs func(string) string, path string) string {
+	if abs == nil {
+		return path
 	}
-	if !filepath.IsAbs(cwd) {
-		return "", fmt.Errorf("cannot resolve relative path %q without request cwd", path)
-	}
-	return filepath.Join(cwd, path), nil
+	return abs(path)
 }
 
 // diskView читает отслеживаемый файл с диска. Отсутствующий файл — не ошибка:

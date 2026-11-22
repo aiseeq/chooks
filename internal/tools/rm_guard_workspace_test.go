@@ -66,6 +66,7 @@ func TestRmGuardWorkspaceMatchesClaudeCode(t *testing.T) {
 		{proj, `rm -rf /home/u/lab/proj/*`, true},
 		{proj, `rm -rf *`, true},
 		{proj, `rm -rf .`, true},
+		{proj, `unbuffer -noecho rm -rf .`, true},
 		{proj, `rm -rf /home/u/lab/extra`, false},
 		{proj + "/sub", `rm -rf /home/u/lab/proj/sub`, true},
 		{proj + "/sub", `rm -rf /home/u/lab/proj/sub/deep`, false},

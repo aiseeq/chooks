@@ -87,7 +87,7 @@ var (
 	dirnameOrCd    = regexp.MustCompile(`^\s*(?:cd|dirname)\s+(?:--?\w*\s+)*([^\s;&|]*)`)
 	normallySet    = map[string]bool{"HOME": true, "USERPROFILE": true, "XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_CACHE_HOME": true, "XDG_STATE_HOME": true, "XDG_RUNTIME_DIR": true, "PWD": true, "OLDPWD": true, "TMPDIR": true, "TMP": true, "TEMP": true}
 	rmKeywords     = map[string]bool{"do": true, "then": true, "else": true, "elif": true, "if": true, "while": true, "until": true, "!": true, "coproc": true, "done": true, "fi": true, "esac": true}
-	rmWrappers     = map[string]bool{"sudo": true, "doas": true, "exec": true, "command": true, "env": true, "nice": true, "nohup": true, "busybox": true, "time": true, "timeout": true, "stdbuf": true, "setsid": true, "ionice": true, "pkexec": true, "runuser": true, "xargs": true}
+	rmWrappers     = map[string]bool{"sudo": true, "doas": true, "exec": true, "command": true, "env": true, "nice": true, "nohup": true, "busybox": true, "time": true, "timeout": true, "stdbuf": true, "setsid": true, "ionice": true, "pkexec": true, "runuser": true, "xargs": true, "unbuffer": true}
 	inlineShells   = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true}
 	declarers      = map[string]bool{"export": true, "declare": true, "typeset": true, "readonly": true, "local": true}
 	dirChangers    = map[string]bool{"cd": true, "pushd": true, "popd": true, "chdir": true}

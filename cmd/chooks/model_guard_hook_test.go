@@ -41,6 +41,7 @@ func TestPreToolUseModelOverrides(t *testing.T) {
 		{"heredoc multiple values", "cat > .claude/settings.json <<'EOF'\n{\"modelOverrides\":{\"a\":\"opus\",\"claude-opus-5-5\":\"fable\"}}\nEOF\nclaude --model opus", true, "не одобрена"},
 		// запись без запуска claude не судится: имя settings.json носят и чужие файлы
 		{"foreign settings write", "cat > app/settings.json <<'EOF'\n{\"model\":\"gpt-4o\"}\nEOF", false, ""},
+		{"overrides not object", `claude --settings '{"modelOverrides":"claude-haiku-5-5"}' --model opus`, true, "модель не проверить"},
 		{"approved override", `claude --settings '{"modelOverrides":{"claude-opus-5-5":"opus"}}' --model opus`, false, ""},
 		{"without overrides", `claude --settings '{"model":"opus"}' --model opus`, false, ""},
 	}

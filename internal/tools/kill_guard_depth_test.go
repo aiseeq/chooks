@@ -66,6 +66,31 @@ func TestKillGuardDepthBlocks(t *testing.T) {
 	}
 }
 
+func TestDynamicWrapperInputHint(t *testing.T) {
+	for _, wrapper := range []string{"run0", "sudo", "pkexec", "doas"} {
+		for _, name := range []string{"$R", `"$R"`, "${R}"} {
+			for _, input := range []struct {
+				mode, script string
+			}{
+				{"-c", `-c 'kill 1'`},
+				{"here-string", `<<< 'kill 1'`},
+				{"heredoc", "<<'E'\nkill 1\nE"},
+			} {
+				command := "R=" + wrapper + "; " + name + " sh " + input.script
+				t.Run(wrapper+"/"+name+"/"+input.mode, func(t *testing.T) {
+					r := validateKill(t, command)
+					if r.IsValid {
+						t.Fatalf("динамическое имя обёртки с видимым сигналом должно блокироваться: %s", command)
+					}
+					if !strings.Contains(strings.Join(r.Suggestions, "\n"), "Запусти напрямую") {
+						t.Fatalf("нет подсказки прямого запуска: %s: %v", command, r.Suggestions)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestKillGuardRun0UnreadInput(t *testing.T) {
 	for _, command := range []string{
 		`exec < <(echo kill 6159); run0 bash`,

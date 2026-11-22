@@ -12,7 +12,7 @@ import (
 
 const depthHint = "Запусти напрямую: сигнал или остановку — отдельной командой без обёрток (kill 12345, systemctl --user stop имя.service), цель найди отдельной командой заранее (pgrep -a '[x]yz', systemctl --user list-units)"
 
-var run0WordRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])run0([^[:alnum:]_.-]|$)`)
+var run0WordRe, dynamicCommandNameRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])run0([^[:alnum:]_.-]|$)`), regexp.MustCompile(`^\s*"?\$([[:alpha:]_][[:alnum:]_]*|\{[[:alpha:]_][[:alnum:]_]*\})"?($|[[:space:]])`)
 var notLevels = []string{"-c", "--command", "pipe", "command", "builtin", "exec", "time", "eval", "-exec", "-execdir", "-ok", "-okdir"}
 
 func wrapperLevels(via []string) int {
@@ -57,7 +57,7 @@ func depthSignal(c shellcmd.Call) (name string, ok bool) {
 	return c.Name, false
 }
 func (s *killScan) depthReason(c shellcmd.Call, calls []shellcmd.Call) string {
-	if c.Name == "run0" && c.Offset < 0 && strings.ContainsAny(c.Raw, "$`") && visibleRun0Signal(c) {
+	if c.Offset < 0 && dynamicCommandNameRe.MatchString(c.Raw) && visibleDynamicSignal(c) {
 		return "имя команды вычисляется при запуске, а в тексте видна команда сигнала: такую форму хук не разбирает"
 	}
 	if wrapperLevels(c.Via) < 2 || slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
@@ -174,7 +174,7 @@ func signalWords(text string) (string, bool) {
 	}
 	return "", false
 }
-func visibleRun0Signal(c shellcmd.Call) bool {
+func visibleDynamicSignal(c shellcmd.Call) bool {
 	calls, _ := shellcmd.Calls(literalShellWords(c.Args))
 	for _, r := range c.Redirs {
 		more, _ := shellcmd.Calls(r.Target + "\n" + r.Body)

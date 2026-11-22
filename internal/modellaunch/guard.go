@@ -290,6 +290,9 @@ func (c *check) classify(claudePID int) (agent bool, basis string, complete bool
 	if found {
 		return true, basis + ancestorBasis, true
 	}
+	if c.userClScope(claudePID, parent) {
+		return false, basis + "cl_scope_matches_pid_with_tty", true
+	}
 	if c.detachedAgent(claudePID, parent) {
 		return true, basis + "agent_scope_parent_not_cl", true
 	}
@@ -305,16 +308,78 @@ func (c *check) detachedAgent(pid, parent int) bool {
 		return false
 	}
 	comm, err := c.proc.Comm(parent)
-	return err == nil && strings.TrimSpace(comm) != "cl"
+	if err != nil || strings.TrimSpace(comm) != "cl" {
+		return err == nil
+	}
+	grandparent, err := c.proc.Parent(parent)
+	return err == nil && grandparent <= 1
 }
 
-func (c *check) nonInteractiveAgent(pid int) bool {
+// userClScope recognizes cl -p's systemd scope: cl execs systemd-run and
+// becomes Claude, so the scope carries Claude's own PID while the user tty
+// and shell remain attached.
+func (c *check) userClScope(pid, parent int) bool {
 	tty, err := c.proc.TTYNr(pid)
-	if err != nil || tty != 0 {
+	if err != nil {
+		c.logger.Warn("modellaunch: tty процесса claude не прочитан", "pid", pid, "error", err)
+		return false
+	}
+	if tty == 0 {
 		return false
 	}
 	cgroup, err := c.proc.Cgroup(pid)
-	return err == nil && !inInteractiveScope(cgroup)
+	if err != nil {
+		c.logger.Warn("modellaunch: cgroup процесса claude не прочитан", "pid", pid, "error", err)
+		return false
+	}
+	for part := range strings.SplitSeq(cgroupPath(cgroup), "/") {
+		if !strings.HasPrefix(part, "agent-") || !strings.HasSuffix(part, ".scope") {
+			continue
+		}
+		unit := strings.TrimSuffix(strings.TrimPrefix(part, "agent-"), ".scope")
+		fields := strings.Split(unit, "-")
+		if len(fields) == 0 || fields[len(fields)-1] != strconv.Itoa(pid) {
+			continue
+		}
+		if len(fields) > 1 && strings.HasPrefix(fields[len(fields)-1], "r") {
+			continue
+		}
+		parentPID, err := c.proc.Parent(pid)
+		if err != nil {
+			c.logger.Warn("modellaunch: родитель процесса claude не прочитан", "pid", pid, "error", err)
+			return false
+		}
+		if parentPID == parent {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *check) nonInteractiveAgent(pid int) bool {
+	cgroup, err := c.proc.Cgroup(pid)
+	if err != nil {
+		c.logger.Warn("modellaunch: cgroup процесса claude не прочитан", "pid", pid, "error", err)
+		return false
+	}
+	if inInteractiveScope(cgroup) {
+		return false
+	}
+	tty, err := c.proc.TTYNr(pid)
+	if err != nil {
+		c.logger.Warn("modellaunch: tty процесса claude не прочитан", "pid", pid, "error", err)
+		return false
+	}
+	return tty == 0 || inRunService(cgroup)
+}
+
+func inRunService(cgroup string) bool {
+	for part := range strings.SplitSeq(cgroupPath(cgroup), "/") {
+		if strings.HasPrefix(part, "run-") && strings.HasSuffix(part, ".service") {
+			return true
+		}
+	}
+	return false
 }
 
 func cgroupPath(cgroup string) string {
@@ -339,7 +404,7 @@ func inAgentScope(cgroup string) bool {
 
 func inInteractiveScope(cgroup string) bool {
 	for part := range strings.SplitSeq(cgroupPath(cgroup), "/") {
-		if (strings.HasPrefix(part, "session-") || strings.HasPrefix(part, "app-")) && strings.HasSuffix(part, ".scope") {
+		if (strings.HasPrefix(part, "session-") && strings.HasSuffix(part, ".scope")) || (strings.HasPrefix(part, "app-") && (strings.HasSuffix(part, ".scope") || strings.HasSuffix(part, ".service"))) {
 			return true
 		}
 	}

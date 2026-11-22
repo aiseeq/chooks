@@ -405,7 +405,14 @@ func TestRuntimeDetachedLaunchClassification(t *testing.T) {
 		{"Chrome app scope without tty", "0::/user.slice/app-com.google.Chrome-456.scope", "chrome", 0},
 	} {
 		t.Run("user "+tc.name, func(t *testing.T) {
-			wantPass(t, makeTree("fable", tc.cgroup, tc.tty, tc.parent))
+			f := makeTree("fable", tc.cgroup, tc.tty, tc.parent)
+			// In a user's cl session the cl parent has a live shell above it;
+			// an orphaned cl is the detached agent form.
+			if tc.parent == "cl" {
+				f.add(80, 70, "/usr/bin/bash", nil, []string{"bash"})
+				f.tty[80] = tc.tty
+			}
+			wantPass(t, f)
 		})
 	}
 }

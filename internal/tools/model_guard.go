@@ -119,10 +119,10 @@ func (t *ModelGuardTool) validateShellPrefix(input *core.ToolInput) *core.Valida
 	reason, err := shellPrefixViolation(input.Command, t.Logger())
 	if err != nil {
 		t.Logger().Warn("model_guard: значение префикса хуков не удалось проверить", "error", err)
-		return t.reject(shellPrefixFailure, nil)
+		return t.rejectPrefix(shellPrefixFailure)
 	}
 	if reason != "" {
-		return t.reject(reason, nil)
+		return t.rejectPrefix(reason)
 	}
 	return nil
 }
@@ -137,6 +137,12 @@ func shellPrefixViolation(command string, logger core.Logger) (string, error) {
 		return shellPrefixFailure + "; назови литералом", nil
 	}
 	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if strings.HasPrefix(value, "~/") {
+			value = filepath.Join(os.Getenv("HOME"), value[2:])
+		}
 		if !filepath.IsAbs(value) {
 			return shellPrefixFailure, nil
 		}
@@ -149,6 +155,11 @@ func shellPrefixViolation(command string, logger core.Logger) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func (t *ModelGuardTool) rejectPrefix(reason string) *core.ValidationResult {
+	v := core.NewViolation("model_guard", reason, "", core.LevelCritical, 0, 0)
+	return core.NewValidationResult(false, []core.Violation{v}, nil)
 }
 
 // CandidateModels exposes the model values found by the same parser used for
@@ -364,6 +375,78 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 	}
 	var values []string
 	dynamic := false
+	callValues, callDynamic := shellEnvCallValues(command, name, logger)
+	values = append(values, callValues...)
+	dynamic = dynamic || callDynamic
+	nestedValues, nestedDynamic := shellNestedEnvValues(file, name, logger)
+	values = append(values, nestedValues...)
+	dynamic = dynamic || nestedDynamic
+	// shellcmd exposes wrapper payloads as argv; reparse compound argv so
+	// assignments after env survive setsid/nohup and shell -c boundaries.
+	textValues, textDynamic := shellEnvTextValues(command, name)
+	values = append(values, textValues...)
+	dynamic = dynamic || textDynamic
+	declaredValues, declaredDynamic := shellEnvDeclarations(file, command, name)
+	values = append(values, declaredValues...)
+	dynamic = dynamic || declaredDynamic
+	return values, dynamic
+}
+
+func shellNestedEnvValues(file *syntax.File, name string, logger core.Logger) ([]string, bool) {
+	var values []string
+	dynamic := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		cmd, literal := literalValue(call.Args[0])
+		if !literal || !shellcmd.IsShell(filepath.Base(cmd)) {
+			return true
+		}
+		for _, arg := range call.Args[1:] {
+			value, literal := literalValue(arg)
+			if !literal || !strings.Contains(value, name) {
+				continue
+			}
+			nested, nestedDynamic := shellEnvValues(value, name, logger)
+			values = append(values, nested...)
+			dynamic = dynamic || nestedDynamic
+		}
+		return true
+	})
+	return values, dynamic
+}
+
+func shellEnvTextValues(command, name string) ([]string, bool) {
+	var values []string
+	dynamic := false
+	if !strings.Contains(command, name) {
+		return values, dynamic
+	}
+	for _, marker := range []string{"env ", "env\t", "env -", "/env "} {
+		for at := strings.Index(command, marker); at >= 0; {
+			rest := command[at+len(marker):]
+			if _, val, ok := findEnvAssignment(rest, name); ok {
+				if strings.ContainsAny(val, "$`") {
+					dynamic = true
+				} else {
+					values = append(values, val)
+				}
+			}
+			next := strings.Index(command[at+len(marker):], marker)
+			if next < 0 {
+				break
+			}
+			at += len(marker) + next
+		}
+	}
+	return values, dynamic
+}
+
+func shellEnvDeclarations(file *syntax.File, command, name string) ([]string, bool) {
+	var values []string
+	dynamic := false
 	add := func(key, value string, literal, selfReference bool) {
 		if key != name {
 			return
@@ -377,11 +460,7 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 		values = append(values, value)
 	}
 	addAssign := func(assign *syntax.Assign) {
-		if assign == nil || assign.Name == nil {
-			return
-		}
-		if assign.Value == nil {
-			add(assign.Name.Value, "", false, false)
+		if assign == nil || assign.Name == nil || assign.Value == nil {
 			return
 		}
 		value, literal := literalValue(assign.Value)
@@ -390,48 +469,7 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch n := node.(type) {
 		case *syntax.CallExpr:
-			for _, assign := range n.Assigns {
-				addAssign(assign)
-			}
-			if len(n.Args) == 0 {
-				return true
-			}
-			cmd, ok := literalValue(n.Args[0])
-			if ok && cmd == "env" {
-				for _, arg := range n.Args[1:] {
-					value, literal := literalValue(arg)
-					if !literal {
-						start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
-						if start >= 0 && end >= start && end <= len(command) && strings.HasPrefix(command[start:end], name+"=") {
-							dynamic = true
-							continue
-						}
-						break
-					}
-					key, val, assigned := strings.Cut(value, "=")
-					if !assigned {
-						break
-					}
-					add(key, val, true, false)
-				}
-			}
-			if !ok || !declarers[cmd] || cmd == "local" {
-				return true
-			}
-			for _, arg := range n.Args[1:] {
-				value, literal := literalValue(arg)
-				if !literal {
-					start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
-					if start >= 0 && end >= start && end <= len(command) && strings.HasPrefix(command[start:end], name+"=") && !(name == "HOME" && homeSelfReference(command, arg)) {
-						dynamic = true
-					}
-					continue
-				}
-				key, val, assigned := strings.Cut(value, "=")
-				if assigned {
-					add(key, val, true, false)
-				}
-			}
+			dynamic = shellEnvCallDeclaration(n, command, name, add, addAssign) || dynamic
 		case *syntax.DeclClause:
 			if !declarers[n.Variant.Value] {
 				return true
@@ -443,6 +481,130 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 		return true
 	})
 	return values, dynamic
+}
+
+func shellEnvCallDeclaration(call *syntax.CallExpr, command, name string, add func(string, string, bool, bool), addAssign func(*syntax.Assign)) bool {
+	for _, assign := range call.Assigns {
+		addAssign(assign)
+	}
+	if len(call.Args) == 0 {
+		return false
+	}
+	cmd, ok := literalValue(call.Args[0])
+	if !ok || !declarers[cmd] || cmd == "local" {
+		return false
+	}
+	dynamic := false
+	for _, arg := range call.Args[1:] {
+		value, literal := literalValue(arg)
+		if literal {
+			key, val, assigned := strings.Cut(value, "=")
+			if assigned {
+				add(key, val, true, false)
+			}
+			continue
+		}
+		start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
+		if start >= 0 && end >= start && end <= len(command) && strings.HasPrefix(command[start:end], name+"=") && !(name == "HOME" && homeSelfReference(command, arg)) {
+			dynamic = true
+		}
+	}
+	return dynamic
+}
+
+func shellEnvCallValues(command, name string, logger core.Logger) ([]string, bool) {
+	seen := map[string]bool{}
+	var values []string
+	dynamic := false
+	var scan func(string, int)
+	scan = func(source string, depth int) {
+		if depth > 8 || seen[source] {
+			return
+		}
+		seen[source] = true
+		calls, err := shellcmd.Calls(source)
+		if err != nil {
+			logger.Warn("model_guard: env-присваивания не разобраны", "name", name, "error", err)
+			return
+		}
+		for index := range calls {
+			call := &calls[index]
+			if filepath.Base(call.Name) == "env" {
+				found, unknown := envCallAssignments(call.Args, name)
+				values = append(values, found...)
+				dynamic = dynamic || unknown
+				continue
+			}
+			for i, arg := range call.Args {
+				if strings.Contains(arg, name) {
+					scan(strings.Join(call.Args[i:], " "), depth+1)
+				}
+			}
+		}
+	}
+	scan(command, 0)
+	return values, dynamic
+}
+
+func envCallAssignments(args []string, name string) ([]string, bool) {
+	var values []string
+	dynamic := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			i++
+			if i < len(args) {
+				key, val, assigned := strings.Cut(args[i], "=")
+				if assigned && key == name {
+					values = append(values, val)
+				}
+			}
+			break
+		}
+		if arg == "-i" || arg == "--ignore-environment" {
+			continue
+		}
+		if slices.Contains([]string{"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}, arg) {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		key, val, assigned := strings.Cut(arg, "=")
+		if !assigned {
+			break
+		}
+		if key != name {
+			continue
+		}
+		if strings.ContainsAny(val, "$`") {
+			dynamic = true
+		} else {
+			values = append(values, val)
+		}
+	}
+	return values, dynamic
+}
+
+func findEnvAssignment(text, name string) (string, string, bool) {
+	for field := range strings.FieldsSeq(text) {
+		if field == "--" {
+			continue
+		}
+		if strings.HasPrefix(field, "-") {
+			continue
+		}
+		field = strings.Trim(field, "'\";|&)")
+		key, val, ok := strings.Cut(field, "=")
+		if ok && key == name {
+			return key, strings.Trim(val, "'\""), true
+		}
+		if !ok {
+			break
+		}
+	}
+	return "", "", false
 }
 
 func homeSelfReference(source string, node syntax.Node) bool {

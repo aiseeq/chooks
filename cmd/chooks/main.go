@@ -274,6 +274,8 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	if err := validateHookRequest(ctx, request); err != nil {
 		return exitError, err
 	}
+	ctx, cancelRequest := context.WithTimeout(ctx, request.Timeout)
+	defer cancelRequest()
 	timer := newHookTimerForRequest(hookType, request)
 	exit, cli := ctx.Value(cliTerminationKey{}).(func(int))
 	if cli {
@@ -342,7 +344,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 			}
 		}
 		timer.stage("skills")
-		remindStaleSkills(eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget), timer, request)
+		remindStaleSkills(ctx, eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget), timer, request)
 		return exitAllowed, nil
 	case hookStop:
 		runSessionEventForRequest(core.EventStop, data, config, logger, &request)
@@ -393,7 +395,7 @@ func runUserPromptSubmit(ctx context.Context, hookType string, data []byte, conf
 	timer.stage("state")
 	saveStateIn(logger, request.RuntimeDir(), input.SessionID, core.StateWorking)
 	timer.stage("skills")
-	remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer, request)
+	remindStaleSkills(ctx, eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer, request)
 	return exitAllowed, nil
 }
 

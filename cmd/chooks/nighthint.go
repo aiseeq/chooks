@@ -44,6 +44,10 @@ const skillStateWait = time.Second
 // скилла autonomous-work по записи skill-reload; deadline — срок хука для
 // чтения записи
 func nightHintDepsForRequest(config *core.Config, deadline time.Time, request hookctx.Context) (nighthint.Deps, error) {
+	return nightHintDepsContext(context.Background(), config, deadline, request)
+}
+
+func nightHintDepsContext(ctx context.Context, config *core.Config, deadline time.Time, request hookctx.Context) (nighthint.Deps, error) {
 	state, err := request.StateDir()
 	if err != nil {
 		return nighthint.Deps{}, err
@@ -52,7 +56,7 @@ func nightHintDepsForRequest(config *core.Config, deadline time.Time, request ho
 	if err != nil {
 		return nighthint.Deps{}, err
 	}
-	skillCalled := autonomousSkillCalledIn(config, deadline, func() (string, error) { return skillDir, nil })
+	skillCalled := autonomousSkillCalledContext(ctx, config, deadline, func() (string, error) { return skillDir, nil })
 	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: filepath.Join(state, "night-hint")}, SkillCalled: skillCalled}, nil
 }
 
@@ -70,6 +74,10 @@ func nightHintDepsForRequest(config *core.Config, deadline time.Time, request ho
 // 3 с из settings.json (тикет night-hint-night-work-budget). Срок наступил —
 // запись не читается, подсказка идёт по правилу «раз за ночь», причина — в лог
 func autonomousSkillCalledIn(config *core.Config, deadline time.Time, stateDir func() (string, error)) func(sessionID string) (bool, error) {
+	return autonomousSkillCalledContext(context.Background(), config, deadline, stateDir)
+}
+
+func autonomousSkillCalledContext(ctx context.Context, config *core.Config, deadline time.Time, stateDir func() (string, error)) func(sessionID string) (bool, error) {
 	return func(sessionID string) (bool, error) {
 		if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
 			return false, fmt.Errorf("%s disabled in config: %w", skillReloadTool, nighthint.ErrSkillUnknown)
@@ -86,22 +94,21 @@ func autonomousSkillCalledIn(config *core.Config, deadline time.Time, stateDir f
 		if deadline.Before(wait) {
 			wait = deadline
 		}
-		// LockFile ограничивает ожидание блокировки, но обычное чтение после
-		// захвата может задержаться на диске. Оно только читает запись, поэтому
-		// уносим его в горутину и возвращаемся к абсолютному сроку хука.
 		type skillCallResult struct {
 			called bool
 			err    error
 		}
 		result := make(chan skillCallResult, 1)
 		go func() {
-			called, err := skillreload.SkillCalled(dir, sessionID, nighthint.AutonomousSkills(), wait)
+			called, err := skillreload.SkillCalledContext(ctx, dir, sessionID, nighthint.AutonomousSkills(), wait)
 			result <- skillCallResult{called: called, err: err}
 		}()
 		var called bool
 		select {
 		case answer := <-result:
 			called, err = answer.called, answer.err
+		case <-ctx.Done():
+			return false, ctx.Err()
 		case <-time.After(time.Until(deadline)):
 			return false, fmt.Errorf("skill-reload record read abandoned at hook deadline: %w", skillreload.ErrNoTime)
 		}
@@ -236,7 +243,7 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 
 // defaultNightHint — обработчик для runHook: живые зависимости
 func defaultNightHint(ctx context.Context, data []byte, config *core.Config, logger core.Logger, deadline time.Time, request hookctx.Context) {
-	deps, err := nightHintDepsForRequest(config, deadline, request)
+	deps, err := nightHintDepsContext(ctx, config, deadline, request)
 	if err != nil {
 		logger.Warn("night hint state dir unavailable", "error", err)
 		return

@@ -145,6 +145,7 @@ func HasQuestion(message string) bool {
 // Run решает подсказку по событию. Дешёвые признаки (событие, час) — до
 // вызова признака блокировки: днём шина не спрашивается
 func Run(ctx context.Context, deps Deps, event Event) (Result, error) {
+	deps.Store.Context = ctx
 	var damaged error
 	switch event.Name {
 	case EventSessionStart:

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,7 +46,7 @@ type hookContextOutput struct {
 // инструкций, сделанные после того, как их текст попал в контекст: diff, а
 // при большой правке — просьбу перечитать. Сбой только логируется: выдача не
 // повод показывать человеку ошибку хука на каждом ходу
-func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, deadline time.Time, timer *hookTimer, request hookctx.Context) {
+func remindStaleSkills(ctx context.Context, eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, deadline time.Time, timer *hookTimer, request hookctx.Context) {
 	if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
 		return
 	}
@@ -58,15 +59,17 @@ func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Con
 		return
 	}
 
-	checker := skillreload.Checker{StateDir: stateDir, Abs: request.Abs, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
+	if !timer.now().Before(timer.deadline(optionalBudget)) {
+		logger.Warn("skill reload skipped: hook budget spent", "hook", eventName, "session", input.SessionID, "agent", input.AgentID)
+		return
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	checker := skillreload.Checker{Context: ctx, StateDir: stateDir, Abs: request.Abs, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
 	var result skillreload.Result
-	err = nil
 	if awaitSkillCheck(timer, logger, eventName, input, func() {
 		result, err = checker.Check(skillreload.Event{
-			SessionID:      input.SessionID,
-			AgentID:        input.AgentID,
-			AgentType:      input.AgentType,
-			TranscriptPath: input.TranscriptPath,
+			SessionID: input.SessionID, AgentID: input.AgentID, AgentType: input.AgentType, TranscriptPath: input.TranscriptPath,
 		})
 	}) {
 		finishSkillCheck(eventName, input, logger, result, err, request.Stdout)

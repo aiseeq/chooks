@@ -1,6 +1,7 @@
 package nighthint
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +41,8 @@ type record struct {
 
 // Store — записи сессий: файл `<сессия>.json` в Dir
 type Store struct {
-	Dir string
+	Dir     string
+	Context context.Context
 }
 
 // MarkNight отмечает подсказку ночи night; false — она этой ночью уже дана
@@ -123,7 +125,11 @@ func (s Store) update(sessionID string, change func(*record) bool) (changed bool
 			changed, err = false, fmt.Errorf("close record: %w", closeErr)
 		}
 	}()
-	if err := core.LockFile(file, time.Now().Add(lockWait)); err != nil {
+	ctx := s.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := core.LockFileContext(ctx, file, time.Now().Add(lockWait)); err != nil {
 		return false, err
 	}
 	data, err := io.ReadAll(file)

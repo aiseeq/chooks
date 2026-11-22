@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -19,7 +20,15 @@ const lockPoll = 10 * time.Millisecond
 // который держит блокировку (под свопом или остановленным), съело бы весь
 // таймаут, и Claude Code выбросил бы вывод хука
 func LockFile(file *os.File, deadline time.Time) error {
+	return LockFileContext(context.Background(), file, deadline)
+}
+
+// LockFileContext also stops waiting when the request is cancelled.
+func LockFileContext(ctx context.Context, file *os.File, deadline time.Time) error {
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			return nil
@@ -30,6 +39,13 @@ func LockFile(file *os.File, deadline time.Time) error {
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("%s: %w", file.Name(), ErrLockBusy)
 		}
-		time.Sleep(lockPoll)
+		wait := min(lockPoll, time.Until(deadline))
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package skillreload
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -33,6 +34,7 @@ type Result struct {
 // Checker проверяет файлы сессии на событии хука
 type Checker struct {
 	StateDir string
+	Context  context.Context
 	// Abs resolves a relative path of a tracked file (state of older versions)
 	// as the hook request does (hookctx.Context.Abs); nil keeps it as given,
 	// so the OS resolves it from the process cwd
@@ -74,7 +76,11 @@ func (c Checker) Check(event Event) (Result, error) {
 		return Result{}, ErrNoTime
 	}
 	c.substage("lock")
-	locked, err := openState(c.StateDir, name, c.within(c.now().Add(lockWait)))
+	ctx := c.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	locked, err := openStateContext(ctx, c.StateDir, name, c.within(c.now().Add(lockWait)))
 	if err != nil {
 		return Result{}, err
 	}
@@ -151,7 +157,7 @@ func (c Checker) substage(name string) {
 }
 
 func (c Checker) expired() bool {
-	return !c.Deadline.IsZero() && !c.now().Before(c.Deadline)
+	return (c.Context != nil && c.Context.Err() != nil) || (!c.Deadline.IsZero() && !c.now().Before(c.Deadline))
 }
 
 // prepareFresh готовит запись впервые встреченной сессии: убирает давние

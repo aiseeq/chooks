@@ -43,7 +43,7 @@ type ModelGuardTool struct {
 // NewModelGuardTool создаёт проверку выбранной модели.
 func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardTool, error) {
 	return &ModelGuardTool{
-		BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent", "Write", "Edit"}, core.ShellTools...), logger),
+		BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent"}, core.ShellTools...), logger),
 		userOnly: config.UserOnly,
 	}, nil
 }
@@ -55,11 +55,6 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 	}
 	if !t.IsEnabled() || input == nil {
 		return &core.ValidationResult{IsValid: true}, nil
-	}
-	if input.CWD == "" {
-		if request, ok := hookctx.Request(ctx); ok {
-			input.CWD = request.Cwd
-		}
 	}
 	candidates := modelCandidates(ctx, input, t.Logger())
 	if len(candidates) == 0 {
@@ -142,9 +137,6 @@ type modelCandidate struct {
 }
 
 func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
-	if input.ToolName == "Write" || input.ToolName == "Edit" {
-		return settingsWriteCandidates(input)
-	}
 	if input.ToolName != "Agent" && !core.IsShellTool(input.ToolName) {
 		return nil
 	}
@@ -219,50 +211,6 @@ func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Log
 		candidates = append(candidates, modelCandidate{value: "settings path with unknown home", dynamic: true})
 	}
 	return candidates
-}
-
-func settingsWriteCandidates(input *core.ToolInput) []modelCandidate {
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(input.ToolInput, &fields) != nil {
-		return nil
-	}
-	var path string
-	if json.Unmarshal(fields["file_path"], &path) != nil || (filepath.Base(path) != "settings.json" && filepath.Base(path) != "settings.local.json") {
-		return nil
-	}
-	var contents string
-	if input.ToolName == "Write" {
-		if json.Unmarshal(fields["content"], &contents) != nil {
-			return unknownSettingsWrite(path)
-		}
-		return settingsCandidates([]byte(contents), nil)
-	}
-	var oldText, newText string
-	if json.Unmarshal(fields["old_string"], &oldText) != nil || json.Unmarshal(fields["new_string"], &newText) != nil {
-		return unknownSettingsWrite(path)
-	}
-	if !filepath.IsAbs(path) && input.CWD != "" {
-		path = filepath.Join(input.CWD, path)
-	}
-	current, err := readSettingsFile(path)
-	if err != nil {
-		if strings.Contains(newText, "modelOverrides") || strings.Contains(oldText, "modelOverrides") {
-			return unknownSettingsWrite(path)
-		}
-		return nil
-	}
-	if oldText == "" || !strings.Contains(string(current), oldText) {
-		if strings.Contains(newText, "modelOverrides") || strings.Contains(oldText, "modelOverrides") {
-			return unknownSettingsWrite(path)
-		}
-		return nil
-	}
-	updated := strings.Replace(string(current), oldText, newText, 1)
-	return settingsCandidates([]byte(updated), nil)
-}
-
-func unknownSettingsWrite(path string) []modelCandidate {
-	return []modelCandidate{{value: path, unknownWrite: true}}
 }
 
 func settingsForCWD(ctx context.Context, cwd string, homes, configs pathSet, logger core.Logger, includeProject bool) []modelCandidate {
@@ -1061,7 +1009,17 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 			found = append(found, c)
 		}
 	}
-	found = append(found, writtenOverrideCandidates([]byte(decoded))...)
+	objects := jsonObjects(decoded)
+	for _, raw := range objects {
+		if json.Valid(raw) {
+			found = append(found, settingsCandidates(raw, nil)...)
+		} else {
+			found = append(found, writtenOverrideCandidates(raw)...)
+		}
+	}
+	if len(objects) == 0 {
+		found = append(found, writtenOverrideCandidates([]byte(decoded))...)
+	}
 	for _, match := range regexp.MustCompile(`(?m)^\s*model:\s*([^\s#]+)`).FindAllStringSubmatch(decoded, -1) {
 		found = append(found, modelCandidate{value: strings.Trim(match[1], `"'`), userOnlyCheck: true})
 	}
@@ -1687,6 +1645,43 @@ func writtenOverrideCandidates(raw []byte) []modelCandidate {
 	return found
 }
 
+// jsonObjects extracts brace-delimited objects from shell text while respecting
+// quoted strings and escapes. The settings parser decides which objects matter.
+func jsonObjects(text string) [][]byte {
+	var objects [][]byte
+	start, depth := -1, 0
+	quoted, escaped := false, false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if quoted {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				quoted = false
+			}
+			continue
+		}
+		if c == '"' {
+			quoted = true
+			continue
+		}
+		if c == '{' {
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		} else if c == '}' && depth > 0 {
+			depth--
+			if depth == 0 {
+				objects = append(objects, []byte(text[start:i+1]))
+			}
+		}
+	}
+	return objects
+}
+
 // jsonModelCandidates — модели в JSON флага claude: --settings (строка JSON
 // или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
 // Файла --settings ещё нет — модели в тексте команды, которая его пишет.
@@ -1794,10 +1789,25 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 	if json.Unmarshal(settings["model"], &model) == nil {
 		found.add(model)
 	}
-	var overrides map[string]string
-	if json.Unmarshal(settings["modelOverrides"], &overrides) == nil {
-		for _, model := range overrides {
-			found.add(model)
+	var overrides map[string]json.RawMessage
+	rawOverrides := settings["modelOverrides"]
+	if len(rawOverrides) != 0 && strings.TrimSpace(string(rawOverrides)) != "null" {
+		if err := json.Unmarshal(rawOverrides, &overrides); err != nil {
+			found = append(found, modelCandidate{value: "modelOverrides", unknownSettings: true})
+		}
+	}
+	if overrides != nil {
+		for _, key := range slices.Sorted(maps.Keys(overrides)) {
+			rawModel := overrides[key]
+			if strings.TrimSpace(string(rawModel)) == "null" {
+				continue
+			}
+			var model string
+			if json.Unmarshal(rawModel, &model) == nil {
+				found.add(model)
+			} else {
+				found = append(found, modelCandidate{value: "modelOverrides", unknownSettings: true})
+			}
 		}
 	}
 	var agent struct {

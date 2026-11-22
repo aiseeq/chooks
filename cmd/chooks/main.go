@@ -41,11 +41,18 @@ var Version = "dev"
 type cliTerminationKey struct{}
 
 func main() {
+	os.Exit(runCLI())
+}
+
+// runCLI — CLI в процессе: запрос — сам процесс, причина запасного пути
+// прокси (CHOOKS_FALLBACK) — в ctx, из env она снята
+func runCLI() int {
 	// Некоторые команды не используют cwd и работают даже после удаления
 	// текущего каталога, поэтому ошибка Getwd не мешает запуску CLI.
 	request, _ := hookctx.FromProcess()
 	ctx := context.WithValue(context.Background(), cliTerminationKey{}, (func(int))(os.Exit))
-	os.Exit(execute(ctx, request))
+	ctx = context.WithValue(ctx, fallbackReasonKey{}, takeFallbackReason(&request))
+	return execute(ctx, request)
 }
 
 // execute запускает CLI и возвращает exit-код для Claude Code
@@ -101,6 +108,7 @@ func execute(ctx context.Context, request hookctx.Context) int {
 		newUnderstandBenchCmd(),
 		newCorpusSweepCmd(),
 		newDeliverAlertCmd(),
+		newServeCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -230,7 +238,7 @@ func executeHook(ctx context.Context, request hookctx.Context, hookType string) 
 	ctx = hookctx.WithRequest(ctx, request)
 	code := exitAllowed
 	var err error
-	if hookType == "statusline" {
+	if hookType == hookStatusLine {
 		err = runStatusLine(ctx, request)
 	} else {
 		code, err = runHook(ctx, hookType)
@@ -315,6 +323,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	}
 	timer.setLogger(logger)
 	timer.setDurations(config.Logger)
+	logCLIFallback(ctx, config, request, hookType)
 
 	timer.stage("work")
 	switch hookType {
@@ -951,6 +960,7 @@ func runStatusLine(ctx context.Context, request hookctx.Context) error {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
 	defer closeRequestLogger(logger)
+	logCLIFallback(ctx, config, request, hookStatusLine)
 	line, err := statusline.Render(ctx, request.Stdin, logger)
 	if err != nil {
 		return err

@@ -28,6 +28,11 @@ func TestMain(m *testing.M) {
 	if os.Getenv(relativeEnvHelper) == "1" {
 		os.Exit(runRelativeEnvCLI())
 	}
+	// Бинарь тестов как CLI chooks с argv запуска, как прокси хука или как
+	// CLI, упавший паникой (serve_test.go)
+	if code, ok := runServeHelper(); ok {
+		os.Exit(code)
+	}
 	os.Exit(runIsolated(m.Run))
 }
 

@@ -1,0 +1,385 @@
+// Package hookproxy — прокси хука chooks-hook: пересылает вызов хука демону
+// chooks serve по unix-сокету и отдаёт его stdout, stderr и код. Демона нет
+// или «принято» не пришло в срок — execve нынешнего CLI chooks с тем же stdin.
+// Импорты — только os, syscall, x/sys/unix, time и hookwire: запуск прокси — часть
+// времени каждого хука.
+package hookproxy
+
+import (
+	"os"
+	"strings"
+	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/aiseeq/chooks/internal/hookwire"
+)
+
+// Переменные env прокси
+const (
+	// EnvSocket — путь сокета демона вместо $XDG_RUNTIME_DIR/chooks.sock
+	// (тесты)
+	EnvSocket = "CHOOKS_HOOK_SOCKET"
+	// EnvCLI — бинарь запасного пути вместо ~/bin/chooks (тесты)
+	EnvCLI = "CHOOKS_HOOK_CLI"
+	// EnvFallback — причина запасного пути; её получает CLI
+	EnvFallback = "CHOOKS_FALLBACK"
+)
+
+// AckWindow — срок от отправки запроса до «принято». Не пришло — CLI:
+// пользователь ждёт демона не дольше этого
+const AckWindow = 100 * time.Millisecond
+
+// ackPerMiB — добавка к сроку на каждый МиБ stdin: большой запрос демон
+// читает дольше, а прокси не должен уходить в CLI из-за размера
+const ackPerMiB = 20 * time.Millisecond
+
+// Main — прокси целиком: args — os.Args. Возвращает код выхода; на запасном
+// пути не возвращается (execve)
+func Main(args []string) int {
+	p := proxy{args: args, fd: -1}
+	return p.run()
+}
+
+type proxy struct {
+	args []string
+	fd   int // сокет демона; -1 — нет
+}
+
+func (p *proxy) run() int {
+	path := socketPath()
+	if path == "" {
+		return p.fallback(nil, false, "connect: no socket path")
+	}
+	var err error
+	p.fd, err = dial(path, time.Now().Add(AckWindow))
+	if err != nil {
+		// Демона нет: stdin не тронут, CLI читает его сам
+		return p.fallback(nil, false, "connect: "+err.Error())
+	}
+	stdin, err := readAll(0)
+	if err != nil {
+		p.close()
+		return p.fallback(stdin, true, "stdin: "+err.Error())
+	}
+	if len(stdin) > hookwire.MaxStdin {
+		p.close()
+		return p.fallback(stdin, true, "stdin too large")
+	}
+	cwd, _ := os.Getwd()
+	request := hookwire.Request{Env: os.Environ(), Cwd: cwd, PID: os.Getpid(), PPID: os.Getppid(), Stdin: stdin}
+	if len(p.args) > 1 {
+		request.Subcommand = p.args[1]
+		request.Args = p.args[2:]
+	}
+	deadline := time.Now().Add(AckWindow + time.Duration(len(stdin)>>20)*ackPerMiB)
+	if err := writeAll(p.fd, hookwire.EncodeRequest(request), deadline); err != nil {
+		p.close()
+		return p.fallback(stdin, true, "send: "+err.Error())
+	}
+	var b [1]byte
+	if err := readFull(p.fd, b[:], deadline); err != nil {
+		p.close()
+		return p.fallback(stdin, true, "ack: "+err.Error())
+	}
+	switch b[0] {
+	case hookwire.Accepted:
+	case hookwire.Fallback:
+		reason, err := hookwire.ReadReason(deadlineReader{fd: p.fd, deadline: deadline})
+		p.close()
+		if err != nil {
+			return p.fallback(stdin, true, "ack: "+err.Error())
+		}
+		return p.fallback(stdin, true, reason)
+	default:
+		p.close()
+		return p.fallback(stdin, true, "ack: unexpected byte")
+	}
+	// «Принято» пришло в срок: 'C' отдаёт исполнение демону. Не ушло — демон
+	// запрос не исполнит, CLI его исполнит один раз
+	if err := writeAll(p.fd, []byte{hookwire.Commit}, deadline); err != nil {
+		p.close()
+		return p.fallback(stdin, true, "commit: "+err.Error())
+	}
+	return p.await()
+}
+
+// await ждёт результат без срока: срок хука держит Claude Code, а демон
+// отменяет запрос по своему сроку и по обрыву. Обрыв — код 1 без повтора:
+// эффект хука мог уже случиться
+func (p *proxy) await() int {
+	r := deadlineReader{fd: p.fd}
+	if err := setTimeout(p.fd, syscall.SO_RCVTIMEO, 0); err != nil {
+		return p.lost(err)
+	}
+	var b [1]byte
+	if err := readFull(p.fd, b[:], time.Time{}); err != nil {
+		return p.lost(err)
+	}
+	if b[0] != hookwire.Result {
+		return p.lost(syscall.EPROTO)
+	}
+	code, stdout, stderr, err := hookwire.ReadResult(r)
+	if err != nil {
+		return p.lost(err)
+	}
+	p.close()
+	if len(stdout) > 0 {
+		_, _ = os.Stdout.Write(stdout)
+	}
+	if len(stderr) > 0 {
+		_, _ = os.Stderr.Write(stderr)
+	}
+	return code
+}
+
+func (p *proxy) lost(err error) int {
+	p.close()
+	_, _ = os.Stderr.WriteString("chooks-hook: связь с демоном оборвалась после «принято», хук не повторён: " + err.Error() + "\n")
+	return 1
+}
+
+func (p *proxy) close() {
+	if p.fd >= 0 {
+		_ = syscall.Close(p.fd)
+		p.fd = -1
+	}
+}
+
+// fallback — execve CLI с подкомандой и аргументами прокси. consumed — stdin
+// уже прочитан: CLI получает его копию через memfd
+func (p *proxy) fallback(stdin []byte, consumed bool, reason string) int {
+	cli := cliPath()
+	if consumed {
+		if err := replaceStdin(stdin); err != nil {
+			_, _ = os.Stderr.WriteString("chooks-hook: stdin для " + cli + ": " + err.Error() + "\n")
+			return 1
+		}
+	}
+	argv := append([]string{cli}, p.args[min(1, len(p.args)):]...)
+	env := withEnv(os.Environ(), EnvFallback, strings.ReplaceAll(reason, "\n", " "))
+	err := syscall.Exec(cli, argv, env)
+	_, _ = os.Stderr.WriteString("chooks-hook: запасной путь " + cli + ": " + err.Error() + "\n")
+	return 1
+}
+
+func socketPath() string {
+	if path := os.Getenv(EnvSocket); path != "" {
+		return path
+	}
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); strings.HasPrefix(dir, "/") {
+		return dir + "/chooks.sock"
+	}
+	return ""
+}
+
+// cliPath — ~/bin/chooks; без абсолютного HOME — chooks рядом с прокси
+func cliPath() string {
+	if path := os.Getenv(EnvCLI); path != "" {
+		return path
+	}
+	if home := os.Getenv("HOME"); strings.HasPrefix(home, "/") {
+		return strings.TrimSuffix(home, "/") + "/bin/chooks"
+	}
+	if exe, err := os.Executable(); err == nil {
+		if i := strings.LastIndexByte(exe, '/'); i >= 0 {
+			return exe[:i+1] + "chooks"
+		}
+	}
+	return "chooks"
+}
+
+func withEnv(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if !strings.HasPrefix(e, key+"=") {
+			out = append(out, e)
+		}
+	}
+	return append(out, key+"="+value)
+}
+
+// replaceStdin ставит на fd 0 memfd с data: CLI читает тот же stdin, что
+// прочитал прокси, любого размера (pipe с буфером 64 КиБ без писателя
+// повис бы)
+func replaceStdin(data []byte) error {
+	fd, err := unix.MemfdCreate("chooks-hook-stdin", unix.MFD_CLOEXEC)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	for off := 0; off < len(data); {
+		n, err := syscall.Write(fd, data[off:])
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		off += n
+	}
+	if _, err := syscall.Seek(fd, 0, 0); err != nil {
+		return err
+	}
+	return syscall.Dup3(fd, 0, 0)
+}
+
+func readAll(fd int) ([]byte, error) {
+	buf := make([]byte, 0, 16<<10)
+	for {
+		if len(buf) == cap(buf) {
+			buf = append(buf, 0)[:len(buf)]
+		}
+		n, err := syscall.Read(fd, buf[len(buf):cap(buf)])
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil {
+			return buf, err
+		}
+		if n == 0 {
+			return buf, nil
+		}
+		buf = buf[:len(buf)+n]
+	}
+}
+
+// dial — connect к unix-сокету со сроком: при полной очереди приёма connect
+// ждёт не дольше SO_SNDTIMEO
+func dial(path string, deadline time.Time) (int, error) {
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	if err := setTimeout(fd, syscall.SO_SNDTIMEO, time.Until(deadline)); err != nil {
+		_ = syscall.Close(fd)
+		return -1, err
+	}
+	for {
+		err = syscall.Connect(fd, &syscall.SockaddrUnix{Name: path})
+		if err != syscall.EINTR {
+			break
+		}
+	}
+	if err != nil {
+		_ = syscall.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
+// errTimeout — срок вышел
+var errTimeout = syscall.ETIMEDOUT
+
+// setTimeout ставит SO_RCVTIMEO или SO_SNDTIMEO; 0 — без срока. Срок уже
+// вышел — errTimeout
+func setTimeout(fd, opt int, d time.Duration) error {
+	if d < 0 || (d == 0 && opt == syscall.SO_SNDTIMEO) {
+		return errTimeout
+	}
+	if d > 0 && d < time.Microsecond {
+		d = time.Microsecond
+	}
+	tv := syscall.NsecToTimeval(d.Nanoseconds())
+	return syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, opt, &tv)
+}
+
+func remaining(deadline time.Time) (time.Duration, error) {
+	if deadline.IsZero() {
+		return 0, nil
+	}
+	d := time.Until(deadline)
+	if d <= 0 {
+		return 0, errTimeout
+	}
+	return d, nil
+}
+
+// writeAll пишет b целиком до срока; MSG_NOSIGNAL — закрытый демоном сокет
+// даёт EPIPE, а не SIGPIPE
+func writeAll(fd int, b []byte, deadline time.Time) error {
+	for len(b) > 0 {
+		d, err := remaining(deadline)
+		if err != nil {
+			return err
+		}
+		if err := setTimeout(fd, syscall.SO_SNDTIMEO, d); err != nil {
+			return err
+		}
+		n, err := syscall.SendmsgN(fd, b, nil, nil, syscall.MSG_NOSIGNAL)
+		switch {
+		case err == syscall.EINTR:
+			continue
+		case err == syscall.EAGAIN:
+			return errTimeout
+		case err != nil:
+			return err
+		}
+		b = b[n:]
+	}
+	return nil
+}
+
+// readFull читает len(b) байт до срока; нулевой срок — без срока
+func readFull(fd int, b []byte, deadline time.Time) error {
+	for len(b) > 0 {
+		d, err := remaining(deadline)
+		if err != nil {
+			return err
+		}
+		if !deadline.IsZero() {
+			if err := setTimeout(fd, syscall.SO_RCVTIMEO, d); err != nil {
+				return err
+			}
+		}
+		n, err := syscall.Read(fd, b)
+		switch {
+		case err == syscall.EINTR:
+			continue
+		case err == syscall.EAGAIN:
+			return errTimeout
+		case err != nil:
+			return err
+		case n == 0:
+			return syscall.ECONNRESET
+		}
+		b = b[n:]
+	}
+	return nil
+}
+
+// deadlineReader — io.Reader поверх сокета со сроком для hookwire
+type deadlineReader struct {
+	fd       int
+	deadline time.Time
+}
+
+func (r deadlineReader) Read(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+	for {
+		d, err := remaining(r.deadline)
+		if err != nil {
+			return 0, err
+		}
+		if !r.deadline.IsZero() {
+			if err := setTimeout(r.fd, syscall.SO_RCVTIMEO, d); err != nil {
+				return 0, err
+			}
+		}
+		n, err := syscall.Read(r.fd, b)
+		switch {
+		case err == syscall.EINTR:
+			continue
+		case err == syscall.EAGAIN:
+			return 0, errTimeout
+		case err != nil:
+			return 0, err
+		case n == 0:
+			return 0, syscall.ECONNRESET
+		}
+		return n, nil
+	}
+}

@@ -184,6 +184,9 @@ func TestKillGuardBlocks(t *testing.T) {
 		`xargs -I {} kill {} < pids`,
 		// обёртки
 		`stdbuf -oL kill $PID`,
+		`unbuffer kill -9 1`,
+		`unbuffer -p kill 1500`,
+		`unbuffer -noecho kill 1500`,
 		`flock /tmp/x kill $PID`,
 		`flock -w 5 /tmp/x -c 'kill 1500'`,
 		`busybox kill $PID`,
@@ -773,6 +776,8 @@ func TestKillGuardAllows(t *testing.T) {
 		`kill -s 0 -- 1`,
 		// без -c первый операнд — файл скрипта, не текст
 		`bash -x 'kill 1'`,
+		// unbuffer без kill за ним
+		`unbuffer make test`,
 		`bash -x "$X"; kill 455274`,
 		// присваивание за sudo -- без слова kill и kill за sudo без него;
 		// за sudo -- X=1 — kill чужого PID литералом

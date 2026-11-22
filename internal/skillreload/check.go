@@ -110,7 +110,7 @@ func (c Checker) Check(event Event) (Result, error) {
 	if store == nil {
 		store = newDirStore(c.StateDir)
 	}
-	view := func(kind, path string) (fileView, error) { return diskView(kind, pathFor(c.Abs, path)) }
+	view := func(kind, path string) (fileView, error) { return diskViewAt(kind, pathFor(c.Abs, path), path) }
 	t := tracker{state: state, store: store, view: view, resolvePath: c.Abs}
 	for _, ev := range scan.Events {
 		if ev.Kind == evSkillLoad || ev.Kind == evMemoryLoad {

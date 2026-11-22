@@ -68,7 +68,7 @@ func requestSessionBus(request hookctx.Context) (*dbus.Conn, error) {
 			return nil, err
 		}
 	}
-	return dbus.Connect(address)
+	return dbus.Connect(request.BusAddress(address))
 }
 
 // discoverRequestBus mirrors the usual Linux session-bus discovery without

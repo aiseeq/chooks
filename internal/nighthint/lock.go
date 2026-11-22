@@ -93,7 +93,7 @@ func connectSystemBus(ctx context.Context) (*dbus.Conn, error) {
 		if address == "" {
 			address = "unix:path=/var/run/dbus/system_bus_socket"
 		}
-		return dbus.Connect(address, dbus.WithContext(ctx))
+		return dbus.Connect(request.BusAddress(address), dbus.WithContext(ctx))
 	}
 	return nil, fmt.Errorf("hook request is missing")
 }

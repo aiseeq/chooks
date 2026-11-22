@@ -464,11 +464,15 @@ func TestPreToolCommandsParallel(t *testing.T) {
 	}
 }
 
+// Запрос в процессе с относительным или пустым cwd граница отклоняет до хука:
+// Abs оставил бы путь относительным, и ОС открыла бы его от cwd исполнителя
 func TestHookRequestRejectsRelativeCWD(t *testing.T) {
-	var out, stderr bytes.Buffer
-	req := hookctx.New(strings.NewReader(`{}`), &out, &stderr, nil, "relative", 1, 2)
-	if code := executeHook(context.Background(), req, hookNoPrompt); code != exitError || !strings.Contains(stderr.String(), "cwd must be absolute") {
-		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	for _, cwd := range []string{"relative", ""} {
+		var out, stderr bytes.Buffer
+		req := hookctx.New(strings.NewReader(`{}`), &out, &stderr, nil, cwd, 1, 2)
+		if code := executeHook(context.Background(), req, hookNoPrompt); code != exitError || !strings.Contains(stderr.String(), "cwd must be absolute") || out.Len() != 0 {
+			t.Errorf("cwd=%q: code=%d stdout=%q stderr=%q", cwd, code, out.String(), stderr.String())
+		}
 	}
 }
 

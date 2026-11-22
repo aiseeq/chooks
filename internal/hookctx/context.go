@@ -143,18 +143,58 @@ func (c Context) StateDir() (string, error) {
 	return filepath.Join(c.Abs(base), "chooks"), nil
 }
 
-// LookPath searches the request's PATH without consulting the executor's cwd.
+// LookPath ищет name так, как LookPath из os/exec в процессе запроса. У CLI
+// это он сам по env и cwd процесса, как в базе. У демона — его повтор
+// (lp_unix.go lookPath) по PATH и GODEBUG из env запроса: пустой элемент PATH —
+// «.», относительный элемент разрешается от cwd запроса и без
+// GODEBUG=execerrdot=0 даёт ErrDot. Найденный путь у демона абсолютный:
+// filepath.Join после Abs чистит его так же, как Join(dir, name) базы чистит
+// путь от cwd процесса, а cwd в Abs уже без симлинков
 func (c Context) LookPath(name string) (string, error) {
+	if c.process {
+		return exec.LookPath(name)
+	}
+	switch name {
+	case "", ".", "..":
+		return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+	}
+	if strings.Contains(name, "/") {
+		path := c.Abs(name)
+		if !executable(path) {
+			return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+		}
+		return path, nil
+	}
 	for _, dir := range filepath.SplitList(c.Getenv("PATH")) {
+		if dir == "" {
+			dir = "."
+		}
 		path := filepath.Join(c.Abs(dir), name)
 		if executable(path) {
-			if !filepath.IsAbs(dir) {
+			if !filepath.IsAbs(dir) && c.godebug("execerrdot") != "0" {
 				return "", &exec.Error{Name: name, Err: exec.ErrDot}
 			}
 			return path, nil
 		}
 	}
 	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+}
+
+// godebug — значение настройки name в GODEBUG запроса, как его читает
+// internal/godebug: пары через «,», последняя пара имени главнее, хвост
+// после «#» — настройка bisect, не значение. Своей директивы godebug в go.mod
+// нет, поэтому без пары в env действует умолчание Go
+func (c Context) godebug(name string) string {
+	pairs := strings.Split(c.Getenv("GODEBUG"), ",")
+	for i := len(pairs) - 1; i >= 0; i-- {
+		key, value, ok := strings.Cut(pairs[i], "=")
+		if !ok || key != name {
+			continue
+		}
+		value, _, _ = strings.Cut(value, "#")
+		return value
+	}
+	return ""
 }
 
 func executable(path string) bool {

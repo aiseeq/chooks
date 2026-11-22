@@ -43,9 +43,10 @@ const compactWindow = time.Minute
 
 // tracker ведёт запись сессии по событиям транскрипта
 type tracker struct {
-	state *sessionState
-	store textStore
-	view  viewer
+	state       *sessionState
+	store       textStore
+	view        viewer
+	resolvePath func(string) string
 }
 
 // apply применяет событие транскрипта к записи
@@ -425,7 +426,7 @@ func (t tracker) announcedBySchema1(w *watched, view fileView) bool {
 		return false
 	}
 	delete(t.state.Announced, w.Path)
-	raw, err := readSkillFile(filepath.Dir(w.Path))
+	raw, err := readSkillFile(filepath.Dir(pathFor(t.resolvePath, w.Path)))
 	return err == nil && contentHash(raw.Raw) == notified && renderBody(raw.Raw, w.Dir) == view.Text
 }
 

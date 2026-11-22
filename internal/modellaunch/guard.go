@@ -49,7 +49,7 @@ type ProcessReader interface {
 // Judge судит команду запуска claude: model_guard
 type Judge interface {
 	ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error)
-	CandidateModels(input *core.ToolInput) []string
+	CandidateModels(ctx context.Context, input *core.ToolInput) []string
 }
 
 // Guard checks the Claude process of the session that runs the hook.
@@ -118,7 +118,7 @@ func (g *Guard) Check(ctx context.Context, hookPID int) (string, error) {
 		if message, err := c.judgeUserLaunchers(ctx, claudePID, basis); message != "" || err != nil {
 			return message, err
 		}
-		c.logUserDecision(claudePID, basis)
+		c.logUserDecision(ctx, claudePID, basis)
 		return "", nil
 	}
 	return c.judgeAgent(ctx, hookPID, claudePID, basis)
@@ -434,8 +434,8 @@ func (c *check) argvRejection(ctx context.Context, l launch) (string, error) {
 }
 
 // logUserDecision — строка лога о сессии пользователя: её модель не судится
-func (c *check) logUserDecision(claudePID int, basis string) {
-	model, err := c.userModel(claudePID)
+func (c *check) logUserDecision(ctx context.Context, claudePID int, basis string) {
+	model, err := c.userModel(ctx, claudePID)
 	if err != nil {
 		c.logDecision(claudePID, "user", basis+";model_unreadable="+err.Error(), "unknown", "allowed")
 		return
@@ -444,7 +444,7 @@ func (c *check) logUserDecision(claudePID int, basis string) {
 }
 
 // userModel — модель сессии пользователя для строки лога; не судится
-func (c *check) userModel(pid int) (string, error) {
+func (c *check) userModel(ctx context.Context, pid int) (string, error) {
 	argv, err := c.cmdline(pid)
 	if err != nil {
 		return "", fmt.Errorf("cmdline %d: %w", pid, err)
@@ -453,7 +453,7 @@ func (c *check) userModel(pid int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cwd %d: %w", pid, err)
 	}
-	return c.models(launch{pid: pid, args: modelArgs(argv), env: c.modelEnv(pid), cwd: cwd}), nil
+	return c.models(ctx, launch{pid: pid, args: modelArgs(argv), env: c.modelEnv(pid), cwd: cwd}), nil
 }
 
 // modelEnv — переменные модели из environ процесса; environ не прочитан —
@@ -467,8 +467,8 @@ func (c *check) modelEnv(pid int) []string {
 	return envWords(env)
 }
 
-func (c *check) models(l launch) string {
-	model := strings.Join(c.judge.CandidateModels(l.input()), ",")
+func (c *check) models(ctx context.Context, l launch) string {
+	model := strings.Join(c.judge.CandidateModels(ctx, l.input()), ",")
 	if model == "" {
 		return "unspecified"
 	}
@@ -497,7 +497,7 @@ func (c *check) judgeAgent(ctx context.Context, hookPID, claudePID int, basis st
 		launches = c.addLaunch(launches, c.launcherLaunch(pid, cwd))
 	}
 	launches = c.addLaunch(launches, c.launcherLaunch(hookPID, cwd))
-	model := c.models(primary)
+	model := c.models(ctx, primary)
 	for _, l := range launches {
 		if badPath, err := fdSettingsPath(l); badPath != "" {
 			c.logger.Warn("modellaunch: модель из --settings не проверить: путь читается в процессе хука, а не claude", "pid", l.pid, "path", badPath, "error", err)

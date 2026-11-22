@@ -1,7 +1,6 @@
 package statusline
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,7 +75,7 @@ func TestPlanUnitRenderAndLimits(t *testing.T) {
 			writeStore(t, false)
 			resets := time.Now().Add(5 * 24 * time.Hour).Truncate(time.Hour).Unix()
 			input := fmt.Sprintf(`{"session_id":"s","cwd":%q,"rate_limits":{"seven_day":{"used_percentage":73,"resets_at":%d}}}`, t.TempDir(), resets)
-			line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
+			line, err := Render(statusRequestContext(t), strings.NewReader(input), testLogger(t))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,7 +83,7 @@ func TestPlanUnitRenderAndLimits(t *testing.T) {
 				t.Errorf("строка %q, ожидалось %q", plain(line), tt.line)
 			}
 			var out strings.Builder
-			if err := WriteLimits(&out, false); err != nil {
+			if err := WriteLimits(&out, false, statusTestRequest(t)); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(out.String(), tt.limits) {

@@ -32,14 +32,20 @@ var unitEndActions = append([]string{"exit"}, loginShutdownKinds...)
 // кончаются на первом слове команды ("+" в getopt)
 func systemdRunReason(args []word) (reason, hint string) {
 	options := parseSystemdRunOptions(args)
-	scope := (unitAction{user: options.user}).scope()
-	for _, p := range options.properties {
+	return unitEndActionReason(options.properties, (unitAction{user: options.user}).scope(), "systemd-run")
+}
+
+// unitEndActionReason отказ на SuccessAction= или FailureAction= среди
+// свойств props службы, которую запустит tool (systemd-run, run0) в
+// менеджере scope
+func unitEndActionReason(props []word, scope, tool string) (reason, hint string) {
+	for _, p := range props {
 		key, action, _ := strings.Cut(p.text, "=")
 		end := strings.TrimSuffix(strings.TrimSuffix(action, "-force"), "-immediate")
 		if !p.literal || key != "SuccessAction" && key != "FailureAction" || !slices.Contains(unitEndActions, end) {
 			continue
 		}
-		label := strings.Replace(scope, "systemctl", "systemd-run", 1)
+		label := strings.Replace(scope, "systemctl", tool, 1)
 		return fmt.Sprintf("%s -p %s: когда служба завершится, менеджер выполнит %s — %s: гаснут сессии Claude, терминал и графическая оболочка", label, p.text, action, systemctlEndEffect(scope, end)), systemctlEndHint(scope, end)
 	}
 	return "", ""

@@ -11,8 +11,20 @@ import (
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/tools"
 )
+
+// requestContext — запрос этого процесса теста: model_guard читает env и cwd
+// запроса, его берут после t.Setenv теста
+func requestContext(t *testing.T) context.Context {
+	t.Helper()
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hookctx.WithRequest(context.Background(), request)
+}
 
 // hookCommand — команда хука, как её передаёт Claude Code оболочке и префиксу
 const hookCommand = `"$HOME/bin/chooks" user-prompt-submit`
@@ -133,7 +145,7 @@ func userChain(f *fakeProcess) {
 
 func wantReject(t *testing.T, f *fakeProcess) string {
 	t.Helper()
-	message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+	message, err := runtimeGuard(t, f).Check(requestContext(t), 100)
 	if err != nil || message == "" {
 		t.Fatalf("Check = %q, %v; want rejection", message, err)
 	}
@@ -145,7 +157,7 @@ func wantReject(t *testing.T, f *fakeProcess) string {
 
 func wantPass(t *testing.T, f *fakeProcess) {
 	t.Helper()
-	message, err := runtimeGuard(t, f).Check(context.Background(), 100)
+	message, err := runtimeGuard(t, f).Check(requestContext(t), 100)
 	if err != nil || message != "" {
 		t.Fatalf("Check = %q, %v; want pass", message, err)
 	}
@@ -567,7 +579,7 @@ type panicJudge struct{}
 func (panicJudge) ValidateTool(context.Context, *core.ToolInput) (*core.ValidationResult, error) {
 	panic("judge broke")
 }
-func (panicJudge) CandidateModels(*core.ToolInput) []string { return nil }
+func (panicJudge) CandidateModels(context.Context, *core.ToolInput) []string { return nil }
 
 // Паника судьи не перехватывается здесь: её ловит и пишет в лог вызывающий
 // (cmd/chooks), и тест этого — там. Здесь — что судья вызывается для агента
@@ -581,12 +593,12 @@ func TestRuntimeModelGuardCallsJudgeForAgent(t *testing.T) {
 			t.Fatal("judge was not called")
 		}
 	}()
-	_, _ = New(agentTree([]string{"claude", "--model", "haiku"}, "CLAUDECODE=1"), panicJudge{}, logger).Check(context.Background(), 100)
+	_, _ = New(agentTree([]string{"claude", "--model", "haiku"}, "CLAUDECODE=1"), panicJudge{}, logger).Check(requestContext(t), 100)
 }
 
 func TestRuntimeModelGuardLogsDecision(t *testing.T) {
 	guard, logPath := testGuard(t, prefixTree("timeout 60 bash -c", []string{"timeout", "60", "bash", "-c", hookCommand}, []string{"claude", "--model", "haiku"}, "CLAUDECODE=1"))
-	if message, _ := guard.Check(context.Background(), 100); message == "" {
+	if message, _ := guard.Check(requestContext(t), 100); message == "" {
 		t.Fatal("want rejection")
 	}
 	data, err := os.ReadFile(logPath)
@@ -723,7 +735,7 @@ func TestRuntimeModelGuardClaudeDisguisedAsPrefixUnderUser(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"model":"fable"}`), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if message, err := guard.Check(context.Background(), 100); err != nil || message != "" {
+		if message, err := guard.Check(requestContext(t), 100); err != nil || message != "" {
 			t.Fatalf("Check = %q, %v; want pass", message, err)
 		}
 	})

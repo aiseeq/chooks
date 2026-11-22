@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/tools"
 )
 
@@ -17,7 +18,7 @@ const wideSearchHintTool = "wide_search_hint"
 // wideSearchContext — подсказка модели, если команда рекурсивно обходит
 // большое дерево диска (tools.WideSearch); вызов не прерывается. Пустая
 // строка — подсказки нет, при ошибке её тоже нет
-func wideSearchContext(input *core.ToolInput, config *core.Config, logger core.Logger) (string, error) {
+func wideSearchContext(ctx context.Context, input *core.ToolInput, config *core.Config, logger core.Logger) (string, error) {
 	if tool, exists := config.Tools[wideSearchHintTool]; exists && !tool.Enabled {
 		return "", nil
 	}
@@ -30,7 +31,7 @@ func wideSearchContext(input *core.ToolInput, config *core.Config, logger core.L
 	if err := json.Unmarshal(input.ToolInput, &toolInput); err != nil {
 		return "", fmt.Errorf("tool input unreadable: %w", err)
 	}
-	home, err := os.UserHomeDir()
+	home, err := hookctx.UserHomeDir(ctx)
 	if err != nil {
 		return "", fmt.Errorf("home unknown: %w", err)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/approved"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 	"mvdan.cc/sh/v3/syntax"
@@ -48,15 +49,18 @@ func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardT
 }
 
 // ValidateTool проверяет модель лишь у вызовов, которые её явно задают.
-func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+	if _, ok := hookctx.Request(ctx); !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
 	if !t.IsEnabled() || input == nil {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
-	candidates := modelCandidates(input, t.Logger())
+	candidates := modelCandidates(ctx, input, t.Logger())
 	if len(candidates) == 0 {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
-	path := t.approvedPath()
+	path := t.approvedPath(ctx)
 	models, reason := readApprovedModels(path)
 	if reason != "" {
 		return t.reject(reason, nil), nil
@@ -107,8 +111,8 @@ func (t *ModelGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) 
 
 // CandidateModels exposes the model values found by the same parser used for
 // validation, for decision logging by runtime guards.
-func (t *ModelGuardTool) CandidateModels(input *core.ToolInput) []string {
-	candidates := modelCandidates(input, t.Logger())
+func (t *ModelGuardTool) CandidateModels(ctx context.Context, input *core.ToolInput) []string {
+	candidates := modelCandidates(ctx, input, t.Logger())
 	values := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		values = append(values, candidate.value)
@@ -132,25 +136,21 @@ type modelCandidate struct {
 	userOnlyCheck bool
 }
 
-func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate {
+func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
 	if input.ToolName != "Agent" && !core.IsShellTool(input.ToolName) {
 		return nil
 	}
+	request, _ := hookctx.Request(ctx)
 	if input.CWD == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			input.CWD = cwd
-		}
+		input.CWD = request.Cwd
 	}
-	home, err := os.UserHomeDir()
+	home, err := hookctx.UserHomeDir(ctx)
 	if err != nil {
 		logger.Warn("model_guard: домашний каталог неизвестен", "error", err)
-		home = os.Getenv("HOME")
-		if home == "" {
-			return []modelCandidate{{value: "HOME", dynamic: true}}
-		}
+		return []modelCandidate{{value: "HOME", dynamic: true}}
 	}
 	agentModels := func(name string) []modelCandidate {
-		return agentDefinitionModels(name, input.CWD, home, nil, logger, false)
+		return agentDefinitionModels(ctx, name, input.CWD, home, nil, logger, false)
 	}
 	if input.ToolName == "Agent" {
 		return agentToolCandidates(input, agentModels, logger)
@@ -159,7 +159,7 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 	homes := commandPathCandidates(input.Command, "HOME", cwdCandidates, []string{home}, home, logger)
 	cwdCandidates = commandCWDs(input.Command, input.CWD, homes.paths, logger)
 	homes = commandPathCandidates(input.Command, "HOME", cwdCandidates, []string{home}, home, logger)
-	configs := commandPathCandidates(input.Command, "CLAUDE_CONFIG_DIR", cwdCandidates, nonEmpty(os.Getenv("CLAUDE_CONFIG_DIR")), home, logger)
+	configs := commandPathCandidates(input.Command, "CLAUDE_CONFIG_DIR", cwdCandidates, nonEmpty(claudeConfigDir(ctx)), home, logger)
 	unresolvedTildeSettings := false
 	readSettings := func(path string, tilde shellcmd.Tilde, _ string) [][]byte {
 		var contents [][]byte
@@ -189,9 +189,9 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 		return contents
 	}
 	settingsAt := func(cwd string, includeProject bool) []modelCandidate {
-		return settingsForCWD(cwd, homes, configs, logger, includeProject)
+		return settingsForCWD(ctx, cwd, homes, configs, logger, includeProject)
 	}
-	candidates := bashModelCandidatesAt(input.Command, input.CWD, cwdCandidates, homes, configs, modelFiles{settings: readSettings, agent: agentModels}, settingsAt, func(name, cwd string, extra []string) []modelCandidate {
+	candidates := bashModelCandidatesAt(input.Command, input.CWD, home, cwdCandidates, homes, configs, modelFiles{settings: readSettings, agent: agentModels}, settingsAt, func(name, cwd string, extra []string) []modelCandidate {
 		var found []modelCandidate
 		for _, commandHome := range homes.paths {
 			agentExtra := append([]string(nil), extra...)
@@ -200,7 +200,7 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 				agentExtra = append(agentExtra, installedPluginAgentDirs(filepath.Join(configDir, "plugins", "installed_plugins.json"), logger)...)
 			}
 			agentExtra = append(agentExtra, filepath.Join(commandHome, ".claude", "agents"))
-			found = append(found, agentDefinitionModels(name, cwd, commandHome, agentExtra, logger, true)...)
+			found = append(found, agentDefinitionModels(ctx, name, cwd, commandHome, agentExtra, logger, true)...)
 		}
 		if homes.dynamic || configs.dynamic {
 			found = append(found, modelCandidate{value: "HOME or CLAUDE_CONFIG_DIR", dynamic: true})
@@ -213,7 +213,7 @@ func modelCandidates(input *core.ToolInput, logger core.Logger) []modelCandidate
 	return candidates
 }
 
-func settingsForCWD(cwd string, homes, configs pathSet, logger core.Logger, includeProject bool) []modelCandidate {
+func settingsForCWD(ctx context.Context, cwd string, homes, configs pathSet, logger core.Logger, includeProject bool) []modelCandidate {
 	var paths []string
 	if includeProject {
 		paths = append(paths, projectSettingsPaths(cwd)...)
@@ -238,7 +238,7 @@ func settingsForCWD(cwd string, homes, configs pathSet, logger core.Logger, incl
 			if !includeProject {
 				lookupCWD = ""
 			}
-			found = append(found, agentDefinitionModels(name, lookupCWD, home, agentDirsForSettings, logger, true)...)
+			found = append(found, agentDefinitionModels(ctx, name, lookupCWD, home, agentDirsForSettings, logger, true)...)
 		}
 		return found
 	}
@@ -446,11 +446,11 @@ type modelFiles struct {
 // agentDirs, по симлинкам тоже; имя — поле name frontmatter, сравнивается
 // точно и нормализованным, как в Claude Code 2.1.330 (приёмка 21.11).
 // Модель определения проверяется по обычному списку одобренных моделей.
-func agentDefinitionModels(name, cwd, home string, extra []string, logger core.Logger, rejectMissing bool) []modelCandidate {
+func agentDefinitionModels(ctx context.Context, name, cwd, home string, extra []string, logger core.Logger, rejectMissing bool) []modelCandidate {
 	var found []modelCandidate
 	definitionFound := false
 	walk := agentWalk{seen: map[string]bool{}, logger: logger}
-	dirs := append(agentDirs(cwd, home, logger), extra...)
+	dirs := append(agentDirs(ctx, cwd, home, logger), extra...)
 	if builtinAgent(name) {
 		pluginDirs := installedPluginAgentDirs(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), logger)
 		dirs = slices.DeleteFunc(dirs, func(dir string) bool { return slices.Contains(pluginDirs, filepath.Clean(dir)) })
@@ -510,12 +510,12 @@ func agentNameMatches(defName, name string) bool {
 
 // agentDirs — каталоги пользовательских и проектных определений, а также
 // установленных плагинов из их реестра.
-func agentDirs(cwd, home string, logger core.Logger) []string {
+func agentDirs(ctx context.Context, cwd, home string, logger core.Logger) []string {
 	var dirs []string
 	if cwd != "" {
 		cwd = filepath.Clean(cwd)
 	}
-	if config := os.Getenv("CLAUDE_CONFIG_DIR"); config != "" {
+	if config := claudeConfigDir(ctx); config != "" {
 		dirs = append(dirs, filepath.Join(config, "agents"))
 	}
 	if home != "" {
@@ -795,7 +795,7 @@ func usableDirectory(path string, logger core.Logger) bool {
 // вход оболочке). Если shellcmd не разобрал команду, модели ищутся в её тексте
 // (--model, -m, присваивание переменной модели). readSettings возвращает все
 // прочитанные варианты файла --settings.
-func bashModelCandidatesAt(command, initialCWD string, cwdCandidates []string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) []modelCandidate {
+func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) []modelCandidate {
 	calls, err := shellcmd.Calls(command)
 	if calls == nil && err != nil {
 		logger.Warn("model_guard: shellcmd не разобрал команду, модели ищутся в тексте", "error", err)
@@ -807,13 +807,13 @@ func bashModelCandidatesAt(command, initialCWD string, cwdCandidates []string, h
 	for i := range calls {
 		call := &calls[i]
 		if call.Name == "cd" || call.Name == "pushd" {
-			if next, known := changeDirKnown(call, cwd, homeForPaths()); known && usableDirectory(next, logger) {
+			if next, known := changeDirKnown(call, cwd, home); known && usableDirectory(next, logger) {
 				cwd = next
 			}
 			continue
 		}
 		if call.Name == "env" {
-			if dir, found, known := envChdir(call.Args, cwd, homeForPaths()); found {
+			if dir, found, known := envChdir(call.Args, cwd, home); found {
 				if known && usableDirectory(dir, logger) {
 					cwd = dir
 				}
@@ -863,7 +863,7 @@ func bashModelCandidatesAt(command, initialCWD string, cwdCandidates []string, h
 			}
 		}
 		if dialect == "claude" {
-			callExtraDirs = claudeAddedAgentDirs(args, cwd, homeForPaths())
+			callExtraDirs = claudeAddedAgentDirs(args, cwd, home)
 			if settingsAt != nil {
 				for _, candidateCWD := range cwdCandidates {
 					found = append(found, settingsAt(candidateCWD, true)...)
@@ -1086,7 +1086,19 @@ func claudeAddedAgentDirs(args []word, cwd, home string) []string {
 	return dirs
 }
 
-func homeForPaths() string { return os.Getenv("HOME") }
+// claudeConfigDir — CLAUDE_CONFIG_DIR запроса: относительный путь — от cwd
+// запроса, как его открыл бы процесс хука
+func claudeConfigDir(ctx context.Context) string {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return ""
+	}
+	config := request.Getenv("CLAUDE_CONFIG_DIR")
+	if config == "" {
+		return ""
+	}
+	return request.Abs(config)
+}
 
 // modelClientWord — отдельное слово клиента из modelClients (не .claude/ и не claude-hooks)
 var modelClientWord = regexp.MustCompile(`(^|[^[:alnum:]_.-])(claude|cl|codex|opencode|worker)([^[:alnum:]_.-]|$)`)
@@ -1741,16 +1753,21 @@ func codexConfigCandidate(config word) (modelCandidate, bool) {
 	return modelCandidate{value: value, dynamic: !config.literal}, true
 }
 
-func (t *ModelGuardTool) approvedPath() string {
-	if os.Getenv("MODELS_APPROVED") == "" && t.path != "" {
-		return t.path
+func (t *ModelGuardTool) approvedPath(ctx context.Context) string {
+	if request, ok := hookctx.Request(ctx); ok {
+		if path := request.Getenv("MODELS_APPROVED"); path != "" {
+			return request.Abs(path)
+		}
+		if t.path != "" {
+			return request.Abs(t.path)
+		}
+		if home := request.Getenv("HOME"); home != "" {
+			return filepath.Join(request.Abs(home), ".config", "models", "approved")
+		}
+		t.Logger().Warn("не удалось определить домашний каталог для списка моделей", "error", errors.New("$HOME is not defined"))
+		return request.Abs(defaultApprovedModelsPath)
 	}
-	path, err := approved.Path()
-	if err != nil {
-		t.Logger().Warn("не удалось определить домашний каталог для списка моделей", "error", err)
-		return defaultApprovedModelsPath
-	}
-	return path
+	return ""
 }
 
 func readApprovedModels(path string) ([]approvedModel, string) {

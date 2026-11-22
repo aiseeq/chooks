@@ -2,6 +2,7 @@ package statusline
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/accounts"
 	"github.com/aiseeq/chooks/internal/atomicfile"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // WeeklyLimit — доля недельного лимита подписки, как её отдаёт Claude Code
@@ -146,16 +148,36 @@ const (
 
 // LimitsFile — путь снимка. Каталог состояния, а не времени выполнения:
 // снимок нужен и после перезагрузки, пока ни одна сессия не открыта
-func LimitsFile() (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("no home directory for the limits snapshot: %w", err)
-		}
-		base = filepath.Join(home, ".local", "state")
+func LimitsFile(request hookctx.Context) (string, error) {
+	base, err := request.StateDir()
+	if err != nil {
+		return "", fmt.Errorf("no home directory for the limits snapshot: %w", err)
 	}
-	return filepath.Join(base, "chooks", "limits.json"), nil
+	return filepath.Join(base, "limits.json"), nil
+}
+
+func limitsFileForContext(ctx context.Context) (string, error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return "", fmt.Errorf("hook request is missing")
+	}
+	return LimitsFile(request)
+}
+
+func recordLimitsForContext(ctx context.Context, smp sample, now time.Time) (mergeResult, error) {
+	path, err := limitsFileForContext(ctx)
+	if err != nil {
+		return mergeResult{verdict: weekChanged}, err
+	}
+	return mergeLimits(path, smp, now)
+}
+
+func diskLimitsForContext(ctx context.Context) (*limitsSnapshot, error) {
+	path, err := limitsFileForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return loadLimits(path)
 }
 
 // limitsHistory — журнал шагов рядом со снимком. Строка — изменение доли
@@ -166,8 +188,8 @@ func limitsHistory(snapshot string) string {
 }
 
 // recordLimits сводит замер со снимком по пути из LimitsFile
-func recordLimits(smp sample, now time.Time) (mergeResult, error) {
-	path, err := LimitsFile()
+func recordLimits(request hookctx.Context, smp sample, now time.Time) (mergeResult, error) {
+	path, err := LimitsFile(request)
 	if err != nil {
 		return mergeResult{verdict: weekChanged}, err
 	}
@@ -446,8 +468,8 @@ func (s *limitsSnapshot) weekOf(account string, now time.Time) (weeklyUsage, boo
 }
 
 // diskLimits читает снимок по пути из LimitsFile
-func diskLimits() (*limitsSnapshot, error) {
-	path, err := LimitsFile()
+func diskLimits(request hookctx.Context) (*limitsSnapshot, error) {
+	path, err := LimitsFile(request)
 	if err != nil {
 		return nil, err
 	}
@@ -475,8 +497,8 @@ func loadLimits(path string) (*limitsSnapshot, error) {
 }
 
 // readLimits читает снимок для сводки: снимок и журнал шагов
-func readLimits() (string, *limitsSnapshot, []limitStep, error) {
-	path, err := LimitsFile()
+func readLimits(request hookctx.Context) (string, *limitsSnapshot, []limitStep, error) {
+	path, err := LimitsFile(request)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -570,8 +592,8 @@ func lockFile(path string) (func(), error) {
 // WriteLimits печатает сводку для мастеров и калибровки: учётки хранилища
 // по почте с неделей и сроком входа, неопознанные недели по
 // сбросу, а при steps — журнал шагов одной таблицей с табуляцией
-func WriteLimits(w io.Writer, steps bool) error {
-	path, snapshot, journal, err := readLimits()
+func WriteLimits(w io.Writer, steps bool, request hookctx.Context) error {
+	path, snapshot, journal, err := readLimits(request)
 	if err != nil {
 		return err
 	}
@@ -582,7 +604,7 @@ func WriteLimits(w io.Writer, steps bool) error {
 		}
 		return nil
 	}
-	paths, err := accounts.DefaultPaths()
+	paths, err := accounts.DefaultPaths(request)
 	if err != nil {
 		return err
 	}
@@ -599,7 +621,11 @@ func WriteLimits(w io.Writer, steps bool) error {
 	}
 	latest := latestWeek(weeks)
 	shown := map[int]bool{}
-	unit := store.PlanUnit(now)
+	home := request.Getenv("HOME")
+	if home != "" {
+		home = request.Abs(home)
+	}
+	unit := store.PlanUnitForHome(now, home)
 	if unit.OK() {
 		fmt.Fprintf(w, "Доли — в %% %s (полная неделя учётки — %s)\n", unit.Name(), unit.Percent(100))
 	} else {
@@ -711,11 +737,11 @@ func accountUsage(s *limitsSnapshot, now time.Time) map[string]accounts.Usage {
 
 // SnapshotLimits — снимок строки статуса для ротации учёток: расход учёток
 // и запись расхода, спрошенного у API
-type SnapshotLimits struct{}
+type SnapshotLimits struct{ Request hookctx.Context }
 
 // Usage читает расход учёток из снимка
-func (SnapshotLimits) Usage() (map[string]accounts.Usage, error) {
-	path, err := LimitsFile()
+func (limits SnapshotLimits) Usage() (map[string]accounts.Usage, error) {
+	path, err := LimitsFile(limits.Request)
 	if err != nil {
 		return nil, err
 	}
@@ -728,11 +754,11 @@ func (SnapshotLimits) Usage() (map[string]accounts.Usage, error) {
 
 // Record вписывает расход учётки, спрошенный у API её токеном: учётка
 // известна точно. Окно без сброса (неделя не начата) не пишется
-func (SnapshotLimits) Record(email string, week accounts.Window, now time.Time) error {
+func (limits SnapshotLimits) Record(email string, week accounts.Window, now time.Time) error {
 	if week.ResetsAt.IsZero() {
 		return nil
 	}
 	smp := sample{week: weeklyUsage{used: week.Used, resetsAt: week.ResetsAt}, session: "api", account: email, exact: true}
-	_, err := recordLimits(smp, now)
+	_, err := recordLimits(limits.Request, smp, now)
 	return err
 }

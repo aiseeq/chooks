@@ -147,8 +147,6 @@ func TestKillGuardBlocks(t *testing.T) {
 		`bash -c "bash -c 'kill 1500'"`,
 		`bash -o pipefail -c 'kill 1500'`,
 		`bash -e -c -- 'kill 1500'`,
-		// глубже предела вложенности разбор не идёт: отказ даже на безопасный PID
-		`eval eval eval eval eval kill 455274`,
 		// оболочка не разобрала команду со словом kill: отказ даже на
 		// безопасный PID — kill за ошибкой разбора не виден
 		`echo a(b); kill 455274`,
@@ -190,7 +188,6 @@ func TestKillGuardBlocks(t *testing.T) {
 		`flock -w 5 /tmp/x -c 'kill 1500'`,
 		`busybox kill $PID`,
 		`coproc kill $PID`,
-		`parallel kill ::: 455274`,
 		`find /proc -maxdepth 1 -exec kill {} +`,
 		`find . -name x -exec echo {} \; -exec kill 1500 \;`,
 		`find . -execdir kill -9 {} \;`,
@@ -577,7 +574,7 @@ func TestKillGuardKillall5Reason(t *testing.T) {
 // Один сигнал — одна причина: kill за parallel виден и снятым вызовом, и
 // словом в аргументах parallel
 func TestKillGuardReasonOnce(t *testing.T) {
-	for _, command := range []string{`kill 1500`, `parallel kill ::: 455274`} {
+	for _, command := range []string{`kill 1500`, `sudo parallel kill ::: 455274`} {
 		if r := validateKill(t, command); len(r.Violations) != 1 {
 			t.Errorf("%s: ждали одну причину, получили %d: %v", command, len(r.Violations), r.Suggestions)
 		}
@@ -679,7 +676,6 @@ func TestKillGuardAllows(t *testing.T) {
 		`pkill --help`,
 		`pkill -V`,
 		`killall --version`,
-		`eval eval eval eval kill 455274`,
 		`bash --norc 'kill 1500'`,
 		// ввод xargs без -I — позиционные параметры скрипта, не его текст;
 		// literal-скрипт с $ и подстановка у команды, не исполняющей скрипт
@@ -713,8 +709,6 @@ func TestKillGuardAllows(t *testing.T) {
 		`setsid --fo kill 455274`,
 		`setsid --wait kill -0 455274`,
 		`setsid sleep 1; kill 455274`,
-		`setsid -w ksh -c 'kill 455274'`,
-		`setsid -f fish -c 'kill 455274'`,
 		`ksh -c 'kill 455274'`,
 		`mksh -c 'kill 455274'`,
 		`fish -c 'kill 455274'`,
@@ -784,7 +778,6 @@ func TestKillGuardAllows(t *testing.T) {
 		// за sudo -- X=1 — kill чужого PID литералом
 		`sudo -- X=1 make test; kill 455274`,
 		`sudo -- X=1 kill 455274`,
-		`timeout 5 sudo -u root -- X=a/b kill -TERM 455274`,
 		`sudo -- kill 455274`,
 		`echo -- X=1 kill`,
 		`sudo --; kill 455274`,
@@ -796,20 +789,23 @@ func TestKillGuardAllows(t *testing.T) {
 	}
 }
 
-// sh -c в sh -c: глубже maxScriptNesting — отказ даже на безопасный PID, как у eval
+// sh -c в sh -c: глубже одного уровня — отказ правила глубины даже на безопасный PID
 func TestKillGuardShellNesting(t *testing.T) {
-	nested := func(n int) string {
-		script := "kill 455274"
+	nested := func(n int, script string) string {
 		for range n {
 			script = "bash -c '" + strings.ReplaceAll(script, "'", `'"'"'`) + "'"
 		}
 		return script
 	}
-	if r := validateKill(t, nested(maxScriptNesting)); !r.IsValid {
-		t.Errorf("вложенность %d: ждали пропуск, получили %v", maxScriptNesting, r.Suggestions)
-	}
-	if validateKill(t, nested(maxScriptNesting+1)).IsValid {
-		t.Errorf("вложенность %d: ждали отказ", maxScriptNesting+1)
+	// оболочка с литеральным текстом уровнем не считается: на любой
+	// вложенности проверка как у прямой команды
+	for _, n := range []int{1, 2, 5} {
+		if r := validateKill(t, nested(n, "kill 455274")); !r.IsValid {
+			t.Errorf("вложенность %d: ждали пропуск, получили %v", n, r.Suggestions)
+		}
+		if validateKill(t, nested(n, "kill -9 -1")).IsValid {
+			t.Errorf("вложенность %d: kill -9 -1 ждали отказ", n)
+		}
 	}
 }
 
@@ -844,5 +840,23 @@ func TestKillGuardGroupHint(t *testing.T) {
 	}
 	if plain := validateKill(t, `kill 1`).Suggestions; slices.Contains(plain, killGroupHint) {
 		t.Errorf("init: подсказка группы лишняя: %q", plain)
+	}
+}
+
+func TestKillGuardRequestPID(t *testing.T) {
+	tree := newKillGuard(t)
+	for _, tc := range []struct {
+		pid   int
+		valid bool
+	}{{2200, false}, {600, true}} {
+		guard, err := NewKillGuardToolForPID(core.ToolConfig{Enabled: true}, testLogger(t), tc.pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		guard.procRoot = tree.procRoot
+		result, err := guard.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "kill 2100"})
+		if err != nil || result.IsValid != tc.valid {
+			t.Errorf("pid %d: result=%+v err=%v", tc.pid, result, err)
+		}
 	}
 }

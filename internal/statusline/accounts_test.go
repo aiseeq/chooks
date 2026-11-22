@@ -1,7 +1,6 @@
 package statusline
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/chooks/internal/accounts"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // rotationCall — запуск ротации, который строка статуса попросила
@@ -32,7 +32,7 @@ func isolateRender(t *testing.T) *[]rotationCall {
 	writeRates(t, "100")
 	var calls []rotationCall
 	saved := startRotation
-	startRotation = func(_ accounts.Paths, s *accounts.Store, usage map[string]accounts.Usage, _ time.Time, _ string, args ...string) (string, error) {
+	startRotation = func(_ accounts.Paths, s *accounts.Store, usage map[string]accounts.Usage, _ time.Time, _ string, _ hookctx.Context, args ...string) (string, error) {
 		calls = append(calls, rotationCall{store: s, usage: usage, args: args})
 		return "", nil
 	}
@@ -43,7 +43,7 @@ func isolateRender(t *testing.T) *[]rotationCall {
 // writeStore кладёт хранилище двух учёток, активна рабочая
 func writeStore(t *testing.T, autoOff bool) {
 	t.Helper()
-	paths, err := accounts.DefaultPaths()
+	paths, err := accounts.DefaultPaths(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func renderInput(t *testing.T, session string, week int, weekResets time.Time) s
 	t.Helper()
 	input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"rate_limits":{"seven_day":{"used_percentage":%d,"resets_at":%d}}}`,
 		session, t.TempDir(), week, weekResets.Unix())
-	line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
+	line, err := Render(statusRequestContext(t), strings.NewReader(input), testLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 	if line := renderInput(t, "s1", 40, workNext); !strings.Contains(line, "work@example.com") || !strings.Contains(line, "40%") || strings.Contains(line, "нед") {
 		t.Errorf("полоса недели: %q", line)
 	}
-	path, err := LimitsFile()
+	path, err := LimitsFile(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 
 	// Сессия со старым ответом прежней учётки рисует её неделю — по сбросу,
 	// хотя активна уже другая
-	paths, err := accounts.DefaultPaths()
+	paths, err := accounts.DefaultPaths(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := WriteLimits(&out, false); err != nil {
+	if err := WriteLimits(&out, false, statusTestRequest(t)); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
@@ -156,10 +156,10 @@ func TestRenderAttributesWeekToActiveAccount(t *testing.T) {
 // неделя
 func TestRecordSkipsWeekNotStarted(t *testing.T) {
 	isolateRender(t)
-	if err := (SnapshotLimits{}).Record("work@example.com", accounts.Window{}, time.Now()); err != nil {
+	if err := (SnapshotLimits{Request: statusTestRequest(t)}).Record("work@example.com", accounts.Window{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	path, err := LimitsFile()
+	path, err := LimitsFile(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestFiveHourWindowIgnored(t *testing.T) {
 	workNext := now.Add(4 * 24 * time.Hour).Truncate(time.Hour)
 	renderInput(t, "s1", 40, workNext)
 
-	path, err := LimitsFile()
+	path, err := LimitsFile(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestFiveHourWindowIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	usage, err := SnapshotLimits{}.Usage()
+	usage, err := SnapshotLimits{Request: statusTestRequest(t)}.Usage()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestFiveHourWindowIgnored(t *testing.T) {
 		t.Errorf("расход для выбора: %+v", usage)
 	}
 	var out strings.Builder
-	if err := WriteLimits(&out, false); err != nil {
+	if err := WriteLimits(&out, false, statusTestRequest(t)); err != nil {
 		t.Fatal(err)
 	}
 	if text := out.String(); strings.Contains(text, "пят") || !strings.Contains(text, "неделя 40%") {
@@ -216,7 +216,7 @@ func TestFiveHourWindowIgnored(t *testing.T) {
 
 	input := fmt.Sprintf(`{"session_id":"s2","cwd":%q,"rate_limits":{"seven_day":{"used_percentage":41,"resets_at":%d},"five_hour":{"used_percentage":96,"resets_at":%d}}}`,
 		t.TempDir(), workNext.Unix(), now.Add(time.Hour).Unix())
-	if _, err := Render(context.Background(), strings.NewReader(input), testLogger(t)); err != nil {
+	if _, err := Render(statusRequestContext(t), strings.NewReader(input), testLogger(t)); err != nil {
 		t.Fatal(err)
 	}
 	raw, err = os.ReadFile(path)
@@ -235,7 +235,7 @@ func TestRenderSingleAccountLabel(t *testing.T) {
 	if line := renderInput(t, "s", 10, now.Add(3*24*time.Hour).Truncate(time.Hour)); !strings.Contains(line, "нед ▓") {
 		t.Errorf("полоса без хранилища: %q", line)
 	}
-	path, err := LimitsFile()
+	path, err := LimitsFile(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,10 +254,10 @@ func TestSnapshotLimitsRecordExact(t *testing.T) {
 	now := time.Now()
 	resets := now.Add(3 * 24 * time.Hour).Truncate(time.Hour)
 	renderInput(t, "s", 50, resets)
-	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 7, ResetsAt: resets}, now); err != nil {
+	if err := (SnapshotLimits{Request: statusTestRequest(t)}).Record("personal@example.com", accounts.Window{Used: 7, ResetsAt: resets}, now); err != nil {
 		t.Fatal(err)
 	}
-	usage, err := (SnapshotLimits{}).Usage()
+	usage, err := (SnapshotLimits{Request: statusTestRequest(t)}).Usage()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestRenderForeignWeekAfterSwitch(t *testing.T) {
 	if !strings.Contains(line, "work@example.com") || !strings.Contains(line, "96%") {
 		t.Errorf("полоса — неделя рабочей, что у Claude Code: %q", line)
 	}
-	path, err := LimitsFile()
+	path, err := LimitsFile(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestRenderForeignWeekAfterSwitch(t *testing.T) {
 	}
 
 	// Замер API токеном личной забирает её неделю; верхние поля не меняет
-	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 0, ResetsAt: personalNext}, now); err != nil {
+	if err := (SnapshotLimits{Request: statusTestRequest(t)}).Record("personal@example.com", accounts.Window{Used: 0, ResetsAt: personalNext}, now); err != nil {
 		t.Fatal(err)
 	}
 	snap = readSnapshot(t, path)
@@ -306,7 +306,7 @@ func TestRenderForeignWeekAfterSwitch(t *testing.T) {
 		t.Fatalf("недели после замера API: %+v", snap)
 	}
 	var out strings.Builder
-	if err := WriteLimits(&out, false); err != nil {
+	if err := WriteLimits(&out, false, statusTestRequest(t)); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
@@ -328,7 +328,7 @@ func TestRecordExactRepairsMisattributedWeek(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	workNext := now.Add(4 * 24 * time.Hour).Truncate(time.Hour)
 	personalNext := now.Add(6 * 24 * time.Hour).Truncate(time.Hour)
-	path, err := LimitsFile()
+	path, err := LimitsFile(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,10 +342,10 @@ func TestRecordExactRepairsMisattributedWeek(t *testing.T) {
 	if err := saveLimits(path, broken); err != nil {
 		t.Fatal(err)
 	}
-	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 0, ResetsAt: personalNext}, now); err != nil {
+	if err := (SnapshotLimits{Request: statusTestRequest(t)}).Record("personal@example.com", accounts.Window{Used: 0, ResetsAt: personalNext}, now); err != nil {
 		t.Fatal(err)
 	}
-	usage, err := (SnapshotLimits{}).Usage()
+	usage, err := (SnapshotLimits{Request: statusTestRequest(t)}).Usage()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestRecordExactRepairsMisattributedWeek(t *testing.T) {
 	// Замер API рабочей с другим сбросом: прежняя неделя рабочей ошибочна
 	// и становится неопознанной
 	other := workNext.Add(time.Hour)
-	if err := (SnapshotLimits{}).Record("work@example.com", accounts.Window{Used: 10, ResetsAt: other}, now); err != nil {
+	if err := (SnapshotLimits{Request: statusTestRequest(t)}).Record("work@example.com", accounts.Window{Used: 10, ResetsAt: other}, now); err != nil {
 		t.Fatal(err)
 	}
 	for _, rec := range readSnapshot(t, path).Weeks {
@@ -380,7 +380,7 @@ func TestRenderWithoutRateLimitsShowsActiveWeek(t *testing.T) {
 	now := time.Now()
 	renderInput(t, "s", 96, now.Add(4*24*time.Hour).Truncate(time.Hour))
 	input := fmt.Sprintf(`{"session_id":"fresh","cwd":%q}`, t.TempDir())
-	line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
+	line, err := Render(statusRequestContext(t), strings.NewReader(input), testLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestRenderColorsByPool(t *testing.T) {
 	now := time.Now()
 	workNext := now.Add(5 * 24 * time.Hour).Truncate(time.Hour)
 	personalNext := now.Add(6 * 24 * time.Hour).Truncate(time.Hour)
-	path, err := LimitsFile()
+	path, err := LimitsFile(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +429,7 @@ func TestRenderColorsByPool(t *testing.T) {
 	if err := os.WriteFile(limitsHistory(path), []byte(history.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := (SnapshotLimits{}).Record("personal@example.com", accounts.Window{Used: 50, ResetsAt: personalNext}, now); err != nil {
+	if err := (SnapshotLimits{Request: statusTestRequest(t)}).Record("personal@example.com", accounts.Window{Used: 50, ResetsAt: personalNext}, now); err != nil {
 		t.Fatal(err)
 	}
 	// Сама неделя активной зелёная бы: 20% за двое суток — 70% к сбросу
@@ -438,7 +438,7 @@ func TestRenderColorsByPool(t *testing.T) {
 		t.Errorf("полоса должна быть красной без значка: %q", plain(raw))
 	}
 	var out strings.Builder
-	if err := WriteLimits(&out, false); err != nil {
+	if err := WriteLimits(&out, false, statusTestRequest(t)); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Пул учёток: темп 96% в сутки") || !strings.Contains(out.String(), "пул кончится") ||
@@ -452,7 +452,7 @@ func renderRaw(t *testing.T, session string, week int, resets time.Time) string 
 	t.Helper()
 	input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"rate_limits":{"seven_day":{"used_percentage":%d,"resets_at":%d}}}`,
 		session, t.TempDir(), week, resets.Unix())
-	line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
+	line, err := Render(statusRequestContext(t), strings.NewReader(input), testLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}

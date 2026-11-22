@@ -60,16 +60,31 @@ type Logger interface {
 	With(args ...any) Logger
 }
 
-// slogLogger обертка вокруг slog.Logger
+// FileLogger — логгер запроса, который владеет открытым им файлом лога.
+// Close закрывает файл по концу обработки запроса: в долгоживущем процессе
+// дескриптор иначе висит до финализатора GC. Вывод в stderr Close не трогает
+type FileLogger interface {
+	Logger
+	Close() error
+}
+
+// slogLogger обертка вокруг slog.Logger; file — открытый им файл лога или nil
 type slogLogger struct {
 	logger *slog.Logger
+	file   io.Closer
 }
 
 // NewLogger создает logger по конфигурации
 func NewLogger(config LoggerConfig) (Logger, error) {
+	return NewLoggerTo(config, os.Stderr)
+}
+
+// NewLoggerTo sends console logs and rotation errors to the request's stderr.
+// Файл лога (output: file) закрывает вызывающий через Close
+func NewLoggerTo(config LoggerConfig, stderr io.Writer) (FileLogger, error) {
 	applyLoggerDefaults(&config)
 
-	writer, err := openLogWriter(config)
+	writer, err := openLogWriter(config, stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +107,25 @@ func NewLogger(config LoggerConfig) (Logger, error) {
 		handler = slog.NewTextHandler(writer, opts)
 	}
 
-	return &slogLogger{logger: slog.New(handler)}, nil
+	logger := &slogLogger{logger: slog.New(handler)}
+	if file, ok := writer.(*os.File); ok && config.Output == "file" {
+		logger.file = file
+	}
+	return logger, nil
+}
+
+// Close закрывает файл лога, открытый NewLoggerTo; у вывода в stderr — ничего.
+// Логгеры от With делят файл с родителем и его не закрывают
+func (l *slogLogger) Close() error {
+	if l.file == nil {
+		return nil
+	}
+	file := l.file
+	l.file = nil
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close log file: %w", err)
+	}
+	return nil
 }
 
 // maskAttr скрывает секреты в значении поля: журнал читают обходы и суб-агенты, а поля
@@ -127,11 +160,11 @@ func parseLogLevel(level string) slog.Level {
 }
 
 // openLogWriter открывает поток вывода логов
-func openLogWriter(config LoggerConfig) (io.Writer, error) {
+func openLogWriter(config LoggerConfig, stderr io.Writer) (io.Writer, error) {
 	switch config.Output {
 	case "stdout":
 		// stdout зарезервирован под протокол обмена с Claude Code
-		return os.Stderr, nil
+		return stderr, nil
 	case "file":
 		if config.LogFile == "" {
 			return nil, fmt.Errorf("log file path is required when output is 'file'")
@@ -141,7 +174,7 @@ func openLogWriter(config LoggerConfig) (io.Writer, error) {
 		}
 		// Неудавшаяся ротация логирование не останавливает: лог просто растёт дальше
 		if err := rotateLogIfNeeded(config.LogFile, config.MaxSizeMB); err != nil {
-			fmt.Fprintf(os.Stderr, "chooks: log rotation failed: %v\n", err)
+			fmt.Fprintf(stderr, "chooks: log rotation failed: %v\n", err)
 		}
 
 		file, err := os.OpenFile(config.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -150,7 +183,7 @@ func openLogWriter(config LoggerConfig) (io.Writer, error) {
 		}
 		return file, nil
 	default:
-		return os.Stderr, nil
+		return stderr, nil
 	}
 }
 

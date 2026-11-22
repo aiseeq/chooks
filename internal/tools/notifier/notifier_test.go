@@ -8,11 +8,16 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 func newNotifier(t *testing.T, config core.ToolConfig) *Notifier {
 	t.Helper()
-	return New(config, testLogger(t))
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewForRequest(config, testLogger(t), request)
 }
 
 func TestNotifier_BuildAlert(t *testing.T) {
@@ -97,9 +102,9 @@ func TestNotifier_AnnounceSilent(t *testing.T) {
 }
 
 func TestNotifierTool_ProjectName(t *testing.T) {
-	notifier := newNotifier(t, core.ToolConfig{Enabled: true})
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	notifier := newNotifier(t, core.ToolConfig{Enabled: true})
 
 	// Проекты вне ~/work и вложенные каталоги: имя определяется по факту, а не по шаблону пути
 	for _, dir := range []string{"work/chooks", "git/life", "work/projecta/frontend/admin-app"} {

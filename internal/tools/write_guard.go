@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // WriteGuardTool отклоняет запись файла через here-doc, тело которого
@@ -31,7 +32,7 @@ type WriteGuardTool struct {
 
 // NewWriteGuardTool создает проверку тел here-doc
 func NewWriteGuardTool(config core.ToolConfig, logger core.Logger) (*WriteGuardTool, error) {
-	rm, err := NewRmGuardTool(core.ToolConfig{Enabled: true}, logger)
+	rm, err := newRmGuardTool(core.ToolConfig{Enabled: true}, logger, nil)
 	if err != nil {
 		return nil, fmt.Errorf("rm check for write_guard: %w", err)
 	}
@@ -57,7 +58,16 @@ var (
 )
 
 // ValidateTool проверяет тела here-doc в команде Bash
-func (t *WriteGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+func (t *WriteGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
+	local := *t
+	rm := *t.rm
+	rm.lookupEnv = request.LookupEnv
+	local.rm = &rm
+	t = &local
 	cmd := input.Command
 	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) || !strings.Contains(cmd, "<<") || !strings.Contains(cmd, "rm") || !strings.Contains(cmd, "$") {
 		return &core.ValidationResult{IsValid: true}, nil

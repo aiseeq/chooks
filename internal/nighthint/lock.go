@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -34,7 +35,7 @@ var errNoActiveSession = errors.New("no active session on seat0")
 func ScreenLocked(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
-	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
+	conn, err := connectSystemBus(ctx)
 	if err != nil {
 		return false, fmt.Errorf("connect system bus: %w", err)
 	}
@@ -70,7 +71,7 @@ func ScreenLocked(ctx context.Context) (bool, error) {
 func LidClosed(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
-	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
+	conn, err := connectSystemBus(ctx)
 	if err != nil {
 		return false, fmt.Errorf("connect system bus: %w", err)
 	}
@@ -84,4 +85,15 @@ func LidClosed(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("LidClosed %s: not a bool", hint)
 	}
 	return closed, nil
+}
+
+func connectSystemBus(ctx context.Context) (*dbus.Conn, error) {
+	if request, ok := hookctx.Request(ctx); ok {
+		address := request.Getenv("DBUS_SYSTEM_BUS_ADDRESS")
+		if address == "" {
+			address = "unix:path=/var/run/dbus/system_bus_socket"
+		}
+		return dbus.Connect(request.BusAddress(address), dbus.WithContext(ctx))
+	}
+	return nil, fmt.Errorf("hook request is missing")
 }

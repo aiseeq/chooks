@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // rmGuardEnv окружение, в котором снимались вердикты Claude Code: HOME и PWD
@@ -207,7 +208,7 @@ func TestRmGuard330HintUsesLiteralPath(t *testing.T) {
 
 func validateRm(t *testing.T, command string) *core.ValidationResult {
 	t.Helper()
-	result, err := newRmGuard(t).ValidateTool(context.Background(),
+	result, err := newRmGuard(t).ValidateTool(rmTestContext(),
 		&core.ToolInput{ToolName: "Bash", Command: command, CWD: "/home/u/proj"})
 	if err != nil {
 		t.Fatalf("ValidateTool: %v", err)
@@ -810,12 +811,9 @@ func TestRmGuard330HomeWorkspace(t *testing.T) {
 		}
 	}
 	const sandboxHome = "/home/aisee/.cache/claude-tmp/rmcc330/home"
-	tool.lookupEnv = func(name string) (string, bool) {
-		if name == "HOME" {
-			return sandboxHome, true
-		}
-		return "", false
-	}
+	// HOME приходит из контекста запроса: ValidateTool берёт env оттуда
+	rmGuardEnv["HOME"] = sandboxHome
+	t.Cleanup(func() { rmGuardEnv["HOME"] = "/home/u" })
 	r := validateRmWith(t, tool, `false && rm -rf $HOME/.cache/*`, sandboxHome+"/.cache/w")
 	if r.IsValid {
 		t.Error("удаление предка cwd песочницы должно отклоняться")
@@ -890,4 +888,12 @@ func TestRmGuardCdGlobReason(t *testing.T) {
 	if got := strings.Join(r.Suggestions, "\n"); got != want {
 		t.Errorf("\nесть  %q\nждали %q", got, want)
 	}
+}
+
+func rmTestContext() context.Context {
+	env := make([]string, 0, len(rmGuardEnv))
+	for k, v := range rmGuardEnv {
+		env = append(env, k+"="+v)
+	}
+	return hookctx.WithRequest(context.Background(), hookctx.New(nil, nil, nil, env, "/home/u/proj", 1, 2))
 }

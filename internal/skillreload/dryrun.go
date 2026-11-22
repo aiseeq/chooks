@@ -342,7 +342,10 @@ func fileVersions(ctx context.Context, kind, path string) ([]version, []error) {
 	if err != nil {
 		return versions, append(problems, fmt.Errorf("%s: %w", path, err))
 	}
-	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+	lines := strings.TrimSpace(string(out))
+	for more := true; more; {
+		var line string
+		line, lines, more = strings.Cut(lines, "\n")
 		if line == "" {
 			continue
 		}

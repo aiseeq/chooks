@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -49,7 +48,7 @@ func TestRunWebFetchFallback_SubstitutesBlockedPage(t *testing.T) {
 	calls := fakeWebtext(t)
 
 	var out bytes.Buffer
-	runWebFetchFallback(context.Background(), webFetchInput(t, 403, "The server returned HTTP 403 Forbidden."), config, logger, &out)
+	runWebFetchFallback(processTestContext(t), webFetchInput(t, 403, "The server returned HTTP 403 Forbidden."), config, logger, &out)
 
 	var output postToolUseOutput
 	if err := json.Unmarshal(out.Bytes(), &output); err != nil {
@@ -72,7 +71,7 @@ func TestRunWebFetchFallback_LeavesResponse(t *testing.T) {
 	t.Run("обычная страница — webtext не зовётся", func(t *testing.T) {
 		calls := fakeWebtext(t)
 		var out bytes.Buffer
-		runWebFetchFallback(context.Background(), webFetchInput(t, 200, "**Key facts** about the regulation"), config, logger, &out)
+		runWebFetchFallback(processTestContext(t), webFetchInput(t, 200, "**Key facts** about the regulation"), config, logger, &out)
 		if out.Len() != 0 {
 			t.Errorf("обычный ответ подменён: %s", out.String())
 		}
@@ -84,7 +83,7 @@ func TestRunWebFetchFallback_LeavesResponse(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
 		t.Setenv("HOME", t.TempDir())
 		var out bytes.Buffer
-		runWebFetchFallback(context.Background(), webFetchInput(t, 403, "The server returned HTTP 403 Forbidden."), config, logger, &out)
+		runWebFetchFallback(processTestContext(t), webFetchInput(t, 403, "The server returned HTTP 403 Forbidden."), config, logger, &out)
 		if out.Len() != 0 {
 			t.Errorf("без webtext ответ должен остаться как был: %s", out.String())
 		}
@@ -94,7 +93,7 @@ func TestRunWebFetchFallback_LeavesResponse(t *testing.T) {
 		off := *config
 		off.Tools = map[string]core.ToolConfig{webFallbackTool: {Enabled: false}}
 		var out bytes.Buffer
-		runWebFetchFallback(context.Background(), webFetchInput(t, 403, "The server returned HTTP 403 Forbidden."), &off, logger, &out)
+		runWebFetchFallback(processTestContext(t), webFetchInput(t, 403, "The server returned HTTP 403 Forbidden."), &off, logger, &out)
 		if _, err := os.Stat(calls); out.Len() != 0 || err == nil {
 			t.Errorf("выключенный хук сработал: %s", out.String())
 		}
@@ -119,7 +118,7 @@ func TestRunWebFetchFallback_FailureAddsContext(t *testing.T) {
 	calls := fakeWebtext(t)
 
 	var out bytes.Buffer
-	runWebFetchFallback(context.Background(), webFetchFailureInput(t, "https://www.itv.com/news/x", false), config, logger, &out)
+	runWebFetchFallback(processTestContext(t), webFetchFailureInput(t, "https://www.itv.com/news/x", false), config, logger, &out)
 
 	var output postToolUseFailureOutput
 	if err := json.Unmarshal(out.Bytes(), &output); err != nil {
@@ -149,7 +148,7 @@ func TestRunWebFetchFallback_FailureSkipped(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			calls := fakeWebtext(t)
 			var out bytes.Buffer
-			runWebFetchFallback(context.Background(), input, config, logger, &out)
+			runWebFetchFallback(processTestContext(t), input, config, logger, &out)
 			if _, err := os.Stat(calls); out.Len() != 0 || err == nil {
 				t.Errorf("хук сработал: %s", out.String())
 			}

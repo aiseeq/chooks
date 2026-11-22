@@ -11,6 +11,7 @@ import (
 	"github.com/aiseeq/akit/shellcmd"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // jiraCommentEndpoint запрос, создающий или редактирующий комментарий в Jira
@@ -59,7 +60,10 @@ func NewJiraStyleTool(config core.ToolConfig, logger core.Logger) (*JiraStyleToo
 }
 
 // ValidateTool проверяет команду, постящую комментарий в Jira
-func (t *JiraStyleTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+func (t *JiraStyleTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+	if _, ok := hookctx.Request(ctx); !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
 	if !t.IsEnabled() || input.ToolName != "Bash" || input.Command == "" {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
@@ -80,7 +84,7 @@ func (t *JiraStyleTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 		}
 		return t.checkTexts(stripSedPatterns(input.Command), nil), nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := hookctx.UserHomeDir(ctx)
 	if err != nil {
 		// ~ и cd без аргументов не раскрыть: такие пути тела - отказ
 		t.Logger().Warn("jira_style: домашний каталог неизвестен", "error", err)

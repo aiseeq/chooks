@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -18,7 +17,7 @@ func validateRmIn(t *testing.T, command, cwd string) *core.ValidationResult {
 
 func validateRmWith(t *testing.T, tool *RmGuardTool, command, cwd string) *core.ValidationResult {
 	t.Helper()
-	result, err := tool.ValidateTool(context.Background(),
+	result, err := tool.ValidateTool(rmTestContext(),
 		&core.ToolInput{ToolName: "Bash", Command: command, CWD: cwd})
 	if err != nil {
 		t.Fatalf("ValidateTool: %v", err)
@@ -126,7 +125,7 @@ func TestRmGuardWorkspaceAddDirsError(t *testing.T) {
 	tool := newRmGuard(t)
 	sessionDirs(t, tool, nil)
 	tool.addDirs = func(string) ([]string, error) { return nil, errors.New("no proc") }
-	r, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash",
+	r, err := tool.ValidateTool(rmTestContext(), &core.ToolInput{ToolName: "Bash",
 		Command: `cd /home/u/lab/extra && rm -rf /home/u/lab/proj`, CWD: "/home/u/lab/proj"})
 	if err != nil || r.IsValid {
 		t.Errorf("должно отклоняться без ошибки: %v, %v", r, err)
@@ -249,7 +248,7 @@ func TestRmGuardWorkspaceRealPathError(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	_, err := newRmGuard(t).ValidateTool(context.Background(),
+	_, err := newRmGuard(t).ValidateTool(rmTestContext(),
 		&core.ToolInput{ToolName: "Bash", Command: "rm -rf /x", CWD: filepath.Join(locked, "cwd")})
 	if err == nil && os.Geteuid() != 0 {
 		t.Error("нет ошибки realpath в папке без прав")
@@ -269,7 +268,7 @@ func TestRmGuardWorkspaceCdDirRealPathError(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 	tool := newRmGuard(t)
 	sessionDirs(t, tool, nil)
-	r, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash",
+	r, err := tool.ValidateTool(rmTestContext(), &core.ToolInput{ToolName: "Bash",
 		Command: "cd " + locked + "/x && rm -rf /home/u/lab/proj", CWD: "/home/u/lab/proj"})
 	if err != nil || r.IsValid {
 		t.Errorf("должно отклоняться без ошибки: %v, %v", r, err)

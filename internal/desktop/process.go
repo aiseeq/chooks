@@ -11,6 +11,9 @@ import (
 // до эмулятора терминала короткая, а зацикливаться на битом /proc нельзя
 const maxAncestors = 16
 
+// procDir — корень /proc; тесты подставляют своё дерево процессов
+var procDir = "/proc"
+
 // ProcessAncestors возвращает PID процесса и всех его предков, начиная с самого процесса.
 // Окно терминала принадлежит одному из них: какому именно — решает оконный менеджер,
 // поэтому список передаётся целиком и не требует знания конкретных эмуляторов терминала.
@@ -42,7 +45,7 @@ func processNames(pid int) ([]string, error) {
 	}
 	names := make([]string, 0, len(ancestors))
 	for _, ancestor := range ancestors {
-		commPath := "/proc/" + strconv.Itoa(ancestor) + "/comm"
+		commPath := procDir + "/" + strconv.Itoa(ancestor) + "/comm"
 		data, err := os.ReadFile(commPath)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read %s: %w", commPath, err)
@@ -54,7 +57,7 @@ func processNames(pid int) ([]string, error) {
 
 // parentPID читает PPid процесса из /proc/<pid>/stat
 func parentPID(pid int) (int, error) {
-	statPath := "/proc/" + strconv.Itoa(pid) + "/stat"
+	statPath := procDir + "/" + strconv.Itoa(pid) + "/stat"
 	data, err := os.ReadFile(statPath)
 	if err != nil {
 		return 0, fmt.Errorf("cannot read %s: %w", statPath, err)

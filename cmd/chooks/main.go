@@ -17,6 +17,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/modellaunch"
 	"github.com/aiseeq/chooks/internal/processor"
 	"github.com/aiseeq/chooks/internal/statusline"
@@ -34,21 +35,21 @@ const (
 	exitBlocked = 2
 )
 
-var (
-	configPath string
-	verbose    bool
-	timeout    time.Duration
+// Version подставляется через ldflags при сборке.
+var Version = "dev"
 
-	// Version подставляется через ldflags при сборке
-	Version = "dev"
-)
+type cliTerminationKey struct{}
 
 func main() {
-	os.Exit(execute())
+	// Некоторые команды не используют cwd и работают даже после удаления
+	// текущего каталога, поэтому ошибка Getwd не мешает запуску CLI.
+	request, _ := hookctx.FromProcess()
+	ctx := context.WithValue(context.Background(), cliTerminationKey{}, (func(int))(os.Exit))
+	os.Exit(execute(ctx, request))
 }
 
 // execute запускает CLI и возвращает exit-код для Claude Code
-func execute() int {
+func execute(ctx context.Context, request hookctx.Context) int {
 	exitCode := exitAllowed
 
 	rootCmd := &cobra.Command{
@@ -61,10 +62,14 @@ func execute() int {
 			return cmd.Help()
 		},
 	}
+	rootCmd.SetContext(hookctx.WithRequest(ctx, request))
+	rootCmd.SetIn(request.Stdin)
+	rootCmd.SetOut(request.Stdout)
+	rootCmd.SetErr(request.Stderr)
 
-	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "путь к файлу конфигурации")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "подробный вывод")
-	rootCmd.PersistentFlags().DurationVar(&timeout, "timeout", 5*time.Second, "таймаут обработки")
+	rootCmd.PersistentFlags().StringP("config", "c", "", "путь к файлу конфигурации")
+	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "подробный вывод")
+	rootCmd.PersistentFlags().Duration("timeout", 5*time.Second, "таймаут обработки")
 
 	preToolUse := newHookCmd(hookPreToolUse, "Проверить вызов инструмента до запуска (PreToolUse): kill, rm, rsync, git, модель, стиль Jira", &exitCode)
 	preToolUse.Long = preToolUseLong
@@ -82,7 +87,7 @@ func execute() int {
 		newHookCmd(hookUnsentCheck, "Не выпустить ответ «текст не отправлен» без reddy history в ходе (Stop)", &exitCode),
 		newNightHintCmd(&exitCode),
 		newNotifyCmd(),
-		newStatusLineCmd(),
+		newStatusLineCmd(&exitCode),
 		newLimitsCmd(),
 		newAccountCmd(),
 		newConfigCmd(),
@@ -99,7 +104,7 @@ func execute() int {
 	)
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "chooks: %v\n", err)
+		fmt.Fprintf(request.Stderr, "chooks: %v\n", err)
 		if exitCode == exitAllowed {
 			exitCode = exitError
 		}
@@ -129,7 +134,7 @@ func newModelScanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			config, err := core.LoadConfig(configPath)
+			config, err := core.LoadConfig(commandConfigPath(cmd))
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
@@ -173,26 +178,125 @@ func newHookCmd(hookType, short string, exitCode *int) *cobra.Command {
 		Use:   hookType,
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			code, err := runHook(cmd.Context(), hookType)
+			code, err := runHook(hookCommandContext(cmd), hookType)
 			*exitCode = code
 			return err
 		},
 	}
 }
 
+func hookCommandContext(cmd *cobra.Command) context.Context {
+	ctx := cmd.Context()
+	request, ok := hookctx.Request(ctx)
+	if ok {
+		flags := cmd.Root().PersistentFlags()
+		if flags.Lookup("config") != nil {
+			request.ConfigPath, _ = flags.GetString("config")
+		}
+		if flags.Lookup("verbose") != nil {
+			request.Verbose, _ = flags.GetBool("verbose")
+		}
+		if flags.Lookup("timeout") != nil {
+			request.Timeout, _ = flags.GetDuration("timeout")
+		}
+		return hookctx.WithRequest(ctx, request)
+	}
+	return ctx
+}
+
+func commandRequest(cmd *cobra.Command) (hookctx.Context, error) {
+	request, ok := hookctx.Request(cmd.Context())
+	if !ok {
+		return hookctx.Context{}, fmt.Errorf("hook request is missing")
+	}
+	return request, nil
+}
+
+func commandConfigPath(cmd *cobra.Command) string {
+	flags := cmd.Root().PersistentFlags()
+	if flags.Lookup("config") == nil {
+		return ""
+	}
+	path, _ := flags.GetString("config")
+	return path
+}
+
+// executeHook runs one hook request without relying on the executor's argv.
+func executeHook(ctx context.Context, request hookctx.Context, hookType string) int {
+	if err := validateHookRequest(ctx, request); err != nil {
+		fmt.Fprintf(request.Stderr, "chooks: %v\n", err)
+		return exitError
+	}
+	ctx = hookctx.WithRequest(ctx, request)
+	code := exitAllowed
+	var err error
+	if hookType == "statusline" {
+		err = runStatusLine(ctx, request)
+	} else {
+		code, err = runHook(ctx, hookType)
+	}
+	if err != nil {
+		fmt.Fprintf(request.Stderr, "chooks: %v\n", err)
+		if code == exitAllowed {
+			code = exitError
+		}
+	}
+	return code
+}
+
+func validateHookRequest(ctx context.Context, request hookctx.Context) error {
+	// The CLI can still handle absolute inputs when its cwd was deleted.
+	// An in-process request must have an absolute cwd to avoid using the
+	// executor's working directory for relative paths.
+	_, cli := ctx.Value(cliTerminationKey{}).(func(int))
+	if !cli && !filepath.IsAbs(request.Cwd) {
+		return fmt.Errorf("hook request cwd must be absolute")
+	}
+	return nil
+}
+
+// closeRequestLogger закрывает файл лога запроса. Ошибку закрытия не
+// показывает: строки уже записаны без буфера (O_APPEND), а у CLI база файл не
+// закрывала вовсе, и лишней строки в stderr у неё не было
+func closeRequestLogger(logger core.FileLogger) {
+	if logger == nil {
+		return
+	}
+	_ = logger.Close()
+}
+
 // runHook выполняет основную логику хука
 func runHook(ctx context.Context, hookType string) (code int, err error) {
-	timer := newHookTimer(hookType)
-	timer.watchTermination()
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return exitError, fmt.Errorf("hook request is missing")
+	}
+	if err := validateHookRequest(ctx, request); err != nil {
+		return exitError, err
+	}
+	timer := newHookTimerForRequest(hookType, request)
+	exit, cli := ctx.Value(cliTerminationKey{}).(func(int))
+	if cli {
+		timer.watchTermination(exit)
+	}
+	// Файл лога закрывает владелец запроса. У CLI это процесс: обработчик
+	// SIGTERM подписан до выхода и после возврата runHook ещё пишет строку
+	// «hook killed/cancelled by SIGTERM», поэтому файл, как в базе, закрывает
+	// ОС при выходе. Запрос без своего обработчика (executeHook в демоне)
+	// закрывает файл сам — последним, после строк таймера, и на пути ошибки
+	var logger core.FileLogger
 	defer func() {
 		status := "ok"
 		if err != nil || code == exitError {
 			status = "error"
 		}
 		timer.finish(status)
+		if !cli {
+			closeRequestLogger(logger)
+		}
 	}()
 
-	data, err := io.ReadAll(os.Stdin)
+	data, err := io.ReadAll(request.Stdin)
 	if err != nil {
 		return exitError, fmt.Errorf("failed to read input: %w", err)
 	}
@@ -200,12 +304,12 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	timer.setSession(sessionIDOf(data))
 
 	timer.stage("config")
-	config, err := core.LoadConfig(configPath)
+	config, err := core.LoadConfigForRequest(request.ConfigPath, request)
 	if err != nil {
 		return exitError, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	logger, err := core.NewLogger(config.Logger)
+	logger, err = core.NewLoggerTo(config.Logger, request.Stderr)
 	if err != nil {
 		return exitError, fmt.Errorf("failed to create logger: %w", err)
 	}
@@ -215,7 +319,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	timer.stage("work")
 	switch hookType {
 	case hookPreToolUse:
-		hookCtx, cancel := context.WithTimeout(ctx, timeout)
+		hookCtx, cancel := context.WithTimeout(ctx, request.Timeout)
 		defer cancel()
 		return runPreToolUse(hookCtx, data, config, logger)
 	case hookUserPromptSubmit:
@@ -230,40 +334,40 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		// ответ на запрос разрешения или AskUserQuestion не проходит через
 		// UserPromptSubmit, а пакет после ответа значит, что работа идёт.
 		// Пакет субагента — не ответ: главный ход может стоять на вопросе
-		input := parseSessionInput(logger, hookType, data)
+		input := parseSessionInputForRequest(logger, hookType, data, &request)
 		timer.stage("state")
 		if input.AgentID == "" {
-			if _, err := core.SwapSessionState(input.SessionID, core.StateWaiting, core.StateWorking); err != nil {
+			if _, err := core.SwapSessionStateIn(request.RuntimeDir(), input.SessionID, core.StateWaiting, core.StateWorking); err != nil {
 				logger.Warn("session state not resumed", "session", input.SessionID, "error", err)
 			}
 		}
 		timer.stage("skills")
-		remindStaleSkills(eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget), timer)
+		remindStaleSkills(eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget), timer, request)
 		return exitAllowed, nil
 	case hookStop:
-		runSessionEvent(core.EventStop, data, config, logger)
+		runSessionEventForRequest(core.EventStop, data, config, logger, &request)
 		return exitAllowed, nil
 	case hookStopFailure:
-		runSessionEvent(core.EventStopFailure, data, config, logger)
+		runSessionEventForRequest(core.EventStopFailure, data, config, logger, &request)
 		return exitAllowed, nil
 	case hookNotification:
-		runSessionEvent(core.EventNotification, data, config, logger)
+		runSessionEventForRequest(core.EventNotification, data, config, logger, &request)
 		return exitAllowed, nil
 
 	case hookUnderstandCheck:
-		runUnderstandCheck(ctx, data, config, logger, os.Stdout)
+		runUnderstandCheck(ctx, data, config, logger, request.Stdout)
 		return exitAllowed, nil
 	case hookWebFetchFallback:
-		runWebFetchFallback(ctx, data, config, logger, os.Stdout)
+		runWebFetchFallback(ctx, data, config, logger, request.Stdout)
 		return exitAllowed, nil
 	case hookUnsentCheck:
-		runUnsentCheck(parseSessionInput(logger, hookType, data), logger, os.Stdout)
+		runUnsentCheck(parseSessionInputForRequest(logger, hookType, data, &request), logger, request.Stdout)
 		return exitAllowed, nil
 	case hookNightHint:
-		defaultNightHint(ctx, data, config, logger, timer.deadline(optionalBudget))
+		defaultNightHint(ctx, data, config, logger, timer.deadline(optionalBudget), request)
 		return exitAllowed, nil
 	case hookNoPrompt:
-		if err := runNoPrompt(data, logger, os.Stdout); err != nil {
+		if err := runNoPrompt(data, logger, request.Stdout); err != nil {
 			logger.Error("prompt left to the dialog", "hook", hookNoPrompt, "error", err)
 			return exitError, err
 		}
@@ -274,8 +378,12 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 }
 
 func runUserPromptSubmit(ctx context.Context, hookType string, data []byte, config *core.Config, logger core.Logger, timer *hookTimer) (int, error) {
-	input := parseSessionInput(logger, hookType, data)
-	message, err := checkRuntimeLaunchGuard(ctx, config.Tools["model_guard"], logger)
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return exitError, fmt.Errorf("hook request is missing")
+	}
+	input := parseSessionInputForRequest(logger, hookType, data, &request)
+	message, err := checkRuntimeLaunchGuard(ctx, request.PID, config.Tools["model_guard"], logger)
 	if err != nil {
 		return exitError, err
 	}
@@ -283,15 +391,16 @@ func runUserPromptSubmit(ctx context.Context, hookType string, data []byte, conf
 		return exitBlocked, fmt.Errorf("%s", message)
 	}
 	timer.stage("state")
-	saveState(logger, input.SessionID, core.StateWorking)
+	saveStateIn(logger, request.RuntimeDir(), input.SessionID, core.StateWorking)
 	timer.stage("skills")
-	remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer)
+	remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer, request)
 	return exitAllowed, nil
 }
 
 // checkRuntimeLaunchGuard — отказ claude, запущенному агентом на модели вне
-// списка. Паника в проверке не блокирует реплику: строка Error в лог и пропуск
-func checkRuntimeLaunchGuard(ctx context.Context, config core.ToolConfig, logger core.Logger) (message string, err error) {
+// списка. Паника в проверке не блокирует реплику: строка Error в лог и пропуск.
+// hookPID — процесс хука запроса: от него идёт подъём к claude сессии
+func checkRuntimeLaunchGuard(ctx context.Context, hookPID int, config core.ToolConfig, logger core.Logger) (message string, err error) {
 	if config.RuntimeLaunchGuard != nil && !*config.RuntimeLaunchGuard {
 		return "", nil
 	}
@@ -301,22 +410,42 @@ func checkRuntimeLaunchGuard(ctx context.Context, config core.ToolConfig, logger
 			message, err = "", nil
 		}
 	}()
-	guard, err := newRuntimeGuard(config, logger)
+	guard, err := newRuntimeGuard(ctx, config, logger)
 	if err != nil {
 		return "", err
 	}
-	return guard.Check(ctx, os.Getpid())
+	return guard.Check(ctx, hookPID)
+}
+
+// runtimeGuardKey — ключ ctx запроса с runtimeGuardDeps: тест подставляет
+// дерево процессов и судью одному запросу, не трогая параллельные
+type runtimeGuardKey struct{}
+
+// runtimeGuardDeps — подмена для проверки модели claude одного запроса; пустое
+// поле — настоящее: /proc машины и model_guard
+type runtimeGuardDeps struct {
+	proc  modellaunch.ProcessReader
+	judge modellaunch.Judge
 }
 
 // newRuntimeGuard строит проверку модели claude сессии: model_guard судит
-// команду из /proc. Тест подменяет судью
-var newRuntimeGuard = func(config core.ToolConfig, logger core.Logger) (*modellaunch.Guard, error) {
-	config.Enabled = true
-	modelGuard, err := tools.NewModelGuardTool(config, logger)
-	if err != nil {
-		return nil, err
+// команду из /proc
+func newRuntimeGuard(ctx context.Context, config core.ToolConfig, logger core.Logger) (*modellaunch.Guard, error) {
+	deps, _ := ctx.Value(runtimeGuardKey{}).(runtimeGuardDeps)
+	proc := deps.proc
+	if proc == nil {
+		proc = modellaunch.ProcReader{}
 	}
-	return modellaunch.New(modellaunch.ProcReader{}, modelGuard, logger), nil
+	judge := deps.judge
+	if judge == nil {
+		config.Enabled = true
+		modelGuard, err := tools.NewModelGuardTool(config, logger)
+		if err != nil {
+			return nil, err
+		}
+		judge = modelGuard
+	}
+	return modellaunch.New(proc, judge, logger), nil
 }
 
 // sessionIDOf — сессия события для строк о длительности. Нечитаемый вход
@@ -334,12 +463,17 @@ func sessionIDOf(data []byte) string {
 
 // runPreToolUse прогоняет вызов инструмента через проверки
 func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger core.Logger) (int, error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return exitError, fmt.Errorf("hook request is missing")
+	}
 	input, err := core.ParseToolInput(data)
 	if err != nil {
 		return exitError, fmt.Errorf("failed to parse input: %w", err)
 	}
+	resolveHookInput(input, request)
 
-	engine, err := processor.New(config, logger)
+	engine, err := processor.NewForRequest(config, logger, request)
 	if err != nil {
 		return exitError, fmt.Errorf("failed to create processor: %w", err)
 	}
@@ -350,10 +484,10 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 		return exitError, err
 	}
 
-	printResponse(logger, input, response)
+	printResponse(logger, input, response, request.Stderr, request.Verbose)
 
 	if response.Action == core.HookActionAllow {
-		writeAllowedOutput(input, config, logger, os.Stdout)
+		writeAllowedOutputContext(ctx, input, config, logger, request.Stdout)
 		return exitAllowed, nil
 	}
 	// Warn и Block одинаково возвращают 2: только этот код доносит сообщение до модели
@@ -365,16 +499,20 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 // в отдельный процесс, поэтому хук укладывается в миллисекунды. Сбои здесь
 // только логируются: событие сессии нечего блокировать, а ошибка хука
 // показалась бы человеку в интерфейсе на каждой остановке
-func runSessionEvent(eventName string, data []byte, config *core.Config, logger core.Logger) {
-	announceSessionEvent(eventName, parseSessionInput(logger, eventName, data), config, logger)
+func runSessionEventForRequest(eventName string, data []byte, config *core.Config, logger core.Logger, request *hookctx.Context) {
+	announceSessionEvent(eventName, parseSessionInputForRequest(logger, eventName, data, request), config, logger, request)
 }
 
 // announceSessionEvent решает по событию сессии, запоминает состояние и зовёт
 // человека
-func announceSessionEvent(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger) notifier.Decision {
+func announceSessionEvent(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, request *hookctx.Context) notifier.Decision {
 	// Неинтерактивную сессию человек не ждёт вовсе — ни её остановку, ни её
 	// вопросы: ответить в неё всё равно некому
-	printMode, err := core.PrintModeSession()
+	if request == nil {
+		logger.Error("hook request is missing")
+		return notifier.Decision{Reason: "hook request is missing"}
+	}
+	printMode, err := core.PrintModeSessionForPID(request.Getenv("CLAUDE_PID"))
 	if err != nil {
 		logger.Warn("session mode unknown, assuming interactive", "error", err)
 	}
@@ -386,7 +524,7 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 	// Строка статуса рисуется отдельным процессом и о ходе сессии не знает —
 	// состояние для неё оставляют хуки. Предыдущее состояние нужно решению:
 	// по нему виден переход, а не только новое состояние
-	previous, recorded, err := core.LookupSessionState(input.SessionID)
+	previous, recorded, err := core.LookupSessionStateIn(request.RuntimeDir(), input.SessionID)
 	if err != nil {
 		// Явный failover: без записи переход не виден, и решение принимается
 		// по StateUnknown — оно зовёт человека, лишний звонок лучше пропущенного
@@ -403,7 +541,8 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 		if input.SessionCrons != nil {
 			crons = *input.SessionCrons
 		}
-		active, err := core.RecordBackground(input.SessionID, *input.BackgroundTasks, crons, time.Now())
+		var active []core.BackgroundTask
+		active, err = core.RecordBackgroundIn(request.RuntimeDir(), input.SessionID, *input.BackgroundTasks, crons, time.Now())
 		if err != nil {
 			// Failover на список Claude Code: брошенные задачи не отличить от
 			// живых, а про все задачи списка Claude Code сам сказал, что они живы
@@ -417,14 +556,15 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 	logDecision(logger, event, decision)
 
 	if decision.State != "" {
-		saveState(logger, input.SessionID, decision.State)
+		saveStateIn(logger, request.RuntimeDir(), input.SessionID, decision.State)
 	}
 
 	toolConfig, exists := config.Tools["notifier"]
 	if !exists || !toolConfig.Enabled {
 		return decision
 	}
-	if err := notifier.New(toolConfig, logger).Announce(eventName, input, decision); err != nil {
+	tool := notifier.NewForRequest(toolConfig, logger, *request)
+	if err := tool.Announce(eventName, input, decision); err != nil {
 		logger.Warn("failed to deliver alert", "hook", eventName, "error", err)
 	}
 	return decision
@@ -441,12 +581,29 @@ func parseSessionInput(logger core.Logger, hookType string, data []byte) *core.T
 	return input
 }
 
+func parseSessionInputForRequest(logger core.Logger, hookType string, data []byte, request *hookctx.Context) *core.ToolInput {
+	input := parseSessionInput(logger, hookType, data)
+	if request != nil {
+		resolveHookInput(input, *request)
+	}
+	return input
+}
+
+func resolveHookInput(input *core.ToolInput, request hookctx.Context) {
+	if input.CWD != "" && !filepath.IsAbs(input.CWD) {
+		input.CWD = request.Abs(input.CWD)
+	}
+	if input.TranscriptPath != "" && !filepath.IsAbs(input.TranscriptPath) {
+		input.TranscriptPath = request.Abs(input.TranscriptPath)
+	}
+}
+
 // saveState запоминает состояние сессии для строки статуса и следующего
 // события. Сбой хранилища хук не срывает: код ошибки Claude Code показал бы
 // человеку на каждом событии, а уведомление важнее записи
-func saveState(logger core.Logger, sessionID string, state core.SessionState) {
-	//nolint:log-and-return-zero // события сессии нечего блокировать, а ошибка хука видна человеку в интерфейсе; без записи следующее событие решает по старому состоянию, сбой остаётся в логе
-	if err := core.SaveSessionState(sessionID, state); err != nil {
+func saveStateIn(logger core.Logger, runtimeDir, sessionID string, state core.SessionState) {
+	//nolint:log-and-return-zero // событие сессии не блокируется ошибкой записи состояния
+	if err := core.SaveSessionStateIn(runtimeDir, sessionID, state); err != nil {
 		logger.Warn("session state not saved", "session", sessionID, "error", err)
 	}
 }
@@ -498,7 +655,7 @@ func taskTypes(tasks []core.BackgroundTask) string {
 }
 
 // printResponse выводит результат: stderr читает Claude Code при exit-коде 2
-func printResponse(logger core.Logger, input *core.ToolInput, response *core.HookResponse) {
+func printResponse(logger core.Logger, input *core.ToolInput, response *core.HookResponse, stderr io.Writer, verbose bool) {
 	switch response.Action {
 	case core.HookActionBlock, core.HookActionWarn:
 		logger.Warn("hook blocked operation", append(deniedCallFields(input),
@@ -507,13 +664,13 @@ func printResponse(logger core.Logger, input *core.ToolInput, response *core.Hoo
 			"violations", len(response.Violations),
 		)...)
 
-		fmt.Fprintln(os.Stderr, response.Message)
+		fmt.Fprintln(stderr, response.Message)
 		for _, suggestion := range response.Suggestions {
-			fmt.Fprintf(os.Stderr, "  • %s\n", suggestion)
+			fmt.Fprintf(stderr, "  • %s\n", suggestion)
 		}
 	case core.HookActionAllow:
 		if verbose {
-			fmt.Fprintln(os.Stderr, "✅ проверки пройдены")
+			fmt.Fprintln(stderr, "✅ проверки пройдены")
 		}
 	}
 
@@ -522,10 +679,10 @@ func printResponse(logger core.Logger, input *core.ToolInput, response *core.Hoo
 	}
 
 	for _, violation := range response.Violations {
-		fmt.Fprintf(os.Stderr, "  [%s] %s:%d %s\n",
+		fmt.Fprintf(stderr, "  [%s] %s:%d %s\n",
 			violation.Severity, violation.Type, violation.Line, violation.Message)
 	}
-	fmt.Fprintf(os.Stderr, "⏱  %.1f ms\n", response.ProcessTime)
+	fmt.Fprintf(stderr, "⏱  %.1f ms\n", response.ProcessTime)
 }
 
 // newConfigCmd создает команду управления конфигурацией
@@ -540,14 +697,14 @@ func newConfigCmd() *cobra.Command {
 			Use:   "show",
 			Short: "Показать текущую конфигурацию",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return showConfig()
+				return showConfig(commandConfigPath(cmd))
 			},
 		},
 		&cobra.Command{
 			Use:   "validate",
 			Short: "Проверить файл конфигурации",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				path, err := configPathOrDefault()
+				path, err := configPathOrDefault(commandConfigPath(cmd))
 				if err != nil {
 					return err
 				}
@@ -562,7 +719,7 @@ func newConfigCmd() *cobra.Command {
 			Use:   "init",
 			Short: "Создать конфигурацию по умолчанию",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				path, err := configPathOrDefault()
+				path, err := configPathOrDefault(commandConfigPath(cmd))
 				if err != nil {
 					return err
 				}
@@ -582,8 +739,8 @@ func newConfigCmd() *cobra.Command {
 }
 
 // showConfig печатает состояние валидаторов и инструментов
-func showConfig() error {
-	path, err := configPathOrDefault()
+func showConfig(configPath string) error {
+	path, err := configPathOrDefault(configPath)
 	if err != nil {
 		return err
 	}
@@ -609,7 +766,7 @@ func showConfig() error {
 }
 
 // configPathOrDefault возвращает заданный путь конфигурации либо путь по умолчанию
-func configPathOrDefault() (string, error) {
+func configPathOrDefault(configPath string) (string, error) {
 	if configPath != "" {
 		return configPath, nil
 	}
@@ -762,7 +919,7 @@ func applyNotifyUrgency(alert *desktop.Alert, name string, timeoutSet bool) erro
 }
 
 // newStatusLineCmd создает команду отрисовки строки статуса Claude Code
-func newStatusLineCmd() *cobra.Command {
+func newStatusLineCmd(exitCode *int) *cobra.Command {
 	return &cobra.Command{
 		Use:   "statusline",
 		Short: "Отрисовать строку статуса Claude Code",
@@ -773,22 +930,32 @@ func newStatusLineCmd() *cobra.Command {
 Подключается в ~/.claude/settings.json:
   "statusLine": {"type": "command", "command": "~/bin/chooks statusline"}`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, err := core.LoadConfig(configPath)
-			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+			request, ok := hookctx.Request(hookCommandContext(cmd))
+			if !ok {
+				return fmt.Errorf("missing hook request context")
 			}
-			logger, err := core.NewLogger(config.Logger)
-			if err != nil {
-				return fmt.Errorf("failed to create logger: %w", err)
-			}
-			line, err := statusline.Render(cmd.Context(), os.Stdin, logger)
-			if err != nil {
-				return err
-			}
-			fmt.Println(line)
+			*exitCode = executeHook(cmd.Context(), request, "statusline")
 			return nil
 		},
 	}
+}
+
+func runStatusLine(ctx context.Context, request hookctx.Context) error {
+	config, err := core.LoadConfigForRequest(request.ConfigPath, request)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	logger, err := core.NewLoggerTo(config.Logger, request.Stderr)
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+	defer closeRequestLogger(logger)
+	line, err := statusline.Render(ctx, request.Stdin, logger)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(request.Stdout, line)
+	return nil
 }
 
 // newLimitsCmd создает команду сводки недельного лимита по учёткам
@@ -811,10 +978,14 @@ func newLimitsCmd() *cobra.Command {
 учёток прогноз не учитывает: его продлевает пользователь. Его читает
 страница Сна.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if pool {
-				return statusline.WritePoolJSON(cmd.OutOrStdout())
+			request, err := commandRequest(cmd)
+			if err != nil {
+				return err
 			}
-			return statusline.WriteLimits(cmd.OutOrStdout(), steps)
+			if pool {
+				return statusline.WritePoolJSON(cmd.OutOrStdout(), request)
+			}
+			return statusline.WriteLimits(cmd.OutOrStdout(), steps, request)
 		},
 	}
 	cmd.Flags().BoolVar(&steps, "steps", false, "журнал шагов вместо сводки")
@@ -874,7 +1045,7 @@ SHA-256 тоже).
 1 - есть нарушения, 2 - черновик не прочитан.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, err := core.LoadConfig(configPath)
+			config, err := core.LoadConfig(commandConfigPath(cmd))
 			if err != nil {
 				*exitCode = exitStyleError
 				return fmt.Errorf("failed to load config: %w", err)

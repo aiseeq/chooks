@@ -19,7 +19,6 @@ import (
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/nighthint"
-	"github.com/aiseeq/chooks/internal/skillreload"
 )
 
 func nightTestDeps(t *testing.T, now time.Time, locked bool, lockErr error) nighthint.Deps {
@@ -56,7 +55,7 @@ func TestRunNightHintOutput(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			logger, logPath := nightTestLogger(t)
 			var out bytes.Buffer
-			runNightHint(context.Background(), []byte(c.input), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
+			runNightHint(processTestContext(t), []byte(c.input), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
 			var got hookContextOutput
 			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 				t.Fatalf("вывод %q: %v", out.String(), err)
@@ -88,7 +87,7 @@ func TestRunNightHintAfterCompact(t *testing.T) {
 		logger, _ := nightTestLogger(t)
 		var out bytes.Buffer
 		input := `{"hook_event_name":"SessionStart","session_id":"s1","source":"` + c.source + `"}`
-		runNightHint(context.Background(), []byte(input), core.DefaultConfig(), logger, &out, deps)
+		runNightHint(processTestContext(t), []byte(input), core.DefaultConfig(), logger, &out, deps)
 		if got := out.Len() > 0; got != c.want {
 			t.Errorf("source %s: подсказка %v, нужно %v (%q)", c.source, got, c.want, out.String())
 		}
@@ -103,7 +102,7 @@ func TestRunNightHintSilent(t *testing.T) {
 	t.Run("lock error", func(t *testing.T) {
 		logger, logPath := nightTestLogger(t)
 		var out bytes.Buffer
-		runNightHint(context.Background(), []byte(ask), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, errors.New("no system bus")))
+		runNightHint(processTestContext(t), []byte(ask), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, errors.New("no system bus")))
 		if out.Len() != 0 {
 			t.Errorf("подсказка при ошибке признака: %s", out.String())
 		}
@@ -123,7 +122,7 @@ func TestRunNightHintSilent(t *testing.T) {
 			t.Fatal(err)
 		}
 		var out bytes.Buffer
-		runNightHint(context.Background(), []byte(`{"hook_event_name":"SessionStart","session_id":"s1"}`), core.DefaultConfig(), logger, &out, deps)
+		runNightHint(processTestContext(t), []byte(`{"hook_event_name":"SessionStart","session_id":"s1"}`), core.DefaultConfig(), logger, &out, deps)
 		log := readLog(t, logPath)
 		if out.Len() == 0 || !strings.Contains(log, "level=WARN") || !strings.Contains(log, "night hint record replaced") {
 			t.Errorf("вывод %q, лог %s", out.String(), log)
@@ -135,7 +134,7 @@ func TestRunNightHintSilent(t *testing.T) {
 		config := core.DefaultConfig()
 		config.Tools[nightHintTool] = core.ToolConfig{Enabled: false}
 		var out bytes.Buffer
-		runNightHint(context.Background(), []byte(ask), config, logger, &out, nightTestDeps(t, night, true, nil))
+		runNightHint(processTestContext(t), []byte(ask), config, logger, &out, nightTestDeps(t, night, true, nil))
 		if out.Len() != 0 {
 			t.Errorf("выключенный хук дал подсказку: %s", out.String())
 		}
@@ -144,7 +143,7 @@ func TestRunNightHintSilent(t *testing.T) {
 	t.Run("unreadable input", func(t *testing.T) {
 		logger, logPath := nightTestLogger(t)
 		var out bytes.Buffer
-		runNightHint(context.Background(), []byte(`{`), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
+		runNightHint(processTestContext(t), []byte(`{`), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
 		log := readLog(t, logPath)
 		if out.Len() != 0 || !strings.Contains(log, "night hint input unreadable") || strings.Contains(log, "night hint failed") {
 			t.Errorf("нечитаемый вход: вывод %q, лог %s", out.String(), log)
@@ -158,7 +157,7 @@ func TestRunNightHintSilent(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			logger, _ := nightTestLogger(t)
 			var out bytes.Buffer
-			runNightHint(context.Background(), []byte(input), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
+			runNightHint(processTestContext(t), []byte(input), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
 			if out.Len() != 0 {
 				t.Errorf("подсказка: %s", out.String())
 			}
@@ -168,7 +167,7 @@ func TestRunNightHintSilent(t *testing.T) {
 	t.Run("unsupported event", func(t *testing.T) {
 		logger, logPath := nightTestLogger(t)
 		var out bytes.Buffer
-		runNightHint(context.Background(), []byte(`{"hook_event_name":"PostToolUse","session_id":"s1"}`), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
+		runNightHint(processTestContext(t), []byte(`{"hook_event_name":"PostToolUse","session_id":"s1"}`), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
 		log := readLog(t, logPath)
 		if out.Len() != 0 || !strings.Contains(log, "level=WARN") || !strings.Contains(log, "night hint failed") {
 			t.Errorf("незнакомое событие: вывод %q, лог %s", out.String(), log)
@@ -178,7 +177,7 @@ func TestRunNightHintSilent(t *testing.T) {
 	t.Run("unlocked", func(t *testing.T) {
 		logger, logPath := nightTestLogger(t)
 		var out bytes.Buffer
-		runNightHint(context.Background(), []byte(ask), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, false, nil))
+		runNightHint(processTestContext(t), []byte(ask), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, false, nil))
 		if out.Len() != 0 || !strings.Contains(readLog(t, logPath), "экран не заблокирован") {
 			t.Errorf("разблокированный экран: вывод %q", out.String())
 		}
@@ -189,7 +188,7 @@ func TestRunNightHintSilent(t *testing.T) {
 		t.Setenv("CLAUDE_PID", pid)
 		logger, logPath := nightTestLogger(t)
 		var out bytes.Buffer
-		runNightHint(context.Background(), []byte(ask), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
+		runNightHint(processTestContext(t), []byte(ask), core.DefaultConfig(), logger, &out, nightTestDeps(t, night, true, nil))
 		if out.Len() != 0 || !strings.Contains(readLog(t, logPath), "неинтерактивная сессия") {
 			t.Errorf("claude -p: вывод %q", out.String())
 		}
@@ -224,7 +223,7 @@ func printModeProcess(t *testing.T) string {
 // скиллами skills в каталог под XDG_STATE_HOME
 func writeSkillState(t *testing.T, skills ...string) {
 	t.Helper()
-	dir, err := skillreload.DefaultStateDir()
+	dir, err := skillReloadTestDir(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +259,7 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 		t.Helper()
 		logger, logPath := nightTestLogger(t)
 		var out bytes.Buffer
-		runNightHint(context.Background(), []byte(input), config, logger, &out, deps)
+		runNightHint(processTestContext(t), []byte(input), config, logger, &out, deps)
 		return out.Len() > 0, readLog(t, logPath)
 	}
 
@@ -310,7 +309,7 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 			config.Tools[skillReloadTool] = core.ToolConfig{Enabled: false}
 		}},
 		{"broken record", "level=WARN", func(t *testing.T, _ *core.Config) {
-			dir, err := skillreload.DefaultStateDir()
+			dir, err := skillReloadTestDir(t)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -355,7 +354,7 @@ func TestRunNightHintUntilSkillCalled(t *testing.T) {
 			}
 		}
 		// Чтение записи не создаёт: её ведёт только skill-reload
-		dir, err := skillreload.DefaultStateDir()
+		dir, err := skillReloadTestDir(t)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -418,7 +417,7 @@ func TestRunNightHintSkillWaitWithinDeadline(t *testing.T) {
 		t.Helper()
 		logger, logPath := nightTestLogger(t)
 		var out bytes.Buffer
-		runNightHint(context.Background(), []byte(input), config, logger, &out, deps)
+		runNightHint(processTestContext(t), []byte(input), config, logger, &out, deps)
 		return out.Len() > 0, readLog(t, logPath)
 	}
 	// prepare — ночь отмечена SessionStart, запись skill-reload без скилла:
@@ -433,7 +432,7 @@ func TestRunNightHintSkillWaitWithinDeadline(t *testing.T) {
 		if given, _ := run(t, config, deps, start); !given {
 			t.Fatal("SessionStart(clear) без подсказки")
 		}
-		dir, err := skillreload.DefaultStateDir()
+		dir, err := skillReloadTestDir(t)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -507,7 +506,7 @@ func TestPresenceSkipLoggedOncePerNight(t *testing.T) {
 	input := []byte(`{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"AskUserQuestion"}`)
 	for range 2 {
 		var out bytes.Buffer
-		runNightHint(context.Background(), input, core.DefaultConfig(), logger, &out, deps)
+		runNightHint(processTestContext(t), input, core.DefaultConfig(), logger, &out, deps)
 		if out.Len() != 0 {
 			t.Fatalf("unexpected hint: %s", out.String())
 		}
@@ -535,7 +534,7 @@ func TestNightHintLidErrorLog(t *testing.T) {
 	deps.LidClosed = func(context.Context) (bool, error) { return false, errors.New("lid unavailable") }
 	logger, path := nightTestLogger(t)
 	var out bytes.Buffer
-	runNightHint(context.Background(), []byte(`{"hook_event_name":"SessionStart","session_id":"s1"}`), core.DefaultConfig(), logger, &out, deps)
+	runNightHint(processTestContext(t), []byte(`{"hook_event_name":"SessionStart","session_id":"s1"}`), core.DefaultConfig(), logger, &out, deps)
 	log := readLog(t, path)
 	if out.Len() != 0 || !strings.Contains(log, `level=WARN msg="night hint skipped: lid state unknown"`) || !strings.Contains(log, "lid unavailable") || strings.Contains(log, "screen lock state unknown") {
 		t.Fatalf("вывод %q, лог %s", out.String(), log)

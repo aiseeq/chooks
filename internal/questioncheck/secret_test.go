@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"time"
 )
 
@@ -62,7 +64,11 @@ func (*recordingCLI) capture(t *testing.T, model, input string) (string, string)
 	script("codex", `{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"pass\"}"}}`)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	judge := CLIJudge{Name: model, ID: "id-" + model, Effort: "low", Dir: bin, Prompt: SaidPrompt}
-	answer, _, err := judge.Ask(context.Background(), input)
+	req, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, _, err := judge.Ask(hookctx.WithRequest(context.Background(), req), input)
 	if err != nil {
 		t.Fatal(err)
 	}

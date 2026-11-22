@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -192,7 +191,7 @@ func TestModelGuard(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			input := &core.ToolInput{ToolName: tc.tool, Command: tc.command, ToolInput: []byte(tc.raw)}
-			got, err := tool.ValidateTool(context.Background(), input)
+			got, err := tool.ValidateTool(gitGuardTestContext(t), input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -223,7 +222,7 @@ func TestModelGuardEnvReasons(t *testing.T) {
 		{"sudo bash <<'EOF'\nANTHROPIC_MODEL=sonnet claude -p hi\nEOF", `модель "sonnet" не одобрена`, 1},
 		{"env ANTHROPIC_MODEL=sonnet claude -p hi; env ANTHROPIC_MODEL=sonnet claude -p hi", `модель "sonnet" не одобрена`, 2},
 	} {
-		got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: tc.command})
+		got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -237,7 +236,7 @@ func TestModelGuardApprovedListErrors(t *testing.T) {
 	for _, tc := range []struct{ name, contents, want string }{{"missing", "\x00", "не найден"}, {"empty", "# models\n", "пуст"}, {"bad line", "opus claude-opus-5-5 extra\n", "строка 1"}, {"id на слэш", "x waibee/\n", "строка 1: id без имени модели"}, {"id только вариант", "x [1m]\n", "строка 1: id без имени модели"}, {"id на слэш с вариантом", "x waibee/[1m]\n", "строка 1: id без имени модели"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			tool := modelGuardForTest(t, tc.contents)
-			got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "claude --model sonnet"})
+			got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: "claude --model sonnet"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -270,7 +269,7 @@ func TestModelGuardScan(t *testing.T) {
 	}
 	logger, _ := core.NewLogger(core.DefaultLoggerConfig())
 	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true}, logger)
-	result, err := ScanModelTranscripts(context.Background(), filepath.Join(dir, "projects"), 7, tool)
+	result, err := ScanModelTranscripts(gitGuardTestContext(t), filepath.Join(dir, "projects"), 7, tool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +371,7 @@ func TestModelGuardSettingsFile(t *testing.T) {
 		// FIFO не читается: чтение повесило бы хук (ревью 12.11)
 		"claude -p hi --settings " + fifo: true,
 	} {
-		got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: command})
+		got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -410,7 +409,7 @@ func TestModelGuardSettingsTildeForms(t *testing.T) {
 		{"неизвестный пользователь", "claude --settings ~root/x", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: cwd})
+			got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: cwd})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -490,7 +489,7 @@ func TestModelGuardUserOnly(t *testing.T) {
 			if c.tool == "Agent" {
 				input.Command = ""
 			}
-			result, err := tool.ValidateTool(context.Background(), input)
+			result, err := tool.ValidateTool(gitGuardTestContext(t), input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -666,7 +665,7 @@ func TestModelGuardRoundTwo(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: tc.tool, CWD: tc.cwd, Command: tc.command, ToolInput: []byte(tc.raw)})
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: tc.tool, CWD: tc.cwd, Command: tc.command, ToolInput: []byte(tc.raw)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -742,7 +741,7 @@ func TestModelGuardRoundThree(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: tc.tool, CWD: cwd, Command: tc.command})
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: tc.tool, CWD: cwd, Command: tc.command})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -752,7 +751,7 @@ func TestModelGuardRoundThree(t *testing.T) {
 		})
 	}
 	t.Run("dynamic cd includes session project settings", func(t *testing.T) {
-		result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", CWD: dynamicProject, Command: `cd $P && claude -p --model opus hi`})
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", CWD: dynamicProject, Command: `cd $P && claude -p --model opus hi`})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -932,7 +931,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			input := &core.ToolInput{ToolName: c.tool, ToolInput: []byte(c.raw), Command: c.command, CWD: c.cwd}
 			start := time.Now()
-			result, err := tool.ValidateTool(context.Background(), input)
+			result, err := tool.ValidateTool(gitGuardTestContext(t), input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -960,7 +959,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, "cfg/settings.json"), []byte(`{"model":"opus"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	managedResult, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "cd " + home + " && claude", CWD: home})
+	managedResult, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: "cd " + home + " && claude", CWD: home})
 	if err != nil || managedResult.IsValid {
 		t.Fatalf("managed settings: valid=%v err=%v", managedResult.IsValid, err)
 	}
@@ -1022,7 +1021,7 @@ func TestModelGuardRoundTenPaths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", CWD: tc.cwd, Command: tc.command})
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", CWD: tc.cwd, Command: tc.command})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1053,7 +1052,7 @@ func TestModelGuardFIFOCandidate(t *testing.T) {
 	for _, tc := range cases {
 		done := make(chan *core.ValidationResult, 1)
 		go func() {
-			result, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", CWD: cwd, Command: tc.command})
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", CWD: cwd, Command: tc.command})
 			if err != nil {
 				t.Error(err)
 			}

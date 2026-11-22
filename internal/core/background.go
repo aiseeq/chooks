@@ -90,20 +90,20 @@ func artifactWatch(task BackgroundTask) bool {
 	return task.Type == "monitor" && strings.HasPrefix(task.Description, artifactWatchPrefix)
 }
 
-// RecordBackground запоминает фоновую работу сессии на конец хода и
+// RecordBackgroundIn запоминает фоновую работу сессии на конец хода и
 // отбирает задачи, которых Claude ещё ждёт: всё из списка Claude Code, кроме
 // слежения за Artifact и висящих дольше abandonedTaskAge. Слежение за
 // Artifact не попадает и в учёт. Время первого появления задачи хранится
 // рядом с состоянием сессии, исчезнувшие из списка задачи забываются. При
 // сбое учёта возвращается только ошибка: брошенные задачи не отличить от
 // живых, и чем заменить отбор, решает вызывающий
-func RecordBackground(sessionID string, tasks []BackgroundTask, crons []SessionCron, now time.Time) ([]BackgroundTask, error) {
+func RecordBackgroundIn(runtimeDir, sessionID string, tasks []BackgroundTask, crons []SessionCron, now time.Time) ([]BackgroundTask, error) {
 	tasks = slices.DeleteFunc(slices.Clone(tasks), artifactWatch)
 	if sessionID == "" {
 		return tasks, nil
 	}
 
-	statePath, err := sessionStatePath(sessionID)
+	statePath, err := sessionStatePathIn(filepath.Join(runtimeDir, "sessions"), sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -146,10 +146,10 @@ func RecordBackground(sessionID string, tasks []BackgroundTask, crons []SessionC
 	return active, nil
 }
 
-// LoadBackground читает фоновую работу сессии на конец последнего хода.
+// LoadBackgroundIn читает фоновую работу сессии на конец последнего хода.
 // Нет записи — работы нет
-func LoadBackground(sessionID string) (Background, error) {
-	statePath, err := sessionStatePath(sessionID)
+func LoadBackgroundIn(runtimeDir, sessionID string) (Background, error) {
+	statePath, err := sessionStatePathIn(filepath.Join(runtimeDir, "sessions"), sessionID)
 	if err != nil {
 		return Background{}, err
 	}

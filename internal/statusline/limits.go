@@ -612,7 +612,7 @@ func WriteLimits(w io.Writer, steps bool, request hookctx.Context) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
+	now := time.Now().In(request.Location())
 	infos := store.Infos()
 	weeks := snapshot.Weeks
 	if len(weeks) == 0 && len(infos) == 0 {

@@ -142,7 +142,7 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 		return "", fmt.Errorf("failed to parse status line input: %w", err)
 	}
 
-	now := time.Now()
+	now := time.Now().In(request.Location())
 	store, paths := loadAccounts(ctx, logger)
 	owner := ""
 	var snapshot *limitsSnapshot

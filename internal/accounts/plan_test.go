@@ -190,3 +190,14 @@ func dead(a Account) Account {
 	a.Dead = "токен отозван"
 	return a
 }
+
+func TestValidFromUsesRequestLocation(t *testing.T) {
+	loc := time.FixedZone("request", 9*60*60)
+	date, err := validFrom("2026-01-01", loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := date.UTC(); !got.Equal(time.Date(2025, 12, 31, 15, 0, 0, 0, time.UTC)) {
+		t.Fatalf("parsed date in UTC = %v", got)
+	}
+}

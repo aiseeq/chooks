@@ -90,6 +90,35 @@ func (c Context) Getenv(key string) string {
 	return value
 }
 
+// Location resolves the request's TZ without changing the executor's timezone.
+func (c Context) Location() *time.Location {
+	tz, ok := c.LookupEnv("TZ")
+	if !ok {
+		if c.process {
+			return time.Local
+		}
+		tz = "/etc/localtime"
+	}
+	tz = strings.TrimPrefix(tz, ":")
+	if tz == "" {
+		return time.UTC
+	}
+	if filepath.IsAbs(tz) {
+		data, err := os.ReadFile(tz)
+		if err == nil {
+			if loc, err := time.LoadLocationFromTZData(tz, data); err == nil {
+				return loc
+			}
+		}
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
 // Abs gives the path that opens, from the executor, the file the OS would open
 // for this path from the hook's cwd. Nothing is cleaned: with a symlink
 // link/../x is not x. An absolute path and any path of this very process's

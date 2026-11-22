@@ -57,7 +57,7 @@ func nightHintDepsContext(ctx context.Context, config *core.Config, deadline tim
 		return nighthint.Deps{}, err
 	}
 	skillCalled := autonomousSkillCalledContext(ctx, config, deadline, func() (string, error) { return skillDir, nil })
-	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: filepath.Join(state, "night-hint")}, SkillCalled: skillCalled}, nil
+	return nighthint.Deps{Now: func() time.Time { return time.Now().In(request.Location()) }, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: filepath.Join(state, "night-hint")}, SkillCalled: skillCalled}, nil
 }
 
 // autonomousSkillCalled — признак вызова скилла autonomous-work в сессии по

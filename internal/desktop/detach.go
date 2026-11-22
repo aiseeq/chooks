@@ -20,10 +20,8 @@ func StartDetached(cmd *exec.Cmd) error {
 		return fmt.Errorf("failed to start %s: %w", cmd.Path, err)
 	}
 
-	// Процесс переживёт запустившего и ждать его никто не будет: после
-	// выхода запустившего его подберёт init
-	if err := cmd.Process.Release(); err != nil {
-		return fmt.Errorf("failed to release %s: %w", cmd.Path, err)
-	}
+	// A long-lived executor must reap the child when it eventually exits.
+	// The wait belongs to the detached child, not to the hook's deadline.
+	go func() { _ = cmd.Wait() }()
 	return nil
 }

@@ -159,7 +159,7 @@ func planPrice(path, provider string, now time.Time) (ratePlan, error) {
 		if row["provider"] != provider {
 			continue
 		}
-		from, err := validFrom(row["valid_from"])
+		from, err := validFrom(row["valid_from"], now.Location())
 		if err != nil {
 			return ratePlan{}, fmt.Errorf("цены плана нет: %s: %w", path, err)
 		}
@@ -189,8 +189,8 @@ func planPrice(path, provider string, now time.Time) (ratePlan, error) {
 
 // validFrom — начало действия строки курсов: дата (местная полночь) или
 // RFC3339
-func validFrom(s string) (time.Time, error) {
-	from, err := time.ParseInLocation(time.DateOnly, s, time.Local)
+func validFrom(s string, location *time.Location) (time.Time, error) {
+	from, err := time.ParseInLocation(time.DateOnly, s, location)
 	if err != nil {
 		if from, err = time.Parse(time.RFC3339, s); err != nil {
 			return time.Time{}, fmt.Errorf("valid_from %q: %w", s, err)

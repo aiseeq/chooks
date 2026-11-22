@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -19,15 +23,21 @@ const visibleTimeout = 300 * time.Millisecond
 // в своём окне Konsole, а окно в фокусе. Не Konsole — false без ошибки:
 // узнать, смотрел ли человек, там нечем
 func TabVisible(ctx context.Context) (bool, error) {
-	service, session, ok := konsoleSession()
-	window := os.Getenv("KONSOLE_DBUS_WINDOW")
-	if !ok || window == "" {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return false, fmt.Errorf("hook request is missing")
+	}
+	service := request.Getenv("KONSOLE_DBUS_SERVICE")
+	session := request.Getenv("KONSOLE_DBUS_SESSION")
+	window := request.Getenv("KONSOLE_DBUS_WINDOW")
+	if service == "" || session == "" || window == "" {
 		return false, nil
 	}
-	conn, err := dbus.SessionBus()
+	conn, err := requestSessionBus(request)
 	if err != nil {
 		return false, fmt.Errorf("session bus unavailable: %w", err)
 	}
+	defer conn.Close()
 	ctx, cancel := context.WithTimeout(ctx, visibleTimeout)
 	defer cancel()
 
@@ -47,4 +57,49 @@ func TabVisible(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("konsole isActiveWindow: %w", err)
 	}
 	return active, nil
+}
+
+func requestSessionBus(request hookctx.Context) (*dbus.Conn, error) {
+	address := request.Getenv("DBUS_SESSION_BUS_ADDRESS")
+	if address == "" || address == "autolaunch:" {
+		var err error
+		address, err = discoverRequestBus(request)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return dbus.Connect(request.BusAddress(address))
+}
+
+// discoverRequestBus mirrors the usual Linux session-bus discovery without
+// changing the daemon's environment or inheriting its PATH/cwd.
+func discoverRequestBus(request hookctx.Context) (string, error) {
+	runtime := filepath.Join("/run/user", strconv.Itoa(os.Getuid()))
+	bus := filepath.Join(runtime, "bus")
+	if _, err := os.Stat(bus); err == nil {
+		return "unix:path=" + dbus.EscapeBusAddressValue(bus), nil
+	}
+	if data, err := os.ReadFile(filepath.Join(runtime, "dbus-session")); err == nil {
+		if address, ok := strings.CutPrefix(string(data), "DBUS_SESSION_BUS_ADDRESS="); ok {
+			return strings.TrimRight(address, "\n\r"), nil
+		}
+	}
+	path, err := request.LookPath("dbus-launch")
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(path)
+	cmd.Args[0] = "dbus-launch"
+	cmd.Env = append([]string{}, request.Env...)
+	cmd.Dir = request.Cwd
+	data, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	_, address, ok := strings.Cut(line, "=")
+	if !ok || address == "" {
+		return "", fmt.Errorf("dbus: couldn't determine address of session bus")
+	}
+	return address, nil
 }

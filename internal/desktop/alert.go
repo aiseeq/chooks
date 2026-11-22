@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -136,6 +137,17 @@ func watchLifetime(urgency Urgency) time.Duration {
 // executable — путь к собственному бинарю, watchCommand — имя его скрытой подкоманды
 func DeliverInBackground(executable, watchCommand string, alert Alert) error {
 	if err := StartDetached(exec.Command(executable, WatchArgs(watchCommand, alert)...)); err != nil {
+		return fmt.Errorf("notification watcher: %w", err)
+	}
+	return nil
+}
+
+// DeliverInBackgroundForRequest passes the hook environment to the watcher.
+func DeliverInBackgroundForRequest(executable, watchCommand string, alert Alert, request hookctx.Context) error {
+	cmd := exec.Command(executable, WatchArgs(watchCommand, alert)...)
+	cmd.Env = append([]string{}, request.Env...)
+	cmd.Dir = request.Cwd
+	if err := StartDetached(cmd); err != nil {
 		return fmt.Errorf("notification watcher: %w", err)
 	}
 	return nil

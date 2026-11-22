@@ -13,6 +13,7 @@ import (
 	"github.com/aiseeq/chooks/internal/accounts"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // ANSI-последовательности. Строка статуса должна читаться боковым зрением,
@@ -113,19 +114,24 @@ func contextUsed(input Input, threshold int) float64 {
 
 // contextFill — заполнение контекста до порога автосжатия по settings.json
 // из claudeDir и окружению Claude Code
-func contextFill(input Input, claudeDir string, logger core.Logger) float64 {
+func contextFill(ctx context.Context, input Input, claudeDir string, logger core.Logger) float64 {
 	settings, err := loadCompactSettings(claudeDir)
 	if err != nil {
 		// Явный failover: без settings порог штатный — по полному окну модели
 		logger.Warn("settings unreadable, context bar uses the default compaction window", "error", err)
 	}
-	return contextUsed(input, compactThreshold(input.ContextWindow.Size, input.Model.ID, settings, os.Getenv))
+	request, _ := hookctx.Request(ctx)
+	return contextUsed(input, compactThreshold(input.ContextWindow.Size, input.Model.ID, settings, request.Getenv))
 }
 
 // Render читает данные Claude Code и возвращает строку статуса.
 // Попутно обновляется заголовок окна: строка статуса видна только в активном
 // окне, а по заголовку сессию видно в панели задач и в переключателе окон.
 func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return "", fmt.Errorf("hook request is missing")
+	}
 	data, err := io.ReadAll(stdin)
 	if err != nil {
 		return "", fmt.Errorf("failed to read status line input: %w", err)
@@ -137,13 +143,13 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	}
 
 	now := time.Now()
-	store, paths := loadAccounts(logger)
+	store, paths := loadAccounts(ctx, logger)
 	owner := ""
 	var snapshot *limitsSnapshot
 	limit := input.RateLimits.SevenDay
 	if week, ok := limit.usage(); ok {
 		smp := sample{week: week, session: input.SessionID, account: store.ActiveEmail()}
-		res, err := recordLimits(smp, now)
+		res, err := recordLimitsForContext(ctx, smp, now)
 		switch {
 		case err != nil:
 			// Явный failover: снимок не сведён, полоса рисуется по доле самой сессии
@@ -171,7 +177,7 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 		// Code, если она известна
 		if snapshot == nil {
 			var err error
-			if snapshot, err = diskLimits(); err != nil {
+			if snapshot, err = diskLimitsForContext(ctx); err != nil {
 				// Сбой не срывает строку статуса: полосы нет, сбой — в лог
 				logger.Warn("limits snapshot unreadable, weekly bar of the active account not shown", "error", err)
 			}
@@ -182,7 +188,7 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 		}
 	}
 	if store != nil {
-		rotate(paths, store, snapshot, now, logger)
+		rotate(ctx, paths, store, snapshot, now, logger)
 	}
 	bar := weekBar{label: "нед"}
 	if store != nil && len(store.Accounts) > 1 && owner != "" {
@@ -191,14 +197,27 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 		bar.label = store.ShortName(owner)
 	}
 	if store != nil && len(store.Accounts) > 0 {
-		bar.pool = poolPace(store, snapshot, now, logger)
+		bar.pool = poolPace(ctx, store, snapshot, now, logger)
 	}
-	bar.unit = store.PlanUnit(now)
-
+	// HOME запроса — через request.Abs: у CLI как есть (как UserHomeDir из
+	// пакета os), у демона — от cwd запроса
+	home := request.Getenv("HOME")
+	if home != "" {
+		home = request.Abs(home)
+	}
+	bar.unit = store.PlanUnitForHome(now, home)
 	visible := func() (bool, error) { return desktop.TabVisible(ctx) }
-	line, title := build(input, contextFill(input, paths.ClaudeDir, logger), bar, now, visible, logger)
-	if err := desktop.SetTerminalTitle(title); err != nil {
-		logger.Warn("terminal title not set", "error", err)
+	if input.Workspace.ProjectDir == "" && input.CWD == "" && input.Workspace.CurrentDir == "" {
+		input.CWD = request.Cwd
+		if input.CWD == "" {
+			input.CWD = "."
+		}
+	}
+	used := contextFill(ctx, input, paths.ClaudeDir, logger)
+	line, title := buildForRuntime(request.RuntimeDir(), &home, input, used, bar, now, visible, logger)
+	titleErr := desktop.SetTerminalTitleForRequest(title, request)
+	if titleErr != nil {
+		logger.Warn("terminal title not set", "error", titleErr)
 	}
 
 	return line, nil
@@ -208,9 +227,9 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 // сессии строку не срывает: она рисуется по тому, что удалось прочитать, а
 // сбой уходит в лог. Ветки и worktree в строке нет (пользователь 24.10 о
 // строке всех агентов: «Хочу видеть только вот это»)
-func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible func() (bool, error), logger core.Logger) (string, string) {
+func buildForRuntime(runtimeDir string, home *string, input Input, ctxUsed float64, bar weekBar, now time.Time, visible func() (bool, error), logger core.Logger) (string, string) {
 	dir := sessionDir(input)
-	state, recorded, err := core.LookupSessionState(input.SessionID)
+	state, recorded, err := core.LookupSessionStateIn(runtimeDir, input.SessionID)
 	if err != nil {
 		// Явный failover: без записи состояние помечается неизвестным, и
 		// плашка остаётся нейтральной — ни «ждёт ответа», ни «готово»
@@ -227,26 +246,30 @@ func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible fun
 	// Фоновая работа известна на конец хода: пока ход идёт, список устарел
 	var background core.Background
 	if state == core.StatePaused || state == core.StateDone || state == core.StateIdle {
-		background, err = core.LoadBackground(input.SessionID)
+		background, err = core.LoadBackgroundIn(runtimeDir, input.SessionID)
 		if err != nil {
 			// Сбой не срывает строку: фон не показывается, сбой — в лог
 			logger.Warn("background tasks unreadable, not shown", "session", input.SessionID, "error", err)
 		}
 	}
 	if state == core.StatePaused && background.Abandoned(now) {
-		state = abandon(input.SessionID, logger)
+		state = abandon(runtimeDir, input.SessionID, logger)
 	}
 	if state == core.StatePaused && background.AgentsWorking(now) {
 		state = core.StateAgents
 	}
 	if state == core.StateDone {
-		state = seen(input.SessionID, visible, logger)
+		state = seen(runtimeDir, input.SessionID, visible, logger)
 	}
 
 	// Путь не показывается: плашка уже называет проект, а полный путь
 	// повторяет её и занимает место
 	var output strings.Builder
-	output.WriteString(projectBadge(dir, state))
+	homeDir := ""
+	if home != nil {
+		homeDir = *home
+	}
+	output.WriteString(projectBadgeForHome(dir, homeDir, state))
 
 	parts := details(input, ctxUsed, bar, now)
 	if part := backgroundPart(background, now); part != "" {
@@ -256,21 +279,21 @@ func build(input Input, ctxUsed float64, bar weekBar, now time.Time, visible fun
 		output.WriteString(dim + " · " + reset + part)
 	}
 
-	return output.String(), terminalTitle(dir, state)
+	return output.String(), state.Marker() + " " + core.ProjectNameForDirWithHome(dir, homeDir)
 }
 
 // abandon переводит паузу в «готово», когда все задачи сессии висят дольше
 // срока, а будильников нет: Claude их больше не ждёт, а конец хода был
 // раньше, чем задачи стали брошенными. Без этого вкладка показывала бы паузу
 // до следующего хода
-func abandon(sessionID string, logger core.Logger) core.SessionState {
-	swapped, err := core.SwapSessionState(sessionID, core.StatePaused, core.StateDone)
+func abandon(runtimeDir, sessionID string, logger core.Logger) core.SessionState {
+	swapped, err := core.SwapSessionStateIn(runtimeDir, sessionID, core.StatePaused, core.StateDone)
 	if err != nil {
 		logger.Warn("abandoned background tasks, pause kept", "session", sessionID, "error", err)
 		return core.StatePaused
 	}
 	if !swapped {
-		return reloadState(sessionID, logger)
+		return reloadState(runtimeDir, sessionID, logger)
 	}
 	logger.Info("background tasks abandoned, session done", "session", sessionID)
 	return core.StateDone
@@ -342,7 +365,7 @@ func truncateRunes(text string, limit int) string {
 // Строка статуса — единственное, что запускается, пока сессия стоит
 // (statusLine.refreshInterval), поэтому смотрит она. Сбой — «новое» остаётся:
 // лишний значок лучше пропущенного ответа
-func seen(sessionID string, visible func() (bool, error), logger core.Logger) core.SessionState {
+func seen(runtimeDir, sessionID string, visible func() (bool, error), logger core.Logger) core.SessionState {
 	shown, err := visible()
 	if err != nil {
 		logger.Warn("tab visibility unknown, keeping the turn unseen", "session", sessionID, "error", err)
@@ -351,21 +374,21 @@ func seen(sessionID string, visible func() (bool, error), logger core.Logger) co
 	if !shown {
 		return core.StateDone
 	}
-	swapped, err := core.SwapSessionState(sessionID, core.StateDone, core.StateIdle)
+	swapped, err := core.SwapSessionStateIn(runtimeDir, sessionID, core.StateDone, core.StateIdle)
 	if err != nil {
 		logger.Warn("session not marked seen", "session", sessionID, "error", err)
 		return core.StateDone
 	}
 	if !swapped {
-		return reloadState(sessionID, logger)
+		return reloadState(runtimeDir, sessionID, logger)
 	}
 	return core.StateIdle
 }
 
 // reloadState перечитывает состояние, которое хук записал между чтением и
 // заменой: им и рисовать. Не прочиталось — значка нет, сбой в лог
-func reloadState(sessionID string, logger core.Logger) core.SessionState {
-	state, err := core.LoadSessionState(sessionID)
+func reloadState(runtimeDir, sessionID string, logger core.Logger) core.SessionState {
+	state, err := core.LoadSessionStateIn(runtimeDir, sessionID)
 	if err != nil {
 		logger.Warn("session state changed but unreadable, no badge", "session", sessionID, "error", err)
 		return core.StateUnknown
@@ -376,10 +399,6 @@ func reloadState(sessionID string, logger core.Logger) core.SessionState {
 // terminalTitle собирает заголовок окна: значок состояния и проект.
 // Значок идёт первым — по нему окно находится взглядом в панели задач; ветка
 // есть в строке статуса, во вкладке она вытесняет имя проекта
-func terminalTitle(dir string, state core.SessionState) string {
-	return state.Marker() + " " + core.ProjectNameForDir(dir)
-}
-
 // projectBadge рисует имя проекта плашкой, цвет которой показывает состояние:
 // синяя — работает, в том числе своими агентами после хода, сине-серая — ход
 // кончился и ждёт внешнего: shell, монитор, будильник (что именно — в
@@ -388,7 +407,7 @@ func terminalTitle(dir string, state core.SessionState) string {
 // «давай сделаем зелёным в режиме "зелёная галочка"»), красная — ход оборван
 // ошибкой API. Заполнение контекста видно по полосе ctx, плашка его не
 // повторяет (пользователь 26.10: убрать красный с плашки)
-func projectBadge(dir string, state core.SessionState) string {
+func projectBadgeForHome(dir, home string, state core.SessionState) string {
 	badge := badgeBlue
 	switch state {
 	case core.StatePaused:
@@ -403,7 +422,7 @@ func projectBadge(dir string, state core.SessionState) string {
 		badge = badgeRed
 	}
 
-	name := strings.ToUpper(core.ProjectNameForDir(dir))
+	name := strings.ToUpper(core.ProjectNameForDirWithHome(dir, home))
 	return badge + " " + name + " " + reset
 }
 
@@ -484,10 +503,10 @@ func weeklyBar(bar weekBar, week weeklyUsage, now time.Time) string {
 
 // poolPace — прогноз пула учёток для цвета полосы. Сбой (нет снимка,
 // короткая история) — явный failover на прогноз одной недели, сбой — в лог
-func poolPace(store *accounts.Store, snapshot *limitsSnapshot, now time.Time, logger core.Logger) *pace {
-	path, err := LimitsFile()
+func poolPace(ctx context.Context, store *accounts.Store, snapshot *limitsSnapshot, now time.Time, logger core.Logger) *pace {
+	path, err := limitsFileForContext(ctx)
 	if err == nil && snapshot == nil {
-		snapshot, err = diskLimits()
+		snapshot, err = loadLimits(path)
 	}
 	var f PoolForecast
 	if err == nil {
@@ -581,16 +600,18 @@ func firstDir(candidates ...string) string {
 		}
 	}
 
-	if wd, err := os.Getwd(); err == nil {
-		return wd
-	}
 	return "."
 }
 
 // loadAccounts читает хранилище учёток. Сбой не срывает строку статуса:
 // неделя пишется без учётки, ротации нет
-func loadAccounts(logger core.Logger) (*accounts.Store, accounts.Paths) {
-	paths, err := accounts.DefaultPaths()
+func loadAccounts(ctx context.Context, logger core.Logger) (*accounts.Store, accounts.Paths) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		logger.Warn("accounts paths unavailable: hook request is missing")
+		return nil, accounts.Paths{}
+	}
+	paths, err := accounts.DefaultPaths(request)
 	if err != nil {
 		logger.Warn("accounts paths unavailable, no rotation", "error", err)
 		return nil, paths
@@ -612,13 +633,18 @@ var startRotation = accounts.MaybeRotate
 
 // rotate запускает фоновую ротацию учёток, если ей есть работа. Снимок из
 // отрисовки, а без замера недели — с диска
-func rotate(paths accounts.Paths, store *accounts.Store, snapshot *limitsSnapshot, now time.Time, logger core.Logger) {
+func rotate(ctx context.Context, paths accounts.Paths, store *accounts.Store, snapshot *limitsSnapshot, now time.Time, logger core.Logger) {
 	var usage map[string]accounts.Usage
 	if snapshot != nil {
 		usage = accountUsage(snapshot, now)
 	} else {
 		var err error
-		if usage, err = (SnapshotLimits{}).Usage(); err != nil {
+		var loaded *limitsSnapshot
+		loaded, err = diskLimitsForContext(ctx)
+		if err == nil {
+			usage = accountUsage(loaded, time.Now())
+		}
+		if err != nil {
 			logger.Warn("limits snapshot unreadable, no rotation", "error", err)
 			return
 		}
@@ -628,7 +654,12 @@ func rotate(paths accounts.Paths, store *accounts.Store, snapshot *limitsSnapsho
 		logger.Warn("own executable unknown, no rotation", "error", err)
 		return
 	}
-	why, err := startRotation(paths, store, usage, now, executable, rotateArgs...)
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		logger.Warn("account rotation not started: hook request is missing")
+		return
+	}
+	why, err := startRotation(paths, store, usage, now, executable, request, rotateArgs...)
 	if err != nil {
 		logger.Warn("account rotation not started", "error", err)
 		return

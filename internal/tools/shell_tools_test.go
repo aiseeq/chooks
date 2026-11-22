@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"slices"
 	"testing"
 
@@ -45,7 +44,7 @@ func TestShellGuardsSupportMonitor(t *testing.T) {
 		{newRmGuard(t), `rm -rf "$NOPE/"`},
 		{newWriteGuard(t), "{ cat <<'EOF'\nrm -rf $NOPE/*\nEOF\n} > x"},
 	} {
-		result, err := tc.tool.ValidateTool(context.Background(),
+		result, err := tc.tool.ValidateTool(rmTestContext(),
 			&core.ToolInput{ToolName: "Monitor", Command: tc.command, CWD: "/home/u/proj"})
 		if err != nil {
 			t.Fatalf("%s: %v", tc.tool.Name(), err)

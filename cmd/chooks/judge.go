@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/questioncheck"
 )
 
@@ -17,6 +18,22 @@ func newJudge(model, effort string) (questioncheck.CLIJudge, error) {
 		return questioncheck.CLIJudge{}, fmt.Errorf("create judge dir: %w", err)
 	}
 	return questioncheck.NewCLIJudge(model, effort, dir)
+}
+
+func newJudgeForRequest(model, effort string, request hookctx.Context) (questioncheck.CLIJudge, error) {
+	dir := filepath.Join(request.RuntimeDir(), "question-judge")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return questioncheck.CLIJudge{}, fmt.Errorf("create judge dir: %w", err)
+	}
+	path := request.Getenv("MODELS_APPROVED")
+	if path == "" {
+		home := request.Getenv("HOME")
+		if home == "" {
+			return questioncheck.CLIJudge{}, fmt.Errorf("cannot resolve home dir for the approved models list: $HOME is not defined")
+		}
+		path = filepath.Join(home, ".config", "models", "approved")
+	}
+	return questioncheck.NewCLIJudgeFromPath(model, effort, dir, request.Abs(path))
 }
 
 // stopBlockOutput — ответ Stop-хука, который не даёт ходу закончиться:

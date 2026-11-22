@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 const (
@@ -229,8 +231,19 @@ func open(ctx context.Context, rawURL string, noDirect bool, run Runner) (report
 	if !rep.OK {
 		return rep, "", nil
 	}
-	text, err := os.ReadFile(rep.Path)
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return rep, "", fmt.Errorf("hook request is missing")
+	}
+	path := request.Abs(rep.Path)
+	text, err := os.ReadFile(path)
 	if err != nil {
+		var pathErr *os.PathError
+		if path != rep.Path && errors.As(err, &pathErr) {
+			copy := *pathErr
+			copy.Path = rep.Path
+			err = &copy
+		}
 		return rep, "", fmt.Errorf("webtext text: %w", err)
 	}
 	return rep, string(text), nil
@@ -348,11 +361,17 @@ func LogURL(raw string) string {
 // ExecRunner запускает webtext из PATH, а без него — ~/bin/webtext: хук
 // наследует PATH сессии, а у фоновых claude -p он бывает урезан
 func ExecRunner(ctx context.Context, args []string) ([]byte, int, error) {
-	path, err := webtextPath()
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return nil, 0, fmt.Errorf("hook request is missing")
+	}
+	path, err := webtextPathForRequest(request)
 	if err != nil {
 		return nil, 0, err
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = append([]string{}, request.Env...)
+	cmd.Dir = request.Cwd
 	cmd.WaitDelay = time.Second
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -367,17 +386,15 @@ func ExecRunner(ctx context.Context, args []string) ([]byte, int, error) {
 	return stdout.Bytes(), 0, nil
 }
 
-func webtextPath() (string, error) {
-	if path, err := exec.LookPath("webtext"); err == nil {
+func webtextPathForRequest(request hookctx.Context) (string, error) {
+	if path, err := request.LookPath("webtext"); err == nil {
 		return path, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", ErrNoWebtext
+	if home := request.Getenv("HOME"); home != "" {
+		path := filepath.Join(request.Abs(home), "bin", "webtext")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, nil
+		}
 	}
-	path := filepath.Join(home, "bin", "webtext")
-	if info, err := os.Stat(path); err != nil || info.IsDir() {
-		return "", ErrNoWebtext
-	}
-	return path, nil
+	return "", ErrNoWebtext
 }

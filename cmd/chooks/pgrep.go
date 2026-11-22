@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,12 +30,12 @@ type preToolUseOutput struct {
 
 // writeAllowedOutput пишет ответ разрешённого вызова: подмену pgrep и
 // подсказку о широком обходе одним JSON; нечего сказать — ничего
-func writeAllowedOutput(input *core.ToolInput, config *core.Config, logger core.Logger, out io.Writer) {
+func writeAllowedOutputContext(ctx context.Context, input *core.ToolInput, config *core.Config, logger core.Logger, out io.Writer) {
 	updated, err := rewritePgrep(input, config, logger)
 	if err != nil {
 		logger.Warn("pre-tool-use: pgrep not rewritten", "tool", input.ToolName, "error", err)
 	}
-	hint, err := wideSearchContext(input, config, logger)
+	hint, err := wideSearchContext(ctx, input, config, logger)
 	if err != nil {
 		logger.Warn("pre-tool-use: wide search not checked", "tool", input.ToolName, "error", err)
 	}

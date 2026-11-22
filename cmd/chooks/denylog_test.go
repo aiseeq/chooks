@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/understandcheck"
 )
 
@@ -69,7 +70,11 @@ func TestRunPreToolUse_DenyLogsSessionToolMaskedCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, err := runPreToolUse(context.Background(), data, config, logger)
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := runPreToolUse(hookctx.WithRequest(context.Background(), request), data, config, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +223,11 @@ func TestRunPreToolUse_DenyLogHidesPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, err := runPreToolUse(context.Background(), data, config, logger)
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := runPreToolUse(hookctx.WithRequest(context.Background(), request), data, config, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

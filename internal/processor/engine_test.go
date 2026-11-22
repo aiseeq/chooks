@@ -5,12 +5,17 @@ import (
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 func newEngine(t *testing.T, config *core.Config) *Engine {
 	t.Helper()
 
-	engine, err := New(config, testLogger(t))
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewForRequest(config, testLogger(t), request)
 	if err != nil {
 		t.Fatalf("не удалось создать процессор: %v", err)
 	}
@@ -24,7 +29,7 @@ func TestEngine_BlocksJiraCommentStyle(t *testing.T) {
 		},
 	})
 
-	response, err := engine.ProcessPreToolUse(context.Background(), &core.ToolInput{
+	response, err := engine.ProcessPreToolUse(requestTestContext(t), &core.ToolInput{
 		ToolName: "Bash",
 		Command:  "curl -X POST https://x.atlassian.net/rest/api/3/issue/PROJ-1/comment -d '{\"body\":\"готово — проверь\"}'",
 	})
@@ -44,7 +49,7 @@ func TestEngine_AllowsOrdinaryCommand(t *testing.T) {
 		},
 	})
 
-	response, err := engine.ProcessPreToolUse(context.Background(), &core.ToolInput{
+	response, err := engine.ProcessPreToolUse(requestTestContext(t), &core.ToolInput{
 		ToolName: "Bash",
 		Command:  "echo 'сборка — готово'",
 	})
@@ -75,7 +80,7 @@ func TestEngine_DisabledToolsAreNotCreated(t *testing.T) {
 // обновлении не перезаписывается
 func TestEngine_GitGuardOnWhenAbsent(t *testing.T) {
 	engine := newEngine(t, &core.Config{Tools: map[string]core.ToolConfig{}})
-	response, err := engine.ProcessPreToolUse(context.Background(), &core.ToolInput{
+	response, err := engine.ProcessPreToolUse(requestTestContext(t), &core.ToolInput{
 		ToolName: "Bash",
 		// Каталог неизвестен — дерево не своё (временный каталог теста был бы своим)
 		Command: "git stash",
@@ -112,4 +117,13 @@ func testLogger(t *testing.T) core.Logger {
 		t.Fatalf("не удалось создать логгер: %v", err)
 	}
 	return logger
+}
+
+func requestTestContext(t *testing.T) context.Context {
+	t.Helper()
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hookctx.WithRequest(context.Background(), request)
 }

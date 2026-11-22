@@ -30,22 +30,36 @@ type fileView struct {
 // viewer — файл в момент проверки: на диске у хука, по истории в сухом прогоне
 type viewer func(kind, path string) (fileView, error)
 
+func pathFor(abs func(string) string, path string) string {
+	if abs == nil {
+		return path
+	}
+	return abs(path)
+}
+
 // diskView читает отслеживаемый файл с диска. Отсутствующий файл — не ошибка:
 // скилл удалён или лежал во временном каталоге, показывать нечего
 func diskView(kind, path string) (fileView, error) {
-	info, err := os.Stat(path)
+	return diskViewAt(kind, path, path)
+}
+
+// diskViewAt открывает файл по openPath, а рендерит по path из записи:
+// ${CLAUDE_SKILL_DIR} в контексте сессии — каталог, каким его записал
+// Claude Code, а openPath — тот же путь, разрешённый от cwd запроса
+func diskViewAt(kind, openPath, path string) (fileView, error) {
+	info, err := os.Stat(openPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return fileView{}, nil
 	}
 	if err != nil {
-		return fileView{}, fmt.Errorf("cannot stat %s: %w", path, err)
+		return fileView{}, fmt.Errorf("cannot stat %s: %w", openPath, err)
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(openPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return fileView{}, nil
 	}
 	if err != nil {
-		return fileView{}, fmt.Errorf("cannot read %s: %w", path, err)
+		return fileView{}, fmt.Errorf("cannot read %s: %w", openPath, err)
 	}
 	view := fileView{Exists: true, ModTime: info.ModTime()}
 	view.Text, view.Name = render(kind, path, raw)

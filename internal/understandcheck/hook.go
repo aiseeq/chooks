@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/akit/transcript"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/questioncheck"
 	"github.com/aiseeq/chooks/internal/tailscan"
 )
@@ -69,6 +70,15 @@ type Outcome struct {
 	Verdict string
 }
 
+// DefaultPaths resolves the journal and denied-call directory for a request.
+func DefaultPaths(request hookctx.Context) (string, string, error) {
+	dir, err := request.StateDir()
+	if err != nil {
+		return "", "", err
+	}
+	return filepath.Join(dir, "understand-check.jsonl"), filepath.Join(dir, "understand-check"), nil
+}
+
 // Entry — строка журнала: по нему считаются поправки, override, сбои и
 // задержка
 type Entry struct {
@@ -97,16 +107,6 @@ type Entry struct {
 	DenyRev int `json:"deny_rev,omitempty"`
 }
 
-// DefaultPaths — $XDG_STATE_HOME/chooks/understand-check.jsonl и каталог
-// ключей рядом с ним
-func DefaultPaths() (journal, denied string, err error) {
-	dir, err := questioncheck.StateDir()
-	if err != nil {
-		return "", "", err
-	}
-	return filepath.Join(dir, "understand-check.jsonl"), filepath.Join(dir, "understand-check"), nil
-}
-
 // Run проверяет вызов. Всё, кроме поправки судьи, пропускает вызов: сбой
 // проверки не повод держать агента
 func (h Hook) Run(ctx context.Context, call Call) Outcome {
@@ -114,7 +114,15 @@ func (h Hook) Run(ctx context.Context, call Call) Outcome {
 	if call.AgentID != "" {
 		return Outcome{Skip: "суб-агент"}
 	}
-	kind, file, action, ok := classify(call.Tool, call.Input)
+	request, hasRequest := hookctx.Request(ctx)
+	if !hasRequest {
+		return Outcome{Verdict: VerdictError, Skip: "hook request is missing"}
+	}
+	home := request.Getenv("HOME")
+	if home != "" {
+		home = request.Abs(home)
+	}
+	kind, file, action, ok := classifyForHome(call.Tool, call.Input, home, request.Stderr)
 	if !ok {
 		return Outcome{Skip: "действие не проверяется"}
 	}
@@ -131,7 +139,7 @@ func (h Hook) Run(ctx context.Context, call Call) Outcome {
 	if call.TranscriptPath == "" {
 		return h.fail(entry, started, VerdictError, errors.New("no transcript path in hook input"))
 	}
-	turn, err := ReadTurn(call.TranscriptPath)
+	turn, err := ReadTurn(call.TranscriptPath, request)
 	if err != nil {
 		return h.fail(entry, started, VerdictError, err)
 	}
@@ -304,10 +312,10 @@ func DenyReason(verdict Verdict) string {
 
 // ReadTurn читает ход из хвоста транскрипта: окно растёт, пока не ясно,
 // начат ли ход репликой пользователя и после какого ответа агента она идёт
-func ReadTurn(path string) (Turn, error) {
+func ReadTurn(path string, request hookctx.Context) (Turn, error) {
 	var turn Turn
-	err := tailscan.Scan(path, func(buf []byte) bool {
-		turn = scanTurn(buf)
+	err := tailscan.Scan(request.Abs(path), func(buf []byte) bool {
+		turn = scanTurn(buf, request)
 		return turn.Decided
 	})
 	if err != nil {
@@ -317,8 +325,12 @@ func ReadTurn(path string) (Turn, error) {
 }
 
 // scanTurn проходит события окна по порядку тем же Collector, что сухой прогон
-func scanTurn(buf []byte) Turn {
-	var c Collector
+func scanTurn(buf []byte, request hookctx.Context) Turn {
+	home := request.Getenv("HOME")
+	if home != "" {
+		home = request.Abs(home)
+	}
+	c := Collector{Home: home, Stderr: request.Stderr}
 	parser := transcript.NewParser()
 	for line := range bytes.SplitSeq(buf, []byte("\n")) {
 		// Выводы инструментов большие и ходу не нужны, кроме ответов в окне

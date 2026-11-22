@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // watched — скилл или файл инструкций в контексте сессии и что о нём уже
@@ -106,16 +107,12 @@ const lockWait = time.Second
 
 // DefaultStateDir — каталог записей: $XDG_STATE_HOME/chooks/skill-reload.
 // Не каталог времени выполнения: сессию продолжают после перезагрузки
-func DefaultStateDir() (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("cannot resolve home dir: %w", err)
-		}
-		base = filepath.Join(home, ".local", "state")
+func StateDir(request hookctx.Context) (string, error) {
+	base, err := request.StateDir()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(base, "chooks", "skill-reload"), nil
+	return filepath.Join(base, "skill-reload"), nil
 }
 
 // stateFileName — имя записи сессии или её субагента

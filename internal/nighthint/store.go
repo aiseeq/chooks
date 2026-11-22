@@ -43,20 +43,6 @@ type Store struct {
 	Dir string
 }
 
-// DefaultDir — $XDG_STATE_HOME/chooks/night-hint, рядом с skill-reload:
-// сессию продолжают и после перезагрузки
-func DefaultDir() (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("cannot resolve home dir: %w", err)
-		}
-		base = filepath.Join(home, ".local", "state")
-	}
-	return filepath.Join(base, "chooks", "night-hint"), nil
-}
-
 // MarkNight отмечает подсказку ночи night; false — она этой ночью уже дана
 func (s Store) MarkNight(sessionID, night string) (bool, error) {
 	return s.update(sessionID, func(rec *record) bool {

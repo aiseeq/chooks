@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -54,17 +55,73 @@ type ToolConfig struct {
 func LoadConfig(configPath string) (*Config, error) {
 	if configPath == "" {
 		var err error
-		if configPath, err = DefaultConfigPath(); err != nil {
+		configPath, err = DefaultConfigPath()
+		if err != nil {
 			return nil, err
 		}
 	}
+	config, present, err := loadConfig(configPath)
+	if err != nil || !present {
+		return config, err
+	}
+	if err := expandConfigPaths(config); err != nil {
+		return nil, fmt.Errorf("failed to expand paths in %s: %w", configPath, err)
+	}
+	return finishConfig(config, configPath)
+}
 
+// LoadConfigForRequest загружает конфигурацию по окружению запроса (флаг или
+// $XDG_CONFIG_HOME по правилам UserConfigDir из пакета os). Относительный путь
+// открывается от cwd запроса (hookctx.Context.Abs), в ошибках — открытый путь
+func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, error) {
+	if configPath == "" {
+		dir := request.Getenv("XDG_CONFIG_HOME")
+		switch {
+		case dir == "":
+			home := request.Getenv("HOME")
+			if home == "" {
+				return nil, fmt.Errorf("failed to resolve default config path: neither $XDG_CONFIG_HOME nor $HOME are defined")
+			}
+			dir = filepath.Join(home, ".config")
+		case !filepath.IsAbs(dir):
+			return nil, fmt.Errorf("failed to resolve default config path: path in $XDG_CONFIG_HOME is relative")
+		}
+		configPath = filepath.Join(dir, "chooks", "config.yaml")
+	}
+	configPath = request.Abs(configPath)
+	expand := func(config *Config) error {
+		path := config.Logger.LogFile
+		if strings.HasPrefix(path, "~/") {
+			home := request.Getenv("HOME")
+			if home == "" {
+				return fmt.Errorf("cannot expand ~ in %q: $HOME is not defined", path)
+			}
+			path = filepath.Join(home, path[2:])
+		}
+		if path != "" {
+			path = request.Abs(path)
+		}
+		config.Logger.LogFile = path
+		return nil
+	}
+	config, present, err := loadConfig(configPath)
+	if err != nil || !present {
+		return config, err
+	}
+	if err := expand(config); err != nil {
+		return nil, fmt.Errorf("failed to expand paths in %s: %w", configPath, err)
+	}
+	return finishConfig(config, configPath)
+}
+
+// loadConfig читает файл; present — файл есть, иначе значения по умолчанию
+func loadConfig(configPath string) (*Config, bool, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return DefaultConfig(), nil
+			return DefaultConfig(), false, nil
 		}
-		return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+		return nil, false, fmt.Errorf("failed to read config file %s: %w", configPath, err)
 	}
 
 	// Неизвестные ключи — ошибка: молча проигнорированная опечатка в имени поля
@@ -74,19 +131,19 @@ func LoadConfig(configPath string) (*Config, error) {
 	decoder.KnownFields(true)
 	// io.EOF означает пустой файл — работаем на значениях по умолчанию
 	if err := decoder.Decode(&config); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+		return nil, false, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 	}
 
 	applyLoggerDefaults(&config.Logger)
-	if err := expandConfigPaths(&config); err != nil {
-		return nil, fmt.Errorf("failed to expand paths in %s: %w", configPath, err)
-	}
+	return &config, true, nil
+}
 
-	if err := validateConfig(&config); err != nil {
+func finishConfig(config *Config, configPath string) (*Config, error) {
+	if err := validateConfig(config); err != nil {
 		return nil, fmt.Errorf("config validation failed in %s: %w", configPath, err)
 	}
 
-	return &config, nil
+	return config, nil
 }
 
 // SaveConfig сохраняет конфигурацию в файл

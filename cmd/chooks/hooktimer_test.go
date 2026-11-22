@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/skillreload"
 )
 
@@ -201,7 +202,7 @@ func TestAwaitSkillCheckSkipsWhenOptionalBudgetSpent(t *testing.T) {
 func TestFinishSkillCheckLogsScanErrorWithExpiredDeadline(t *testing.T) {
 	logger := &captureLogger{}
 	readErr := errors.New("transcript read failed")
-	finishSkillCheck(eventPostToolBatch, &core.ToolInput{SessionID: "s1"}, logger, skillreload.Result{}, errors.Join(readErr, skillreload.ErrNoTime))
+	finishSkillCheck(eventPostToolBatch, &core.ToolInput{SessionID: "s1"}, logger, skillreload.Result{}, errors.Join(readErr, skillreload.ErrNoTime), io.Discard)
 	if len(logger.warns) != 1 || !strings.Contains(logger.warns[0], readErr.Error()) {
 		t.Fatalf("ошибка чтения транскрипта потеряна: %q", logger.warns)
 	}
@@ -264,7 +265,7 @@ func TestHookTimerHelper(t *testing.T) {
 	timer := newHookTimer("user-prompt-submit")
 	timer.setSession("helper-session")
 	timer.setDurations(core.LoggerConfig{Output: "file", LogFile: os.Getenv("CHOOKS_HOOKTIMER_LOG")})
-	timer.watchTermination()
+	timer.watchTermination(os.Exit)
 	timer.stage("skills")
 	timer.setSubstage("notices")
 	fmt.Println("ready")
@@ -368,19 +369,18 @@ func TestRunHook_ErrorStatus(t *testing.T) {
 	if err := os.WriteFile(configFile, []byte(writeConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previous := configPath
-	configPath = configFile
-	t.Cleanup(func() { configPath = previous })
 	stdin, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stdin.Close()
-	oldStdin := os.Stdin
-	os.Stdin = stdin
-	t.Cleanup(func() { os.Stdin = oldStdin })
-
-	if _, err := runHook(t.Context(), "no-such-hook"); err == nil {
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Stdin = stdin
+	request.ConfigPath = configFile
+	if _, err := runHook(hookctx.WithRequest(t.Context(), request), "no-such-hook"); err == nil {
 		t.Fatal("неизвестный хук должен давать ошибку")
 	}
 	data, err := os.ReadFile(filepath.Join(logDir, durationsFile))

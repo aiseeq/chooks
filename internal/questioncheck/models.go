@@ -13,6 +13,11 @@ func NewCLIJudge(name, effort, dir string) (CLIJudge, error) {
 	if err != nil {
 		return CLIJudge{}, err
 	}
+	return NewCLIJudgeFromPath(name, effort, dir, path)
+}
+
+// NewCLIJudgeFromPath reads the approved models list belonging to a request.
+func NewCLIJudgeFromPath(name, effort, dir, path string) (CLIJudge, error) {
 	models, err := approved.Read(path)
 	if err != nil {
 		return CLIJudge{}, fmt.Errorf("approved models: %w", err)

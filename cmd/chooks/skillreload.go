@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/skillreload"
 )
 
@@ -43,37 +45,40 @@ type hookContextOutput struct {
 // инструкций, сделанные после того, как их текст попал в контекст: diff, а
 // при большой правке — просьбу перечитать. Сбой только логируется: выдача не
 // повод показывать человеку ошибку хука на каждом ходу
-func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, deadline time.Time, timer *hookTimer) {
+func remindStaleSkills(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, deadline time.Time, timer *hookTimer, request hookctx.Context) {
 	if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
 		return
 	}
 	if input.SessionID == "" || input.TranscriptPath == "" {
 		return
 	}
-	stateDir, err := skillreload.DefaultStateDir()
+	stateDir, err := skillreload.StateDir(request)
 	if err != nil {
 		logger.Warn("skill reload state dir unavailable", "error", err)
 		return
 	}
 
-	checker := skillreload.Checker{StateDir: stateDir, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
-	awaitSkillCheck(timer, logger, eventName, input, func() {
-		result, err := checker.Check(skillreload.Event{
+	checker := skillreload.Checker{StateDir: stateDir, Abs: request.Abs, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
+	var result skillreload.Result
+	err = nil
+	if awaitSkillCheck(timer, logger, eventName, input, func() {
+		result, err = checker.Check(skillreload.Event{
 			SessionID:      input.SessionID,
 			AgentID:        input.AgentID,
 			AgentType:      input.AgentType,
 			TranscriptPath: input.TranscriptPath,
 		})
-		finishSkillCheck(eventName, input, logger, result, err)
-	})
+	}) {
+		finishSkillCheck(eventName, input, logger, result, err, request.Stdout)
+	}
 }
 
 // awaitSkillCheck ограничивает ожидание Check абсолютным сроком от старта
 // процесса. Ушедшая горутина может закончить начатую запись, но хук её не ждёт.
-func awaitSkillCheck(timer *hookTimer, logger core.Logger, eventName string, input *core.ToolInput, check func()) {
+func awaitSkillCheck(timer *hookTimer, logger core.Logger, eventName string, input *core.ToolInput, check func()) bool {
 	if !timer.now().Before(timer.deadline(optionalBudget)) {
 		logger.Warn("skill reload skipped: hook budget spent", "hook", eventName, "session", input.SessionID, "agent", input.AgentID)
-		return
+		return false
 	}
 	finished := make(chan struct{})
 	go func() {
@@ -83,13 +88,15 @@ func awaitSkillCheck(timer *hookTimer, logger core.Logger, eventName string, inp
 	wait := time.Until(timer.deadline(skillHardBudget))
 	if wait <= 0 {
 		warnSkillAbandoned(timer, logger, eventName, input)
-		return
+		return false
 	}
 	select {
 	case <-finished:
 		timer.setSubstage("")
+		return true
 	case <-time.After(wait):
 		warnSkillAbandoned(timer, logger, eventName, input)
+		return false
 	}
 }
 
@@ -98,7 +105,7 @@ func warnSkillAbandoned(timer *hookTimer, logger core.Logger, eventName string, 
 		"agent", input.AgentID, "substage", timer.currentSubstage())
 }
 
-func finishSkillCheck(eventName string, input *core.ToolInput, logger core.Logger, result skillreload.Result, err error) {
+func finishSkillCheck(eventName string, input *core.ToolInput, logger core.Logger, result skillreload.Result, err error, out io.Writer) {
 	if errors.Is(err, skillreload.ErrNoTime) {
 		// Напоминание останется для следующего события; сбой чтения
 		// транскрипта, случившийся после срока, — в поле error
@@ -132,7 +139,7 @@ func finishSkillCheck(eventName string, input *core.ToolInput, logger core.Logge
 	var output hookContextOutput
 	output.HookSpecificOutput.HookEventName = eventName
 	output.HookSpecificOutput.AdditionalContext = skillreload.Format(result.Notices)
-	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
+	if err := json.NewEncoder(out).Encode(output); err != nil {
 		logger.Warn("skill reload reminder not printed", "error", err)
 		return
 	}

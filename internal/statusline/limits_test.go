@@ -1,7 +1,6 @@
 package statusline
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -152,7 +151,7 @@ func TestWriteLimitsTwoAccounts(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
 	writeRates(t, "100")
-	path, err := LimitsFile()
+	path, err := LimitsFile(statusTestRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +161,7 @@ func TestWriteLimitsTwoAccounts(t *testing.T) {
 	merge(t, path, 4, personalNext, "personal", base.Add(time.Minute))
 
 	var out strings.Builder
-	if err := WriteLimits(&out, false); err != nil {
+	if err := WriteLimits(&out, false, statusTestRequest(t)); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
@@ -174,7 +173,7 @@ func TestWriteLimitsTwoAccounts(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := WriteLimits(&out, true); err != nil {
+	if err := WriteLimits(&out, true, statusTestRequest(t)); err != nil {
 		t.Fatal(err)
 	}
 	if rows := strings.Split(strings.TrimSpace(out.String()), "\n"); len(rows) != 3 || !strings.HasSuffix(rows[1], "\t61\twork\t") {
@@ -337,7 +336,7 @@ func TestRenderStaleSessionShowsRecordedWeek(t *testing.T) {
 		t.Helper()
 		input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"rate_limits":{"seven_day":{"used_percentage":%d,"resets_at":%d}}}`,
 			session, t.TempDir(), used, resets)
-		line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
+		line, err := Render(statusRequestContext(t), strings.NewReader(input), testLogger(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -416,7 +415,7 @@ func TestRenderPartialReset(t *testing.T) {
 		t.Helper()
 		input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"rate_limits":{"seven_day":{"used_percentage":%d,"resets_at":%d}}}`,
 			session, t.TempDir(), used, resets)
-		line, err := Render(context.Background(), strings.NewReader(input), testLogger(t))
+		line, err := Render(statusRequestContext(t), strings.NewReader(input), testLogger(t))
 		if err != nil {
 			t.Fatal(err)
 		}

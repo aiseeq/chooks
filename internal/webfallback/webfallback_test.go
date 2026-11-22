@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // Текст отказа WebFetch 2.1.310
@@ -76,7 +78,7 @@ func TestFallbackOpened(t *testing.T) {
 	runner := &fakeRunner{stdout: `{"ok":true,"source":"wayback","snapshot":"20260208211225","kind":"html","path":"` + path + `"}`}
 	fetch := Fetch{Code: 403, CodeText: "Forbidden", Result: forbidden, URL: "https://www.lb.lt/x", DurationMs: 314}
 
-	updated, outcome, err := Fallback(context.Background(), fetch, runner.run)
+	updated, outcome, err := Fallback(webRequestContext(t), fetch, runner.run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +102,7 @@ func TestFallbackTruncatesLongPage(t *testing.T) {
 	path := writeText(t, strings.Repeat("я", resultRunes+500))
 	runner := &fakeRunner{stdout: `{"ok":true,"source":"direct","kind":"html","path":"` + path + `"}`}
 
-	updated, _, err := Fallback(context.Background(), Fetch{Code: 403, URL: "https://example.org/a"}, runner.run)
+	updated, _, err := Fallback(webRequestContext(t), Fetch{Code: 403, URL: "https://example.org/a"}, runner.run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +120,7 @@ func TestFallbackRateLimitedNotOpened(t *testing.T) {
 	runner := &fakeRunner{code: 1, stdout: `{"ok":false,"steps":[{"step":"wayback","result":"no 200 snapshot"}],"hint":"Найди копию через WebSearch по заголовку."}`}
 	original := "The server returned HTTP 429 Too Many Requests."
 
-	updated, outcome, err := Fallback(context.Background(), Fetch{Code: 429, Result: original, URL: "https://liquipedia.net/starcraft2/X"}, runner.run)
+	updated, outcome, err := Fallback(webRequestContext(t), Fetch{Code: 429, Result: original, URL: "https://liquipedia.net/starcraft2/X"}, runner.run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +151,7 @@ func TestFallbackLeavesResponse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			updated, _, err := Fallback(context.Background(), tt.fetch, tt.runner.run)
+			updated, _, err := Fallback(webRequestContext(t), tt.fetch, tt.runner.run)
 			if updated != nil {
 				t.Errorf("ответ должен остаться как был, а подменён: %+v", updated)
 			}
@@ -161,7 +163,7 @@ func TestFallbackLeavesResponse(t *testing.T) {
 			}
 		})
 	}
-	if _, _, err := Fallback(context.Background(), Fetch{Code: 403, URL: "https://a.org"}, (&fakeRunner{err: ErrNoWebtext}).run); !errors.Is(err, ErrNoWebtext) {
+	if _, _, err := Fallback(webRequestContext(t), Fetch{Code: 403, URL: "https://a.org"}, (&fakeRunner{err: ErrNoWebtext}).run); !errors.Is(err, ErrNoWebtext) {
 		t.Errorf("нет утилиты — ErrNoWebtext, а %v", err)
 	}
 }
@@ -179,7 +181,7 @@ func TestFailureContextOpened(t *testing.T) {
 	path := writeText(t, "Thread\nsource: wayback\n\nТекст обсуждения.")
 	runner := &fakeRunner{stdout: `{"ok":true,"source":"wayback","snapshot":"20250801092245","kind":"html","path":"` + path + `"}`}
 
-	text, outcome, err := FailureContext(context.Background(), "https://www.reddit.com/r/x/comments/1/", domainBlocked, runner.run)
+	text, outcome, err := FailureContext(webRequestContext(t), "https://www.reddit.com/r/x/comments/1/", domainBlocked, runner.run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +207,7 @@ func TestFailureContextFitsHookCap(t *testing.T) {
 	runner := &fakeRunner{stdout: `{"ok":true,"source":"direct","kind":"html","path":"` + path + `"}`}
 	longErr := strings.Repeat("certificate chain error ", 100) + "\nвторая строка"
 
-	text, outcome, err := FailureContext(context.Background(), "https://example.org/a", longErr, runner.run)
+	text, outcome, err := FailureContext(webRequestContext(t), "https://example.org/a", longErr, runner.run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +228,7 @@ func TestFailureContextFitsHookCap(t *testing.T) {
 func TestFailureContextNotOpened(t *testing.T) {
 	runner := &fakeRunner{code: 1, stdout: `{"ok":false,"steps":[{"step":"direct","result":"error: tls: failed to verify certificate"},{"step":"wayback","result":"no snapshot with status 200"}]}`}
 
-	text, outcome, err := FailureContext(context.Background(), "https://developer.bank.example/docs/x", "self signed certificate in certificate chain", runner.run)
+	text, outcome, err := FailureContext(webRequestContext(t), "https://developer.bank.example/docs/x", "self signed certificate in certificate chain", runner.run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +254,7 @@ func TestFailureContextSkipsLocal(t *testing.T) {
 		"http://100.64.0.1/", "http://router.lan/", "http://nas.local/", "http://[::ffff:127.0.0.1]/",
 	} {
 		runner := &fakeRunner{}
-		_, _, err := FailureContext(context.Background(), address, "fetch failed", runner.run)
+		_, _, err := FailureContext(webRequestContext(t), address, "fetch failed", runner.run)
 		if !errors.Is(err, ErrLocalAddress) {
 			t.Errorf("%s: ожидался ErrLocalAddress, а %v", address, err)
 		}
@@ -262,8 +264,17 @@ func TestFailureContextSkipsLocal(t *testing.T) {
 	}
 	for _, address := range []string{"https://132.70.196.109/x", "https://www.reddit.com./r/x", "https://3dnews.ru/x", "https://a.b.io/"} {
 		runner := &fakeRunner{code: 1, stdout: `{"ok":false}`}
-		if _, _, err := FailureContext(context.Background(), address, "connect ECONNREFUSED", runner.run); err != nil || runner.args == nil {
+		if _, _, err := FailureContext(webRequestContext(t), address, "connect ECONNREFUSED", runner.run); err != nil || runner.args == nil {
 			t.Errorf("%s: публичный адрес должен идти в webtext: err %v, вызван %v", address, err, runner.args != nil)
 		}
 	}
+}
+
+func webRequestContext(t *testing.T) context.Context {
+	t.Helper()
+	req, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hookctx.WithRequest(context.Background(), req)
 }

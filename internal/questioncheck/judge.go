@@ -11,12 +11,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/aiseeq/akit/secretmask"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // Usage — токены вызова: по ним итог недели считает цену по ценам модели
@@ -63,9 +63,9 @@ func (j CLIJudge) Ask(ctx context.Context, input string) (string, Usage, error) 
 
 // judgeEnv — окружение вызова без признаков сессии-родителя: вложенный
 // claude иначе принял бы чужое имя сессии и CLAUDE_PID
-func judgeEnv() []string {
-	var env []string
-	for _, kv := range os.Environ() {
+func judgeEnv(source []string) []string {
+	env := make([]string, 0, len(source))
+	for _, kv := range source {
 		if strings.HasPrefix(kv, "CLAUDE_CODE_SESSION_NAME=") || strings.HasPrefix(kv, "CLAUDE_PID=") ||
 			strings.HasPrefix(kv, "CLAUDE_CODE_SESSION_ID=") || strings.HasPrefix(kv, "CLAUDECODE=") {
 			continue
@@ -76,7 +76,11 @@ func judgeEnv() []string {
 }
 
 func (j CLIJudge) askClaude(ctx context.Context, input string) (string, Usage, error) {
-	cmd := exec.CommandContext(ctx, "claude", "-p",
+	path, err := judgeExecutable(ctx, "claude")
+	if err != nil {
+		return "", Usage{}, err
+	}
+	cmd := exec.CommandContext(ctx, path, "-p",
 		"--model", j.Name,
 		"--system-prompt", j.Prompt,
 		"--tools", "",
@@ -86,7 +90,8 @@ func (j CLIJudge) askClaude(ctx context.Context, input string) (string, Usage, e
 		"--disable-slash-commands",
 		"--effort", j.Effort,
 		"--output-format", "json")
-	out, err := runCLI(cmd, j.Dir, input)
+	cmd.Args[0] = "claude"
+	out, err := runCLI(ctx, cmd, j.Dir, input)
 	if err != nil {
 		return "", Usage{}, err
 	}
@@ -116,7 +121,11 @@ func (j CLIJudge) askClaude(ctx context.Context, input string) (string, Usage, e
 }
 
 func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, error) {
-	cmd := exec.CommandContext(ctx, "codex", "exec",
+	path, err := judgeExecutable(ctx, "codex")
+	if err != nil {
+		return "", Usage{}, err
+	}
+	cmd := exec.CommandContext(ctx, path, "exec",
 		"--json", "--skip-git-repo-check", "--ephemeral",
 		"--ignore-user-config", "--ignore-rules",
 		"--sandbox", "read-only",
@@ -125,7 +134,8 @@ func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, er
 		"-c", `web_search="disabled"`,
 		"-c", "project_doc_max_bytes=0",
 		"-")
-	out, err := runCLI(cmd, j.Dir, j.Prompt+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input)
+	cmd.Args[0] = "codex"
+	out, err := runCLI(ctx, cmd, j.Dir, j.Prompt+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input)
 	if err != nil {
 		return "", Usage{}, err
 	}
@@ -167,9 +177,24 @@ func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, er
 }
 
 // runCLI запускает вызов с текстом на stdin; ошибка несёт хвост stderr
-func runCLI(cmd *exec.Cmd, dir, stdin string) ([]byte, error) {
+func judgeExecutable(ctx context.Context, name string) (string, error) {
+	if request, ok := hookctx.Request(ctx); ok {
+		path, err := request.LookPath(name)
+		if err != nil {
+			return "", fmt.Errorf("%s failed: %w: ", name, err)
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("hook request is missing")
+}
+
+func runCLI(ctx context.Context, cmd *exec.Cmd, dir, stdin string) ([]byte, error) {
 	cmd.Dir = dir
-	cmd.Env = judgeEnv()
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
+	cmd.Env = judgeEnv(request.Env)
 	// По таймауту контекст убивает сам CLI, а его потомки держат stdout:
 	// без WaitDelay хук ждал бы их и выходил за свой таймаут
 	cmd.WaitDelay = 2 * time.Second

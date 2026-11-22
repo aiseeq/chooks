@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // slowFloor — меньше этого хук не медленный ни при каком таймауте: самый
@@ -52,6 +54,7 @@ const timeoutSlack = time.Second
 type hookTimer struct {
 	mu       sync.Mutex
 	hook     string
+	stderr   io.Writer
 	start    time.Time
 	mark     time.Time
 	current  string
@@ -76,10 +79,18 @@ const durationsFile = "chooks-hooks.tsv"
 
 // newHookTimer начинает отсчёт со старта процесса: запуск бинаря под
 // свопом — тоже часть таймаута
-func newHookTimer(hook string) *hookTimer {
-	t := &hookTimer{hook: hook, now: time.Now, settingsPath: userSettingsPath}
+func newHookTimerForRequest(hook string, request hookctx.Context) *hookTimer {
+	t := &hookTimer{hook: hook, stderr: request.Stderr, now: time.Now, settingsPath: func() (string, error) {
+		if dir := request.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+			return filepath.Join(request.Abs(dir), "settings.json"), nil
+		}
+		if home := request.Getenv("HOME"); home != "" {
+			return filepath.Join(request.Abs(home), ".claude", "settings.json"), nil
+		}
+		return "", fmt.Errorf("cannot resolve home dir: $HOME is not defined")
+	}}
 	t.mark = t.now()
-	start, err := processStart()
+	start, err := processStartPID(request.PID)
 	if err != nil {
 		// Явный failover: без старта процесса отсчёт от main, сбой — в лог
 		// вместе со строкой о медленном запуске
@@ -188,13 +199,13 @@ func (t *hookTimer) terminationStatus(elapsed time.Duration) (string, error) {
 // watchTermination пишет в лог, на какой стадии хук оборван: Claude Code шлёт
 // SIGTERM по таймауту (проба 02.11, claude 2.1.316) и при отмене хода
 // (hook_cancelled в транскрипте, 04.11, claude 2.1.317) и выбрасывает вывод
-func (t *hookTimer) watchTermination() {
+func (t *hookTimer) watchTermination(exit func(int)) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM)
 	go func() {
 		<-signals
 		t.reportTermination()
-		os.Exit(killedExitCode)
+		exit(killedExitCode)
 	}()
 }
 
@@ -225,7 +236,9 @@ func (t *hookTimer) reportTermination() {
 	}
 	switch {
 	case logger == nil:
-		fmt.Fprintf(os.Stderr, "chooks: hook terminated by SIGTERM, %s: %s\n", status, strings.Join(args, " "))
+		if t.stderr != nil {
+			fmt.Fprintf(t.stderr, "chooks: hook terminated by SIGTERM, %s: %s\n", status, strings.Join(args, " "))
+		}
 	case status == statusCancelled:
 		logger.Info("hook cancelled by SIGTERM before timeout", toAny(args)...)
 	default:
@@ -295,18 +308,6 @@ func hookTimeout(settingsPath, subcommand string) (time.Duration, error) {
 	return shortest, nil
 }
 
-// userSettingsPath — settings.json Claude Code пользователя
-func userSettingsPath() (string, error) {
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		return filepath.Join(dir, "settings.json"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot resolve home dir: %w", err)
-	}
-	return filepath.Join(home, ".claude", "settings.json"), nil
-}
-
 func formatStage(name string, d time.Duration) string {
 	return name + "=" + strconv.FormatInt(d.Milliseconds(), 10)
 }
@@ -327,15 +328,15 @@ const clockTicks = 100
 // загрузки (/proc/uptime) минус starttime в тиках от загрузки. Оба в одних
 // часах с точностью 10 мс; btime из /proc/stat округлён до секунды и дал бы
 // ошибку до секунды
-func processStart() (time.Time, error) {
+func processStartPID(pid int) (time.Time, error) {
 	now := time.Now()
 	uptimeData, err := os.ReadFile("/proc/uptime")
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read /proc/uptime: %w", err)
 	}
-	stat, err := os.ReadFile("/proc/self/stat")
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return time.Time{}, fmt.Errorf("read /proc/self/stat: %w", err)
+		return time.Time{}, fmt.Errorf("read /proc/%d/stat: %w", pid, err)
 	}
 	uptime, err := parseUptime(string(uptimeData))
 	if err != nil {
@@ -370,13 +371,13 @@ func parseUptime(data string) (time.Duration, error) {
 func parseStartTicks(stat string) (int64, error) {
 	end := strings.LastIndexByte(stat, ')')
 	if end < 0 {
-		return 0, fmt.Errorf("unexpected /proc/self/stat: no command name")
+		return 0, fmt.Errorf("unexpected /proc/<pid>/stat: no command name")
 	}
 	// После «)» идут поля с 3-го: state — индекс 0, starttime (22) — индекс 19
 	fields := strings.Fields(stat[end+1:])
 	const startIndex = 22 - 3
 	if len(fields) <= startIndex {
-		return 0, fmt.Errorf("unexpected /proc/self/stat: %d fields after command", len(fields))
+		return 0, fmt.Errorf("unexpected /proc/<pid>/stat: %d fields after command", len(fields))
 	}
 	ticks, err := strconv.ParseInt(fields[startIndex], 10, 64)
 	if err != nil {

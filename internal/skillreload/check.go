@@ -33,6 +33,10 @@ type Result struct {
 // Checker проверяет файлы сессии на событии хука
 type Checker struct {
 	StateDir string
+	// Abs resolves a relative path of a tracked file (state of older versions)
+	// as the hook request does (hookctx.Context.Abs); nil keeps it as given,
+	// so the OS resolves it from the process cwd
+	Abs func(string) string
 	// ScanBudget — сколько времени дать чтению транскрипта за одно событие.
 	// Первое чтение сессии в сотни МБ растягивается на несколько событий.
 	// Ноль — без ограничения
@@ -106,7 +110,8 @@ func (c Checker) Check(event Event) (Result, error) {
 	if store == nil {
 		store = newDirStore(c.StateDir)
 	}
-	t := tracker{state: state, store: store, view: diskView}
+	view := func(kind, path string) (fileView, error) { return diskViewAt(kind, pathFor(c.Abs, path), path) }
+	t := tracker{state: state, store: store, view: view, resolvePath: c.Abs}
 	for _, ev := range scan.Events {
 		if ev.Kind == evSkillLoad || ev.Kind == evMemoryLoad {
 			result.NewLoads++

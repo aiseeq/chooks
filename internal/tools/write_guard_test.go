@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -24,7 +23,7 @@ func newWriteGuard(t *testing.T) *WriteGuardTool {
 
 func validateWrite(t *testing.T, command string) *core.ValidationResult {
 	t.Helper()
-	result, err := newWriteGuard(t).ValidateTool(context.Background(),
+	result, err := newWriteGuard(t).ValidateTool(rmTestContext(),
 		&core.ToolInput{ToolName: "Bash", Command: command, CWD: "/home/u/proj"})
 	if err != nil {
 		t.Fatalf("ValidateTool: %v", err)
@@ -189,7 +188,7 @@ func TestWriteGuardDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWriteGuardTool: %v", err)
 	}
-	result, err := tool.ValidateTool(context.Background(),
+	result, err := tool.ValidateTool(rmTestContext(),
 		&core.ToolInput{ToolName: "Bash", Command: "{ cat <<'EOF'\nrm -rf $NOPE/*\nEOF\n} > x"})
 	if err != nil || !result.IsValid {
 		t.Fatalf("disabled write_guard: %+v, %v", result, err)

@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/questioncheck"
 	"github.com/aiseeq/chooks/internal/understandcheck"
 )
@@ -52,12 +53,14 @@ func runUnderstandCheck(ctx context.Context, data []byte, config *core.Config, l
 		logger.Warn("understand check input unreadable, call let through", "error", err)
 		return
 	}
-	hook, err := newUnderstandHook(logger)
+	// transcript_path остаётся как его дал запрос: он пишется в журнал и в
+	// текст ошибки, а открывается от cwd запроса (ReadTurn)
+	hook, err := newUnderstandHook(ctx, logger)
 	if err != nil {
 		logger.Warn("understand check unavailable", "error", err)
 		return
 	}
-	outcome := hook.Run(ctx, understandCall(input, logger))
+	outcome := hook.Run(ctx, understandCall(ctx, input, logger))
 	writeUnderstandOutcome(outcome, input, logger, out)
 }
 
@@ -83,7 +86,7 @@ func writeUnderstandOutcome(outcome understandcheck.Outcome, input *core.ToolInp
 
 // understandCall — вызов из входа PreToolUse; имя сессии — по CLAUDE_PID,
 // только для журнала
-func understandCall(input *core.ToolInput, logger core.Logger) understandcheck.Call {
+func understandCall(ctx context.Context, input *core.ToolInput, logger core.Logger) understandcheck.Call {
 	call := understandcheck.Call{
 		SessionID:      input.SessionID,
 		TranscriptPath: input.TranscriptPath,
@@ -91,11 +94,19 @@ func understandCall(input *core.ToolInput, logger core.Logger) understandcheck.C
 		Tool:           input.ToolName,
 		Input:          input.ToolInput,
 	}
-	if pid := os.Getenv("CLAUDE_PID"); pid != "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			call.Name, err = questioncheck.SessionName(filepath.Join(home, ".claude"), pid)
+	request, hasRequest := hookctx.Request(ctx)
+	if !hasRequest {
+		return call
+	}
+	pid := request.Getenv("CLAUDE_PID")
+	if pid != "" {
+		home := request.Getenv("HOME")
+		if home == "" {
+			return call
 		}
+		home = request.Abs(home)
+		var err error
+		call.Name, err = questioncheck.SessionName(filepath.Join(home, ".claude"), pid)
 		if err != nil {
 			logger.Debug("understand check session name unknown", "pid", pid, "error", err)
 		}
@@ -104,12 +115,16 @@ func understandCall(input *core.ToolInput, logger core.Logger) understandcheck.C
 }
 
 // newUnderstandHook собирает проверку с путями по умолчанию
-func newUnderstandHook(logger core.Logger) (understandcheck.Hook, error) {
-	journal, denied, err := understandcheck.DefaultPaths()
+func newUnderstandHook(ctx context.Context, logger core.Logger) (understandcheck.Hook, error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return understandcheck.Hook{}, fmt.Errorf("hook request is missing")
+	}
+	journal, denied, err := understandcheck.DefaultPaths(request)
 	if err != nil {
 		return understandcheck.Hook{}, err
 	}
-	judge, err := newJudge(understandModel, understandEffort)
+	judge, err := newJudgeForRequest(understandModel, understandEffort, request)
 	if err != nil {
 		return understandcheck.Hook{}, err
 	}

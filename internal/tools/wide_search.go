@@ -64,20 +64,35 @@ func WideSearch(command, cwd, home string) (string, error) {
 // changeDir — cwd после cd или pushd c; путь с неизвестной подстановкой
 // оставляет прежний
 func changeDir(c *shellcmd.Call, cwd, home string) string {
+	dir, _ := changeDirKnown(c, cwd, home)
+	return dir
+}
+
+func changeDirKnown(c *shellcmd.Call, cwd, home string) (string, bool) {
 	if len(c.Args) == 0 {
 		if c.Name == "cd" {
-			return home
+			return home, home != ""
 		}
-		return cwd
+		return cwd, false
 	}
-	if len(c.Args) != 1 {
-		return cwd
+	i := 0
+	for i < len(c.Args) && (c.Args[i] == "-P" || c.Args[i] == "-L") {
+		i++
 	}
-	text, known := knownPath(c.Args[0], home)
+	if i < len(c.Args) && c.Args[i] == "--" {
+		i++
+	}
+	if i >= len(c.Args) {
+		return cwd, false
+	}
+	if i+1 != len(c.Args) || c.Args[i] == "-" {
+		return cwd, false
+	}
+	text, known := knownPath(c.Args[i], home)
 	if !known {
-		return cwd
+		return cwd, false
 	}
-	return resolvePath(text, c.ArgTilde(0), cwd, home)
+	return resolvePath(text, c.ArgTilde(i), cwd, home), true
 }
 
 type walkArg struct {

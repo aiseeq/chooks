@@ -64,6 +64,8 @@ tools:
   # Блокирует явный выбор модели, отсутствующей в ~/.config/models/approved
   model_guard:
     enabled: false
+    # Проверять модель у claude, запущенного агентом; по умолчанию включено
+    # runtime_launch_guard: false
     # имена из approved, которые запускает только пользователь: агенту
     # (Agent model, claude/cl --model, переменные модели, worker --model) — отказ
     # user_only: [fable]

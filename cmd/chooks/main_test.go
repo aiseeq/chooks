@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/textstyle"
 	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
@@ -70,7 +72,7 @@ func TestRunSessionEvent_StopDoesNotReadTranscript(t *testing.T) {
 		t.Fatal("Stop-хук ждёт транскрипт")
 	}
 
-	state, err := core.LoadSessionState("s1")
+	state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s1")
 	if err != nil || state != core.StateDone {
 		t.Errorf("состояние после остановки: %q, %v", state, err)
 	}
@@ -83,10 +85,10 @@ func TestRunSessionEvent_PauseThenDone(t *testing.T) {
 	shell := []map[string]any{{"id": "b1", "type": "shell", "status": "running", "description": "sleep 40", "command": "sleep 40"}}
 
 	runSessionEvent(core.EventStop, stopInput(t, "s2", "/nonexistent.jsonl", shell, []map[string]any{}), config, logger)
-	if state, err := core.LoadSessionState("s2"); err != nil || state != core.StatePaused {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s2"); err != nil || state != core.StatePaused {
 		t.Fatalf("при живой задаче ожидалась пауза: %q, %v", state, err)
 	}
-	if background, err := core.LoadBackground("s2"); err != nil || len(background.Tasks) != 1 || background.Tasks[0].Description != "sleep 40" {
+	if background, err := core.LoadBackgroundIn(core.RuntimeDir(), "s2"); err != nil || len(background.Tasks) != 1 || background.Tasks[0].Description != "sleep 40" {
 		t.Fatalf("строке статуса нужно описание задачи: %+v, %v", background, err)
 	}
 
@@ -95,12 +97,12 @@ func TestRunSessionEvent_PauseThenDone(t *testing.T) {
 		t.Fatal(err)
 	}
 	runSessionEvent(core.EventNotification, idle, config, logger)
-	if state, err := core.LoadSessionState("s2"); err != nil || state != core.StatePaused {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s2"); err != nil || state != core.StatePaused {
 		t.Fatalf("напоминание при паузе не меняет состояние: %q, %v", state, err)
 	}
 
 	runSessionEvent(core.EventStop, stopInput(t, "s2", "/nonexistent.jsonl", []map[string]any{}, []map[string]any{}), config, logger)
-	if state, err := core.LoadSessionState("s2"); err != nil || state != core.StateDone {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s2"); err != nil || state != core.StateDone {
 		t.Errorf("после последней задачи ожидалось «готово»: %q, %v", state, err)
 	}
 }
@@ -120,7 +122,7 @@ func TestRunSessionEvent_BrokenTaskBookkeepingKeepsPause(t *testing.T) {
 
 	shell := []map[string]any{{"id": "b1", "type": "shell", "status": "running"}}
 	runSessionEvent(core.EventStop, stopInput(t, "s3", "/nonexistent.jsonl", shell, []map[string]any{}), config, logger)
-	if state, err := core.LoadSessionState("s3"); err != nil || state != core.StatePaused {
+	if state, err := core.LoadSessionStateIn(core.RuntimeDir(), "s3"); err != nil || state != core.StatePaused {
 		t.Errorf("при сбое учёта ожидалась пауза: %q, %v", state, err)
 	}
 }
@@ -128,13 +130,15 @@ func TestRunSessionEvent_BrokenTaskBookkeepingKeepsPause(t *testing.T) {
 // runStyle запускает команду style и возвращает её вывод и exit-код
 func runStyle(t *testing.T, stdin string, args ...string) (string, int) {
 	t.Helper()
+	configPath := os.Getenv("CHOOKS_TEST_CONFIG")
 	if configPath == "" {
 		// Конфиг пользователя (его префиксы ключей) не влияет на тесты:
 		// файла нет — значения по умолчанию
-		useConfig(t, filepath.Join(t.TempDir(), "none.yaml"))
+		configPath = filepath.Join(t.TempDir(), "none.yaml")
 	}
 	exitCode := exitAllowed
 	cmd := newStyleCmd(&exitCode)
+	cmd.PersistentFlags().String("config", configPath, "test config")
 	var out strings.Builder
 	cmd.SetIn(strings.NewReader(stdin))
 	cmd.SetOut(&out)
@@ -277,9 +281,7 @@ func TestStyleCmdDocKeys(t *testing.T) {
 // useConfig — путь конфига, как у --config, до конца теста
 func useConfig(t *testing.T, path string) {
 	t.Helper()
-	saved := configPath
-	configPath = path
-	t.Cleanup(func() { configPath = saved })
+	t.Setenv("CHOOKS_TEST_CONFIG", path)
 }
 
 // styleConfig кладёт конфиг chooks с телом body и делает его конфигом теста
@@ -363,6 +365,7 @@ func TestStyleCmdBadConfig(t *testing.T) {
 	styleConfig(t, "style:\n  key_prefix: [PROJ]\n")
 	exitCode := exitAllowed
 	cmd := newStyleCmd(&exitCode)
+	cmd.PersistentFlags().String("config", os.Getenv("CHOOKS_TEST_CONFIG"), "test config")
 	cmd.SetIn(strings.NewReader("текст\n"))
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
@@ -377,5 +380,49 @@ func TestStyleCmdBadConfig(t *testing.T) {
 func TestStyleCmdDocKeysEmptyPrefix(t *testing.T) {
 	if out, code := runStyle(t, "диапазон 3 -5\n", "--doc", "--keys", "PROJ,", "-"); code != exitAllowed || out != "" {
 		t.Fatalf("пустой префикс: код %d, вывод %q", code, out)
+	}
+}
+
+// runtimeProc — дерево процессов для проверки модели claude: хук — процесс
+// запроса, его родитель — claude, запущенный агентом на haiku
+type runtimeProc struct{ hook int }
+
+func (p runtimeProc) Parent(pid int) (int, error) {
+	if pid == p.hook {
+		return 90, nil
+	}
+	return 1, nil
+}
+func (runtimeProc) Exe(int) (string, error)  { return "/opt/claude/claude", nil }
+func (runtimeProc) Comm(int) (string, error) { return "claude", nil }
+func (runtimeProc) Environ(int) ([]string, error) {
+	return []string{"CLAUDECODE=1"}, nil
+}
+func (runtimeProc) Cmdline(int) ([]string, error) {
+	return []string{"claude", "--model", "haiku"}, nil
+}
+func (runtimeProc) Cwd(int) (string, error) { return "/", nil }
+
+type panicJudge struct{}
+
+func (panicJudge) ValidateTool(context.Context, *core.ToolInput) (*core.ValidationResult, error) {
+	panic("judge broke")
+}
+func (panicJudge) CandidateModels(context.Context, *core.ToolInput) []string { panic("judge broke") }
+
+// Паника судьи модели не блокирует реплику: rc 0 и строка Error в логе
+func TestRunUserPromptSubmit_RuntimeGuardPanicPasses(t *testing.T) {
+	config, _ := silentConfig(t)
+	request := runtimeGuardRequest(t, t.TempDir())
+	logger, logPath := fileLogger(t)
+	ctx := context.WithValue(hookctx.WithRequest(context.Background(), request), runtimeGuardKey{}, runtimeGuardDeps{proc: runtimeProc{hook: request.PID}, judge: panicJudge{}})
+	data := []byte(`{"hook_event_name":"UserPromptSubmit","session_id":"panic-test","prompt":"x"}`)
+	code, err := runUserPromptSubmit(ctx, hookUserPromptSubmit, data, config, logger, newHookTimerForRequest(hookUserPromptSubmit, request))
+	if code != exitAllowed || err != nil {
+		t.Fatalf("runUserPromptSubmit = %d, %v; want %d, nil", code, err, exitAllowed)
+	}
+	log := readLog(t, logPath)
+	if !strings.Contains(log, "level=ERROR") || !strings.Contains(log, "паника в проверке модели claude") || !strings.Contains(log, "judge broke") {
+		t.Fatalf("log lacks panic error line:\n%s", log)
 	}
 }

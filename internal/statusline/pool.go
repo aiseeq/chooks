@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/chooks/internal/accounts"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // Темп расхода пула — сумма шагов доли всех учёток из журнала
@@ -158,8 +159,8 @@ func poolText(store *accounts.Store, f PoolForecast, unit accounts.Unit, now tim
 }
 
 // WritePoolJSON печатает прогноз пула JSON для страницы Сна
-func WritePoolJSON(w io.Writer) error {
-	paths, err := accounts.DefaultPaths()
+func WritePoolJSON(w io.Writer, request hookctx.Context) error {
+	paths, err := accounts.DefaultPaths(request)
 	if err != nil {
 		return err
 	}
@@ -167,7 +168,7 @@ func WritePoolJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	path, snapshot, _, err := readLimits()
+	path, snapshot, _, err := readLimits(request)
 	if err != nil {
 		return err
 	}

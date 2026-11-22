@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // gitGuardHint — что делать суб-агенту вместо запрещённой команды
@@ -39,13 +40,24 @@ type GitGuardTool struct {
 	tempRoots []string
 }
 
-// NewGitGuardTool создаёт запрет разрушительных git-команд суб-агентам
-func NewGitGuardTool(config core.ToolConfig, logger core.Logger) (*GitGuardTool, error) {
-	return &GitGuardTool{BaseTool: NewBaseTool("git_guard", config.Enabled, core.ShellTools, logger), tempRoots: tempRoots()}, nil
+// NewGitGuardToolForRequest uses the hook's temporary directories.
+func NewGitGuardToolForRequest(config core.ToolConfig, logger core.Logger, request hookctx.Context) (*GitGuardTool, error) {
+	tmp := request.Getenv("TMPDIR")
+	if tmp == "" {
+		tmp = "/tmp"
+	}
+	roots := []string{request.Abs(tmp), "/tmp"}
+	if dir := request.Getenv("CLAUDE_CODE_TMPDIR"); dir != "" {
+		roots = append(roots, request.Abs(dir))
+	}
+	return &GitGuardTool{BaseTool: NewBaseTool("git_guard", config.Enabled, core.ShellTools, logger), tempRoots: roots}, nil
 }
 
 // ValidateTool проверяет git-вызовы команды суб-агента
-func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+func (t *GitGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+	if _, ok := hookctx.Request(ctx); !ok {
+		return nil, fmt.Errorf("hook request is missing")
+	}
 	if !t.IsEnabled() || input == nil || input.AgentID == "" || !strings.Contains(input.Command, "git") {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
@@ -57,21 +69,21 @@ func (t *GitGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*
 		}
 		return &core.ValidationResult{IsValid: true}, nil
 	}
-	home, err := os.UserHomeDir()
+	home, homeErr := hookctx.UserHomeDir(ctx)
 	//nolint:fallback-return // home нужен только для ~: без него путь с ~ неизвестен, а неизвестный каталог — чужое дерево, то есть отказ (безопасная сторона)
-	if err != nil {
-		t.Logger().Warn("git_guard: домашний каталог неизвестен", "error", err)
+	if homeErr != nil {
+		t.Logger().Warn("git_guard: домашний каталог неизвестен", "error", homeErr)
 	}
-	gits, ctx := gitCalls(input, calls, home)
+	gitCallsByIndex, callContext := gitCalls(input, calls, home)
 	var reasons []string
 	for i := range calls {
 		c := &calls[i]
 		if c.Name != "git" {
 			continue
 		}
-		g := gits[i]
+		g := gitCallsByIndex[i]
 		why, shared := g.destructive()
-		if why == "" || t.ownTree(g, shared, ctx) {
+		if why == "" || t.ownTree(g, shared, callContext) {
 			continue
 		}
 		reasons = append(reasons, fmt.Sprintf("git %s — %s", g.sub, why))
@@ -506,18 +518,6 @@ func gitOperands(args []string) []string {
 		}
 	}
 	return out
-}
-
-// tempRoots — временные каталоги: репо в них — клон или проба суб-агента
-// (scratchpad Claude Code — в CLAUDE_CODE_TMPDIR), деревья мастеров там не
-// лежат. Сухой прогон 12.11: 112 из 122 отказов суб-агентам — их клоны в
-// scratchpad
-func tempRoots() []string {
-	roots := []string{os.TempDir(), "/tmp"}
-	if dir := os.Getenv("CLAUDE_CODE_TMPDIR"); dir != "" {
-		roots = append(roots, dir)
-	}
-	return roots
 }
 
 // inTemp — каталог во временном: репо там — клон или проба суб-агента

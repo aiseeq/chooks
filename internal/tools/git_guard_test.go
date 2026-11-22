@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
 // gitGuardTree — общее дерево мастера (.git — каталог) с файлом main.go и
@@ -185,7 +186,7 @@ func TestGitGuard(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			input := &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: shared, AgentID: "a1", AgentType: "fighter", TranscriptPath: transcript}
-			got, err := tool.ValidateTool(context.Background(), input)
+			got, err := tool.ValidateTool(gitGuardTestContext(t), input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -197,7 +198,7 @@ func TestGitGuard(t *testing.T) {
 			}
 			// Основная сессия делает их по «да» пользователя — без отказа
 			input.AgentID, input.AgentType = "", ""
-			if main, err := tool.ValidateTool(context.Background(), input); err != nil || !main.IsValid {
+			if main, err := tool.ValidateTool(gitGuardTestContext(t), input); err != nil || !main.IsValid {
 				t.Errorf("основной сессии отказ: %v %v", err, main)
 			}
 		})
@@ -280,7 +281,7 @@ func TestGitGuardAgentWorktree(t *testing.T) {
 	}
 	for _, tc := range cases {
 		input := &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: tc.dir, AgentID: "a1", TranscriptPath: tc.transcript}
-		got, err := tool.ValidateTool(context.Background(), input)
+		got, err := tool.ValidateTool(gitGuardTestContext(t), input)
 		if err != nil || got.IsValid != tc.valid {
 			t.Errorf("%s: %v valid=%v, нужно %v", tc.name, err, got.IsValid, tc.valid)
 		}
@@ -300,13 +301,13 @@ func TestGitGuardMasterInWorktree(t *testing.T) {
 	for _, start := range []string{own, filepath.Join(own, "cmd")} {
 		input := &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: own, AgentID: "a1",
 			TranscriptPath: filepath.Join("/p", encodeProject(start), "s.jsonl")}
-		if got, err := tool.ValidateTool(context.Background(), input); err != nil || got.IsValid {
+		if got, err := tool.ValidateTool(gitGuardTestContext(t), input); err != nil || got.IsValid {
 			t.Errorf("мастер в %s: git stash суб-агенту: %v %+v", start, err, got)
 		}
 	}
 	// Мастер в другом каталоге: worktree — суб-агента
 	input := &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: own, AgentID: "a1", TranscriptPath: agentTranscript(t, "a1", time.Now().Add(-time.Hour))}
-	if got, err := tool.ValidateTool(context.Background(), input); err != nil || !got.IsValid {
+	if got, err := tool.ValidateTool(gitGuardTestContext(t), input); err != nil || !got.IsValid {
 		t.Errorf("свой worktree: %v %+v", err, got)
 	}
 }
@@ -328,7 +329,7 @@ func TestGitGuardFork(t *testing.T) {
 	}
 	tool, _ := NewGitGuardTool(core.ToolConfig{Enabled: true}, logger)
 	tool.tempRoots = nil // дерево теста лежит во временном каталоге
-	got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: shared, AgentID: "f1", AgentType: "fork"})
+	got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: "git stash", CWD: shared, AgentID: "f1", AgentType: "fork"})
 	if err != nil || got.IsValid {
 		t.Errorf("форку git stash: %v %+v", err, got)
 	}
@@ -431,7 +432,7 @@ func TestGitGuardTildeDirectoryDecision(t *testing.T) {
 		{"escaped literal", `git -C \~/x reset --hard`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tool.ValidateTool(context.Background(), &core.ToolInput{
+			got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{
 				ToolName: "Bash", Command: tc.command, CWD: shared,
 				AgentID: "a1", AgentType: "fighter", TranscriptPath: transcript,
 			})
@@ -443,4 +444,13 @@ func TestGitGuardTildeDirectoryDecision(t *testing.T) {
 			}
 		})
 	}
+}
+
+func gitGuardTestContext(t *testing.T) context.Context {
+	t.Helper()
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hookctx.WithRequest(context.Background(), request)
 }

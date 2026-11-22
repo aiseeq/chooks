@@ -119,15 +119,15 @@ func recordModelUse(ctx context.Context, tool string, raw json.RawMessage, times
 		return fmt.Errorf("validate transcript call in %s: %w", path, err)
 	}
 	if validation != nil && !validation.IsValid {
-		recordRejectedModel(input, timestamp, path, project, validator, result)
+		recordRejectedModel(ctx, input, timestamp, path, project, validator, result)
 	} else if tool == "Bash" {
-		recordModelMentions(input.Command, timestamp, path, validator, result)
+		recordModelMentions(ctx, input.Command, timestamp, path, validator, result)
 	}
 	return nil
 }
 
-func recordRejectedModel(input *core.ToolInput, timestamp, path, project string, validator *ModelGuardTool, result *ModelScanResult) {
-	modelName := reportedModel(input, validator)
+func recordRejectedModel(ctx context.Context, input *core.ToolInput, timestamp, path, project string, validator *ModelGuardTool, result *ModelScanResult) {
+	modelName := reportedModel(ctx, input, validator)
 	bucket := result.ByModel[modelName]
 	if bucket == nil {
 		bucket = &modelScanBucket{projects: map[string]int{}}
@@ -141,8 +141,8 @@ func recordRejectedModel(input *core.ToolInput, timestamp, path, project string,
 	result.Rejected++
 }
 
-func recordModelMentions(command, timestamp, path string, validator *ModelGuardTool, result *ModelScanResult) {
-	for _, m := range unguardedModelMentions(command, validator.approvedPath()) {
+func recordModelMentions(ctx context.Context, command, timestamp, path string, validator *ModelGuardTool, result *ModelScanResult) {
+	for _, m := range unguardedModelMentions(command, validator.approvedPath(ctx)) {
 		result.Mentions++
 		if len(result.MentionExamples) < 5 {
 			result.MentionExamples = append(result.MentionExamples, modelScanExample{path, timestamp, firstCommand(command) + " [" + m + "]"})
@@ -150,13 +150,13 @@ func recordModelMentions(command, timestamp, path string, validator *ModelGuardT
 	}
 }
 
-func reportedModel(input *core.ToolInput, validator *ModelGuardTool) string {
-	candidates := modelCandidates(input, validator.Logger())
+func reportedModel(ctx context.Context, input *core.ToolInput, validator *ModelGuardTool) string {
+	candidates := modelCandidates(ctx, input, validator.Logger())
 	for _, c := range candidates {
 		if c.dynamic {
 			return "<переменная>"
 		}
-		if !isApproved(c.value, mustReadModels(validator.approvedPath())) {
+		if !isApproved(c.value, mustReadModels(validator.approvedPath(ctx))) {
 			return normalizeModel(c.value)
 		}
 	}

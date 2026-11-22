@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/nighthint"
 	"github.com/aiseeq/chooks/internal/skillreload"
 )
@@ -42,12 +43,17 @@ const skillStateWait = time.Second
 // nightHintDeps — живые время, признак блокировки, записи и признак вызова
 // скилла autonomous-work по записи skill-reload; deadline — срок хука для
 // чтения записи
-func nightHintDeps(config *core.Config, deadline time.Time) (nighthint.Deps, error) {
-	dir, err := nighthint.DefaultDir()
+func nightHintDepsForRequest(config *core.Config, deadline time.Time, request hookctx.Context) (nighthint.Deps, error) {
+	state, err := request.StateDir()
 	if err != nil {
 		return nighthint.Deps{}, err
 	}
-	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: dir}, SkillCalled: autonomousSkillCalled(config, deadline)}, nil
+	skillDir, err := skillreload.StateDir(request)
+	if err != nil {
+		return nighthint.Deps{}, err
+	}
+	skillCalled := autonomousSkillCalledIn(config, deadline, func() (string, error) { return skillDir, nil })
+	return nighthint.Deps{Now: time.Now, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: filepath.Join(state, "night-hint")}, SkillCalled: skillCalled}, nil
 }
 
 // autonomousSkillCalled — признак вызова скилла autonomous-work в сессии по
@@ -63,7 +69,7 @@ func nightHintDeps(config *core.Config, deadline time.Time) (nighthint.Deps, err
 // lockWait) и logind (lockTimeout), и без срока сумма выходила за таймаут хука
 // 3 с из settings.json (тикет night-hint-night-work-budget). Срок наступил —
 // запись не читается, подсказка идёт по правилу «раз за ночь», причина — в лог
-func autonomousSkillCalled(config *core.Config, deadline time.Time) func(sessionID string) (bool, error) {
+func autonomousSkillCalledIn(config *core.Config, deadline time.Time, stateDir func() (string, error)) func(sessionID string) (bool, error) {
 	return func(sessionID string) (bool, error) {
 		if tool, exists := config.Tools[skillReloadTool]; exists && !tool.Enabled {
 			return false, fmt.Errorf("%s disabled in config: %w", skillReloadTool, nighthint.ErrSkillUnknown)
@@ -72,7 +78,7 @@ func autonomousSkillCalled(config *core.Config, deadline time.Time) func(session
 		if !now.Before(deadline) {
 			return false, fmt.Errorf("skill-reload record not read, hook deadline %s passed: %w", deadline.Format("15:04:05.000"), skillreload.ErrNoTime)
 		}
-		dir, err := skillreload.DefaultStateDir()
+		dir, err := stateDir()
 		if err != nil {
 			return false, err
 		}
@@ -119,7 +125,7 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 			if probe {
 				return probeNightHint(cmd.Context(), cmd.OutOrStdout())
 			}
-			code, err := runHook(cmd.Context(), hookNightHint)
+			code, err := runHook(hookCommandContext(cmd), hookNightHint)
 			*exitCode = code
 			return err
 		},
@@ -162,7 +168,12 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 	}
 	// Неинтерактивную сессию (судья, партия claude -p) человек не ждёт:
 	// спросить в ней некого, подсказка только сбила бы задачу
-	printMode, err := core.PrintModeSession()
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		logger.Error("hook request is missing", "hook", hookNightHint)
+		return
+	}
+	printMode, err := core.PrintModeSessionForPID(request.Getenv("CLAUDE_PID"))
 	if err != nil {
 		logger.Warn("session mode unknown, assuming interactive", "hook", hookNightHint, "error", err)
 	}
@@ -224,11 +235,11 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 }
 
 // defaultNightHint — обработчик для runHook: живые зависимости
-func defaultNightHint(ctx context.Context, data []byte, config *core.Config, logger core.Logger, deadline time.Time) {
-	deps, err := nightHintDeps(config, deadline)
+func defaultNightHint(ctx context.Context, data []byte, config *core.Config, logger core.Logger, deadline time.Time, request hookctx.Context) {
+	deps, err := nightHintDepsForRequest(config, deadline, request)
 	if err != nil {
 		logger.Warn("night hint state dir unavailable", "error", err)
 		return
 	}
-	runNightHint(ctx, data, config, logger, os.Stdout, deps)
+	runNightHint(ctx, data, config, logger, request.Stdout, deps)
 }

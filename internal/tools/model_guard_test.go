@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -90,7 +89,7 @@ func TestModelGuard(t *testing.T) {
 		{"запасной поиск", "Bash", "", `claude --model sonnet -p "hi`, true},
 		{"запасной поиск, переменная", "Bash", "", `ANTHROPIC_MODEL=sonnet claude -p "hi`, true},
 		{"agents inherit", "Bash", "", `claude -p hi --agents '{"r":{"description":"d","prompt":"p","model":"inherit"}}'`, false},
-		{"agents не JSON", "Bash", "", `claude -p hi --agents agents.json`, false},
+		{"agents file path unreadable", "Bash", "", `claude -p hi --agents agents.json`, true},
 		{"settings=", "Bash", "", `claude -p hi --settings='{"model":"sonnet"}'`, true},
 		{"fallback-model=", "Bash", "", "claude -p hi --fallback-model=sonnet", true},
 		{"agents=", "Bash", "", `claude -p hi --agents='{"r":{"description":"d","prompt":"p","model":"haiku"}}'`, true},
@@ -192,7 +191,7 @@ func TestModelGuard(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			input := &core.ToolInput{ToolName: tc.tool, Command: tc.command, ToolInput: []byte(tc.raw)}
-			got, err := tool.ValidateTool(context.Background(), input)
+			got, err := tool.ValidateTool(gitGuardTestContext(t), input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -223,7 +222,7 @@ func TestModelGuardEnvReasons(t *testing.T) {
 		{"sudo bash <<'EOF'\nANTHROPIC_MODEL=sonnet claude -p hi\nEOF", `модель "sonnet" не одобрена`, 1},
 		{"env ANTHROPIC_MODEL=sonnet claude -p hi; env ANTHROPIC_MODEL=sonnet claude -p hi", `модель "sonnet" не одобрена`, 2},
 	} {
-		got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: tc.command})
+		got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -237,7 +236,7 @@ func TestModelGuardApprovedListErrors(t *testing.T) {
 	for _, tc := range []struct{ name, contents, want string }{{"missing", "\x00", "не найден"}, {"empty", "# models\n", "пуст"}, {"bad line", "opus claude-opus-5-5 extra\n", "строка 1"}, {"id на слэш", "x waibee/\n", "строка 1: id без имени модели"}, {"id только вариант", "x [1m]\n", "строка 1: id без имени модели"}, {"id на слэш с вариантом", "x waibee/[1m]\n", "строка 1: id без имени модели"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			tool := modelGuardForTest(t, tc.contents)
-			got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: "claude --model sonnet"})
+			got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: "claude --model sonnet"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -270,7 +269,7 @@ func TestModelGuardScan(t *testing.T) {
 	}
 	logger, _ := core.NewLogger(core.DefaultLoggerConfig())
 	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true}, logger)
-	result, err := ScanModelTranscripts(context.Background(), filepath.Join(dir, "projects"), 7, tool)
+	result, err := ScanModelTranscripts(gitGuardTestContext(t), filepath.Join(dir, "projects"), 7, tool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,11 +367,11 @@ func TestModelGuardSettingsFile(t *testing.T) {
 	}
 	for command, reject := range map[string]bool{
 		"claude -p hi --settings " + settings:              true,
-		"claude -p hi --settings " + dir + "/missing.json": false,
+		"claude -p hi --settings " + dir + "/missing.json": true,
 		// FIFO не читается: чтение повесило бы хук (ревью 12.11)
-		"claude -p hi --settings " + fifo: false,
+		"claude -p hi --settings " + fifo: true,
 	} {
-		got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: command})
+		got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -410,7 +409,7 @@ func TestModelGuardSettingsTildeForms(t *testing.T) {
 		{"неизвестный пользователь", "claude --settings ~root/x", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tool.ValidateTool(context.Background(), &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: cwd})
+			got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: cwd})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -447,7 +446,7 @@ func TestModelGuardUserOnly(t *testing.T) {
 		{"Agent id fable", "Agent", `{"model":"claude-fable-5-2"}`, "", true},
 		{"Agent fable [1m]", "Agent", `{"model":"claude-fable-5-2[1m]"}`, "", true},
 		{"Agent opus", "Agent", `{"model":"opus"}`, "", false},
-		{"Agent без модели", "Agent", `{"subagent_type":"fighter"}`, "", false},
+		{"Agent без модели", "Agent", `{"subagent_type":"general-purpose"}`, "", false},
 		{"claude -p fable", "Bash", "", "claude -p --model fable hi", true},
 		{"cl id fable", "Bash", "", "cl --model claude-fable-5-2", true},
 		{"cl --model=fable", "Bash", "", "cl --model=fable", true},
@@ -468,11 +467,17 @@ func TestModelGuardUserOnly(t *testing.T) {
 		{"SMALL_FAST fable", "Bash", "", "ANTHROPIC_SMALL_FAST_MODEL=fable claude -p hi", true},
 		{"HAIKU в settings env", "Bash", "", `claude -p --settings '{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}' hi`, true},
 		{"HAIKU своя модель", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5 claude -p hi", false},
-		{"HAIKU из переменной", "Bash", "", `ANTHROPIC_SMALL_FAST_MODEL="$H" claude -p hi`, false},
+		{"HAIKU из переменной", "Bash", "", `ANTHROPIC_SMALL_FAST_MODEL="$H" claude -p hi`, true},
 		{"присваивание, потом export", "Bash", "", "ANTHROPIC_MODEL=fable; export ANTHROPIC_MODEL; claude -p hi", true},
 		{"присваивание opus, потом export", "Bash", "", "ANTHROPIC_MODEL=opus; export ANTHROPIC_MODEL; claude -p hi", false},
 		{"классификатор fable", "Bash", "", "CLAUDE_CODE_AUTO_MODE_MODEL=fable claude -p hi", true},
 		{"фоновый классификатор fable", "Bash", "", "CLAUDE_CODE_BG_CLASSIFIER_MODEL=claude-fable-5-2 claude -p hi", true},
+		{"значение модели из предыдущего присваивания", "Bash", "", "F=fable; ANTHROPIC_SMALL_FAST_MODEL=$F claude -p hi", true},
+		{"значение классификатора из предыдущего присваивания", "Bash", "", "F=fable; export CLAUDE_CODE_BG_CLASSIFIER_MODEL=$F; claude -p hi", true},
+		{"codex -m=fable", "Bash", "", "codex exec -m=fable hi", true},
+		{"codex --config=model=fable", "Bash", "", "codex exec --config=model=fable hi", true},
+		{"codex разрешённая -m", "Bash", "", "codex exec -m=luna hi", false},
+		{"codex разрешённая config", "Bash", "", "codex exec --config=model=luna hi", false},
 		{"HAIKU в пишущемся settings", "Bash", "", `echo '{"env":{"ANTHROPIC_DEFAULT_HAIKU_MODEL":"claude-haiku-5-5"}}' > /tmp/mg-absent-h.json; claude --settings /tmp/mg-absent-h.json -p hi`, false},
 		{"fable в пишущемся settings env", "Bash", "", `echo '{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}' > /tmp/mg-absent-f.json; claude --settings /tmp/mg-absent-f.json -p hi`, true},
 		{"--fallback-model у codex", "Bash", "", "codex exec --fallback-model fable hi", false},
@@ -484,12 +489,18 @@ func TestModelGuardUserOnly(t *testing.T) {
 			if c.tool == "Agent" {
 				input.Command = ""
 			}
-			result, err := tool.ValidateTool(context.Background(), input)
+			result, err := tool.ValidateTool(gitGuardTestContext(t), input)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if result.IsValid == c.reject {
 				t.Fatalf("reject=%v, want %v: %+v", !result.IsValid, c.reject, result.Violations)
+			}
+			if c.reject && (strings.Contains(c.name, "нет такого") || strings.Contains(c.name, "неизвестный") || strings.Contains(c.name, "missing-agent")) && !strings.Contains(result.Violations[0].Message, "определение агента") {
+				t.Fatalf("причина неизвестного агента: %+v", result.Violations)
+			}
+			if c.reject && (strings.Contains(c.name, "cd к проекту") || strings.Contains(c.name, "add-dir") || strings.Contains(c.name, "settings")) && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+				t.Fatalf("модель агента/settings не распознана: %+v", result.Violations)
 			}
 			if c.reject && c.name == "Agent fable" && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
 				t.Fatalf("причина: %s", result.Violations[0].Message)
@@ -501,43 +512,298 @@ func TestModelGuardUserOnly(t *testing.T) {
 // TestModelGuardAgentDefinition — модель «только пользователь» в
 // определении агента: Agent без model и claude --agent берут её оттуда
 // (приёмка 20.11, тикет model-guard-user-only-agent-files)
+func TestModelGuardSettingsAgentReference(t *testing.T) {
+	called := ""
+	candidates := settingsCandidates([]byte(`{"agent":"fx"}`), func(name string) []modelCandidate {
+		called = name
+		return []modelCandidate{{value: "fable", userOnlyCheck: true}}
+	})
+	if called != "fx" || len(candidates) != 1 || candidates[0].value != "fable" || !candidates[0].userOnlyCheck {
+		t.Fatalf("settings agent resolution: name=%q candidates=%+v", called, candidates)
+	}
+}
+
+func TestModelGuardUserOnlyModelRemainsRestrictedWhenRemovedFromApprovedList(t *testing.T) {
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	for _, candidate := range []string{"fable", "FABLE", "claude-fable-5-2", "Claude-Fable-5-2[1m]", "anthropic/claude-fable-5-2"} {
+		if name, ok := tool.userOnlyModel(candidate, []approvedModel{{name: "opus", id: "claude-opus-5-5"}}); !ok || name != "fable" {
+			t.Errorf("user-only model %q was not matched: name=%q ok=%v", candidate, name, ok)
+		}
+	}
+}
+
+func TestModelGuardRoundTwo(t *testing.T) {
+	home, root, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	approved := filepath.Join(t.TempDir(), "approved")
+	if err := os.WriteFile(approved, []byte("opus claude-opus-5-5\nfable claude-fable-5-2\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MODELS_APPROVED", approved)
+	oldManaged := managedSettingsPath
+	managedSettingsPath = filepath.Join(t.TempDir(), "managed-settings.json")
+	t.Cleanup(func() { managedSettingsPath = oldManaged })
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	write := func(path, contents string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project := filepath.Join(root, "repo")
+	write(filepath.Join(project, ".git", "HEAD"), "ref: refs/heads/test\n")
+	sub := filepath.Join(project, "sub")
+	write(filepath.Join(sub, "keep"), "")
+	write(filepath.Join(project, ".claude/settings.json"), `{"model":"opus","env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}`)
+	plain := filepath.Join(t.TempDir(), "plain")
+	write(filepath.Join(plain, ".claude/settings.json"), `{"model":"fable"}`)
+	normalized := t.TempDir()
+	write(filepath.Join(normalized, ".claude/settings.json"), `{"model":"opus"}`)
+	write(filepath.Join(normalized, "opusenv/.claude/settings.json"), `{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}`)
+	unnormalizedCWD := normalized + string(filepath.Separator) + "opusenv" + string(filepath.Separator) + ".."
+	for _, path := range projectSettingsPaths(unnormalizedCWD) {
+		if path == filepath.Join(normalized, "opusenv", ".claude", "settings.json") {
+			t.Fatal("settings from a child of normalized cwd were included")
+		}
+	}
+	homeFable := filepath.Join(t.TempDir(), "fakehome")
+	write(filepath.Join(homeFable, ".claude/settings.json"), `{"model":"fable"}`)
+	plugOpus, plugFable := filepath.Join(t.TempDir(), "plug-opus"), filepath.Join(t.TempDir(), "plug-fable")
+	write(filepath.Join(plugOpus, "agents/rev.md"), "---\nname: rev\nmodel: opus\n---\n")
+	write(filepath.Join(plugFable, "agents/rev.md"), "---\nname: rev\nmodel: fable\n---\n")
+	agentProject := t.TempDir()
+	write(filepath.Join(agentProject, ".claude/agents/rev.md"), "---\nname: rev\nmodel: fable\n---\n")
+	write(filepath.Join(agentProject, ".claude/agents/other.md"), "---\nname: other\nmodel: opus\n---\n")
+	agentFile := filepath.Join(t.TempDir(), "agents.json")
+	write(agentFile, `{"rev":{"description":"review","prompt":"inspect","model":"fable"}}`)
+	agentNoModelFile := filepath.Join(t.TempDir(), "agents-no-model.json")
+	write(agentNoModelFile, `{"zz":{"description":"d","prompt":"p"}}`)
+	cases := []struct {
+		name, tool, cwd, command, raw string
+		reject                        bool
+	}{
+		{"for variable assignment", "Bash", outside, `M=opus; for M in fable; do claude --model "$M" -p hi; done`, "", true},
+		{"command substitution reassignment", "Bash", outside, `M=opus; M=$(echo fable); claude --model "$M" -p hi`, "", true},
+		{"prefix reassignment", "Bash", outside, `export M=fable; M=opus claude --model "$M" -p hi`, "", true},
+		{"read reassignment", "Bash", outside, `M=opus; read M <<< fable; claude --model $M -p hi`, "", true},
+		{"printf reassignment", "Bash", outside, `M=opus; printf -v M fable; claude --model $M -p hi`, "", true},
+		{"subshell assignment", "Bash", outside, `(M=fable; claude --model $M -p hi)`, "", true},
+		{"fast model reassignment", "Bash", outside, `F=opus; F=$(echo fable); ANTHROPIC_SMALL_FAST_MODEL=$F claude`, "", true},
+		{"single prior assignment remains dynamic", "Bash", outside, `M=opus; claude --model $M -p hi`, "", true},
+		{"cd -P", "Bash", outside, "cd -P " + plain + " && claude", "", true},
+		{"cd dash separator", "Bash", outside, "cd -- " + plain + " && claude", "", true},
+		{"env -C", "Bash", outside, "env -C " + plain + " claude", "", true},
+		{"env chdir equals", "Bash", outside, "env --chdir=" + plain + " claude", "", true},
+		{"dynamic cwd does not refuse", "Bash", outside, "cd $D && claude --model opus", "", false},
+		{"HOME settings", "Bash", outside, "HOME=" + homeFable + " claude", "", true},
+		{"repo settings env ignores model override", "Bash", sub, "claude --model opus", "", true},
+		{"explicit model does not override project settings model", "Bash", outside, "cd " + plain + " && claude --model opus", "", true},
+		{"explicit model does not override settings after boolean flag", "Bash", outside, `claude --settings '{"model":"fable"}' -p --model opus`, "", true},
+		{"explicit model does not override settings after verbose", "Bash", outside, `claude --settings '{"model":"fable"}' --verbose --model opus`, "", true},
+		{"unknown flag value does not expose model flag", "Bash", outside, `claude --settings '{"model":"fable"}' --future-option --model opus`, "", true},
+		{"dynamic variable before model keeps settings active", "Bash", outside, "X=--name; claude -p $X --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"env wrapper preserves dynamic prefix before model", "Bash", outside, "env -- claude -p $X --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"command substitution before model keeps settings active", "Bash", outside, "claude -p $(echo --name) --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"backticks before model keep settings active", "Bash", outside, "claude -p `echo --name` --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"argv expansion before model keeps settings active", "Bash", outside, "claude -p \"$@\" --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"brace expansion before model keeps settings active", "Bash", outside, "claude -p {--name,} --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"glob before model keeps settings active", "Bash", outside, "claude -p [-]-name --model opus --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"quoted prompt does not override settings", "Bash", outside, `claude -p '@(--name)' --model opus --settings '{"model":"fable"}'`, "", true},
+		{"extglob at sign before model keeps settings active", "Bash", outside, `claude -p @(--name) --model opus --settings '{"model":"fable"}' hi`, "", true},
+		{"extglob exclamation before model keeps settings active", "Bash", outside, `claude -p !(zz) --model opus --settings '{"model":"fable"}' hi`, "", true},
+		{"extglob plus before model keeps settings active", "Bash", outside, `claude -p +(--name) --model opus --settings '{"model":"haiku"}' hi`, "", true},
+		{"extglob after touch before model keeps settings active", "Bash", outside, "touch -- --name; claude -p @(--name) --model opus --settings " + filepath.Join(plain, ".claude/settings.json") + " hi", "", true},
+		{"claude function keeps settings active", "Bash", outside, `claude() { command claude -n "$@"; }; claude --model opus --settings '{"model":"fable"}' -p hi`, "", true},
+		{"function keyword keeps settings active", "Bash", outside, `function claude { command claude --name "$@"; }; claude --model opus --settings '{"model":"fable"}' -p hi`, "", true},
+		{"cl function keeps settings active", "Bash", outside, `cl() { claude -n "$@"; }; cl --model opus --settings '{"model":"fable"}' -p hi`, "", true},
+		{"claude alias keeps settings active", "Bash", outside, "alias claude='claude -n'\nclaude --model opus --settings '{\"model\":\"fable\"}' -p hi", "", true},
+		{"explicit model does not override settings before dynamic prompt", "Bash", outside, "claude --model opus -p \"$(cat prompt)\" --settings " + filepath.Join(plain, ".claude/settings.json"), "", true},
+		{"fable explicit model remains denied", "Bash", outside, `claude --settings '{"model":"opus"}' --model fable -p hi`, "", true},
+		{"project settings remain active after prompt separator", "Bash", plain, "claude -p -- --model", "", true},
+		{"inline settings remain active after prompt separator", "Bash", outside, `claude --settings '{"model":"fable"}' -p -- --model`, "", true},
+		{"inline settings remain active beside model-like prompt text", "Bash", outside, `claude --settings '{"model":"fable"}' -p hi --append-system-prompt --model=opus`, "", true},
+		{"settings file remains active beside model-like prompt text", "Bash", outside, "claude --settings " + filepath.Join(plain, ".claude/settings.json") + " -p hi --append-system-prompt --model=opus", "", true},
+		{"cwd parent path excludes child settings", "Bash", unnormalizedCWD, "claude", "", false},
+		{"write settings", "Bash", outside, `echo '{"model":"fable"}' > ` + filepath.Join(outside, "settings.json") + "; claude", "", true},
+		{"write agent definition", "Bash", outside, "printf -- '---\\nname: x\\nmodel: fable\\n---\\n' > " + filepath.Join(outside, "agents/x.md") + "; claude --agent x", "", true},
+		{"copy unknown settings", "Bash", outside, "cp /not/readable/source " + filepath.Join(outside, "settings.json") + "; claude", "", true},
+		{"worker -model", "Bash", outside, "worker run -model fable --brief b --dir d --class c", "", true},
+		{"worker equals model", "Bash", outside, "worker ask -model=fable --class c --msg hi", "", true},
+		{"opencode equals model", "Bash", outside, "opencode -m=fable run hi", "", true},
+		{"npx Claude", "Bash", outside, "npx @anthropic-ai/claude-code --model fable -p hi", "", true},
+		{"which Claude substitution", "Bash", outside, "$(which claude) --model fable -p hi", "", true},
+		{"echo data", "Bash", outside, "echo fable", "", false},
+		{"grep data", "Bash", outside, "grep -r fable docs", "", false},
+		{"inline agents opus", "Bash", outside, `claude --agents '{"rev":{"model":"opus"}}' --agent rev -p hi`, "", false},
+		{"inline agents fable", "Bash", outside, `claude --agents '{"rev":{"model":"fable"}}' --agent rev -p hi`, "", true},
+		{"inline agents unapproved model", "Bash", outside, `claude --agents '{"rev":{"model":"haiku"}}' --agent rev -p hi`, "", true},
+		{"inline agent without model inherits session", "Bash", outside, `claude -p --agents '{"zz":{"description":"d","prompt":"p"}}' --agent zz hi`, "", false},
+		{"inline opus cannot mask project agent fable", "Bash", agentProject, `claude --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
+		{"inline fable is accumulated with file agent", "Bash", agentProject, `claude --agents '{"other":{"description":"review","prompt":"inspect","model":"fable"}}' --agent other -p hi`, "", true},
+		{"invalid inline agents cannot hide project agent", "Bash", agentProject, `claude --agents '{"rev":{"description":"","prompt":"inspect","effort":"impossible","model":"opus"}}' --agent rev -p hi`, "", true},
+		{"first repeated agents definition is retained", "Bash", agentProject, `claude --agents '{"rev":{"description":"review","prompt":"inspect","model":"fable"}}' --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
+		{"safe mode does not hide project agent", "Bash", agentProject, `claude --safe-mode --agents '{"rev":{"description":"review","prompt":"inspect","model":"opus"}}' --agent rev -p hi`, "", true},
+		{"agents file fable model", "Bash", outside, "claude --agents " + agentFile + " -p hi", "", true},
+		{"agents file without model inherits session", "Bash", outside, "claude --agents " + agentNoModelFile + " --agent zz -p hi", "", false},
+		{"unreadable agents file is refused", "Bash", outside, "claude --agents " + filepath.Join(t.TempDir(), "missing-agents.json") + " -p hi", "", true},
+		{"dynamic agents file is refused", "Bash", outside, `claude --agents "$AGENTS_FILE" -p hi`, "", true},
+		{"plugin-dir opus", "Bash", outside, "claude --plugin-dir " + plugOpus + " --agent myplug:rev -p hi", "", false},
+		{"plugin-dir fable", "Bash", outside, "claude --plugin-dir " + plugFable + " --agent myplug:rev -p hi", "", true},
+		{"unknown Agent plugin allowed", "Agent", outside, "", `{"subagent_type":"frontend-design:frontend-design"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: tc.tool, CWD: tc.cwd, Command: tc.command, ToolInput: []byte(tc.raw)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid == tc.reject {
+				t.Fatalf("reject=%v want=%v violations=%+v", !result.IsValid, tc.reject, result.Violations)
+			}
+			if tc.reject && (strings.Contains(tc.name, "unreadable agents file") || strings.Contains(tc.name, "dynamic agents file")) && !strings.Contains(result.Violations[0].Message, "файл --agents не прочитать") {
+				t.Fatalf("missing unreadable agents-file reason: %+v", result.Violations)
+			}
+		})
+	}
+}
+
+func TestModelGuardRoundThree(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	approved := filepath.Join(t.TempDir(), "approved")
+	if err := os.WriteFile(approved, []byte("opus claude-opus-5-5\nfable claude-fable-5-2\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MODELS_APPROVED", approved)
+	oldManaged := managedSettingsPath
+	managedSettingsPath = filepath.Join(t.TempDir(), "managed-settings.json")
+	t.Cleanup(func() { managedSettingsPath = oldManaged })
+	logger, err := core.NewLogger(core.DefaultLoggerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	write := func(path, contents string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(cwd, ".claude/settings.json"), `{"model":"opus"}`)
+	write(filepath.Join(cwd, "proj/.claude/settings.json"), `{"model":"opus"}`)
+	dynamicProject := t.TempDir()
+	write(filepath.Join(dynamicProject, ".claude/settings.json"), `{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}`)
+	cases := []struct {
+		name, tool, command string
+		reject              bool
+	}{
+		{"parameter substitution", "Bash", `M=opus; claude --model ${M/opus/fable} -p hi`, true},
+		{"parameter default operator", "Bash", `M=opus; claude --model ${M:+fable} -p hi`, true},
+		{"empty substring in model", "Bash", `M=opus; claude --model fa${M:0:0}ble -p hi`, true},
+		{"empty substring at end", "Bash", `M=opus; claude --model fable${M:0:0} -p hi`, true},
+		{"quoted replacement operator", "Bash", `M=opus; claude --model "${M//opus/fable}" -p hi`, true},
+		{"suffix operator", "Bash", `M=opus; claude --model ${M%us}fable -p hi`, true},
+		{"env substitution operator", "Bash", `M=opus; ANTHROPIC_MODEL=${M/opus/fable} claude -p hi`, true},
+		{"worker substitution operator", "Bash", `M=opus; worker run --model ${M/opus/fable} --brief b --dir /x --class c`, true},
+		{"monitor substitution operator", "Monitor", `M=opus; claude --model ${M/opus/fable} -p hi`, true},
+		{"fast model with suffix", "Bash", `F=fa; ANTHROPIC_SMALL_FAST_MODEL=${F}ble claude -p hi`, true},
+		{"fast model with two variables", "Bash", `A=fa; B=ble; ANTHROPIC_SMALL_FAST_MODEL=$A$B claude -p hi`, true},
+		{"fast model with replacement operator", "Bash", `F=opus; ANTHROPIC_SMALL_FAST_MODEL=${F/opus/fable} claude -p hi`, true},
+		{"full variable reference remains dynamic", "Bash", `M=opus; claude --model "${M}" -p hi`, true},
+		{"cd literal assignment", "Bash", "D=" + cwd + `; cd $D && claude -p --model opus hi`, false},
+		{"cd quoted assignment", "Bash", "P=" + cwd + `; cd "$P" && claude -p --model opus hi`, false},
+		{"cd variable prefix", "Bash", "P=" + cwd + `; cd $P/proj && claude -p --model opus hi`, false},
+		{"dynamic cd keeps session project settings candidate", "Bash", "P=" + dynamicProject + `; cd $P && claude -p --model opus hi`, false},
+		{"mktemp empty cwd", "Bash", `bash -c 'd=$(mktemp -d); cd $d && claude -p --model opus hi'`, false},
+		{"prompt mentions settings redirection elsewhere", "Bash", `claude -p "проверь .claude/settings.json" > /tmp/out.txt`, false},
+		{"settings source with output redirection", "Bash", `claude --settings ` + filepath.Join(cwd, ".claude/settings.json") + ` -p hi > /tmp/out.txt`, false},
+		{"read settings source", "Bash", `jq .model ~/.claude/settings.json; claude --version`, false},
+		{"copy settings to backup", "Bash", `cp ~/.claude/settings.json /tmp/bak.json && claude -p hi`, false},
+		{"prompt mentions install and settings", "Bash", `claude -p "install deps, see settings.json"`, false},
+		{"prompt mentions agent with tee elsewhere", "Bash", `claude -p "посмотри ~/.claude/agents/fighter.md" 2>&1 | tee /tmp/log`, false},
+		{"unknown copy into settings target", "Bash", `cp /not/readable/source ` + filepath.Join(cwd, ".claude/settings.local.json") + ` && claude -p hi`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: tc.tool, CWD: cwd, Command: tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid == tc.reject {
+				t.Fatalf("reject=%v want=%v violations=%+v", !result.IsValid, tc.reject, result.Violations)
+			}
+		})
+	}
+	t.Run("dynamic cd includes session project settings", func(t *testing.T) {
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", CWD: dynamicProject, Command: `cd $P && claude -p --model opus hi`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.IsValid {
+			t.Fatalf("session project settings were not checked: %+v", result.Violations)
+		}
+	})
+}
+
 func TestModelGuardAgentDefinition(t *testing.T) {
 	home, project := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
 	approvedPath := filepath.Join(home, "approved")
 	files := map[string]string{
 		approvedPath: "opus claude-opus-5-5\nfable claude-fable-5-2\n",
-		filepath.Join(home, ".claude/agents/fx.md"):                                "---\nname: fx\nmodel: fable\n---\nтело\n",
-		filepath.Join(home, ".claude/agents/sub/fy.md"):                            "---\nname: other-name\nmodel: \"claude-fable-5-2\"\n---\n",
-		filepath.Join(home, ".claude/agents/ok.md"):                                "---\nname: ok\nmodel: opus\n---\nmodel: fable\n",
-		filepath.Join(home, ".claude/agents/hk.md"):                                "---\r\nname: hk\r\nmodel: haiku\r\n---\r\n",
-		filepath.Join(home, ".claude/agents/in.md"):                                "---\nname: in\nmodel: inherit\n---\n",
-		filepath.Join(home, ".claude/agents/nofm.md"):                              "model: fable\n",
-		filepath.Join(project, ".claude/agents/px.md"):                             "---\nname: px\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/byfile.md"):                            "---\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/notes.txt"):                            "---\nname: txt\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/unclosed.md"):                          "---\nname: unclosed\nmodel: fable\n",
-		filepath.Join(home, ".claude/agents/noprefix.md"):                          "name: noprefix\n---\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/emptyname.md"):                         "---\nname: \"\"\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/nokey.md"):                             "---\njust text\nname: nokey\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/spaced.md"):                            "---\nname:   spaced-x  \nmodel:  'fable' \n---\n",
-		filepath.Join(home, ".claude/agents/badyaml.md"):                           "---\nname : fb\nmodel: fable\nbad: [unclosed\n  name: other\n---\n",
-		filepath.Join(home, ".claude/agents/norm.md"):                              "---\nname: f-dash\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/comment.md"):                           "---\nname: fcomment\nmodel: fable # by user\n---\n",
-		filepath.Join(home, ".claude/agents/bom.md"):                               "\xef\xbb\xbf---\nname: fbom\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/trail.md"):                             "---  \nname: ftrail\nmodel: fable\n---  \n",
-		filepath.Join(home, ".claude/agents/block.md"):                             "---\nname: fblock\nmodel: >-\n  fable\n---\n",
-		filepath.Join(home, ".claude/agents/nested.md"):                            "---\nname: fnn\nmetadata:\n  name: other\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/nestmodel.md"):                         "---\nname: fnm\nmodel: opus\nsrv:\n  model: fable\n---\n",
-		filepath.Join(home, ".claude/agents/big.md"):                               "---\nname: fbig\ndescription: " + strings.Repeat("д", 3000) + "\nmodel: fable\n---\n" + strings.Repeat("тело\n", 300000),
-		filepath.Join(project, "outside/fl.md"):                                    "---\nname: flink\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/long.md"):                              "---\nname: flong\nmodel: fable\ndescription: " + strings.Repeat("д", 100000) + "\n---\n",
-		filepath.Join(home, ".claude/agents", strings.Repeat("d/", 20), "deep.md"): "---\nname: fdeep\nmodel: fable\n---\n",
-		filepath.Join(project, "cfg/agents/fc.md"):                                 "---\nname: fconfig\nmodel: fable\n---\n",
-		filepath.Join(home, ".claude/agents/crlf.md"):                              "---\r\nname: crlf\r\nmodel: fable\r\n---\r\n",
-		filepath.Join(home, ".claude/agents/override.md"):                          "---\nname: override\nmodel: opus\n---\n",
-		filepath.Join(home, ".claude/agents/caseupper.md"):                         "---\nname: caseupper\nmodel: FABLE\n---\n",
-		filepath.Join(home, ".claude/agents/onemillion.md"):                        "---\nname: onemillion\nmodel: claude-fable-5-2[1m]\n---\n",
+		filepath.Join(home, ".claude/agents/fx.md"):                                        "---\nname: fx\nmodel: fable\n---\nтело\n",
+		filepath.Join(home, ".claude/agents/sub/fy.md"):                                    "---\nname: other-name\nmodel: \"claude-fable-5-2\"\n---\n",
+		filepath.Join(home, ".claude/agents/ok.md"):                                        "---\nname: ok\nmodel: opus\n---\nmodel: fable\n",
+		filepath.Join(home, ".claude/agents/hk.md"):                                        "---\r\nname: hk\r\nmodel: haiku\r\n---\r\n",
+		filepath.Join(home, ".claude/agents/in.md"):                                        "---\nname: in\nmodel: inherit\n---\n",
+		filepath.Join(home, ".claude/agents/inupper.md"):                                   "---\nname: inupper\nmodel: Inherit\n---\n",
+		filepath.Join(home, ".claude/agents/nofm.md"):                                      "model: fable\n",
+		filepath.Join(project, ".claude/agents/px.md"):                                     "---\nname: px\nmodel: fable\n---\n",
+		filepath.Join(project, ".claude/agents/general-purpose.md"):                        "---\nname: general-purpose\nmodel: haiku\n---\n",
+		filepath.Join(project, ".claude/agents/settings-agent.md"):                         "---\nname: settings-agent\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/byfile.md"):                                    "---\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/notes.txt"):                                    "---\nname: txt\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/unclosed.md"):                                  "---\nname: unclosed\nmodel: fable\n",
+		filepath.Join(home, ".claude/agents/noprefix.md"):                                  "name: noprefix\n---\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/emptyname.md"):                                 "---\nname: \"\"\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/nokey.md"):                                     "---\njust text\nname: nokey\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/spaced.md"):                                    "---\nname:   spaced-x  \nmodel:  'fable' \n---\n",
+		filepath.Join(home, ".claude/agents/badyaml.md"):                                   "---\nname : fb\nmodel: fable\nbad: [unclosed\n  name: other\n---\n",
+		filepath.Join(home, ".claude/agents/norm.md"):                                      "---\nname: f-dash\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/comment.md"):                                   "---\nname: fcomment\nmodel: fable # by user\n---\n",
+		filepath.Join(home, ".claude/agents/bom.md"):                                       "\xef\xbb\xbf---\nname: fbom\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/trail.md"):                                     "---  \nname: ftrail\nmodel: fable\n---  \n",
+		filepath.Join(home, ".claude/agents/block.md"):                                     "---\nname: fblock\nmodel: >-\n  fable\n---\n",
+		filepath.Join(home, ".claude/agents/nested.md"):                                    "---\nname: fnn\nmetadata:\n  name: other\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/nestmodel.md"):                                 "---\nname: fnm\nmodel: opus\nsrv:\n  model: fable\n---\n",
+		filepath.Join(home, ".claude/agents/big.md"):                                       "---\nname: fbig\ndescription: " + strings.Repeat("д", 3000) + "\nmodel: fable\n---\n" + strings.Repeat("тело\n", 300000),
+		filepath.Join(project, "outside/fl.md"):                                            "---\nname: flink\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/agents/long.md"):                                      "---\nname: flong\nmodel: fable\ndescription: " + strings.Repeat("д", 100000) + "\n---\n",
+		filepath.Join(home, ".claude/agents", strings.Repeat("d/", 20), "deep.md"):         "---\nname: fdeep\nmodel: fable\n---\n",
+		filepath.Join(project, "cfg/agents/fc.md"):                                         "---\nname: fconfig\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/plugins/cache/market/plugin/agents/pa.md"):            "---\nname: plug-agent\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/plugins/marketplaces/market/agents/code-reviewer.md"): "---\nname: code-reviewer\nmodel: fable\n---\n",
+		filepath.Join(home, ".claude/plugins/installed_plugins.json"):                      fmt.Sprintf(`{"plugins":{"test@market":[{"installPath":%q}]}}`, filepath.Join(home, ".claude/plugins/cache/market/plugin")),
+		filepath.Join(home, ".claude/agents/crlf.md"):                                      "---\r\nname: crlf\r\nmodel: fable\r\n---\r\n",
+		filepath.Join(home, ".claude/agents/override.md"):                                  "---\nname: override\nmodel: opus\n---\n",
+		filepath.Join(home, ".claude/agents/caseupper.md"):                                 "---\nname: caseupper\nmodel: FABLE\n---\n",
+		filepath.Join(home, ".claude/agents/onemillion.md"):                                "---\nname: onemillion\nmodel: claude-fable-5-2[1m]\n---\n",
 	}
 	for path, text := range files {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -558,6 +824,8 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(project, "cfg"))
+	managedSettingsPath = filepath.Join(project, "managed-settings.json")
+	t.Cleanup(func() { managedSettingsPath = "/etc/claude-code/managed-settings.json" })
 	t.Setenv("MODELS_APPROVED", approvedPath)
 	logger, err := core.NewLogger(core.DefaultLoggerConfig())
 	if err != nil {
@@ -573,8 +841,9 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent по имени файла при другом name", "Agent", `{"subagent_type":"fy"}`, "", home, false},
 		{"Agent без name — имя файла", "Agent", `{"subagent_type":"byfile"}`, "", home, true},
 		{"Agent opus в frontmatter, fable в теле", "Agent", `{"subagent_type":"ok"}`, "", home, false},
-		{"Agent haiku CRLF", "Agent", `{"subagent_type":"hk"}`, "", home, false},
+		{"Agent haiku CRLF is not approved", "Agent", `{"subagent_type":"hk"}`, "", home, true},
 		{"Agent inherit", "Agent", `{"subagent_type":"in"}`, "", home, false},
+		{"Agent Inherit case insensitive", "Agent", `{"subagent_type":"inupper"}`, "", home, false},
 		{"Agent без frontmatter", "Agent", `{"subagent_type":"nofm"}`, "", home, false},
 		{"Agent не .md", "Agent", `{"subagent_type":"txt"}`, "", home, false},
 		{"Agent незакрытый frontmatter", "Agent", `{"subagent_type":"unclosed"}`, "", home, false},
@@ -602,6 +871,9 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"Agent FABLE", "Agent", `{"subagent_type":"caseupper"}`, "", home, true},
 		{"Agent fable [1m]", "Agent", `{"subagent_type":"onemillion"}`, "", home, true},
 		{"Agent нет такого", "Agent", `{"subagent_type":"absent"}`, "", home, false},
+		{"Agent встроенный", "Agent", `{"subagent_type":"general-purpose"}`, "", home, false},
+		{"Agent uninstalled plugin definition is ignored", "Agent", `{"subagent_type":"code-reviewer"}`, "", home, false},
+		{"Agent project definition overrides builtin name", "Agent", `{"subagent_type":"general-purpose"}`, "", project, true},
 		{"Agent fx с model opus", "Agent", `{"subagent_type":"fx","model":"opus"}`, "", home, false},
 		{"Agent fx с пустым model", "Agent", `{"subagent_type":"fx","model":""}`, "", home, true},
 		{"Agent проекта", "Agent", `{"subagent_type":"px"}`, "", project, true},
@@ -610,15 +882,56 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 		{"claude --agent fx", "Bash", "", "claude -p --agent fx hi", home, true},
 		{"cl --agent=fx", "Bash", "", "cl --agent=fx", home, true},
 		{"claude --agent ok", "Bash", "", "claude -p --agent ok hi", home, false},
+		{"claude --agent web-fetch builtin", "Bash", "", "claude -p --agent web-fetch hi", home, false},
+		{"claude --agent explore builtin case insensitive", "Bash", "", "claude -p --agent explore hi", home, false},
+		{"claude --agent hk model is not approved", "Bash", "", "claude -p --agent hk hi", home, true},
 		{"claude --agent из переменной", "Bash", "", `claude -p --agent "$A" hi`, home, true},
 		{"claude --agent проекта из подкаталога", "Bash", "", "claude -p --agent px hi", deep, true},
+		{"claude dynamic cd falls back to session cwd agent", "Bash", "", `cd "$PWD" && claude --agent px -p hi`, project, true},
+		{"claude cd к проекту", "Bash", "", "cd " + project + " && claude -p --agent px hi", home, true},
+		{"claude add-dir", "Bash", "", "claude --add-dir " + project + " -p --agent px hi", home, true},
+		{"claude неизвестный агент", "Bash", "", "claude --agent missing-agent", home, true},
+		{"claude неизвестный plugin", "Bash", "", "claude --agent plugin:missing-agent", home, true},
+		{"claude plugin agent fable", "Bash", "", "claude --agent plugin:plug-agent", home, true},
+		{"claude переменный config dir", "Bash", "", "CLAUDE_CONFIG_DIR=$DIR claude", home, true},
 		{"codex --agent fx", "Bash", "", "codex exec --agent fx hi", home, false},
 	}
+	for path, value := range map[string]string{
+		filepath.Join(project, ".claude/settings.json"):       `{"model":"opus"}`,
+		filepath.Join(project, ".claude/settings.local.json"): `{"agent":"settings-agent"}`,
+		filepath.Join(project, "cfg/settings.json"):           `{"model":"opus"}`,
+		filepath.Join(project, "cfg-fable/settings.json"):     `{"model":"fable"}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases = append(cases,
+		struct {
+			name, tool, raw, command, cwd string
+			reject                        bool
+		}{"claude project settings", "Bash", "", "cd " + project + " && claude", home, true},
+		struct {
+			name, tool, raw, command, cwd string
+			reject                        bool
+		}{"explicit model overrides settings model but not agent", "Bash", "", "cd " + project + " && claude --model opus", home, true},
+		struct {
+			name, tool, raw, command, cwd string
+			reject                        bool
+		}{"settings config dir", "Bash", "", "CLAUDE_CONFIG_DIR=" + filepath.Join(project, "cfg-fable") + " claude", home, true},
+		struct {
+			name, tool, raw, command, cwd string
+			reject                        bool
+		}{"settings managed", "Bash", "", "cd " + project + " && claude", home, true},
+	)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			input := &core.ToolInput{ToolName: c.tool, ToolInput: []byte(c.raw), Command: c.command, CWD: c.cwd}
 			start := time.Now()
-			result, err := tool.ValidateTool(context.Background(), input)
+			result, err := tool.ValidateTool(gitGuardTestContext(t), input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -629,6 +942,129 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 			if result.IsValid == c.reject {
 				t.Fatalf("reject=%v, want %v: %+v", !result.IsValid, c.reject, result.Violations)
 			}
+			if c.reject && (strings.Contains(c.name, "нет такого") || strings.Contains(c.name, "неизвестный") || strings.Contains(c.name, "missing-agent")) && !strings.Contains(result.Violations[0].Message, "определение агента") {
+				t.Fatalf("причина неизвестного агента: %+v", result.Violations)
+			}
+			if c.name == "claude dynamic cd falls back to session cwd agent" && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+				t.Fatalf("session cwd agent definition was not used: %+v", result.Violations)
+			}
+			if c.reject && (strings.Contains(c.name, "cd к проекту") || strings.Contains(c.name, "add-dir") || strings.Contains(c.name, "project settings")) && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+				t.Fatalf("модель агента/settings не распознана: %+v", result.Violations)
+			}
 		})
+	}
+	if err := os.WriteFile(managedSettingsPath, []byte(`{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "cfg/settings.json"), []byte(`{"model":"opus"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	managedResult, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: "cd " + home + " && claude", CWD: home})
+	if err != nil || managedResult.IsValid {
+		t.Fatalf("managed settings: valid=%v err=%v", managedResult.IsValid, err)
+	}
+	if !strings.Contains(managedResult.Violations[0].Message, "запускает только пользователь") {
+		t.Fatalf("managed settings reason: %+v", managedResult.Violations)
+	}
+}
+
+func TestModelGuardRoundTenPaths(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	decoyHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	oldManaged := managedSettingsPath
+	managedSettingsPath = filepath.Join(t.TempDir(), "managed-settings.json")
+	t.Cleanup(func() { managedSettingsPath = oldManaged })
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(cwd, ".claude/settings.json"), `{"model":"opus"}`)
+	write(filepath.Join(cwd, "sub/.claude/settings.json"), `{"model":"haiku"}`)
+	write(filepath.Join(cwd, "s.json"), `{"model":"opus"}`)
+	write(filepath.Join(cwd, "sub/s.json"), `{"model":"haiku"}`)
+	badCWD := t.TempDir()
+	write(filepath.Join(badCWD, ".claude/settings.json"), `{"model":"haiku"}`)
+	write(filepath.Join(home, "s.json"), `{"model":"opus"}`)
+	write(filepath.Join(home, ".claude/settings.json"), `{"model":"opus"}`)
+	write(filepath.Join(decoyHome, "s.json"), `{"model":"haiku"}`)
+	cases := []struct {
+		name, command string
+		cwd           string
+		reject        bool
+	}{
+		{"failed cd preserves session settings candidate", "cd /nonexistent; claude -p hi", badCWD, true},
+		{"cd target contributes relative settings", "cd sub || true; claude --settings s.json -p hi", cwd, true},
+		{"subshell cd contributes settings", "(cd sub); claude -p hi", cwd, true},
+		{"conditional cd contributes settings", "cd sub || true; claude -p hi", cwd, true},
+		{"short circuited cd contributes settings", "false && cd sub; claude -p hi", cwd, true},
+		{"command substitution cd contributes settings", "x=$(cd sub); claude -p hi", cwd, true},
+		{"function cd contributes settings", "f(){ cd sub; }; claude -p hi", cwd, true},
+		{"pushd target remains candidate", "pushd sub; popd; claude -p hi", cwd, true},
+		{"env chdir target contributes settings", "env -C sub true; claude -p hi", cwd, true},
+		{"HOME assignment adds second tilde root", "HOME=" + decoyHome + " claude --settings ~/s.json -p hi", cwd, true},
+		{"echo HOME text is not assignment", "echo HOME=" + decoyHome + "; claude --settings ~/s.json -p hi", cwd, false},
+		{"comment HOME text is not assignment", "claude --settings ~/s.json -p hi # HOME=" + decoyHome, cwd, false},
+		{"prompt HOME text is not assignment", `claude --settings ~/s.json -p 'explain HOME=$PATH'`, cwd, false},
+		{"HOME self assignment is unchanged", `HOME="$HOME" claude -p --model opus hi`, cwd, false},
+		{"non-directory cd is not a candidate", "cd " + filepath.Join(cwd, "s.json") + " 2>/dev/null; claude -p --model opus hi", cwd, false},
+		{"failed cd does not replace candidate before next cd", "cd " + filepath.Join(cwd, "s.json") + " 2>/dev/null || cd " + cwd + "; claude -p --model opus hi", cwd, false},
+		{"command text model checked with existing settings", `printf '{"model":"fable"}' | dd of=s.json; claude -p --settings s.json hi`, cwd, true},
+		{"sponge text model checked with existing settings", `printf '{"model":"haiku"}' | sponge s.json; claude -p --settings s.json hi`, cwd, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", CWD: tc.cwd, Command: tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid == tc.reject {
+				t.Fatalf("reject=%v want=%v violations=%+v", !result.IsValid, tc.reject, result.Violations)
+			}
+		})
+	}
+}
+
+// Цель cd — именованный канал: хук не ждёт писателя (ревью 14f14ed)
+func TestModelGuardFIFOCandidate(t *testing.T) {
+	cwd := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	fifo := filepath.Join(cwd, "p")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		command string
+		reject  bool
+	}{
+		{"cd " + fifo + " 2>/dev/null; claude -p --model fable hi", true},
+		{"env -C " + fifo + " true; claude -p --model opus hi", false},
+	}
+	for _, tc := range cases {
+		done := make(chan *core.ValidationResult, 1)
+		go func() {
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", CWD: cwd, Command: tc.command})
+			if err != nil {
+				t.Error(err)
+			}
+			done <- result
+		}()
+		select {
+		case result := <-done:
+			if result != nil && result.IsValid == tc.reject {
+				t.Fatalf("%s: reject=%v want=%v", tc.command, !result.IsValid, tc.reject)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s: hook hangs on FIFO", tc.command)
+		}
 	}
 }

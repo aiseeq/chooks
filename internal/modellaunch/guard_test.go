@@ -380,7 +380,8 @@ func TestRuntimeDetachedLaunchClassification(t *testing.T) {
 	makeTree := func(model, cgroup string, tty int64, parentComm string) *fakeProcess {
 		f := agentTree([]string{"claude", "--model", model})
 		f.comm[80] = parentComm
-		f.cgroup[90], f.tty[90] = cgroup, tty
+		// родитель в том же юните, что claude: так на машине (агент в agents.slice)
+		f.cgroup[80], f.cgroup[90], f.tty[90] = cgroup, cgroup, tty
 		return f
 	}
 	for _, tc := range []struct {

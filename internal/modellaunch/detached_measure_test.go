@@ -16,6 +16,10 @@ func measureTree(model, cgroup string, tty int64, parentComm string) *fakeProces
 	f := agentTree([]string{"claude", "--model", model})
 	f.comm[80] = parentComm
 	f.cgroup[90], f.tty[90] = cgroup, tty
+	// родитель в том же неинтерактивном юните (живой расклад 22.11 22:46: команды
+	// агента и его claude лежат в agents.slice/agent-<имя>-<pid>.scope); формы
+	// пользователя переопределяют родителя через underUserShell/underLogin
+	f.cgroup[80] = cgroup
 	return f
 }
 
@@ -96,10 +100,8 @@ func TestMeasureApprovedModelServicePasses(t *testing.T) {
 // ошибки чтения: признак не срабатывает — «пользователь»
 func TestMeasureReadErrorsFailOpen(t *testing.T) {
 	f := measureTree("fable", measureSlice+"app.slice/run-u1.service", 0, "systemd")
-	f.cgroupErr[90] = errDenied
-	wantPass(t, f)
-	f = measureTree("fable", measureSlice+"app.slice/run-u1.service", 0, "systemd")
-	f.ttyErr[90] = errDenied
+	// решает cgroup родителя claude: его ошибка чтения — пропуск
+	f.cgroupErr[80] = errDenied
 	wantPass(t, f)
 }
 

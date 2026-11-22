@@ -57,6 +57,16 @@ func TestMeasureShellPrefix(t *testing.T) {
 		{"unset CLAUDE_CODE_SHELL_PREFIX", true},
 		{"echo " + bad, true},
 		{"env CLAUDE_CODE_SHELL_PREFIX= bash launch.sh", true},
+		// env за обёртками, которые его прячут от поиска по имени вызова
+		{"exec env " + bad + " bash launch.sh", false},
+		{"exec env -i HOME=/home/x " + bad + " bash launch.sh", false},
+		{"command env " + bad + " bash launch.sh", false},
+		{"stdbuf -oL env " + bad + " bash launch.sh", false},
+		{"systemd-run --user --setenv=CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh", false},
+		// NAME= в аргументах обёрнутой команды — не присваивание
+		{"nohup grep -rn CLAUDE_CODE_SHELL_PREFIX=timeout docs/ &", true},
+		{"timeout 10 grep -rn CLAUDE_CODE_SHELL_PREFIX=timeout docs/", true},
+		{"timeout 10 echo CLAUDE_CODE_SHELL_PREFIX=timeout", true},
 		{"sudo -u aisee " + bad + " bash launch.sh", false},
 		// присваивание только в тексте: кавычки, сообщение коммита, here-doc, текст промпта
 		{`echo "env ` + bad + ` bash launch.sh"`, true},

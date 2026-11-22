@@ -272,7 +272,13 @@ func exeName(exe string) string {
 // claude среди предков. Environ claude не читается (бинарь без права чтения)
 // — признаки агента берутся и из environ читаемых предков
 func (c *check) classify(claudePID int) (agent bool, basis string, complete bool) {
+	parent, err := c.proc.Parent(claudePID)
+	if err != nil {
+		c.logger.Warn("modellaunch: родитель claude не прочитан", "pid", claudePID, "error", err)
+		return false, "", false
+	}
 	env, envErr := c.environ(claudePID)
+	basis = ""
 	if envErr == nil {
 		if agent, key := agentEnvironment(env); agent {
 			return true, key, true
@@ -281,74 +287,27 @@ func (c *check) classify(claudePID int) (agent bool, basis string, complete bool
 		c.logger.Warn("modellaunch: окружение claude не прочитано, признаки агента ищутся у предков", "pid", claudePID, "error", envErr)
 		basis = "claude_environ_unreadable;"
 	}
-	parent, err := c.proc.Parent(claudePID)
-	if err != nil {
-		c.logger.Warn("modellaunch: родитель claude не прочитан", "pid", claudePID, "error", err)
-		return false, basis, false
-	}
-	found, ancestorBasis, complete := c.scanAncestors(parent, envErr != nil)
+	// Явные признаки агента и Claude среди предков классифицируют запуск до
+	// проверки интерактивного scope. Это также сохраняет проверку запуска,
+	// когда окружение/argv агента доступны только у предков.
+	found, ancestorBasis, ancestorComplete := c.scanAncestors(parent, envErr != nil)
 	if found {
 		return true, basis + ancestorBasis, true
 	}
-	// Интерактивность задаёт scope непосредственного запуска. cl -p меняет
-	// процесс на Claude, поэтому для него проверяется scope родителя cl.
-	interactivePID := parent
-	comm, commErr := c.proc.Comm(parent)
-	if commErr == nil && strings.TrimSpace(comm) == "cl" {
-		if grandparent, err := c.proc.Parent(parent); err == nil {
-			interactivePID = grandparent
-		} else {
-			c.logger.Warn("modellaunch: родитель cl не прочитан", "pid", parent, "error", err)
-			return false, basis + "parent_scope_unreadable", true
-		}
-	} else if commErr != nil {
-		c.logger.Warn("modellaunch: имя родителя claude не прочитано", "pid", parent, "error", commErr)
-		return false, basis + "parent_scope_unreadable", true
+	if !ancestorComplete {
+		return false, basis + "ancestor_read_incomplete", false
 	}
-	claudeCgroup, err := c.proc.Cgroup(claudePID)
+	// При прямом запуске cl родитель Claude и есть cl; при cl -p это
+	// родитель процесса Claude (timeout, python, make, sshd-session и т. п.).
+	interactiveCgroup, err := c.proc.Cgroup(parent)
 	if err != nil {
-		c.logger.Warn("modellaunch: cgroup процесса claude не прочитан", "pid", claudePID, "error", err)
-		return false, basis + "claude_cgroup_unreadable", true
+		c.logger.Warn("modellaunch: cgroup родителя claude не прочитан", "pid", parent, "error", err)
+		return false, "parent_scope_unreadable", false
 	}
-	parentCgroup, err := c.proc.Cgroup(interactivePID)
-	if err != nil {
-		c.logger.Warn("modellaunch: cgroup родителя claude не прочитан", "pid", interactivePID, "error", err)
-		return false, basis + "parent_scope_unreadable", true
+	if inInteractiveScope(interactiveCgroup) {
+		return false, "parent_in_interactive_scope", true
 	}
-	tty, err := c.proc.TTYNr(claudePID)
-	if err != nil {
-		c.logger.Warn("modellaunch: tty процесса claude не прочитан", "pid", claudePID, "error", err)
-		return false, basis + "tty_unreadable", true
-	}
-	parentIsCL := commErr == nil && strings.TrimSpace(comm) == "cl"
-	if inInteractiveScope(claudeCgroup) || (inInteractiveScope(parentCgroup) && (parentIsCL || (interactiveParent(comm) && tty > 1))) {
-		return false, basis + "parent_in_interactive_scope", true
-	}
-	if commErr == nil && strings.TrimSpace(comm) == "cl" {
-		if clTTY, err := c.proc.TTYNr(parent); err == nil && clTTY != 0 {
-			if manager, err := c.proc.Parent(parent); err == nil {
-				if manager > 1 {
-					return false, basis + "cl_with_live_shell_ancestry", true
-				}
-				if managerComm, err := c.proc.Comm(manager); err == nil && strings.TrimSpace(managerComm) == "systemd" {
-					return false, basis + "cl_reparented_to_user_manager_with_tty", true
-				}
-				if shell, err := c.proc.Comm(manager); err == nil && interactiveParent(shell) {
-					return false, basis + "cl_with_interactive_shell_parent", true
-				}
-			}
-		}
-	}
-	return true, basis + "parent_outside_interactive_scope", complete
-}
-
-func interactiveParent(comm string) bool {
-	switch strings.TrimSpace(comm) {
-	case "bash", "sh", "dash", "zsh", "fish", "cl":
-		return true
-	default:
-		return false
-	}
+	return true, basis + "parent_outside_interactive_scope", true
 }
 
 func cgroupPath(cgroup string) string {

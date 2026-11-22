@@ -375,9 +375,13 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 	}
 	var values []string
 	dynamic := false
-	callValues, callDynamic := shellEnvCallValues(command, name, logger)
+	callValues, callDynamic, callErr := shellEnvCallValues(command, name)
 	values = append(values, callValues...)
 	dynamic = dynamic || callDynamic
+	if callErr != nil {
+		logger.Warn("model_guard: обёртки shell-присваиваний не разобраны", "name", name, "error", callErr)
+		dynamic = true
+	}
 	nestedValues, nestedDynamic := shellNestedEnvValues(file, name, logger)
 	values = append(values, nestedValues...)
 	dynamic = dynamic || nestedDynamic
@@ -481,60 +485,175 @@ func shellEnvCallDeclaration(call *syntax.CallExpr, command, name string, add fu
 	return dynamic
 }
 
-func shellEnvCallValues(command, name string, logger core.Logger) ([]string, bool) {
-	seen := map[string]bool{}
+func shellEnvCallValues(command, name string) ([]string, bool, error) {
+	calls, err := shellcmd.Calls(command)
+	if err != nil {
+		return nil, false, fmt.Errorf("shellcmd calls: %w", err)
+	}
+	via := shellEnvWrapperVia(calls)
+	if !via["env"] && !via["sudo"] && !via["systemd-run"] {
+		return nil, false, nil
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil, false, fmt.Errorf("parse shell command: %w", err)
+	}
 	var values []string
 	dynamic := false
-	var scan func(string, int)
-	scan = func(source string, depth int) {
-		if depth > 8 || seen[source] {
-			return
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
 		}
-		seen[source] = true
-		calls, err := shellcmd.Calls(source)
-		if err != nil {
-			logger.Warn("model_guard: env-присваивания не разобраны", "name", name, "error", err)
-			return
+		found, unknown := shellEnvAssignmentsForCall(call, command, name, via)
+		values = append(values, found...)
+		dynamic = dynamic || unknown
+		return true
+	})
+	return values, dynamic, nil
+}
+
+func shellEnvWrapperVia(calls []shellcmd.Call) map[string]bool {
+	via := map[string]bool{}
+	for i := range calls {
+		call := &calls[i]
+		base := filepath.Base(call.Name)
+		if base == "env" || base == "sudo" || base == "systemd-run" {
+			via[base] = true
 		}
-		for index := range calls {
-			call := &calls[index]
-			if filepath.Base(call.Name) == "env" {
-				found, unknown := envCallAssignments(call.Args, name)
-				values = append(values, found...)
-				dynamic = dynamic || unknown
-				continue
-			}
-			if shellEnvWrapper(call.Name) {
-				for _, arg := range call.Args {
-					if key, value, ok := strings.Cut(arg, "="); ok && key == name {
-						if strings.ContainsAny(value, "$`") {
-							dynamic = true
-						} else {
-							values = append(values, value)
-						}
-					}
+		for _, wrapper := range call.Via {
+			via[wrapper] = true
+		}
+	}
+	return via
+}
+
+func shellEnvAssignmentsForCall(call *syntax.CallExpr, source, name string, via map[string]bool) ([]string, bool) {
+	cmd, literal := literalValue(call.Args[0])
+	if !literal {
+		return nil, false
+	}
+	base, args := filepath.Base(cmd), call.Args[1:]
+	var values []string
+	dynamic := false
+	if base != "env" && via[base] && via["env"] {
+		if found, unknown := nestedEnvAssignments(args, source, name); len(found) > 0 || unknown {
+			values = append(values, found...)
+			dynamic = dynamic || unknown
+		}
+	}
+	switch base {
+	case "env":
+		words := shellWordsFromAST(args, source)
+		found, unknown := envCallAssignments(words, name)
+		values = append(values, found...)
+		dynamic = dynamic || unknown
+	case "sudo":
+		if via["sudo"] {
+			for _, assignment := range sudoAssignments(args) {
+				if value, ok := selectedEnvValue(assignment, name); ok {
+					values = append(values, value)
 				}
 			}
-			if shellcmd.IsShell(call.Name) {
-				for _, arg := range call.Args {
-					if strings.Contains(arg, name) {
-						scan(arg, depth+1)
-					}
+		}
+	case "systemd-run":
+		if via["systemd-run"] {
+			for _, assignment := range systemdRunAssignments(args) {
+				if value, ok := selectedEnvValue(assignment, name); ok {
+					values = append(values, value)
 				}
 			}
 		}
 	}
-	scan(command, 0)
 	return values, dynamic
 }
 
-func shellEnvWrapper(name string) bool {
-	switch filepath.Base(name) {
-	case "sudo", "timeout", "setsid", "nohup", "nice", "systemd-run", "chronic", "ionice":
-		return true
-	default:
-		return false
+func nestedEnvAssignments(args []*syntax.Word, source, name string) ([]string, bool) {
+	for i, arg := range args {
+		word, ok := literalValue(arg)
+		if !ok || filepath.Base(word) != "env" {
+			continue
+		}
+		return envCallAssignments(shellWordsFromAST(args[i+1:], source), name)
 	}
+	return nil, false
+}
+
+func shellWordsFromAST(args []*syntax.Word, source string) []string {
+	words := make([]string, len(args))
+	for i, arg := range args {
+		word, ok := literalValue(arg)
+		if !ok {
+			word = shellWordText(source, arg)
+		}
+		words[i] = word
+	}
+	return words
+}
+
+func selectedEnvValue(assignment, name string) (string, bool) {
+	key, value, ok := strings.Cut(assignment, "=")
+	return value, ok && key == name
+}
+
+func shellWordText(source string, word *syntax.Word) string {
+	start, end := int(word.Pos().Offset()), int(word.End().Offset())
+	if start < 0 || end < start || end > len(source) {
+		return ""
+	}
+	return source[start:end]
+}
+
+func sudoAssignments(args []*syntax.Word) []string {
+	var assignments []string
+	for i := 0; i < len(args); i++ {
+		arg, literal := literalValue(args[i])
+		if !literal {
+			continue
+		}
+		if arg == "--" {
+			return append(assignments, shellWordsFromAST(args[i+1:], "")...)
+		}
+		if strings.HasPrefix(arg, "-") {
+			if slices.Contains([]string{"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from", "-D", "--chdir", "-R", "--chroot"}, arg) {
+				i++
+			}
+			continue
+		}
+		if strings.Contains(arg, "=") {
+			assignments = append(assignments, arg)
+			continue
+		}
+		break
+	}
+	return assignments
+}
+
+func systemdRunAssignments(args []*syntax.Word) []string {
+	var assignments []string
+	for i := 0; i < len(args); i++ {
+		arg, literal := literalValue(args[i])
+		if !literal {
+			continue
+		}
+		if arg == "-E" || arg == "--setenv" {
+			i++
+			if i < len(args) {
+			value, ok := literalValue(args[i])
+			if ok {
+				assignments = append(assignments, value)
+			}
+			}
+			continue
+		}
+		for _, prefix := range []string{"--setenv=", "-E"} {
+			if after, ok := strings.CutPrefix(arg, prefix); ok {
+				assignments = append(assignments, after)
+				break
+			}
+		}
+	}
+	return assignments
 }
 
 func envCallAssignments(args []string, name string) ([]string, bool) {
@@ -576,26 +695,6 @@ func envCallAssignments(args []string, name string) ([]string, bool) {
 		}
 	}
 	return values, dynamic
-}
-
-func findEnvAssignment(text, name string) (string, string, bool) {
-	for field := range strings.FieldsSeq(text) {
-		if field == "--" {
-			continue
-		}
-		if strings.HasPrefix(field, "-") {
-			continue
-		}
-		field = strings.Trim(field, "'\";|&)")
-		key, val, ok := strings.Cut(field, "=")
-		if ok && key == name {
-			return key, strings.Trim(val, "'\""), true
-		}
-		if !ok {
-			break
-		}
-	}
-	return "", "", false
 }
 
 func homeSelfReference(source string, node syntax.Node) bool {

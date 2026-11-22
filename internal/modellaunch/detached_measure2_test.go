@@ -22,6 +22,8 @@ func TestMeasure2AgentForms(t *testing.T) {
 		f := agentTree([]string{"claude", "--model", "fable"})
 		f.add(80, 75, "/home/aisee/bin/cl", nil, []string{"cl", "--model", "fable"})
 		f.comm[80], f.tty[80] = "cl", 0
+		// cl наследует scope запустившего агента
+		f.cgroup[80] = r2Slice + "agents.slice/agent-luna-123.scope"
 		f.cgroup[90], f.tty[90] = r2Slice+"agents.slice/agent-claude-80.scope", 34901
 		underUserManager(f, 80)
 		wantReject(t, f)

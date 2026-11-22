@@ -381,11 +381,6 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 	nestedValues, nestedDynamic := shellNestedEnvValues(file, name, logger)
 	values = append(values, nestedValues...)
 	dynamic = dynamic || nestedDynamic
-	// shellcmd exposes wrapper payloads as argv; reparse compound argv so
-	// assignments after env survive setsid/nohup and shell -c boundaries.
-	textValues, textDynamic := shellEnvTextValues(command, name)
-	values = append(values, textValues...)
-	dynamic = dynamic || textDynamic
 	declaredValues, declaredDynamic := shellEnvDeclarations(file, command, name)
 	values = append(values, declaredValues...)
 	dynamic = dynamic || declaredDynamic
@@ -415,32 +410,6 @@ func shellNestedEnvValues(file *syntax.File, name string, logger core.Logger) ([
 		}
 		return true
 	})
-	return values, dynamic
-}
-
-func shellEnvTextValues(command, name string) ([]string, bool) {
-	var values []string
-	dynamic := false
-	if !strings.Contains(command, name) {
-		return values, dynamic
-	}
-	for _, marker := range []string{"env ", "env\t", "env -", "/env "} {
-		for at := strings.Index(command, marker); at >= 0; {
-			rest := command[at+len(marker):]
-			if _, val, ok := findEnvAssignment(rest, name); ok {
-				if strings.ContainsAny(val, "$`") {
-					dynamic = true
-				} else {
-					values = append(values, val)
-				}
-			}
-			next := strings.Index(command[at+len(marker):], marker)
-			if next < 0 {
-				break
-			}
-			at += len(marker) + next
-		}
-	}
 	return values, dynamic
 }
 
@@ -535,15 +504,37 @@ func shellEnvCallValues(command, name string, logger core.Logger) ([]string, boo
 				dynamic = dynamic || unknown
 				continue
 			}
-			for i, arg := range call.Args {
-				if strings.Contains(arg, name) {
-					scan(strings.Join(call.Args[i:], " "), depth+1)
+			if shellEnvWrapper(call.Name) {
+				for _, arg := range call.Args {
+					if key, value, ok := strings.Cut(arg, "="); ok && key == name {
+						if strings.ContainsAny(value, "$`") {
+							dynamic = true
+						} else {
+							values = append(values, value)
+						}
+					}
+				}
+			}
+			if shellcmd.IsShell(call.Name) {
+				for _, arg := range call.Args {
+					if strings.Contains(arg, name) {
+						scan(arg, depth+1)
+					}
 				}
 			}
 		}
 	}
 	scan(command, 0)
 	return values, dynamic
+}
+
+func shellEnvWrapper(name string) bool {
+	switch filepath.Base(name) {
+	case "sudo", "timeout", "setsid", "nohup", "nice", "systemd-run", "chronic", "ionice":
+		return true
+	default:
+		return false
+	}
 }
 
 func envCallAssignments(args []string, name string) ([]string, bool) {

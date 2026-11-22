@@ -290,96 +290,65 @@ func (c *check) classify(claudePID int) (agent bool, basis string, complete bool
 	if found {
 		return true, basis + ancestorBasis, true
 	}
-	if c.userClScope(claudePID, parent) {
-		return false, basis + "cl_scope_matches_pid_with_tty", true
+	// Интерактивность задаёт scope непосредственного запуска. cl -p меняет
+	// процесс на Claude, поэтому для него проверяется scope родителя cl.
+	interactivePID := parent
+	comm, commErr := c.proc.Comm(parent)
+	if commErr == nil && strings.TrimSpace(comm) == "cl" {
+		if grandparent, err := c.proc.Parent(parent); err == nil {
+			interactivePID = grandparent
+		} else {
+			c.logger.Warn("modellaunch: родитель cl не прочитан", "pid", parent, "error", err)
+			return false, basis + "parent_scope_unreadable", true
+		}
+	} else if commErr != nil {
+		c.logger.Warn("modellaunch: имя родителя claude не прочитано", "pid", parent, "error", commErr)
+		return false, basis + "parent_scope_unreadable", true
 	}
-	if c.detachedAgent(claudePID, parent) {
-		return true, basis + "agent_scope_parent_not_cl", true
+	claudeCgroup, err := c.proc.Cgroup(claudePID)
+	if err != nil {
+		c.logger.Warn("modellaunch: cgroup процесса claude не прочитан", "pid", claudePID, "error", err)
+		return false, basis + "claude_cgroup_unreadable", true
 	}
-	if c.nonInteractiveAgent(claudePID) {
-		return true, basis + "no_tty_outside_session_app_scope", true
+	parentCgroup, err := c.proc.Cgroup(interactivePID)
+	if err != nil {
+		c.logger.Warn("modellaunch: cgroup родителя claude не прочитан", "pid", interactivePID, "error", err)
+		return false, basis + "parent_scope_unreadable", true
 	}
-	return false, basis + "no_agent_markers_or_claude_ancestor", complete
+	tty, err := c.proc.TTYNr(claudePID)
+	if err != nil {
+		c.logger.Warn("modellaunch: tty процесса claude не прочитан", "pid", claudePID, "error", err)
+		return false, basis + "tty_unreadable", true
+	}
+	parentIsCL := commErr == nil && strings.TrimSpace(comm) == "cl"
+	if inInteractiveScope(claudeCgroup) || (inInteractiveScope(parentCgroup) && (parentIsCL || (interactiveParent(comm) && tty > 1))) {
+		return false, basis + "parent_in_interactive_scope", true
+	}
+	if commErr == nil && strings.TrimSpace(comm) == "cl" {
+		if clTTY, err := c.proc.TTYNr(parent); err == nil && clTTY != 0 {
+			if manager, err := c.proc.Parent(parent); err == nil {
+				if manager > 1 {
+					return false, basis + "cl_with_live_shell_ancestry", true
+				}
+				if managerComm, err := c.proc.Comm(manager); err == nil && strings.TrimSpace(managerComm) == "systemd" {
+					return false, basis + "cl_reparented_to_user_manager_with_tty", true
+				}
+				if shell, err := c.proc.Comm(manager); err == nil && interactiveParent(shell) {
+					return false, basis + "cl_with_interactive_shell_parent", true
+				}
+			}
+		}
+	}
+	return true, basis + "parent_outside_interactive_scope", complete
 }
 
-func (c *check) detachedAgent(pid, parent int) bool {
-	cgroup, err := c.proc.Cgroup(pid)
-	if err != nil || !inAgentScope(cgroup) {
+func interactiveParent(comm string) bool {
+	switch strings.TrimSpace(comm) {
+	case "bash", "sh", "dash", "zsh", "fish", "cl":
+		return true
+	default:
 		return false
 	}
-	comm, err := c.proc.Comm(parent)
-	if err != nil || strings.TrimSpace(comm) != "cl" {
-		return err == nil
-	}
-	grandparent, err := c.proc.Parent(parent)
-	return err == nil && grandparent <= 1
-}
-
-// userClScope recognizes cl -p's systemd scope: cl execs systemd-run and
-// becomes Claude, so the scope carries Claude's own PID while the user tty
-// and shell remain attached.
-func (c *check) userClScope(pid, parent int) bool {
-	tty, err := c.proc.TTYNr(pid)
-	if err != nil {
-		c.logger.Warn("modellaunch: tty процесса claude не прочитан", "pid", pid, "error", err)
-		return false
-	}
-	if tty == 0 {
-		return false
-	}
-	cgroup, err := c.proc.Cgroup(pid)
-	if err != nil {
-		c.logger.Warn("modellaunch: cgroup процесса claude не прочитан", "pid", pid, "error", err)
-		return false
-	}
-	for part := range strings.SplitSeq(cgroupPath(cgroup), "/") {
-		if !strings.HasPrefix(part, "agent-") || !strings.HasSuffix(part, ".scope") {
-			continue
-		}
-		unit := strings.TrimSuffix(strings.TrimPrefix(part, "agent-"), ".scope")
-		fields := strings.Split(unit, "-")
-		if len(fields) == 0 || fields[len(fields)-1] != strconv.Itoa(pid) {
-			continue
-		}
-		if len(fields) > 1 && strings.HasPrefix(fields[len(fields)-1], "r") {
-			continue
-		}
-		parentPID, err := c.proc.Parent(pid)
-		if err != nil {
-			c.logger.Warn("modellaunch: родитель процесса claude не прочитан", "pid", pid, "error", err)
-			return false
-		}
-		if parentPID == parent {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *check) nonInteractiveAgent(pid int) bool {
-	cgroup, err := c.proc.Cgroup(pid)
-	if err != nil {
-		c.logger.Warn("modellaunch: cgroup процесса claude не прочитан", "pid", pid, "error", err)
-		return false
-	}
-	if inInteractiveScope(cgroup) {
-		return false
-	}
-	tty, err := c.proc.TTYNr(pid)
-	if err != nil {
-		c.logger.Warn("modellaunch: tty процесса claude не прочитан", "pid", pid, "error", err)
-		return false
-	}
-	return tty == 0 || inRunService(cgroup)
-}
-
-func inRunService(cgroup string) bool {
-	for part := range strings.SplitSeq(cgroupPath(cgroup), "/") {
-		if strings.HasPrefix(part, "run-") && strings.HasSuffix(part, ".service") {
-			return true
-		}
-	}
-	return false
 }
 
 func cgroupPath(cgroup string) string {

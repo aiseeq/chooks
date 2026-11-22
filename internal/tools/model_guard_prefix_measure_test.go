@@ -56,6 +56,18 @@ func TestMeasureShellPrefix(t *testing.T) {
 		{"export CLAUDE_CODE_SHELL_PREFIX", true},
 		{"unset CLAUDE_CODE_SHELL_PREFIX", true},
 		{"echo " + bad, true},
+		{"env CLAUDE_CODE_SHELL_PREFIX= bash launch.sh", true},
+		{"sudo -u aisee " + bad + " bash launch.sh", false},
+		// присваивание только в тексте: кавычки, сообщение коммита, here-doc, текст промпта
+		{`echo "env ` + bad + ` bash launch.sh"`, true},
+		{`git commit -m "fix: отказ на env CLAUDE_CODE_SHELL_PREFIX=timeout"`, true},
+		{`grep -rn "env ` + bad + `" docs/`, true},
+		{`tl --grep 'env -i CLAUDE_CODE_SHELL_PREFIX=timeout'`, true},
+		{"cat > note.md <<'EOF'\nenv " + bad + " bash launch.sh\nEOF", true},
+		{`claude --model opus -p 'разбор: env CLAUDE_CODE_SHELL_PREFIX=timeout'`, true},
+		// HOME и CLAUDE_CONFIG_DIR в тексте промпта — не запуск
+		{`claude --model opus -p 'проверь: env CLAUDE_CONFIG_DIR=$DIR claude'`, true},
+		{`claude --model opus -p 'проверь: env HOME=$X claude'`, true},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})

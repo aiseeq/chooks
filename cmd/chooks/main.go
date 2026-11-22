@@ -273,11 +273,15 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		return exitError, err
 	}
 	timer := newHookTimerForRequest(hookType, request)
-	if exit, ok := ctx.Value(cliTerminationKey{}).(func(int)); ok {
+	exit, cli := ctx.Value(cliTerminationKey{}).(func(int))
+	if cli {
 		timer.watchTermination(exit)
 	}
-	// Файл лога запроса закрывается последним, после строк таймера: и на
-	// пути ошибки, и при выходе из любой ветки хука
+	// Файл лога закрывает владелец запроса. У CLI это процесс: обработчик
+	// SIGTERM подписан до выхода и после возврата runHook ещё пишет строку
+	// «hook killed/cancelled by SIGTERM», поэтому файл, как в базе, закрывает
+	// ОС при выходе. Запрос без своего обработчика (executeHook в демоне)
+	// закрывает файл сам — последним, после строк таймера, и на пути ошибки
 	var logger core.FileLogger
 	defer func() {
 		status := "ok"
@@ -285,7 +289,9 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 			status = "error"
 		}
 		timer.finish(status)
-		closeRequestLogger(logger)
+		if !cli {
+			closeRequestLogger(logger)
+		}
 	}()
 
 	data, err := io.ReadAll(request.Stdin)

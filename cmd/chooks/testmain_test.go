@@ -23,14 +23,16 @@ import (
 // каталоги состояния, кэша akit и runtime сверяются со снимком до них
 // (newFakeEntries)
 func TestMain(m *testing.M) {
-	os.Exit(runIsolated(m))
+	os.Exit(runIsolated(m.Run))
 }
 
 // testRoot — корень прогона со случайным именем: в нём временный HOME
 // (testHome) и TMPDIR процесса тестов; realHome — HOME до подмены
 var testRoot, testHome, realHome string
 
-func runIsolated(m *testing.M) int {
+// runIsolated готовит временный HOME, запускает run (у TestMain — m.Run) и
+// сверяет настоящие каталоги со снимком до него: запись тестов туда — код 1
+func runIsolated(run func() int) int {
 	root, err := os.MkdirTemp("", "chooks-test-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "test root:", err)
@@ -63,7 +65,7 @@ func runIsolated(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, "set TMPDIR:", err)
 		return 1
 	}
-	code := m.Run()
+	code := run()
 	if leaked := newFakeEntries(before, listDirs(watched), runMarkers(root)); len(leaked) > 0 {
 		fmt.Fprintf(os.Stderr, "tests wrote into the real HOME of the process (%s): %s\n", realHome, strings.Join(leaked, ", "))
 		return 1
@@ -238,5 +240,50 @@ func TestFakeEntriesFilter(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("reported %q, want %q", got, want)
+	}
+}
+
+// Сверка срабатывает сквозь runIsolated: фиктивная запись прогона в
+// «настоящее» состояние даёт код 1, живая UUID-запись и чистый прогон — код
+// прогона. «Настоящий» HOME здесь — песочница теста: TestMain уже подменил
+// HOME процесса, а t.Setenv вернёт env и после runIsolated
+func TestRunIsolatedReportsLeak(t *testing.T) {
+	savedRoot, savedHome, savedReal := testRoot, testHome, realHome
+	t.Cleanup(func() { testRoot, testHome, realHome = savedRoot, savedHome, savedReal })
+	for _, name := range []string{"HOME", "XDG_RUNTIME_DIR", "TMPDIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "CLAUDE_CONFIG_DIR", "MODELS_APPROVED"} {
+		t.Setenv(name, os.Getenv(name))
+	}
+	uuid := "12345678-1234-1234-1234-123456789abc"
+	cases := []struct {
+		name, file string
+		code, want int
+	}{
+		{"fake session", "night-hint/s1.json", 0, 1},
+		{"fake hex name", "night-hint/1234567890abcdef.json", 0, 1},
+		{"live session", "night-hint/" + uuid + ".json", 0, 0},
+		{"clean run keeps its code", "", 3, 3},
+	}
+	for _, tc := range cases {
+		sandbox := t.TempDir()
+		state := filepath.Join(sandbox, ".local", "state", "chooks")
+		if err := os.MkdirAll(filepath.Join(state, "night-hint"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for name, value := range map[string]string{"HOME": sandbox, "XDG_RUNTIME_DIR": filepath.Join(sandbox, "run"), "TMPDIR": sandbox} {
+			if err := os.Setenv(name, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := runIsolated(func() int {
+			if tc.file != "" {
+				if err := os.WriteFile(filepath.Join(state, tc.file), []byte("{}"), 0o600); err != nil {
+					t.Error(err)
+				}
+			}
+			return tc.code
+		})
+		if got != tc.want {
+			t.Errorf("%s: runIsolated = %d, want %d", tc.name, got, tc.want)
+		}
 	}
 }

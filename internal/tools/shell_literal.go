@@ -9,9 +9,11 @@ import (
 
 // word слово команды; literal — в нём нет подстановок $ и `
 type word struct {
-	text    string
-	literal bool
-	tilde   shellcmd.Tilde
+	text              string
+	literal           bool
+	shellLiteral      bool
+	shellLiteralKnown bool
+	tilde             shellcmd.Tilde
 }
 
 // computedArg — слово из shellcmd.Call.Args вычисляется при запуске.

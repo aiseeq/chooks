@@ -33,6 +33,9 @@ type StyleConfig struct {
 // ToolConfig конфигурация инструмента
 type ToolConfig struct {
 	Enabled bool `yaml:"enabled"`
+	// RuntimeLaunchGuard включает проверку модели самого процесса claude
+	// при UserPromptSubmit. nil означает включено.
+	RuntimeLaunchGuard *bool `yaml:"runtime_launch_guard"`
 
 	// Специфичные для notifier
 	Sound   bool `yaml:"sound"`

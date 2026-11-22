@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/textstyle"
 	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
@@ -378,5 +380,49 @@ func TestStyleCmdBadConfig(t *testing.T) {
 func TestStyleCmdDocKeysEmptyPrefix(t *testing.T) {
 	if out, code := runStyle(t, "диапазон 3 -5\n", "--doc", "--keys", "PROJ,", "-"); code != exitAllowed || out != "" {
 		t.Fatalf("пустой префикс: код %d, вывод %q", code, out)
+	}
+}
+
+// runtimeProc — дерево процессов для проверки модели claude: хук — процесс
+// запроса, его родитель — claude, запущенный агентом на haiku
+type runtimeProc struct{ hook int }
+
+func (p runtimeProc) Parent(pid int) (int, error) {
+	if pid == p.hook {
+		return 90, nil
+	}
+	return 1, nil
+}
+func (runtimeProc) Exe(int) (string, error)  { return "/opt/claude/claude", nil }
+func (runtimeProc) Comm(int) (string, error) { return "claude", nil }
+func (runtimeProc) Environ(int) ([]string, error) {
+	return []string{"CLAUDECODE=1"}, nil
+}
+func (runtimeProc) Cmdline(int) ([]string, error) {
+	return []string{"claude", "--model", "haiku"}, nil
+}
+func (runtimeProc) Cwd(int) (string, error) { return "/", nil }
+
+type panicJudge struct{}
+
+func (panicJudge) ValidateTool(context.Context, *core.ToolInput) (*core.ValidationResult, error) {
+	panic("judge broke")
+}
+func (panicJudge) CandidateModels(context.Context, *core.ToolInput) []string { panic("judge broke") }
+
+// Паника судьи модели не блокирует реплику: rc 0 и строка Error в логе
+func TestRunUserPromptSubmit_RuntimeGuardPanicPasses(t *testing.T) {
+	config, _ := silentConfig(t)
+	request := runtimeGuardRequest(t, t.TempDir())
+	logger, logPath := fileLogger(t)
+	ctx := context.WithValue(hookctx.WithRequest(context.Background(), request), runtimeGuardKey{}, runtimeGuardDeps{proc: runtimeProc{hook: request.PID}, judge: panicJudge{}})
+	data := []byte(`{"hook_event_name":"UserPromptSubmit","session_id":"panic-test","prompt":"x"}`)
+	code, err := runUserPromptSubmit(ctx, hookUserPromptSubmit, data, config, logger, newHookTimerForRequest(hookUserPromptSubmit, request))
+	if code != exitAllowed || err != nil {
+		t.Fatalf("runUserPromptSubmit = %d, %v; want %d, nil", code, err, exitAllowed)
+	}
+	log := readLog(t, logPath)
+	if !strings.Contains(log, "level=ERROR") || !strings.Contains(log, "паника в проверке модели claude") || !strings.Contains(log, "judge broke") {
+		t.Fatalf("log lacks panic error line:\n%s", log)
 	}
 }

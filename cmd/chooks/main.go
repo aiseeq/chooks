@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
 	"github.com/aiseeq/chooks/internal/hookctx"
+	"github.com/aiseeq/chooks/internal/modellaunch"
 	"github.com/aiseeq/chooks/internal/processor"
 	"github.com/aiseeq/chooks/internal/statusline"
 	"github.com/aiseeq/chooks/internal/textstyle"
@@ -325,12 +327,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		// возобновилась (без неё ответ без единого вызова инструмента остался
 		// бы незамеченным), и напоминает о скиллах, изменённых после вызова.
 		// Срабатывает и на сообщение другой сессии, и посреди хода
-		input := parseSessionInputForRequest(logger, hookType, data, &request)
-		timer.stage("state")
-		saveStateIn(logger, request.RuntimeDir(), input.SessionID, core.StateWorking)
-		timer.stage("skills")
-		remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer, request)
-		return exitAllowed, nil
+		return runUserPromptSubmit(ctx, hookType, data, config, logger, timer)
 	case hookPostToolBatch:
 		// Пакет инструментов — место напоминания в длинном ходе и у субагентов,
 		// до которых UserPromptSubmit не доходит. Он же снимает «ждёт ответа»:
@@ -378,6 +375,77 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	default:
 		return exitError, fmt.Errorf("unknown hook type: %s", hookType)
 	}
+}
+
+func runUserPromptSubmit(ctx context.Context, hookType string, data []byte, config *core.Config, logger core.Logger, timer *hookTimer) (int, error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return exitError, fmt.Errorf("hook request is missing")
+	}
+	input := parseSessionInputForRequest(logger, hookType, data, &request)
+	message, err := checkRuntimeLaunchGuard(ctx, request.PID, config.Tools["model_guard"], logger)
+	if err != nil {
+		return exitError, err
+	}
+	if message != "" {
+		return exitBlocked, fmt.Errorf("%s", message)
+	}
+	timer.stage("state")
+	saveStateIn(logger, request.RuntimeDir(), input.SessionID, core.StateWorking)
+	timer.stage("skills")
+	remindStaleSkills(eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer, request)
+	return exitAllowed, nil
+}
+
+// checkRuntimeLaunchGuard — отказ claude, запущенному агентом на модели вне
+// списка. Паника в проверке не блокирует реплику: строка Error в лог и пропуск.
+// hookPID — процесс хука запроса: от него идёт подъём к claude сессии
+func checkRuntimeLaunchGuard(ctx context.Context, hookPID int, config core.ToolConfig, logger core.Logger) (message string, err error) {
+	if config.RuntimeLaunchGuard != nil && !*config.RuntimeLaunchGuard {
+		return "", nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("modellaunch: паника в проверке модели claude, проверка пропущена", "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			message, err = "", nil
+		}
+	}()
+	guard, err := newRuntimeGuard(ctx, config, logger)
+	if err != nil {
+		return "", err
+	}
+	return guard.Check(ctx, hookPID)
+}
+
+// runtimeGuardKey — ключ ctx запроса с runtimeGuardDeps: тест подставляет
+// дерево процессов и судью одному запросу, не трогая параллельные
+type runtimeGuardKey struct{}
+
+// runtimeGuardDeps — подмена для проверки модели claude одного запроса; пустое
+// поле — настоящее: /proc машины и model_guard
+type runtimeGuardDeps struct {
+	proc  modellaunch.ProcessReader
+	judge modellaunch.Judge
+}
+
+// newRuntimeGuard строит проверку модели claude сессии: model_guard судит
+// команду из /proc
+func newRuntimeGuard(ctx context.Context, config core.ToolConfig, logger core.Logger) (*modellaunch.Guard, error) {
+	deps, _ := ctx.Value(runtimeGuardKey{}).(runtimeGuardDeps)
+	proc := deps.proc
+	if proc == nil {
+		proc = modellaunch.ProcReader{}
+	}
+	judge := deps.judge
+	if judge == nil {
+		config.Enabled = true
+		modelGuard, err := tools.NewModelGuardTool(config, logger)
+		if err != nil {
+			return nil, err
+		}
+		judge = modelGuard
+	}
+	return modellaunch.New(proc, judge, logger), nil
 }
 
 // sessionIDOf — сессия события для строк о длительности. Нечитаемый вход

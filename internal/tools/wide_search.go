@@ -18,9 +18,10 @@ const WideSearchHintText = "дерево большое: код — `git grep` �
 // самих или их предков (~, /) — широкий, обход внутри одного репо или
 // своего scratchpad — нет. claude-1000 — все scratchpad сессий сразу,
 // .local/state/worker, транскрипты .claude/projects и прогоны Сна
-// .claude/improve/runs (1,4 ГБ) — из обходов 20–21.11
+// .claude/improve/runs (1,4 ГБ) — из обходов 20–21.11; sc2 и sc2/demu
+// (корпуса и данные demu, grep -rl прочитал 568 МБ 21.11)
 var wideRoots = []string{"", ".cache", ".cache/claude-tmp", ".cache/claude-tmp/claude-1000", "git", "work",
-	".local/state", ".local/state/worker", ".claude/projects", ".claude/improve/runs"}
+	".local/state", ".local/state/worker", ".claude/projects", ".claude/improve/runs", "sc2", "sc2/demu"}
 
 // WideSearch — первый в команде рекурсивный обход большого дерева: grep -r,
 // rg, find, du, ls -R по пути из wideRoots или его предку. Относительный
@@ -63,20 +64,35 @@ func WideSearch(command, cwd, home string) (string, error) {
 // changeDir — cwd после cd или pushd c; путь с неизвестной подстановкой
 // оставляет прежний
 func changeDir(c *shellcmd.Call, cwd, home string) string {
+	dir, _ := changeDirKnown(c, cwd, home)
+	return dir
+}
+
+func changeDirKnown(c *shellcmd.Call, cwd, home string) (string, bool) {
 	if len(c.Args) == 0 {
 		if c.Name == "cd" {
-			return home
+			return home, home != ""
 		}
-		return cwd
+		return cwd, false
 	}
-	if len(c.Args) != 1 {
-		return cwd
+	i := 0
+	for i < len(c.Args) && (c.Args[i] == "-P" || c.Args[i] == "-L") {
+		i++
 	}
-	text, known := knownPath(c.Args[0], home)
+	if i < len(c.Args) && c.Args[i] == "--" {
+		i++
+	}
+	if i >= len(c.Args) {
+		return cwd, false
+	}
+	if i+1 != len(c.Args) || c.Args[i] == "-" {
+		return cwd, false
+	}
+	text, known := knownPath(c.Args[i], home)
 	if !known {
-		return cwd
+		return cwd, false
 	}
-	return resolvePath(text, c.ArgTilde(0), cwd, home)
+	return resolvePath(text, c.ArgTilde(i), cwd, home), true
 }
 
 type walkArg struct {

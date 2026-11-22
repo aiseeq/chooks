@@ -114,9 +114,13 @@ func TestPromptRequestRuntimeDir(t *testing.T) {
 		}
 		var stdout, stderr bytes.Buffer
 		request := hookctx.New(strings.NewReader(`{"session_id":"shared"}`), &stdout, &stderr, []string{"HOME=" + dir, "XDG_RUNTIME_DIR=" + dir}, dir, 123+i, 45)
-		code, err := runHook(hookctx.WithRequest(context.Background(), request), hookUserPromptSubmit)
+		ctx, procCalls := withFixtureProc(hookctx.WithRequest(context.Background(), request))
+		code, err := runHook(ctx, hookUserPromptSubmit)
 		if err != nil || code != exitAllowed {
 			t.Fatalf("request %d: code=%d err=%v", i, code, err)
+		}
+		if procCalls.Load() == 0 {
+			t.Fatalf("request %d: проверка модели claude не шла по дереву процессов запроса", i)
 		}
 		state, err := os.ReadFile(filepath.Join(dir, "chooks", "sessions", "shared"))
 		if err != nil || string(state) != "working" {
@@ -131,17 +135,19 @@ func TestPromptParallel(t *testing.T) {
 	type outcome struct {
 		code           int
 		output, errors string
+		procCalls      int64
 	}
 	run := func(i int) outcome {
 		dir := filepath.Join(root, fmt.Sprint(i))
 		var out, stderr bytes.Buffer
 		req := hookctx.New(strings.NewReader(`{"session_id":"shared"}`), &out, &stderr, []string{"HOME=" + dir, "XDG_RUNTIME_DIR=" + dir, "CLAUDE_CONFIG_DIR=" + dir, fmt.Sprintf("CLAUDE_PID=%d", 1000+i)}, dir, 2000+i, 3000+i)
-		code, err := runHook(hookctx.WithRequest(context.Background(), req), hookUserPromptSubmit)
+		ctx, procCalls := withFixtureProc(hookctx.WithRequest(context.Background(), req))
+		code, err := runHook(ctx, hookUserPromptSubmit)
 		errText := stderr.String()
 		if err != nil {
 			errText += err.Error()
 		}
-		return outcome{code, out.String(), errText}
+		return outcome{code, out.String(), errText, procCalls.Load()}
 	}
 	for i := range count {
 		dir := filepath.Join(root, fmt.Sprint(i), ".config", "chooks")
@@ -159,7 +165,7 @@ func TestPromptParallel(t *testing.T) {
 	}
 	wg.Wait()
 	for i, result := range got {
-		if result.code != exitAllowed || result.output != "" || result.errors != "" {
+		if result.code != exitAllowed || result.output != "" || result.errors != "" || result.procCalls == 0 {
 			t.Errorf("request %d: %+v", i, result)
 		}
 		state, err := os.ReadFile(filepath.Join(root, fmt.Sprint(i), "chooks", "sessions", "shared"))
@@ -318,6 +324,7 @@ func TestHookCommandsParallel(t *testing.T) {
 	type outcome struct {
 		code                 int
 		out, stderr, failure string
+		procCalls            int64
 	}
 	run := func(i int) outcome {
 		dir := filepath.Join(root, fmt.Sprint(i))
@@ -337,8 +344,9 @@ func TestHookCommandsParallel(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		req := hookctx.New(strings.NewReader(input), &stdout, &stderr, []string{"HOME=" + dir, "XDG_RUNTIME_DIR=" + filepath.Join(dir, "run"), "XDG_STATE_HOME=" + filepath.Join(dir, "state"), "CLAUDE_CONFIG_DIR=" + filepath.Join(dir, "claude"), fmt.Sprintf("CLAUDE_PID=%d", 2000000+i)}, dir, 3000000+i, 4000000+i)
 		req.ConfigPath = filepath.Join(dir, "config.yaml")
-		code := executeHook(context.Background(), req, name)
-		return outcome{code: code, out: stdout.String(), stderr: stderr.String()}
+		ctx, procCalls := withFixtureProc(context.Background())
+		code := executeHook(ctx, req, name)
+		return outcome{code: code, out: stdout.String(), stderr: stderr.String(), procCalls: procCalls.Load()}
 	}
 	var got [count]outcome
 	var wg sync.WaitGroup
@@ -351,6 +359,10 @@ func TestHookCommandsParallel(t *testing.T) {
 		if result.code != exitAllowed || result.failure != "" {
 			t.Errorf("request %d (%s): %+v", i, name, result)
 			continue
+		}
+		// pid запроса выдуман: проверка модели claude идёт по фикстуре, не по /proc
+		if name == hookUserPromptSubmit && result.procCalls == 0 {
+			t.Errorf("request %d (%s): проверка модели claude не шла по дереву процессов запроса", i, name)
 		}
 		switch name {
 		case hookNoPrompt:

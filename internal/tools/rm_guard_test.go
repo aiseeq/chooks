@@ -559,7 +559,8 @@ func TestRmGuard330Gen(t *testing.T) {
 		{`false && rm -f $HOME/*.log`, false},
 		{`false && rm -f "$HOME"/x/*`, false},
 		{`false && rm -f ${HOME}/*`, true},
-		{`false && rm -rf $HOME/.cache/*`, true},
+		// Здесь cwd /home/u/proj, а не каталог внутри ~/.cache, как в пробе.
+		{`false && rm -rf $HOME/.cache/*`, false},
 		{`cd ./a/b && rm -f c/*`, false},
 		{`cd ./a && cd ./b && rm -f c/*`, false},
 		{`cd . && cd ./a && rm -f c/*`, false},
@@ -569,6 +570,7 @@ func TestRmGuard330Gen(t *testing.T) {
 		{`cd './a' && rm -f c/*`, false},
 		{`cd ./a && sudo rm -f c/*`, false},
 		{`cd /home/u/sb/a && cd ./b && rm -f c/*`, true},
+		{`cd /home/u/sb/a && cd /home/u/proj/b && rm -f c/*`, true},
 		{`cd ./a && rm -f c/*.log && cd .. && rm -f d/*`, true},
 		{`cd /home/u/proj/a/b && rm -f c/*`, false},
 		{`cd /home/u/proj/a/../a && rm -f c/*`, true},
@@ -582,6 +584,49 @@ func TestRmGuard330Gen(t *testing.T) {
 		r := validateRm(t, tc.command)
 		if r.IsValid == tc.deny {
 			t.Errorf("deny=%v, ожидалось %v: %q %v", !r.IsValid, tc.deny, tc.command, r.Suggestions)
+		}
+	}
+}
+
+// TestRmGuard330ParameterOperators проверяет распознаваемые исходником формы.
+func TestRmGuard330ParameterOperators(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		deny    bool
+	}{
+		{`rm -f ${X@Q}/*`, false},
+		{`rm -f ${X:?message}/*`, false},
+		{`rm -f ${X:-literal}/*`, false},
+		{`rm -f ${X:=literal}/*`, false},
+		{`rm -f ${X:-/}/*`, true},
+		{`rm -f ${X:=/./}/*`, true},
+		{`rm -f ${X?message}/*`, true},
+		{`rm -f ${X:+literal}/*`, true},
+		{`rm -f ${X%/}/*`, true},
+		{`rm -f ${X:0:3}/*`, true},
+		{`X=literal; rm -f ${X%/}/*`, false},
+		{`X=literal; true | true; rm -f ${X%/}/*`, true},
+		{`X=literal; rm -f ${X%/}/* | cat`, false},
+	} {
+		r := validateRm(t, tc.command)
+		if r.IsValid == tc.deny {
+			t.Errorf("deny=%v, ожидалось %v: %q %v", !r.IsValid, tc.deny, tc.command, r.Suggestions)
+		}
+	}
+}
+
+func TestRmGuard330HomeWorkspace(t *testing.T) {
+	tool := newRmGuard(t)
+	for _, tc := range []struct {
+		cwd  string
+		deny bool
+	}{
+		{"/home/u/.cache/project", true},
+		{"/home/u/proj", false},
+	} {
+		result := validateRmWith(t, tool, `false && rm -rf $HOME/.cache/*`, tc.cwd)
+		if result.IsValid == tc.deny {
+			t.Errorf("cwd=%s: deny=%v, ожидалось %v", tc.cwd, !result.IsValid, tc.deny)
 		}
 	}
 }

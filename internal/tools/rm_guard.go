@@ -63,15 +63,14 @@ const (
 
 var (
 	// namedVarTarget $VAR/ перед глобом, слешем, переменной или концом слова
-	namedVarTarget = regexp.MustCompile(`^[\x{E020}"']*\$(?:\{` + reName + `(?:[^}]*)?\}|` + reName + `)` + reAfter)
+	namedVarTarget = regexp.MustCompile(`^[\x{E020}"']*\$(?:\{` + reName + reDflt + `\}|` + reName + `)` + reAfter)
 	// positionalTarget то же для $1, $@, $*, $!
 	positionalTarget = regexp.MustCompile(`^[\x{E020}"']*\$(?:\{(?:[0-9]+|[@*!])` + reDflt + `\}|[0-9@*!])` + reAfter)
 	// topDirTarget $VAR/<каталог верхнего уровня>
 	topDirTarget = regexp.MustCompile(`(?i)^[\x{E020}"']*\$(?:\{(` + reName + `)(?::?-(?:["']{2}|"?\$\{?(` + reName + `)\}?"?)?)?\}|(` + reName + `))[\x{E020}"']*\\?/(` + reTop + `)(?:[\\/]+\*+)*/?[\x{E020}"']*$`)
 	// guardable раскрытие переменной, которое переписывается в ${VAR:?}
-	guardable            = regexp.MustCompile(`\$(?:\{(` + reName + `)([^}]*)\}|\{([0-9]+|[@*!])([^}]*)\}|(` + reName + `|[0-9]+|[@*!]))`)
-	guardedExpansion     = regexp.MustCompile(`\$\{` + reName + `:\?[^}]*\}`)
-	safeParameterDefault = regexp.MustCompile(`\$\{` + reName + `(?::?[-=])[^$}]+\}`)
+	guardable       = regexp.MustCompile(`\$(?:\{(` + reName + `)([^}]*)\}|\{([0-9]+|[@*!])([^}]*)\}|(` + reName + `|[0-9]+|[@*!]))`)
+	unreadVarTarget = regexp.MustCompile(`^[\x{E020}"']*\$\{(` + reName + `|[0-9]+|[@*])(?:[%#/,^?](?:[^{}]|\{[^{}]*\})*|:[0-9](?:[^{}]|\{[^{}]*\})*|:?\+(?:[^{}]|\{[^{}]*\})*|:?=(?:["']{2}|"?\$\{?` + reName + `\}?"?)?|:?[-=]["']?/[/.]*["']?)\}` + reAfter)
 	// bareVar слово целиком — одна переменная: "$D", ${D}, $D/
 	bareVar        = regexp.MustCompile(`^[\x{E020}"']*\$(?:\{(` + reName + `)(?::?[?-][^}]*)?\}|(` + reName + `))[\x{E020}"']*$`)
 	assignWord     = regexp.MustCompile(`^(` + reName + `)\+?=`)
@@ -137,6 +136,8 @@ func (t *RmGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*c
 
 // rmVars что Claude Code знает о переменных команды
 type rmVars struct {
+	cwd                 string
+	pipeLostAssignments bool
 	// tracked — Claude Code подставляет значения переменных; иначе любая
 	// переменная в цели считается возможно пустой
 	tracked bool
@@ -164,6 +165,7 @@ type binding struct {
 // подставить значения переменных
 func (t *RmGuardTool) trackVars(s *shScript, cwd string) *rmVars {
 	v := &rmVars{
+		cwd:      cwd,
 		tracked:  !s.dollarBrace && !s.group && !s.function && !s.heredoc && !s.complexArith,
 		resolved: map[string]bool{}, assigned: map[string]bool{}, derived: map[string]string{},
 		exported:        map[string]bool{},
@@ -182,6 +184,7 @@ func (t *RmGuardTool) trackVars(s *shScript, cwd string) *rmVars {
 			words := commandWords(c.words)
 			if len(words) > 0 && (commandName(words[0].raw) == "rm" || commandName(words[0].raw) == "rmdir") {
 				v.tracked = false
+				v.pipeLostAssignments = true
 				break
 			}
 		}
@@ -563,6 +566,7 @@ func (t *RmGuardTool) checkShellC(args []shWord, v *rmVars) []string {
 		}
 		// внутренней оболочке видны только экспортированные переменные
 		fresh := &rmVars{
+			cwd:     v.cwd,
 			tracked: v.tracked, resolved: map[string]bool{}, assigned: map[string]bool{}, derived: map[string]string{},
 			exported: v.exported, positionalBound: k+2 < len(args),
 			lookupEnv: v.lookupEnv,
@@ -619,25 +623,18 @@ func (t *RmGuardTool) checkTarget(w shWord, v *rmVars, src inline) hint {
 	if names := varRefs(w.text); len(names) == 1 && names[0] == "HOME" {
 		homeTarget := strings.ReplaceAll(trimQuotes(raw), `"`, "")
 		homeTarget = regexp.MustCompile(`\$\{HOME(?::\?[^}]*)?\}`).ReplaceAllStringFunc(homeTarget, func(string) string { return "$HOME" })
-		if after, ok := strings.CutPrefix(homeTarget, "$HOME/"); ok && (after == "*" || after == ".cache/*") {
-			return func([]shWord, int) string {
-				return "удаление всего в HOME Claude Code остановит, укажи более узкий литеральный путь"
+		if after, ok := strings.CutPrefix(homeTarget, "$HOME/"); ok && globTail.MatchString("/"+after) {
+			home, present := v.lookupEnv("HOME")
+			dir := path.Join(home, globTail.ReplaceAllString("/"+after, ""))
+			if present && home != "" && !strings.ContainsAny(dir, "*?[$`") && (pathWithin(dir, v.cwd) || dir == path.Clean(home)) {
+				return func([]shWord, int) string {
+					return "удаление всего в HOME Claude Code остановит, укажи более узкий литеральный путь"
+				}
 			}
 		}
 	}
-	if guardedExpansion.MatchString(raw) {
-		guarded := true
-		for _, name := range varRefs(w.text) {
-			if name == "HOME" || !regexp.MustCompile(`\$\{`+regexp.QuoteMeta(name)+`:\?[^}]*\}`).MatchString(raw) {
-				guarded = false
-			}
-		}
-		if guarded {
-			return nil
-		}
-	}
-	if safeParameterDefault.MatchString(raw) {
-		return nil
+	if m := unreadVarTarget.FindStringSubmatch(raw); m != nil && m[1] != "HOME" && (!v.assigned[m[1]] || v.pipeLostAssignments) {
+		return guardHint(src, []string{m[1]}, "")
 	}
 	if m := bareVar.FindStringSubmatch(trimGlobTail(raw)); m != nil {
 		if from := v.derived[m[1]+m[2]]; from != "" {
@@ -739,6 +736,20 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 	base := path.Clean(cwd)
 	current := base
 	known := true
+	cdCount := 0
+	for _, c := range cmds {
+		words := cdCommandWords(c.words)
+		if len(words) > 0 && dirChangers[commandName(words[0].raw)] {
+			cdCount++
+		}
+	}
+	if cdCount > 1 {
+		for _, c := range cmds[1:] {
+			if c.sep != "&&" {
+				return false
+			}
+		}
+	}
 	mode := ""
 	for i := range rmIndex {
 		c := cmds[i]
@@ -759,17 +770,17 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 				continue
 			}
 			current = path.Clean(cdPath)
-			known = pathWithin(base, current)
+			known = known && pathWithin(base, current)
 			mode = "absolute"
 			continue
 		}
-		if !known || hasParentSegment(cdPath) || strings.HasSuffix(cdPath, "/") || strings.ContainsAny(cdPath, "*?[]") {
+		if !known || hasParentSegment(cdPath) || strings.ContainsAny(cdPath, "*?[]$`") {
 			known = false
 			mode = ""
 			continue
 		}
 		dotRelative := cdPath == "." || strings.HasPrefix(cdPath, "./")
-		if !dotRelative && mode == "" {
+		if !dotRelative && (mode == "" || cdCount == 1) {
 			known = false
 			continue
 		}

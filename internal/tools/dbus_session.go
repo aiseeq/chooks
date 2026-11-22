@@ -87,7 +87,7 @@ func daemonAddress(argv []string) (string, bool) {
 		case a == "--address" || a == "--session" || a == "--system" || a == "--print-address" || strings.HasPrefix(a, "--print-address="):
 			return "", false
 		case a == "--config-file":
-			if i+1 >= len(argv) || argv[i+1] == "" {
+			if i+1 >= len(argv) || argv[i+1] == "" || strings.HasPrefix(argv[i+1], "-") {
 				return "", false
 			}
 			i++

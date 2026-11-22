@@ -135,6 +135,11 @@ func TestKillGuardReviewDBusAddressCases(t *testing.T) {
 		{name: "tmpdir transport", requestAddress: "unix:path=" + runtimeBus, argv: []string{"--address=unix:tmpdir=/tmp"}, deny: true},
 		{name: "tcp transport", requestAddress: "unix:path=" + runtimeBus, argv: []string{"--address=tcp:host=localhost,port=1234"}, deny: true},
 		{name: "unknown address option", requestAddress: "unix:path=" + runtimeBus, argv: []string{"--session", "--address=unix:path=/tmp/test-bus"}, deny: true},
+		// значение --config-file отдельным аргументом не прячет флаги (ревью 3)
+		{name: "address after config-file", requestAddress: "unix:path=" + runtimeBus, argv: []string{"--config-file", "--address=unix:path=/run/user/1000/bus", "--address=unix:path=/tmp/test-bus"}, deny: true},
+		{name: "session after config-file", requestAddress: "unix:path=" + runtimeBus, argv: []string{"--config-file", "--session", "--address=unix:path=/tmp/test-bus"}, deny: true},
+		{name: "print-address after config-file", requestAddress: "unix:path=" + runtimeBus, argv: []string{"--config-file", "--print-address", "--address=unix:path=/tmp/test-bus"}, deny: true},
+		{name: "config-file value then test bus", requestAddress: "unix:path=" + runtimeBus, argv: []string{"--config-file", "/usr/share/dbus-1/session.conf", "--address=unix:path=/tmp/test-bus"}, deny: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

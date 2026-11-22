@@ -2,6 +2,9 @@ package tools
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,6 +26,98 @@ func newRmGuard(t *testing.T) *RmGuardTool {
 		return v, ok
 	}
 	return tool
+}
+
+func TestRmGuard330CdShapeAndVariables(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		deny    bool
+	}{
+		{`cd ./build other && rm -f cache/*`, true},
+		{`cd ./work extra && rmdir out/*`, true},
+		{`cd -- ./build && rm -f cache/*`, true},
+		{`cd -P ./work && rm -f out/*`, true},
+		{`cd ./build >/dev/null && rm -f cache/*`, true},
+		{`cd ./work 2>&1 && rmdir out/*`, true},
+		{`K=v cd ./build && rm -f cache/*`, true},
+		{`K=v cd ./work && rmdir out/*`, true},
+		{`K=v; cd ./build && rm -f cache/*`, true},
+		{`K=v; cd ./work && rmdir out/*`, true},
+		{`cd ./build && rm -f cache/* | cat`, true},
+		{`cd ./work && rmdir out/* | cat`, true},
+		{`(cd ./build && rm -f cache/*)`, true},
+		{`cd ./work && (rmdir out/*)`, true},
+		{`cd /home/u/proj/build; rm -f cache/*`, true},
+		{`cd /home/u/proj/work; rmdir out/*`, true},
+		{`cd /home/u/proj; rm -f cache/*`, false},
+		{`cd "./build" && rm -f cache/*`, false},
+		{`cd ./build/ && rm -f cache/*`, false},
+		{`cd ./a && cd ./b && rm -f out/*`, false},
+		{`cd ./a && rm -f out/* && cd ./b`, false},
+		{`false && rm -f ~/*`, true},
+		{`false && rm -rf ~/*/`, true},
+		{`false && rm -f ~/Documents/*`, false},
+		{`false && rm -f ~/Downloads/*`, false},
+		{`A=foo true; rm -f ${A%z}/*.log`, true},
+		{`B=bar echo hi; rm -f ${B:+x}/*.log`, true},
+		{`A=; rm -f ${A%z}/*.log`, true},
+		{`B=''; rm -f ${B:+x}/*.log`, true},
+		{`A=foo; rm -f ${A%z}/*.log`, false},
+	} {
+		r := validateRm(t, tc.command)
+		if r.IsValid == tc.deny {
+			t.Errorf("deny=%v, ожидалось %v: %q %v", !r.IsValid, tc.deny, tc.command, r.Suggestions)
+		}
+	}
+}
+
+func TestRmGuard330CdSymlink(t *testing.T) {
+	root := t.TempDir()
+	out := t.TempDir()
+	for _, name := range []string{"escape", "link"} {
+		if err := os.Symlink(out, filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+		command := "cd ./" + name + " && rm -f files/*"
+		if validateRmWith(t, newRmGuard(t), command, root).IsValid {
+			t.Errorf("symlink наружу должен отклоняться: %s", command)
+		}
+	}
+}
+
+func TestRmGuard330HintPreservesExpansion(t *testing.T) {
+	for _, original := range []string{`rm -f $Q/*.log`, `rm -f ${Q%z}/*.log`, `rm -f ${Q:+literal}/*.log`, `rm -f ${Q:-$R}/*.log`} {
+		r := validateRm(t, original)
+		if r.IsValid || len(r.Suggestions) == 0 {
+			t.Fatalf("нет подсказки: %s", original)
+		}
+		_, tail, found := strings.Cut(r.Suggestions[0], "перепиши `")
+		rewrite, _, closed := strings.Cut(tail, "`")
+		if !found || !closed {
+			t.Fatalf("нет команды в подсказке: %v", r.Suggestions)
+		}
+		if !validateRm(t, rewrite).IsValid {
+			t.Errorf("подсказка отклоняется: %s", rewrite)
+		}
+		var outputs []string
+		for _, setup := range []string{`Q=/tmp/treez; R=/tmp/other`, `unset Q; R=/tmp/other`} {
+			if !strings.Contains(original, ":-") && strings.Contains(setup, "unset") {
+				continue // здесь защита намеренно останавливает пустой путь
+			}
+			outputs = nil
+			for _, command := range []string{original, rewrite} {
+				cmd := exec.Command("bash", "-c", `set -f; rm() { printf '<%s>\n' "$@"; }; `+setup+`; `+command)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("bash %s: %v: %s", command, err, out)
+				}
+				outputs = append(outputs, string(out))
+			}
+			if outputs[0] != outputs[1] {
+				t.Errorf("адрес изменился: %s -> %s: %q != %q", original, rewrite, outputs[0], outputs[1])
+			}
+		}
+	}
 }
 
 func validateRm(t *testing.T, command string) *core.ValidationResult {
@@ -468,8 +563,8 @@ func TestRmGuard330Extras(t *testing.T) {
 		{`cd ./sub/../.. && rm -f cl/*`, true},
 		{`cd ./../x && rm -f cl/*`, true},
 		{`cd /home/u/proj/../Extra-1 && rm -f cl/*`, true},
-		{`cd /home/u/proj/sub && rm -rf cl/*/`, false},
-		{`cd /home/u/proj/sub; rm -f cl/*`, false},
+		{`cd /home/u/proj/sub && rm -rf cl/*/`, true},
+		{`cd /home/u/proj/sub; rm -f cl/*`, true},
 		{`cd ~ && rm -f cl/*`, true},
 		{`cd . && rm -f cl/*`, false},
 		{`cd /home/u/proj && rm -f cl/*`, false},
@@ -484,9 +579,9 @@ func TestRmGuard330Extras(t *testing.T) {
 		{`cd ./sub && rm -f ../sub/cl/*`, true},
 		{`cd ./sub && rm -f */x`, false},
 		{`cd /home/u/proj/sub && rm -f cl/*`, false},
-		{`cd /home/u/proj/sub ; rm -f cl/*`, false},
-		{`cd /home/u/proj/sub && rm -rf cl/*/`, false},
-		{`cd /home/u/proj/sub && rm -f ../sub/cl/*`, false},
+		{`cd /home/u/proj/sub ; rm -f cl/*`, true},
+		{`cd /home/u/proj/sub && rm -rf cl/*/`, true},
+		{`cd /home/u/proj/sub && rm -f ../sub/cl/*`, true},
 		{`cd /home/u/proj/sub && rm -f */x`, false},
 		{`cd . && rm -f cl/*`, false},
 		{`cd . ; rm -f cl/*`, true},
@@ -653,8 +748,8 @@ func TestRmGuard330SingleCdChainAndGlobs(t *testing.T) {
 		{`cd ./build && rm -f logs/* && echo done`, false},
 		{`cd /home/u/proj/build; rm -rf logs/*/`, true},
 		{`cd /home/u/proj/work; rmdir cache/*/`, true},
-		{`cd /home/u/proj/build; rm -rf logs/*`, false},
-		{`cd /home/u/proj/build && rm -rf logs/*/`, false},
+		{`cd /home/u/proj/build; rm -rf logs/*`, true},
+		{`cd /home/u/proj/build && rm -rf logs/*/`, true},
 		{`cd . && rm -f */logs/*`, true},
 		{`cd . && rmdir ?/cache/*`, true},
 		{`cd . && rm -f */logs`, false},

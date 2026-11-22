@@ -102,6 +102,17 @@ func (t *RmGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*c
 	script := &shScript{}
 	parseShell(cmd, false, script)
 	var reasons []string
+	for _, c := range script.cmds {
+		words := commandWords(c.words)
+		if len(words) == 0 || (commandName(words[0].raw) != "rm" && commandName(words[0].raw) != "rmdir") {
+			continue
+		}
+		for k, w := range words[1:] {
+			if !w.redirect && regexp.MustCompile(`^~/\*+/*$`).MatchString(w.raw) {
+				reasons = append(reasons, rmInvocation(words, k+1, "")+": удаление всего в HOME Claude Code остановит, укажи более узкий литеральный путь")
+			}
+		}
+	}
 	if strings.Contains(cmd, "$") {
 		vars := t.trackVars(script, input.CWD)
 		for _, c := range script.cmds {
@@ -145,6 +156,8 @@ type rmVars struct {
 	resolved map[string]bool
 	// assigned переменные, которым команда что-то присваивает
 	assigned map[string]bool
+	// bound — непустые постоянные присваивания в оболочке для vRr.
+	bound map[string]bool
 	// derived переменные из вывода pwd и подобных: имя → источник
 	derived map[string]string
 	// exported переменные, переданные export или declare -x дочерним процессам
@@ -167,7 +180,7 @@ func (t *RmGuardTool) trackVars(s *shScript, cwd string) *rmVars {
 	v := &rmVars{
 		cwd:      cwd,
 		tracked:  !s.dollarBrace && !s.group && !s.function && !s.heredoc && !s.complexArith,
-		resolved: map[string]bool{}, assigned: map[string]bool{}, derived: map[string]string{},
+		resolved: map[string]bool{}, assigned: map[string]bool{}, bound: map[string]bool{}, derived: map[string]string{},
 		exported:        map[string]bool{},
 		positionalBound: s.function,
 		lookupEnv:       t.lookupEnv,
@@ -239,6 +252,9 @@ func (v *rmVars) applyBindings(bindings []binding, refs map[string]bool, cwd str
 	for _, b := range bindings {
 		count[b.name]++
 		v.assigned[b.name] = true
+		if b.bare {
+			v.bound[b.name] = unquoteWord(b.value) != "" && v.valueResolved(b.value)
+		}
 		if refs[b.name] && (!b.leading || !b.bare) {
 			v.tracked = false
 		}
@@ -567,13 +583,14 @@ func (t *RmGuardTool) checkShellC(args []shWord, v *rmVars) []string {
 		// внутренней оболочке видны только экспортированные переменные
 		fresh := &rmVars{
 			cwd:     v.cwd,
-			tracked: v.tracked, resolved: map[string]bool{}, assigned: map[string]bool{}, derived: map[string]string{},
+			tracked: v.tracked, resolved: map[string]bool{}, assigned: map[string]bool{}, bound: map[string]bool{}, derived: map[string]string{},
 			exported: v.exported, positionalBound: k+2 < len(args),
 			lookupEnv: v.lookupEnv,
 		}
 		for name := range v.exported {
 			fresh.resolved[name] = v.resolved[name]
 			fresh.assigned[name] = v.assigned[name]
+			fresh.bound[name] = v.bound[name]
 		}
 		return t.checkInline(unquoteWord(script.text), fresh, inlineSingle)
 	}
@@ -633,8 +650,8 @@ func (t *RmGuardTool) checkTarget(w shWord, v *rmVars, src inline) hint {
 			}
 		}
 	}
-	if m := unreadVarTarget.FindStringSubmatch(raw); m != nil && m[1] != "HOME" && (!v.assigned[m[1]] || v.pipeLostAssignments) {
-		return guardHint(src, []string{m[1]}, "")
+	if m := unreadVarTarget.FindStringSubmatch(raw); m != nil && m[1] != "HOME" && (!v.bound[m[1]] || v.pipeLostAssignments) {
+		return transformedHint(src)
 	}
 	if m := bareVar.FindStringSubmatch(trimGlobTail(raw)); m != nil {
 		if from := v.derived[m[1]+m[2]]; from != "" {
@@ -680,6 +697,12 @@ func (t *RmGuardTool) checkTarget(w shWord, v *rmVars, src inline) hint {
 // guardHint подсказка с переписанной формой "${VAR:?}"
 func guardHint(src inline, names []string, prefix string) hint {
 	return func(words []shWord, target int) string {
+		if m := guardable.FindStringSubmatch(words[target].text); m != nil {
+			op := m[2] + m[4]
+			if op != "" && op != "-" && op != ":-" {
+				return transformedHint(src)(words, target)
+			}
+		}
 		switch src {
 		case inlineSingle:
 			return fmt.Sprintf("%sвнутри sh -c '…' переменная $%s пуста, укажи литеральный путь или передай его аргументом: sh -c 'rm -f \"$1\"/*' _ \"$%s\"", prefix, names[0], names[0])
@@ -687,6 +710,37 @@ func guardHint(src inline, names []string, prefix string) hint {
 			return prefix + "команда разбирается повторно (eval или sh -c \"…\"), кавычки защиты не сработают, укажи литеральный путь"
 		}
 		return fmt.Sprintf("%sперепиши %s или укажи литеральный путь", prefix, rmInvocation(words, target, guardTarget(words[target].text)))
+	}
+}
+
+// transformedHint сохраняет операцию раскрытия и проверяет её результат.
+func transformedHint(src inline) hint {
+	return func(words []shWord, target int) string {
+		if src != inlineNone {
+			return "раскрытие разбирается повторно, укажи конкретный литеральный путь"
+		}
+		text := words[target].text
+		start := strings.Index(text, "${")
+		if start < 0 {
+			return "вычисли цель отдельно и укажи конкретный литеральный путь"
+		}
+		runes := []rune(text[start:])
+		end := matchBrace(runes, 1)
+		if end >= len(runes) || runes[end] != '}' {
+			return "вычисли цель отдельно и укажи конкретный литеральный путь"
+		}
+		expansion := string(runes[:end+1])
+		tmp := "RM_GUARD_TARGET"
+		for strings.Contains(joinText(words), tmp) {
+			tmp += "_"
+		}
+		guard := "${" + tmp + ":?}"
+		if !insideDoubleQuotes(text[:start]) {
+			guard = `"` + guard + `"`
+		}
+		replacement := text[:start] + guard + text[start+len(expansion):]
+		invocation := strings.Trim(rmInvocation(words, target, replacement), "`")
+		return fmt.Sprintf("перепиши `%s=%s; %s` или укажи конкретный литеральный путь", tmp, expansion, invocation)
 	}
 }
 
@@ -750,6 +804,11 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 			}
 		}
 	}
+	if cdCount == 1 {
+		if cmds[rmIndex].subshell || rmIndex+1 < len(cmds) && (cmds[rmIndex+1].sep == "|" || cmds[rmIndex+1].sep == "|&") {
+			return false
+		}
+	}
 	// dIe проверяет всю цепочку, в том числе операции после rm. Для
 	// абсолютного cd отдельная проверка может пропустить форму с одним ';'
 	// между cd и rm, но не восстанавливает цепочку cd && rm; следующая команда.
@@ -767,6 +826,9 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 		if len(words) == 0 || commandName(words[0].raw) != "cd" {
 			continue
 		}
+		if cdCount == 1 && (i != 0 || c.subshell || len(c.words) != 2 || c.words[0].raw != "cd" || c.words[1].redirect) {
+			return false
+		}
 		if len(words) < 2 {
 			known = false
 			mode = ""
@@ -780,6 +842,12 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 				continue
 			}
 			current = path.Clean(cdPath)
+			if cdCount == 1 && cmds[rmIndex].sep != "&&" && current != base {
+				return false
+			}
+			if cdCount == 1 && !cdRealWithin(base, current) {
+				return false
+			}
 			known = known && pathWithin(base, current)
 			mode = "absolute"
 			continue
@@ -804,6 +872,9 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 			continue
 		}
 		current = path.Clean(path.Join(current, cdPath))
+		if cdCount == 1 && !cdRealWithin(base, current) {
+			return false
+		}
 		known = pathWithin(base, current)
 		mode = "relative"
 	}
@@ -811,6 +882,11 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 		return false
 	}
 	globPath := unquoteWord(target.text)
+	// В подкаталоге цель остаётся относительной для проверки g0; cd в
+	// исходный cwd удаляется из цепочки и сохраняет прежнее исключение.
+	if cdCount == 1 && mode == "absolute" && current != base && (strings.HasSuffix(globPath, "/") || hasParentSegment(globPath)) {
+		return false
+	}
 	if mode == "relative" && !pathWithin(base, path.Clean(path.Join(current, globPath))) {
 		return false
 	}
@@ -821,6 +897,12 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 		return false
 	}
 	return !(mode == "absolute" && strings.HasSuffix(target.text, "/") && hasParentSegment(globPath))
+}
+
+func cdRealWithin(base, dir string) bool {
+	realBase, baseErr := realPath(base)
+	realDir, dirErr := realPath(dir)
+	return baseErr == nil && dirErr == nil && pathWithin(realBase, realDir)
 }
 
 // multiLevelDirGlob соответствует g0: к числу завершающих /* прибавляется

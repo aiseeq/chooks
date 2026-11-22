@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -18,8 +19,9 @@ type shWord struct {
 
 // shCommand простая команда; nested — внутри подстановки $(…) или `…`
 type shCommand struct {
-	words  []shWord
-	nested bool
+	words    []shWord
+	nested   bool
+	subshell bool
 	// sep разделитель перед командой: "" у первой, &&, ;, |, ||, &, перевод строки
 	sep string
 }
@@ -137,7 +139,7 @@ func (l *shLexer) closeCompound(word string) {
 func (l *shLexer) flushCmd() {
 	l.flushWord()
 	if len(l.words) > 0 {
-		l.out.cmds = append(l.out.cmds, shCommand{words: l.words, nested: l.nested, sep: l.sep})
+		l.out.cmds = append(l.out.cmds, shCommand{words: l.words, nested: l.nested, subshell: slices.Contains(l.closers, ")"), sep: l.sep})
 		l.sep = ""
 	}
 	l.words = nil

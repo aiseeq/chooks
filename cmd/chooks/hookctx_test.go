@@ -437,12 +437,12 @@ func TestPreToolCommandsParallel(t *testing.T) {
 			return outcome{code: -1, stderr: err.Error()}
 		}
 		var out, stderr bytes.Buffer
-		env := []string{"HOME=" + dir, "XDG_RUNTIME_DIR=" + filepath.Join(dir, "run"), "CLAUDE_CONFIG_DIR=" + filepath.Join(dir, "claude"), "MODELS_APPROVED=" + filepath.Join(dir, "approved"), fmt.Sprintf("CLAUDE_PID=%d", 2000000+i)}
+		env := []string{"HOME=.", "XDG_RUNTIME_DIR=run", "TMPDIR=tmp", "XDG_STATE_HOME=state", "XDG_CONFIG_HOME=config", "CLAUDE_CONFIG_DIR=claude", "MODELS_APPROVED=approved", "CLAUDE_CODE_TMPDIR=claude-tmp", fmt.Sprintf("CLAUDE_PID=%d", 2000000+i)}
 		if i%2 == 0 {
 			env = append(env, "REQUEST_PREFIX="+dir)
 		}
 		req := hookctx.New(bytes.NewReader(data), &out, &stderr, env, dir, 3000000+i, 4000000+i)
-		req.ConfigPath = filepath.Join(dir, "config.yaml")
+		req.ConfigPath = "config.yaml"
 		code := executeHook(context.Background(), req, hookPreToolUse)
 		return outcome{code: code, out: out.String(), stderr: stderr.String()}
 	}

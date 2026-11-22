@@ -1,6 +1,9 @@
 package hookctx
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"strings"
 
 	"github.com/godbus/dbus/v5"
@@ -47,7 +50,7 @@ func (c Context) busKeys(keys, key string) string {
 			return keys
 		}
 		// Пустое значение godbus считает незаданным ключом: от cwd его не разрешать
-		if value == "" {
+		if value == "" || (key == "path" && strings.HasPrefix(value, "@")) {
 			return keys
 		}
 		if resolved := c.Abs(value); resolved != value {
@@ -56,4 +59,108 @@ func (c Context) busKeys(keys, key string) string {
 		return strings.Join(pairs, ",")
 	}
 	return keys
+}
+
+// ConnectBus bounds both dialing and the D-Bus authentication handshake.
+// Nonce transports are treated as unavailable rather than starting an
+// uninterruptible nonce-file read in the serving process.
+func (c Context) ConnectBus(ctx context.Context, address string) (*dbus.Conn, error) {
+	var last error
+	for entry := range strings.SplitSeq(c.BusAddress(address), ";") {
+		transport, keys, ok := strings.Cut(entry, ":")
+		if !ok || (transport != "unix" && transport != "tcp") {
+			last = fmt.Errorf("unsupported D-Bus address")
+			continue
+		}
+		values := map[string]string{}
+		invalid := false
+		for pair := range strings.SplitSeq(keys, ",") {
+			key, value, ok := strings.Cut(pair, "=")
+			if !ok {
+				continue
+			}
+			if _, exists := values[key]; exists {
+				continue
+			}
+			value, err := dbus.UnescapeBusAddressValue(value)
+			if err != nil {
+				last = err
+				invalid = true
+				break
+			}
+			values[key] = value
+		}
+		if invalid {
+			continue
+		}
+		network, target := "unix", values["path"]
+		if transport == "unix" {
+			abstract := values["abstract"]
+			if (target == "") == (abstract == "") {
+				last = fmt.Errorf("invalid D-Bus unix address")
+				continue
+			}
+			if abstract != "" {
+				target = "@" + abstract
+			}
+		} else {
+			switch values["family"] {
+			case "":
+				network = "tcp"
+			case "ipv4":
+				network = "tcp4"
+			case "ipv6":
+				network = "tcp6"
+			default:
+				last = fmt.Errorf("invalid D-Bus tcp family")
+				continue
+			}
+			if values["host"] == "" || values["port"] == "" {
+				last = fmt.Errorf("invalid D-Bus tcp address")
+				continue
+			}
+			target = net.JoinHostPort(values["host"], values["port"])
+		}
+		raw, err := (&net.Dialer{}).DialContext(ctx, network, target)
+		if err != nil {
+			last = err
+			continue
+		}
+		stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
+		var conn *dbus.Conn
+		if transport == "unix" {
+			unixConn, ok := raw.(*net.UnixConn)
+			if !ok {
+				stop()
+				_ = raw.Close()
+				last = fmt.Errorf("unexpected D-Bus unix connection type")
+				continue
+			}
+			conn, err = dbus.ConnectUnix(unixConn, dbus.WithContext(ctx))
+		} else {
+			conn, err = dbus.NewConn(raw, dbus.WithContext(ctx))
+			if err == nil {
+				err = conn.Auth(nil)
+			}
+			if err == nil {
+				err = conn.Hello()
+			}
+			if err != nil && conn != nil {
+				_ = conn.Close()
+			}
+		}
+		if !stop() && err == nil {
+			_ = conn.Close()
+			return nil, ctx.Err()
+		}
+		if err == nil {
+			return conn, nil
+		}
+		_ = raw.Close()
+		last = err
+	}
+	if last == nil {
+		last = fmt.Errorf("empty D-Bus address")
+	}
+	return nil, last
 }

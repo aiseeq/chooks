@@ -33,13 +33,13 @@ func TabVisible(ctx context.Context) (bool, error) {
 	if service == "" || session == "" || window == "" {
 		return false, nil
 	}
-	conn, err := requestSessionBus(request)
+	ctx, cancel := context.WithTimeout(ctx, visibleTimeout)
+	defer cancel()
+	conn, err := requestSessionBusContext(ctx, request)
 	if err != nil {
 		return false, fmt.Errorf("session bus unavailable: %w", err)
 	}
 	defer conn.Close()
-	ctx, cancel := context.WithTimeout(ctx, visibleTimeout)
-	defer cancel()
 
 	var current int32
 	if err := conn.Object(service, dbus.ObjectPath(window)).CallWithContext(ctx, "org.kde.konsole.Window.currentSession", 0).Store(&current); err != nil {
@@ -60,20 +60,26 @@ func TabVisible(ctx context.Context) (bool, error) {
 }
 
 func requestSessionBus(request hookctx.Context) (*dbus.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), visibleTimeout)
+	defer cancel()
+	return requestSessionBusContext(ctx, request)
+}
+
+func requestSessionBusContext(ctx context.Context, request hookctx.Context) (*dbus.Conn, error) {
 	address := request.Getenv("DBUS_SESSION_BUS_ADDRESS")
 	if address == "" || address == "autolaunch:" {
 		var err error
-		address, err = discoverRequestBus(request)
+		address, err = discoverRequestBus(ctx, request)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return dbus.Connect(request.BusAddress(address))
+	return request.ConnectBus(ctx, address)
 }
 
 // discoverRequestBus mirrors the usual Linux session-bus discovery without
 // changing the daemon's environment or inheriting its PATH/cwd.
-func discoverRequestBus(request hookctx.Context) (string, error) {
+func discoverRequestBus(ctx context.Context, request hookctx.Context) (string, error) {
 	runtime := filepath.Join("/run/user", strconv.Itoa(os.Getuid()))
 	bus := filepath.Join(runtime, "bus")
 	if _, err := os.Stat(bus); err == nil {
@@ -88,7 +94,8 @@ func discoverRequestBus(request hookctx.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.Command(path)
+	cmd := exec.CommandContext(ctx, path)
+	cmd.WaitDelay = 20 * time.Millisecond
 	cmd.Args[0] = "dbus-launch"
 	cmd.Env = append([]string{}, request.Env...)
 	cmd.Dir = request.Cwd

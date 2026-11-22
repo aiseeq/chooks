@@ -187,6 +187,11 @@ func TestKillGuardBlocks(t *testing.T) {
 		`unbuffer kill -9 1`,
 		`unbuffer -p kill 1500`,
 		`unbuffer -noecho kill 1500`,
+		// модификаторы zsh перед командой (akit v1.90.12)
+		`noglob kill -9 1`,
+		`zsh -c 'noglob kill -9 1'`,
+		`nocorrect kill 1500`,
+		`noglob - kill -9 1`,
 		`flock /tmp/x kill $PID`,
 		`flock -w 5 /tmp/x -c 'kill 1500'`,
 		`busybox kill $PID`,

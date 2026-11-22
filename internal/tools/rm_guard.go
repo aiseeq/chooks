@@ -67,9 +67,7 @@ var (
 	// positionalTarget то же для $1, $@, $*, $!
 	positionalTarget = regexp.MustCompile(`^[\x{E020}"']*\$(?:\{(?:[0-9]+|[@*!])` + reDflt + `\}|[0-9@*!])` + reAfter)
 	// topDirTarget $VAR/<каталог верхнего уровня>
-	topDirTarget = regexp.MustCompile(`(?i)^[\x{E020}"']*\$(?:\{(` + reName + `)(?::?-(?:["']{2}|"?\$\{?(` + reName + `)\}?"?)?)?\}|(` + reName + `))[\x{E020}"']*\\?/(` + reTop + `)(?:[\\/]+\*+)*/?[\x{E020}"']*$`)
-	// guardable раскрытие переменной, которое переписывается в ${VAR:?}
-	guardable       = regexp.MustCompile(`\$(?:\{(` + reName + `)([^}]*)\}|\{([0-9]+|[@*!])([^}]*)\}|(` + reName + `|[0-9]+|[@*!]))`)
+	topDirTarget    = regexp.MustCompile(`(?i)^[\x{E020}"']*\$(?:\{(` + reName + `)(?::?-(?:["']{2}|"?\$\{?(` + reName + `)\}?"?)?)?\}|(` + reName + `))[\x{E020}"']*\\?/(` + reTop + `)(?:[\\/]+\*+)*/?[\x{E020}"']*$`)
 	unreadVarTarget = regexp.MustCompile(`^[\x{E020}"']*\$\{(` + reName + `|[0-9]+|[@*])(?:[%#/,^?](?:[^{}]|\{[^{}]*\})*|:[0-9](?:[^{}]|\{[^{}]*\})*|:?\+(?:[^{}]|\{[^{}]*\})*|:?=(?:["']{2}|"?\$\{?` + reName + `\}?"?)?|:?[-=]["']?/[/.]*["']?)\}` + reAfter)
 	// bareVar слово целиком — одна переменная: "$D", ${D}, $D/
 	bareVar        = regexp.MustCompile(`^[\x{E020}"']*\$(?:\{(` + reName + `)(?::?[?-][^}]*)?\}|(` + reName + `))[\x{E020}"']*$`)
@@ -172,6 +170,7 @@ type binding struct {
 	name, value string
 	leading     bool // в цепочке присваиваний до первой обычной команды
 	bare        bool // простое присваивание, не prefix перед командой и не цикл
+	unset       bool
 }
 
 // trackVars разбирает присваивания так же, как Claude Code решает, можно ли
@@ -252,8 +251,10 @@ func (v *rmVars) applyBindings(bindings []binding, refs map[string]bool, cwd str
 	for _, b := range bindings {
 		count[b.name]++
 		v.assigned[b.name] = true
-		if b.bare {
-			v.bound[b.name] = unquoteWord(b.value) != "" && v.valueResolved(b.value)
+		if b.unset {
+			v.bound[b.name] = false
+		} else if b.bare {
+			v.bound[b.name] = unquoteWord(b.value) != "" && v.valueResolved(b.value) && !v.rootValued(b.value)
 		}
 		if refs[b.name] && (!b.leading || !b.bare) {
 			v.tracked = false
@@ -334,7 +335,7 @@ func commandSideBindings(name string, args []shWord, v *rmVars) []binding {
 	case "read", "unset":
 		for _, w := range args {
 			if !strings.HasPrefix(w.raw, "-") && assignName(w.raw) {
-				out = append(out, binding{name: w.raw})
+				out = append(out, binding{name: w.raw, unset: name == "unset"})
 			}
 		}
 	case "set":
@@ -343,6 +344,22 @@ func commandSideBindings(name string, args []shWord, v *rmVars) []binding {
 		}
 	}
 	return out
+}
+
+// rootValued соответствует Pst: корень, критический каталог или путь,
+// заканчивающийся на . либо ... Такие значения исключаются из assigned в WOe.
+func (v *rmVars) rootValued(value string) bool {
+	p := unquoteWord(value)
+	trimmed := strings.TrimRight(p, "/")
+	if p != "" && trimmed == "" || trimmed == "." || trimmed == ".." || strings.HasSuffix(trimmed, "/.") || strings.HasSuffix(trimmed, "/..") {
+		return true
+	}
+	if !path.IsAbs(p) || strings.ContainsAny(p, "$`") {
+		return false
+	}
+	clean := path.Clean(p)
+	home, ok := v.lookupEnv("HOME")
+	return path.Dir(clean) == "/" || ok && home != "" && clean == path.Clean(home)
 }
 
 func assignment(w shWord, leading, bare bool) binding {
@@ -651,7 +668,7 @@ func (t *RmGuardTool) checkTarget(w shWord, v *rmVars, src inline) hint {
 		}
 	}
 	if m := unreadVarTarget.FindStringSubmatch(raw); m != nil && m[1] != "HOME" && (!v.bound[m[1]] || v.pipeLostAssignments) {
-		return transformedHint(src)
+		return guardHint(src, []string{m[1]}, "")
 	}
 	if m := bareVar.FindStringSubmatch(trimGlobTail(raw)); m != nil {
 		if from := v.derived[m[1]+m[2]]; from != "" {
@@ -694,53 +711,14 @@ func (t *RmGuardTool) checkTarget(w shWord, v *rmVars, src inline) hint {
 	return guardHint(src, names, "")
 }
 
-// guardHint подсказка с переписанной формой "${VAR:?}"
-func guardHint(src inline, names []string, prefix string) hint {
+// guardHint просит назвать конкретный путь, не меняя раскрытие и разбиение Bash.
+func guardHint(_ inline, _ []string, prefix string) hint {
 	return func(words []shWord, target int) string {
-		if m := guardable.FindStringSubmatch(words[target].text); m != nil {
-			op := m[2] + m[4]
-			if op != "" && op != "-" && op != ":-" {
-				return transformedHint(src)(words, target)
-			}
+		example := "rm -f /abs/dir/*.tmp"
+		if commandName(words[0].raw) == "rmdir" {
+			example = "rmdir /abs/dir/*"
 		}
-		switch src {
-		case inlineSingle:
-			return fmt.Sprintf("%sвнутри sh -c '…' переменная $%s пуста, укажи литеральный путь или передай его аргументом: sh -c 'rm -f \"$1\"/*' _ \"$%s\"", prefix, names[0], names[0])
-		case inlineReparsed:
-			return prefix + "команда разбирается повторно (eval или sh -c \"…\"), кавычки защиты не сработают, укажи литеральный путь"
-		}
-		return fmt.Sprintf("%sперепиши %s или укажи литеральный путь", prefix, rmInvocation(words, target, guardTarget(words[target].text)))
-	}
-}
-
-// transformedHint сохраняет операцию раскрытия и проверяет её результат.
-func transformedHint(src inline) hint {
-	return func(words []shWord, target int) string {
-		if src != inlineNone {
-			return "раскрытие разбирается повторно, укажи конкретный литеральный путь"
-		}
-		text := words[target].text
-		start := strings.Index(text, "${")
-		if start < 0 {
-			return "вычисли цель отдельно и укажи конкретный литеральный путь"
-		}
-		runes := []rune(text[start:])
-		end := matchBrace(runes, 1)
-		if end >= len(runes) || runes[end] != '}' {
-			return "вычисли цель отдельно и укажи конкретный литеральный путь"
-		}
-		expansion := string(runes[:end+1])
-		tmp := "RM_GUARD_TARGET"
-		for strings.Contains(joinText(words), tmp) {
-			tmp += "_"
-		}
-		guard := "${" + tmp + ":?}"
-		if !insideDoubleQuotes(text[:start]) {
-			guard = `"` + guard + `"`
-		}
-		replacement := text[:start] + guard + text[start+len(expansion):]
-		invocation := strings.Trim(rmInvocation(words, target, replacement), "`")
-		return fmt.Sprintf("перепиши `%s=%s; %s` или укажи конкретный литеральный путь", tmp, expansion, invocation)
+		return fmt.Sprintf("%sподставь путь каталога буквально, например: `%s`", prefix, example)
 	}
 }
 
@@ -826,15 +804,11 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 		if len(words) == 0 || commandName(words[0].raw) != "cd" {
 			continue
 		}
-		if cdCount == 1 && (i != 0 || c.subshell || len(c.words) != 2 || c.words[0].raw != "cd" || c.words[1].redirect) {
+		cdArg, valid := cdLiteralArgument(c, cdCount > 1)
+		if !valid || cdCount == 1 && i != 0 {
 			return false
 		}
-		if len(words) < 2 {
-			known = false
-			mode = ""
-			continue
-		}
-		cdPath := strings.Trim(unquoteWord(words[1].text), "\"'")
+		cdPath := strings.Trim(unquoteWord(cdArg.text), "\"'")
 		if strings.HasPrefix(cdPath, "/") {
 			if hasParentSegment(cdPath) {
 				known = false
@@ -845,7 +819,7 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 			if cdCount == 1 && cmds[rmIndex].sep != "&&" && current != base {
 				return false
 			}
-			if cdCount == 1 && !cdRealWithin(base, current) {
+			if !cdRealWithin(base, current) {
 				return false
 			}
 			known = known && pathWithin(base, current)
@@ -872,7 +846,7 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 			continue
 		}
 		current = path.Clean(path.Join(current, cdPath))
-		if cdCount == 1 && !cdRealWithin(base, current) {
+		if !cdRealWithin(base, current) {
 			return false
 		}
 		known = pathWithin(base, current)
@@ -897,6 +871,31 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 		return false
 	}
 	return !(mode == "absolute" && strings.HasSuffix(target.text, "/") && hasParentSegment(globPath))
+}
+
+// cdLiteralArgument проверяет форму cd до фильтрации префиксов; при нескольких
+// cd локальная ветка Claude Code допускает перенаправления и необязательное --.
+func cdLiteralArgument(c shCommand, multi bool) (shWord, bool) {
+	if c.subshell || len(c.words) == 0 || c.words[0].raw != "cd" {
+		return shWord{}, false
+	}
+	var args []shWord
+	for _, w := range c.words[1:] {
+		if w.redirect {
+			if !multi {
+				return shWord{}, false
+			}
+			continue
+		}
+		args = append(args, w)
+	}
+	if multi && len(args) > 0 && args[0].raw == "--" {
+		args = args[1:]
+	}
+	if len(args) != 1 {
+		return shWord{}, false
+	}
+	return args[0], true
 }
 
 func cdRealWithin(base, dir string) bool {
@@ -1026,51 +1025,6 @@ func (v *rmVars) allMayBeUnset(names []string) bool {
 		}
 	}
 	return true
-}
-
-// guardTarget переписывает каждое раскрытие в ${VAR:?}, вне кавычек — в "${VAR:?}"
-func guardTarget(target string) string {
-	var b strings.Builder
-	last := 0
-	for _, m := range guardable.FindAllStringSubmatchIndex(target, -1) {
-		b.WriteString(target[last:m[0]])
-		name := sub(target, m, 1) + sub(target, m, 3) + sub(target, m, 5)
-		guarded := "${" + name + ":?}"
-		if !insideDoubleQuotes(target[:m[0]]) {
-			guarded = `"` + guarded + `"`
-		}
-		b.WriteString(guarded)
-		last = m[1]
-	}
-	b.WriteString(target[last:])
-	return b.String()
-}
-
-func sub(s string, m []int, group int) string {
-	if m[2*group] < 0 {
-		return ""
-	}
-	return s[m[2*group]:m[2*group+1]]
-}
-
-// insideDoubleQuotes после prefix открыта двойная кавычка
-func insideDoubleQuotes(prefix string) bool {
-	in := false
-	for i := 0; i < len(prefix); i++ {
-		switch prefix[i] {
-		case '\\':
-			i++
-		case '\'':
-			if !in {
-				if j := strings.IndexByte(prefix[i+1:], '\''); j >= 0 {
-					i += j + 1
-				}
-			}
-		case '"':
-			in = !in
-		}
-	}
-	return in
 }
 
 // rmInvocation текст вызова rm; replacement заменяет цель target

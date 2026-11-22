@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -63,6 +62,18 @@ func TestRmGuard330CdShapeAndVariables(t *testing.T) {
 		{`A=; rm -f ${A%z}/*.log`, true},
 		{`B=''; rm -f ${B:+x}/*.log`, true},
 		{`A=foo; rm -f ${A%z}/*.log`, false},
+		{`cd ./build extra && cd ./next && rm -f cache/*`, true},
+		{`cd ./work other && cd ./next && rmdir out/*`, true},
+		{`K=v cd ./build && cd ./next && rm -f cache/*`, true},
+		{`K=v cd ./work && cd ./next && rmdir out/*`, true},
+		{`cd ./build >/dev/null && cd ./next && rm -f cache/*`, false},
+		{`cd ./work 2>/dev/null && cd ./next && rmdir out/*`, false},
+		{`A=/; false && rm -f ${A%z}/*.log`, true},
+		{`B=//; false && rm -f ${B#x}/*.log`, true},
+		{`A=foo; unset A; false && rm -f ${A%z}/*.log`, true},
+		{`B=bar; unset B; false && rm -f ${B#x}/*.log`, true},
+		{`A=/; A=foo; false && rm -f ${A%z}/*.log`, false},
+		{`B=bar; unset B; B=next; false && rm -f ${B#x}/*.log`, false},
 	} {
 		r := validateRm(t, tc.command)
 		if r.IsValid == tc.deny {
@@ -82,40 +93,33 @@ func TestRmGuard330CdSymlink(t *testing.T) {
 		if validateRmWith(t, newRmGuard(t), command, root).IsValid {
 			t.Errorf("symlink наружу должен отклоняться: %s", command)
 		}
+		for _, command := range []string{
+			"cd ./" + name + " && cd ./child && rm -f files/*",
+			"cd ./" + name + " && rm -f files/* && cd ./child",
+		} {
+			if validateRmWith(t, newRmGuard(t), command, root).IsValid {
+				t.Errorf("symlink перед rm должен отклоняться: %s", command)
+			}
+		}
 	}
 }
 
-func TestRmGuard330HintPreservesExpansion(t *testing.T) {
-	for _, original := range []string{`rm -f $Q/*.log`, `rm -f ${Q%z}/*.log`, `rm -f ${Q:+literal}/*.log`, `rm -f ${Q:-$R}/*.log`} {
+func TestRmGuard330HintUsesLiteralPath(t *testing.T) {
+	for _, original := range []string{`rm -f $Q/*.tmp`, `rm -f ${Q%z}/*.tmp`, `rm -f ${Q#z}/*.tmp`, `rm -f ${Q:+literal}/*.tmp`, `rm -f ${Q:0:7}/*.tmp`, `rm -f ${Q:-$Y}/*.tmp`} {
 		r := validateRm(t, original)
 		if r.IsValid || len(r.Suggestions) == 0 {
 			t.Fatalf("нет подсказки: %s", original)
 		}
-		_, tail, found := strings.Cut(r.Suggestions[0], "перепиши `")
-		rewrite, _, closed := strings.Cut(tail, "`")
+		_, tail, found := strings.Cut(r.Suggestions[0], "подставь путь каталога буквально, например: `")
+		example, _, closed := strings.Cut(tail, "`")
 		if !found || !closed {
 			t.Fatalf("нет команды в подсказке: %v", r.Suggestions)
 		}
-		if !validateRm(t, rewrite).IsValid {
-			t.Errorf("подсказка отклоняется: %s", rewrite)
+		if strings.ContainsAny(tail, "$") || strings.Contains(tail, "RM_GUARD_TARGET") {
+			t.Errorf("подсказка переписывает раскрытие: %s", tail)
 		}
-		var outputs []string
-		for _, setup := range []string{`Q=/tmp/treez; R=/tmp/other`, `unset Q; R=/tmp/other`} {
-			if !strings.Contains(original, ":-") && strings.Contains(setup, "unset") {
-				continue // здесь защита намеренно останавливает пустой путь
-			}
-			outputs = nil
-			for _, command := range []string{original, rewrite} {
-				cmd := exec.Command("bash", "-c", `set -f; rm() { printf '<%s>\n' "$@"; }; `+setup+`; `+command)
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					t.Fatalf("bash %s: %v: %s", command, err, out)
-				}
-				outputs = append(outputs, string(out))
-			}
-			if outputs[0] != outputs[1] {
-				t.Errorf("адрес изменился: %s -> %s: %q != %q", original, rewrite, outputs[0], outputs[1])
-			}
+		if !validateRm(t, example).IsValid {
+			t.Errorf("пример отклоняется: %s", example)
 		}
 	}
 }
@@ -381,23 +385,23 @@ func TestRmGuardReason(t *testing.T) {
 		command, want string
 	}{
 		{`S=/home/u/sb; echo x | rm -f $S/*.zz`,
-			"`rm -f $S/*.zz`: перепиши `rm -f \"${S:?}\"/*.zz` или укажи литеральный путь"},
+			"`rm -f $S/*.zz`: подставь путь каталога буквально, например: `rm -f /abs/dir/*.tmp`"},
 		{`false && rm -f $HOME/*`,
 			"`rm -f $HOME/*`: удаление всего в HOME Claude Code остановит, укажи более узкий литеральный путь"},
 		{`false && rm -f "${HOME:?}"/*`,
 			"`rm -f \"${HOME:?}\"/*`: удаление всего в HOME Claude Code остановит, укажи более узкий литеральный путь"},
 		{`cd /x && ls; S=/home/u/scratchpad/sl; rm -f $S/*; ls`,
-			"`rm -f $S/*`: перепиши `rm -f \"${S:?}\"/*` или укажи литеральный путь"},
+			"`rm -f $S/*`: подставь путь каталога буквально, например: `rm -f /abs/dir/*.tmp`"},
 		{`false && rm -rf "$NOPE/"`,
-			"`rm -rf \"$NOPE/\"`: перепиши `rm -rf \"${NOPE:?}/\"` или укажи литеральный путь"},
+			"`rm -rf \"$NOPE/\"`: подставь путь каталога буквально, например: `rm -f /abs/dir/*.tmp`"},
 		{`false && rm -f ${NOPE:-}/*.zz`,
-			"`rm -f ${NOPE:-}/*.zz`: перепиши `rm -f \"${NOPE:?}\"/*.zz` или укажи литеральный путь"},
+			"`rm -f ${NOPE:-}/*.zz`: подставь путь каталога буквально, например: `rm -f /abs/dir/*.tmp`"},
 		{`false && rm -f "$1"/*.zz`,
 			"`rm -f \"$1\"/*.zz`: $1 в команде Bash пуст, укажи литеральный путь"},
 		{`D=$(pwd); false && rm -rf "$D"`,
 			"`rm -rf \"$D\"`: $D задан из `$(pwd)` и может оказаться рабочей папкой, защита ${D:?} не поможет, укажи литеральный путь"},
 		{`S=/x; sh -c 'rm -f "$S"/*.zz'`,
-			"`rm -f \"$S\"/*.zz`: внутри sh -c '…' переменная $S пуста, укажи литеральный путь или передай его аргументом: sh -c 'rm -f \"$1\"/*' _ \"$S\""},
+			"`rm -f \"$S\"/*.zz`: подставь путь каталога буквально, например: `rm -f /abs/dir/*.tmp`"},
 	} {
 		r := validateRm(t, tc.command)
 		if r.IsValid {

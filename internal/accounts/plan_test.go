@@ -213,3 +213,37 @@ func TestPlanPriceDateInLocalLocation(t *testing.T) {
 		t.Errorf("plan_usd_month %v, want 200 from the row valid since midnight local time", plan.usd)
 	}
 }
+
+// Дата без времени — в поясе запроса, а не процесса: хук считает в поясе
+// вызывающего (hookctx), и на границе суток действует строка его даты.
+func TestPlanPriceDateInRequestLocation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rates.tsv")
+	rates := "valid_from\tprovider\tplan\tplan_usd_month\tapi_usd_week\n2026-02-01\tanthropic\tmax\t100\t800\n2026-03-01\tanthropic\tmax\t200\t1600\n"
+	if err := os.WriteFile(path, []byte(rates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TZ", "UTC")
+	tokyo := time.FixedZone("UTC+9", 9*3600)
+	plan, err := planPrice(path, ratesProvider, time.Date(2026, 3, 1, 0, 30, 0, 0, tokyo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.usd != 200 {
+		t.Errorf("plan_usd_month %v, want 200: 1 марта 00:30 в поясе запроса", plan.usd)
+	}
+}
+
+// Колонка api_usd_week chooks не нужна: файл без неё читается.
+func TestPlanPriceWithoutWeekColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rates.tsv")
+	if err := os.WriteFile(path, []byte("valid_from\tprovider\tplan_usd_month\n2026-01-01\tanthropic\t200\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := planPrice(path, ratesProvider, time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.usd != 200 {
+		t.Errorf("plan_usd_month %v, want 200", plan.usd)
+	}
+}

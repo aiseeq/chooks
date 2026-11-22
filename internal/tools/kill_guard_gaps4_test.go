@@ -193,7 +193,7 @@ func TestKillGuardGaps4Reasons(t *testing.T) {
 		t.Errorf("юнит сессии назван прямо: «за ним» лишнее, получили %q", direct)
 	}
 	mixed := validateKill(t, `kill 1; tmux kill-server; tmux kill-session`).Suggestions
-	if want := []string{killGuardHint, toolHints["tmux"]}; !slices.Equal(mixed[len(mixed)-2:], want) {
+	if want := []string{protectedProcessHint, toolHints["tmux"]}; !slices.Equal(mixed[len(mixed)-2:], want) {
 		t.Errorf("kill и tmux: ждали подсказки %q по разу, получили %q", want, mixed)
 	}
 	if plain := validateKill(t, `loginctl terminate-user aisee`).Suggestions; !slices.Contains(plain, killGuardHint) {

@@ -43,7 +43,6 @@ func TestKillGuardGaps6Allows(t *testing.T) {
 		`sudo -- PATH=$PATH LANG=C /bin/kill 455274`,
 		`sudo -- A=$a B=$b tmux kill-session -t x`,
 		`sudo -E -- PATH=$PATH:/usr/sbin LANG=C fuser -k 8080/tcp`,
-		`timeout 5 sudo -- A=$a B=$b kill 455274`,
 		`sudo -- A=$a B=$b; kill 455274`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {

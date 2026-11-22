@@ -427,6 +427,64 @@ func TestRuntimeModelGuardFindsClaudeAncestorPastUnreadableExe(t *testing.T) {
 	wantReject(t, f)
 }
 
+func TestRuntimeModelGuardModelOverrides(t *testing.T) {
+	for _, source := range []string{"inline", "settings file", "project settings", "user settings", "without overrides"} {
+		t.Run(source, func(t *testing.T) {
+			f := agentTree([]string{"claude", "--model", "opus"}, "CLAUDECODE=1")
+			guard := runtimeGuard(t, f)
+			home, project, outside := os.Getenv("HOME"), t.TempDir(), t.TempDir()
+			f.cwd[90] = outside
+			write := func(path, value string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bad := `{"modelOverrides":{"claude-opus-5-5":"fable"}}`
+			good := `{"modelOverrides":{"claude-opus-5-5":"opus"}}`
+			switch source {
+			case "inline":
+				f.argv[90] = []string{"claude", "--settings", bad, "--model", "opus"}
+			case "settings file":
+				path := filepath.Join(outside, "settings.json")
+				write(path, bad)
+				f.argv[90] = []string{"claude", "--settings", path, "--model", "opus"}
+			case "project settings":
+				write(filepath.Join(project, ".git", "HEAD"), "ref: refs/heads/main\n")
+				write(filepath.Join(project, ".claude", "settings.json"), bad)
+				f.cwd[90] = project
+			case "user settings":
+				write(filepath.Join(home, ".claude", "settings.json"), bad)
+			}
+			if source == "without overrides" {
+				if message, err := guard.Check(requestContext(t), 100); message != "" || err != nil {
+					t.Fatalf("Check = %q, %v; want pass", message, err)
+				}
+				return
+			}
+			if message, err := guard.Check(requestContext(t), 100); err != nil || message == "" {
+				t.Fatalf("unapproved override Check = %q, %v; want reject", message, err)
+			}
+			switch source {
+			case "inline":
+				f.argv[90] = []string{"claude", "--settings", good, "--model", "opus"}
+			case "settings file":
+				write(filepath.Join(outside, "settings.json"), good)
+			case "project settings":
+				write(filepath.Join(project, ".claude", "settings.json"), good)
+			case "user settings":
+				write(filepath.Join(home, ".claude", "settings.json"), good)
+			}
+			if message, err := guard.Check(requestContext(t), 100); message != "" || err != nil {
+				t.Fatalf("approved override Check = %q, %v; want pass", message, err)
+			}
+		})
+	}
+}
+
 func TestRuntimeModelGuardInteractiveUserPasses(t *testing.T) {
 	for _, model := range []string{"fable", "haiku"} {
 		t.Run(model, func(t *testing.T) {

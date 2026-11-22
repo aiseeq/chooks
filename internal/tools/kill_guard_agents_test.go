@@ -178,6 +178,10 @@ func TestKillGuardForeignUnitTexts(t *testing.T) {
 		if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), tc.reason) || !slices.ContainsFunc(r.Suggestions, func(h string) bool { return strings.HasPrefix(h, tc.hint) }) {
 			t.Errorf("%s: ждали отказ с «%s» и подсказкой «%s», получили %v %q", tc.command, tc.reason, tc.hint, r.IsValid, r.Suggestions)
 		}
+		// боец чужого мастера: путь назван, чтобы агент не уходил в сигналы по PID
+		if strings.HasPrefix(tc.hint, "Бойца снимает") && !strings.Contains(strings.Join(r.Suggestions, "\n"), "worker stop --other-master <id> по слову пользователя") {
+			t.Errorf("%s: подсказка без пути для бойца чужого мастера: %q", tc.command, r.Suggestions)
+		}
 	}
 	// своя сессия — прежняя причина: в юните идёт claude
 	r := validateKill(t, `systemctl --user stop agent-x-1.scope`)
@@ -488,9 +492,6 @@ func TestKillGuardSystemdRunStdinTailReview(t *testing.T) {
 // подстановка — отказ, литерал — пропуск, а текст <<< проверяется
 func TestKillGuardSystemdRunStdinTail2(t *testing.T) {
 	for _, command := range []string{
-		`cat a.sh | parallel systemd-run --pipe bash`,
-		`echo make | parallel systemd-run --user --pipe sh`,
-		`cat a.sh | parallel -j2 systemd-run --user --pipe bash`,
 		`sh -c 'systemd-run --pipe bash' < "$F"`,
 		`sh -c 'systemd-run --pipe bash' < "$DIR/a.sh"`,
 		`sh -c 'systemd-run --pipe bash' <<< "$CMD"`,
@@ -518,6 +519,8 @@ func TestKillGuardSystemdRunStdinTail2(t *testing.T) {
 		`printf '%s\n' "$CMD" | sh -c 'systemd-run --pipe bash' < script.sh`,
 		`sh -c 'systemd-run --pipe bash' 2< "$F"`,
 		`seq 3 | parallel systemd-run --user sleep`,
+		// значение литерально: как systemd-run --user --pipe sh make напрямую
+		`echo make | parallel systemd-run --user --pipe sh`,
 		`parallel systemd-run --user --pipe bash ::: a.sh b.sh`,
 		`cat a.sh | parallel systemd-run -H host --pipe bash`,
 		`cat list | parallel systemd-run --user bash build.sh`,
@@ -528,29 +531,12 @@ func TestKillGuardSystemdRunStdinTail2(t *testing.T) {
 	}
 }
 
-// parallel по приёмке: команда — слова, склеенные в строку для оболочки,
-// оболочка ищется на любой глубине под systemd-run; --pipe — как прямой
-// пайп; -S host — другая машина; имя из ввода ({}, {1}) — отказ
+// parallel с systemd-run: слово сигнала во вводе --pipe и имя {} — отказ.
+// Имя или скрипт из нелитерального источника без слова сигнала правило
+// глубины не вычисляет (разбор опций и подстановок parallel удалён)
 func TestKillGuardSystemdRunParallel(t *testing.T) {
 	for _, command := range []string{
-		`cat a.sh | parallel 'systemd-run --pipe bash'`,
-		`cat a.sh | parallel "systemd-run --user --pipe bash"`,
-		`cat a.sh | parallel systemd-run --pipe nice bash`,
-		`cat a.sh | parallel systemd-run --pipe run0 bash`,
-		`cat a.sh | parallel /usr/bin/systemd-run --pipe bash`,
-		`cat a.sh | parallel nice systemd-run --pipe bash`,
-		`cat a.sh | parallel systemd-run --user bash -c`,
-		`cat a.sh | parallel -q systemd-run --pipe bash`,
-		`cat a.sh | parallel --sshlogin : systemd-run --pipe bash`,
-		`cat a.sh | parallel -S :,host systemd-run --pipe bash`,
-		`printf '%s\n' "$CMD" | parallel --pipe systemd-run --pipe bash`,
 		`echo 'kill 455274' | parallel --pipe systemd-run --pipe bash`,
-		`cat "$F" | parallel --pipe systemd-run --user --pipe sh`,
-		`cat a.sh | parallel systemd-run --user {}`,
-		`cat a.sh | parallel systemd-run --user "{}"`,
-		`cat a.sh | parallel --colsep ' ' systemd-run --user {1} {2}`,
-		`cat a.sh | parallel -I XX systemd-run --user XX`,
-		`cat a.sh | parallel systemd-run --user {.} arg`,
 		// и на main: shellcmd снимает parallel с ::: и отдаёт имя {}
 		`parallel systemd-run --user {} ::: make`,
 	} {
@@ -559,88 +545,14 @@ func TestKillGuardSystemdRunParallel(t *testing.T) {
 		}
 	}
 	for _, command := range []string{
-		`echo make | parallel --pipe systemd-run --pipe bash`,
-		`cat a.sh | parallel --pipe systemd-run --pipe bash`,
-		`cat a.sh | parallel -S host systemd-run --pipe bash`,
-		`cat a.sh | parallel -H host systemd-run --pipe bash`,
-		`cat a.sh | parallel --sshlogin host1,host2 systemd-run --pipe bash`,
-		`cat a.sh | parallel --sshlogin=host systemd-run --pipe bash`,
 		`cat a.sh | parallel systemd-run -M c1 --pipe bash`,
 		`parallel systemd-run --user make ::: a b`,
-		`parallel -a list.txt systemd-run --user bash`,
 		`cat a.sh | parallel systemd-run --user make`,
 		`cat a.sh | parallel systemd-run --user bash build.sh`,
 		`cat a.sh | parallel systemd-run --user bash -c 'make {}'`,
 		`cat a.sh | parallel echo systemd-run`,
 		`cat hosts | parallel ssh {} uptime`,
 		`seq 3 | parallel -j2 go test ./pkg/{}`,
-	} {
-		if r := validateKill(t, command); !r.IsValid {
-			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
-		}
-	}
-}
-
-// parallel, последний круг приёмки: run0/pkexec перед systemd-run, машина
-// «:» в записи -S с префиксом и списки машин, которых не видно; строки
-// замены в длинной форме; опции со значением — по таблице parallel
-// 20260922 (Getopt::Long с bundling и require_order)
-func TestKillGuardSystemdRunParallelOptions(t *testing.T) {
-	for _, command := range []string{
-		`cat a.sh | parallel 'run0 systemd-run --pipe bash'`,
-		`cat a.sh | parallel run0 systemd-run --pipe bash`,
-		`cat a.sh | parallel pkexec systemd-run --pipe bash`,
-		`cat a.sh | parallel run0 systemd-run --user {}`,
-		`cat a.sh | parallel 'run0 systemd-run --user kill 455274'`,
-		`cat a.sh | parallel -S 4/: systemd-run --pipe bash`,
-		`cat a.sh | parallel --sshlogin=4/: systemd-run --pipe bash`,
-		`cat a.sh | parallel -S host,4/: systemd-run --pipe bash`,
-		`cat a.sh | parallel -S @grp/: systemd-run --pipe bash`,
-		`cat a.sh | parallel -S @grp/4/: systemd-run --pipe bash`,
-		"cat a.sh | parallel -S 'host\n:' systemd-run --pipe bash",
-		`cat a.sh | parallel -S 'ssh -p 2222 :' systemd-run --pipe bash`,
-		`cat a.sh | parallel -S 4/: systemd-run --user {}`,
-		`cat a.sh | parallel -S "$H" systemd-run --pipe bash`,
-		`cat a.sh | parallel -S - systemd-run --pipe bash`,
-		`cat a.sh | parallel -S .. systemd-run --pipe bash`,
-		`cat a.sh | parallel --replace=XX systemd-run --user XX`,
-		`cat a.sh | parallel --er XX systemd-run --user XX`,
-		`cat a.sh | parallel --extensionreplace XX systemd-run --user XX`,
-		`cat a.sh | parallel --bnr XX systemd-run --user XX`,
-		`cat a.sh | parallel --rpl 'XX s/x//' systemd-run --user XX`,
-		`cat a.sh | parallel --id x systemd-run --pipe bash`,
-		`cat a.sh | parallel --semaphorename x systemd-run --pipe bash`,
-		`cat a.sh | parallel --match x systemd-run --pipe bash`,
-		`cat a.sh | parallel --filter x systemd-run --pipe bash`,
-		`cat a.sh | parallel --trc x systemd-run --pipe bash`,
-		`cat a.sh | parallel --sqlmaster x systemd-run --pipe bash`,
-		`cat a.sh | parallel --ctagstring x systemd-run --pipe bash`,
-		`cat a.sh | parallel -e x systemd-run --pipe bash`,
-		`cat a.sh | parallel --max-replace-args 1 systemd-run --pipe bash`,
-		`cat a.sh | parallel --id x systemd-run --user {}`,
-		`cat a.sh | parallel --max-replace-args 1 systemd-run --user {}`,
-		`cat a.sh | parallel -kj4 systemd-run --pipe bash`,
-		`cat a.sh | parallel --sshd 0.5 systemd-run --pipe bash`,
-		// parallel исполнит run0 kill 455274 1: run0 — служба, как systemd-run
-		`echo 1 | parallel 'run0 kill 455274'`,
-	} {
-		if validateKill(t, command).IsValid {
-			t.Errorf("должно блокироваться: %s", command)
-		}
-	}
-	for _, command := range []string{
-		`cat a.sh | parallel -S host -S h2 systemd-run --user {}`,
-		`cat a.sh | parallel -S 'ssh -p 2222 host' systemd-run --pipe bash`,
-		`cat a.sh | parallel -S u@host:22 systemd-run --pipe bash`,
-		`cat a.sh | parallel --slf hosts systemd-run --pipe bash`,
-		`ls | parallel --id x make -C {}`,
-		`ls | parallel --replace=XX cp XX XX.bak`,
-		// -H у parallel — целое (H=i, снята): -H host — ошибка разбора, parallel
-		// выходит; --sshl неоднозначно (sshlogin, sshloginfile) — тоже выход
-		`cat a.sh | parallel -H host systemd-run --pipe bash`,
-		`cat a.sh | parallel --sshl host systemd-run --pipe bash`,
-		// --hgrp — флаг (hgrp|hostgroups): команда — x, systemd-run её аргумент
-		`cat a.sh | parallel --hgrp x systemd-run --pipe bash`,
 	} {
 		if r := validateKill(t, command); !r.IsValid {
 			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)

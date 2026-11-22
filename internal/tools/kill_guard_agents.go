@@ -67,7 +67,7 @@ func agentUnitReason(scope, name string) (reason, hint string) {
 			continue
 		}
 		if u.worker {
-			return u.reason, "Бойца снимает его мастер: worker stop <id> (id — из worker status), worker сам погасит юнит"
+			return u.reason, "Бойца снимает его мастер: worker stop <id> (id — из worker status), worker сам погасит юнит; боец чужого мастера — worker stop --other-master <id> по слову пользователя, затем сообщи его мастеру"
 		}
 		return u.reason, "Чужой юнит гасит его хозяин. Свой процесс в нём убей литералом: посмотри PID (" + scope + " status юнит) и kill 12345 — ядро не даст задеть чужой"
 	}
@@ -121,8 +121,13 @@ func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call
 		return "", ""
 	}
 	name, signal := signalCommand(c)
-	if k < 0 {
+	run0 := slices.Contains(c.Via, "run0")
+	if k < 0 && !run0 {
 		return "", ""
+	}
+	if k < 0 {
+		// run0 запускает команду временной службой, как systemd-run без --scope
+		k = slices.Index(c.Via, "run0")
 	}
 	if !signal {
 		if reason := s.systemdRunHiddenReason(c, calls, k, feedRead); reason != "" {
@@ -130,7 +135,7 @@ func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call
 		}
 		return "", ""
 	}
-	if systemdRunScopeOnly(c, calls) {
+	if !run0 && systemdRunScopeOnly(c, calls) {
 		// systemd-run --scope делает exec в своём процессе: сигнальная
 		// команда остаётся потомком агента, ядро её сверяет, а цель
 		// проверяется, как у прямого вызова
@@ -188,7 +193,7 @@ func (s *killScan) systemdRunHiddenReason(c shellcmd.Call, calls []shellcmd.Call
 // c: его строки станут аргументами c (-c и скрипт)
 func (s *killScan) unreadInput(c shellcmd.Call, calls []shellcmd.Call) bool {
 	switch {
-	case systemdRunScopeOnly(c, calls) || scriptBodyParsed(c, calls) || inputCallsParsed(c, calls):
+	case !slices.Contains(c.Via, "run0") && systemdRunScopeOnly(c, calls) || scriptBodyParsed(c, calls) || inputCallsParsed(c, calls):
 		return false
 	case afterXargs(c):
 		// ввод у xargs и parallel перед c — не скрипт c, а его аргументы
@@ -376,7 +381,7 @@ func systemdRunElsewhere(c shellcmd.Call, calls []shellcmd.Call) bool {
 // nestedSystemdRunRemote — команда systemd-run с опциями args — снова
 // systemd-run (и так далее), и один из них идёт на другую машину
 func nestedSystemdRunRemote(args []string) bool {
-	for range maxRun0Rewrites {
+	for range maxNestedRewrites {
 		start := systemdRunCommandStart(args)
 		if start >= len(args) || path.Base(args[start]) != "systemd-run" {
 			return false

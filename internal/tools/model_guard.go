@@ -179,7 +179,7 @@ func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Log
 		}
 		// Проверяем текст команды вместе с файлами: запись может обновлять
 		// уже существующий settings.json через dd, sponge и другие команды.
-		if writtenModel.Match([]byte(input.Command)) {
+		if writtenModel.Match([]byte(input.Command)) || writtenOverrides.Match([]byte(input.Command)) {
 			contents = append(contents, []byte(input.Command))
 		}
 		if len(contents) == 0 {
@@ -1009,6 +1009,17 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 			found = append(found, c)
 		}
 	}
+	objects := jsonObjects(decoded)
+	for _, raw := range objects {
+		if json.Valid(raw) {
+			found = append(found, settingsCandidates(raw, nil)...)
+		} else {
+			found = append(found, writtenOverrideCandidates(raw)...)
+		}
+	}
+	if len(objects) == 0 {
+		found = append(found, writtenOverrideCandidates([]byte(decoded))...)
+	}
 	for _, match := range regexp.MustCompile(`(?m)^\s*model:\s*([^\s#]+)`).FindAllStringSubmatch(decoded, -1) {
 		found = append(found, modelCandidate{value: strings.Trim(match[1], `"'`), userOnlyCheck: true})
 	}
@@ -1614,6 +1625,59 @@ var jsonModelKey = regexp.MustCompile(`\b(?:model|[A-Z_]+_MODEL)\\*"\s*:`)
 // "model":"x" и "ANTHROPIC_MODEL":"x"
 var writtenModel = regexp.MustCompile(`"(model|` + modelEnvPattern() + `)"\s*:\s*"([^"]*)"`)
 
+// writtenOverrides finds model IDs embedded in settings JSON in shell text.
+var writtenOverrides = regexp.MustCompile(`"modelOverrides"\s*:\s*\{([^}]*)\}`)
+var writtenOverrideValue = regexp.MustCompile(`"[^"]+"\s*:\s*"([^"]*)"`)
+
+func writtenOverrideCandidates(raw []byte) []modelCandidate {
+	var found []modelCandidate
+	for _, object := range writtenOverrides.FindAllSubmatch(raw, -1) {
+		for _, value := range writtenOverrideValue.FindAllSubmatch(object[1], -1) {
+			if strings.TrimSpace(string(value[1])) != "" {
+				found = append(found, modelCandidate{value: string(value[1])})
+			}
+		}
+	}
+	return found
+}
+
+// jsonObjects extracts brace-delimited objects from shell text while respecting
+// quoted strings and escapes. The settings parser decides which objects matter.
+func jsonObjects(text string) [][]byte {
+	var objects [][]byte
+	start, depth := -1, 0
+	quoted, escaped := false, false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if quoted {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				quoted = false
+			}
+			continue
+		}
+		if c == '"' {
+			quoted = true
+			continue
+		}
+		if c == '{' {
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		} else if c == '}' && depth > 0 {
+			depth--
+			if depth == 0 {
+				objects = append(objects, []byte(text[start:i+1]))
+			}
+		}
+	}
+	return objects
+}
+
 // jsonModelCandidates — модели в JSON флага claude: --settings (строка JSON
 // или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
 // Файла --settings ещё нет — модели в тексте команды, которая его пишет.
@@ -1713,12 +1777,34 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 			for _, m := range writtenModel.FindAllSubmatch(raw, -1) {
 				found.addField(string(m[1]), string(m[2]))
 			}
+			found = append(found, writtenOverrideCandidates(raw)...)
 		}
 		return found
 	}
 	var model string
 	if json.Unmarshal(settings["model"], &model) == nil {
 		found.add(model)
+	}
+	var overrides map[string]json.RawMessage
+	rawOverrides := settings["modelOverrides"]
+	if len(rawOverrides) != 0 && strings.TrimSpace(string(rawOverrides)) != "null" {
+		if err := json.Unmarshal(rawOverrides, &overrides); err != nil {
+			found = append(found, modelCandidate{value: "modelOverrides", unknownSettings: true})
+		}
+	}
+	if overrides != nil {
+		for _, key := range slices.Sorted(maps.Keys(overrides)) {
+			rawModel := overrides[key]
+			if strings.TrimSpace(string(rawModel)) == "null" {
+				continue
+			}
+			var model string
+			if json.Unmarshal(rawModel, &model) == nil {
+				found.add(model)
+			} else {
+				found = append(found, modelCandidate{value: "modelOverrides", unknownSettings: true})
+			}
+		}
 	}
 	var agent struct {
 		Model string `json:"model"`

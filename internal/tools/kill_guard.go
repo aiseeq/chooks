@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,7 +19,7 @@ import (
 // init и менеджеры служб, шина, графическая оболочка, звук, вход по ssh
 var protectedComms = map[string]bool{
 	"systemd": true, "init": true, "systemd-logind": true,
-	"dbus-daemon": true, "dbus-broker": true, "sshd": true, "sshd-session": true,
+	"dbus-broker": true, "sshd": true, "sshd-session": true,
 	"Xwayland": true, "Xorg": true, "kwin_wayland": true, "kwin_x11": true,
 	"plasmashell": true, "gnome-shell": true, "sway": true, "Hyprland": true,
 	"sddm": true, "gdm": true, "pipewire": true, "wireplumber": true,
@@ -29,27 +30,33 @@ var protectedComms = map[string]bool{
 // предков хука (claude, терминал), оболочку, исполняющую команду
 type KillGuardTool struct {
 	*BaseTool
-	procRoot string
-	selfPID  int
+	procRoot    string
+	selfPID     int
+	resolvePath func(string) (string, error)
+	lstatPath   func(string) (fs.FileInfo, error)
 }
 
 // NewKillGuardToolForPID protects the process tree of this hook request.
 func NewKillGuardToolForPID(config core.ToolConfig, logger core.Logger, pid int) (*KillGuardTool, error) {
 	return &KillGuardTool{
-		BaseTool: NewBaseTool("kill_guard", config.Enabled, core.ShellTools, logger),
-		procRoot: "/proc",
-		selfPID:  pid,
+		BaseTool:    NewBaseTool("kill_guard", config.Enabled, core.ShellTools, logger),
+		procRoot:    "/proc",
+		selfPID:     pid,
+		resolvePath: filepath.EvalSymlinks,
+		lstatPath:   os.Lstat,
 	}, nil
 }
 
 const killGuardHint = "Найди PID отдельной командой (ps -o pid,ppid,comm,args -p … или pgrep -a '[x]yz'), посмотри на вывод и убей литералом: kill 12345"
+const protectedProcessHint = "Процесс защищён: не посылай ему сигнал. Если это тестовый процесс, заверши его штатным механизмом теста; для сессии используй её штатное управление"
+const protectedProcessMarker = "\x00protected-process"
 
 // killGroupHint подсказка к отказу на сигнал группе: отдельные PID группу не
 // заменяют — процесс, который группа породит после перечисления, сигнал не получит
 const killGroupHint = "Сигнал отдельным PID — не то же, что группе: процессы, которые появятся в группе после перечисления, его не получат. Перечисли группу отдельной командой (pgrep -a -g 12345), посмотри на вывод, убей её PID литералами (kill 12346 12347) и проверь группу снова"
 
 // ValidateTool проверяет команды, посылающие сигналы процессам
-func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
+func (t *KillGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
 	if !t.IsEnabled() || !core.IsShellTool(input.ToolName) {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
@@ -59,20 +66,15 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 
-	command, rewritten := input.Command, false
-	if run0WordRe.MatchString(text) {
-		var err error
-		if command, rewritten, err = rewriteRun0(input.Command); err != nil {
-			t.Logger().Warn("kill_guard: вызов run0 не заменён в тексте, проверен текстом run0Command", "error", err)
-		}
-	}
+	command := input.Command
 	if strings.Contains(unquoted(command), "systemd-run") {
 		var err error
 		if command, err = rewriteSystemdRunShell(command); err != nil {
 			t.Logger().Warn("kill_guard: systemd-run --shell не переписан в тексте, проверен текстом systemdRunShellCommand", "error", err)
 		}
 	}
-	scan := killScan{tool: t, command: command, source: input.Command, run0: rewritten, killText: killText,
+	busAddress := requestSessionBusAddress(ctx)
+	scan := killScan{tool: t, command: command, source: input.Command, killText: killText, busAddress: busAddress,
 		signalWord: signalWordRe.MatchString(text), zsh: zshWordRe.MatchString(text),
 		anyBus: busAddressRe.MatchString(text)}
 	if err := scan.parsedCalls(); err != nil {
@@ -95,9 +97,6 @@ func (t *KillGuardTool) ValidateTool(_ context.Context, input *core.ToolInput) (
 // его отказу, обычная про литеральный PID — к прочим
 func (s *killScan) hints() []string {
 	var out []string
-	if s.run0 {
-		out = append(out, run0Hint)
-	}
 	for _, r := range s.reasons {
 		hint := killGuardHint
 		switch {
@@ -118,20 +117,15 @@ func unquoted(command string) string {
 	return strings.NewReplacer(`\`, "", `'`, "", `"`, "").Replace(command)
 }
 
-// maxScriptNesting предел вложенности sh -c и eval: глубже — отказ
-const maxScriptNesting = 4
-
 // killScan проверка вызовов команды, найденных разбором оболочки
 type killScan struct {
-	tool *KillGuardTool
-	// command — команда целиком, где run0 заменён на systemd-run
-	// (rewriteRun0), а systemd-run --shell — на systemd-run --pipe bash
-	// (rewriteSystemdRunShell): её разбирают правила; source — как её прислал агент:
-	// этот текст стоит в cmdline оболочки, и pkill -f по нему убьёт эту
-	// оболочку; run0 — в команде есть run0, проверенный как systemd-run
-	// (заменой в тексте или текстом run0Command)
+	tool       *KillGuardTool
+	busAddress string
+	// command — команда целиком, где systemd-run --shell заменён на
+	// systemd-run --pipe bash (rewriteSystemdRunShell): её разбирают
+	// правила; source — как её прислал агент: этот текст стоит в cmdline
+	// оболочки, и pkill -f по нему убьёт эту оболочку
 	command, source string
-	run0            bool
 	procs           []procInfo
 	reasons         []string
 	// groupReasons — те из reasons, что про сигнал группе процессов (kill -N)
@@ -152,7 +146,7 @@ type killScan struct {
 	// systemd у systemctl и вызовов D-Bus проверяется по обоим
 	anyBus bool
 	// stdin — ввод участков текста, к которому отнесены места вызовов
-	// (stdinOf): команды, а за run0 и pkexec — текста за обёрткой
+	// (stdinOf): команды, а за pkexec — текста за обёрткой
 	stdin *stdinScope
 }
 
@@ -254,18 +248,6 @@ func scriptCommandArgs(args []string) ([]string, bool) {
 	return nil, false
 }
 
-// scriptNesting вложенность скриптов вызова: sh -c (в Via — «-c») и
-// eval, watch, trap, su, runuser
-func scriptNesting(via []string) int {
-	n := 0
-	for _, v := range via {
-		if v == "-c" || slices.Contains(scriptRunners, v) {
-			n++
-		}
-	}
-	return n
-}
-
 // parsedCalls проверяет вызовы, найденные полным разбором оболочки
 // (akit/shellcmd): обёртки с опциями, sh -c, eval, watch, trap, su -c,
 // here-doc и here-string на вход оболочке, find -exec, имя из переменной
@@ -278,7 +260,7 @@ func (s *killScan) parsedCalls() error {
 		s.tool.Logger().Warn("kill_guard: shellcmd не разобрал команду со словом kill, отказ", "error", err)
 		s.addReason("разбор оболочки не прошёл (" + err.Error() + "): проверить сигналы в команде нельзя")
 	}
-	calls = s.withWrappedRun0(s.command, calls)
+	calls = s.withWrappedFeeds(calls)
 	if s.signalWord && s.procSubstAfterParam(s.command) {
 		s.addReason(procSubstAfterParamReason)
 	}
@@ -292,22 +274,6 @@ func (s *killScan) parsedCalls() error {
 		}
 	}
 	return nil
-}
-
-// withWrappedRun0 calls текста text и run0 за обёртками среди них
-// (wrappedRun0Calls: systemd-run, setsid, flock): run0, не заменённый в
-// тексте (--via-shell с командой, значение в кавычках), проверяется
-// вызовом, как run0 без обёртки. Слова обёртки, которые не разобрать, при
-// kill в тексте — отказ
-func (s *killScan) withWrappedRun0(text string, calls []shellcmd.Call) []shellcmd.Call {
-	out, err := wrappedRun0Calls(text, calls)
-	if err != nil {
-		s.tool.Logger().Debug("kill_guard: run0 за обёрткой не найти", "error", err)
-		if s.killText {
-			s.addReason("run0 за обёрткой: " + err.Error() + ": его опции и команду проверить нельзя")
-		}
-	}
-	return out
 }
 
 // procSubstAfterParamRe <( или >( где-либо после ${ в тексте команды.
@@ -347,11 +313,11 @@ const procSubstAfterParamReason = "в команде со словом kill по
 // call проверяет один вызов из разбора оболочки; calls — все вызовы
 // команды: среди них ищется xargs, подающий ввод в скрипт вызова
 func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
-	if scriptNesting(c.Via) > maxScriptNesting {
-		s.addReason(fmt.Sprintf("вложенность sh -c и eval глубже %d: проверить сигналы внутри нельзя", maxScriptNesting))
+	if sudoAssignment(c, calls) {
 		return nil
 	}
-	if sudoAssignment(c, calls) {
+	if reason := s.depthReason(c, calls); reason != "" {
+		s.addToolReason(reason, depthHint, false)
 		return nil
 	}
 	if err := s.cgroupWrite(c); err != nil {
@@ -367,7 +333,10 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	if reason, hint := s.systemdRunSignalReason(c, calls, feed != nil); reason != "" {
 		s.addToolReason(reason, hint, false)
 	}
-	if err := s.callNested(c, calls, feed); err != nil {
+	if err := s.callNested(calls, feed); err != nil {
+		return err
+	}
+	if err := s.feedCall(c, calls); err != nil {
 		return err
 	}
 	if !s.signalWord {
@@ -383,18 +352,9 @@ func (s *killScan) call(c shellcmd.Call, calls []shellcmd.Call) error {
 	return s.signal(c, calls)
 }
 
-func (s *killScan) callNested(c shellcmd.Call, calls, feed []shellcmd.Call) error {
+func (s *killScan) callNested(calls, feed []shellcmd.Call) error {
 	for i := range feed {
 		if err := s.call(feed[i], slices.Concat(calls, feed)); err != nil {
-			return err
-		}
-	}
-	if reason := s.parallelSystemdRunReason(c); reason != "" {
-		s.addToolReason(reason, systemdRunHiddenHint, false)
-	}
-	inner := s.parallelInnerCalls(c)
-	for i := range inner {
-		if err := s.call(inner[i], slices.Concat(calls, inner)); err != nil {
 			return err
 		}
 	}
@@ -415,15 +375,6 @@ func (s *killScan) checkScriptCall(c shellcmd.Call, calls []shellcmd.Call, scrip
 		s.addReason(c.Name + " исполняет скрипт с подстановкой $ или ` (eval \"$(…)\", sh -c \"$X\"): текст станет известен только при запуске, проверить его нельзя")
 	case fed != "":
 		s.addReason(c.Name + " получает скрипт из ввода через " + fed + " (-I, {}): проверить его до запуска нельзя")
-	case c.Name == "parallel":
-		// цели parallel берёт из списка ::: или ввода, а команду без :::
-		// shellcmd не снимает (pgrep foo | parallel kill): сигнал — слово
-		// среди аргументов parallel
-		for i := range c.Args {
-			if err := s.check(filepath.Base(c.Args[i]), nil, "parallel"); err != nil {
-				return err
-			}
-		}
 	}
 	return nil
 }
@@ -437,6 +388,7 @@ func (s *killScan) fedScriptInput(c shellcmd.Call, calls []shellcmd.Call, runner
 			harmlessImplicitXargsInput(c, s.inputOf(c)) {
 			fed = ""
 		}
+
 	}
 	return fed
 }
@@ -511,24 +463,15 @@ func harmlessImplicitXargsScriptInput(c shellcmd.Call, s *killScan) bool {
 		knownHarmlessInput(s.inputOf(c))
 }
 
-func (s *killScan) rewrittenCall(c shellcmd.Call, calls []shellcmd.Call) (bool, error) {
-	if c.Name == "sem" && s.signalWord {
-		in := s.inputOf(c)
-		if in.src == stdinPipe || in.src == stdinFile || in.src == stdinRedirect {
-			if script, ok := parallelShellCall(append([]string{"--semaphore"}, c.Args...), &c); ok {
-				if inner, err := shellcmd.Calls(script); err == nil && parallelHasElevatedScript(inner) {
-					s.addReason("sem получает stdin рядом со скриптом оболочки за привилегированной обёрткой")
-					return true, nil
-				}
-			}
-		}
-	}
-	if c.Name == "sem" && systemdRunElsewhere(c, calls) {
-		return true, nil
-	}
+func (s *killScan) rewrittenCall(c shellcmd.Call, _ []shellcmd.Call) (bool, error) {
 	inner, ok := rewrittenCommand(c)
 	if !ok {
 		return false, nil
+	}
+	if c.Name == "run0" {
+		if err := s.run0Service(c); err != nil {
+			return true, err
+		}
 	}
 	return true, s.elevated(c, inner)
 }
@@ -538,8 +481,8 @@ var pkexecValues = []string{"user"}
 
 // elevatedCommand команда, которую pkexec и machinectl shell исполнят от
 // другого пользователя (как sudo, которое снимает разбор оболочки): слова
-// после их опций, собранные в текст для разбора. run0 — не здесь: он
-// запускает службу, как systemd-run (run0Command)
+// после их опций, собранные в текст для разбора. run0 разбор снимает сам,
+// как systemd-run
 func elevatedCommand(c shellcmd.Call) (string, bool) {
 	switch c.Name {
 	case "machinectl":
@@ -684,12 +627,11 @@ func localMachine(spec string) bool {
 }
 
 // elevated проверяет вызовы команды inner, которой проверяется вызов c
-// (rewrittenCommand: run0 — systemd-run службой, pkexec, оболочка script и
-// machinectl shell): Via у них — с c впереди. Перенаправления ввода c
+// (rewrittenCommand: pkexec, оболочка script, machinectl shell, Exec-свойство
+// службы): Via у них — с c впереди. Перенаправления ввода c
 // разбираются вместе с inner (inputRedirs): тело heredoc и <<< оболочки за
 // обёрткой разбор читает как её скрипт. Ошибка разбора — как у всей команды
 func (s *killScan) elevated(c shellcmd.Call, inner string) error {
-	s.run0 = s.run0 || c.Name == "run0"
 	redirs, err := inputRedirs(c)
 	if err != nil {
 		s.tool.Logger().Warn("kill_guard: ввод вызова за обёрткой не перенесён в текст для разбора", "wrapper", c.Name, "error", err)
@@ -702,11 +644,11 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 	if err != nil && s.killText {
 		s.addReason(c.Name + ": разбор команды за ним не прошёл (" + err.Error() + "): проверить сигналы в ней нельзя")
 	}
-	calls = s.withWrappedRun0(text, calls)
+	calls = s.withWrappedFeeds(calls)
 	// Via у всех вызовов — с обёрткой впереди: вызовы ищут друг друга по Via
-	// (systemd-run за run0 — systemdRunRemote). Вызовы самой команды за
-	// обёрткой (их текст — весь inner) получают её ввод и перенаправления:
-	// разбор заново их не знает (… | run0 bash, run0 systemd-run --pipe sh)
+	// (systemdRunRemote). Вызовы самой команды за обёрткой (их текст — весь
+	// inner) получают её ввод и перенаправления: разбор заново их не знает
+	// (… | pkexec bash)
 	src := s.stdinOf(c)
 	piped := src.src == stdinPipe || src.src == stdinFile
 	for i := range calls {
@@ -735,28 +677,6 @@ func (s *killScan) elevated(c shellcmd.Call, inner string) error {
 		}
 	}
 	return nil
-}
-
-// serviceParallel проверяет parallel без команды под systemd-run
-// (bareParallel) как вызов. Команда systemd-run, которую разбор не прочёл, —
-// отказ при kill в тексте: исполнит ли parallel в ней ввод оболочкой, не видно
-func (s *killScan) serviceParallel(c shellcmd.Call, calls []shellcmd.Call) error {
-	if c.Name == "systemd-run" && systemdRunHostOption(c.Args) ||
-		systemdRunElsewhere(c, calls) {
-		return nil
-	}
-	x, ok, err := bareParallel(c)
-	if err != nil {
-		s.tool.Logger().Warn("kill_guard: команда systemd-run не разобрана отдельно", "error", err)
-		if s.killText {
-			s.addReason("systemd-run: разбор его команды не прошёл (" + err.Error() + "): исполнит ли parallel в ней ввод оболочкой, проверить нельзя")
-		}
-		return nil
-	}
-	if !ok {
-		return nil
-	}
-	return s.call(x, append(slices.Clone(calls), x))
 }
 
 // sudoAssignment — c не программа, а присваивание после sudo -- (sudo --
@@ -873,9 +793,6 @@ func (s *killScan) positionalSignal(calls []shellcmd.Call) error {
 // parallel всегда ({} или ввод в конце), xargs — с -I, -i или --replace
 func fedIntoScript(c shellcmd.Call, calls []shellcmd.Call) string {
 	if slices.Contains(c.Via, "parallel") {
-		if slices.Contains(c.Via, "parallel-safe-input") || slices.Contains(c.Via, "parallel-arg-unused") {
-			return ""
-		}
 		return "parallel"
 	}
 	options := xargsOptions(c, calls)
@@ -1012,6 +929,15 @@ func (s *killScan) loadProcs() error {
 	if err != nil {
 		return err
 	}
+	for i := range procs {
+		bus, err := dbusSessionBus(procs[i], s.busAddress, s.tool.resolvePath, s.tool.lstatPath)
+		if err != nil {
+			s.tool.Logger().Debug("D-Bus address path could not be resolved; process remains protected", "pid", procs[i].pid, "error", err)
+			procs[i].protected = true
+			continue
+		}
+		procs[i].protected = protectedComms[procs[i].comm] || bus
+	}
 	s.procs = procs
 	return nil
 }
@@ -1038,7 +964,11 @@ func (s *killScan) check(name string, args []word, via string) error {
 		reason, group = s.tool.checkPattern(name, args, s.source, s.procs)
 	}
 	if reason != "" {
-		s.addReason(reason)
+		if before, _, ok := strings.Cut(reason, protectedProcessMarker); ok {
+			s.addToolReason(before, protectedProcessHint, false)
+		} else {
+			s.addReason(reason)
+		}
 	}
 	if group && !slices.Contains(s.groupReasons, reason) {
 		s.groupReasons = append(s.groupReasons, reason)
@@ -1080,7 +1010,7 @@ func (t *KillGuardTool) checkKill(args []word, procs []procInfo) (reason string,
 			return "kill 0: сигнал своей группе процессов — той, где идёт сама эта команда", false
 		}
 		if reason := t.dangerous(pid, procs, ancestors); reason != "" {
-			return fmt.Sprintf("kill %d: %s", pid, reason), false
+			return fmt.Sprintf("kill %d: %s", pid, reason) + protectedProcessMarker, false
 		}
 	}
 	return "", false
@@ -1095,7 +1025,7 @@ func (t *KillGuardTool) dangerous(pid int, procs []procInfo, ancestors map[int]b
 		return "предок этой сессии Claude (claude, оболочка, терминал или менеджер сессии)"
 	}
 	for _, p := range procs {
-		if p.pid == pid && protectedComms[p.comm] {
+		if p.pid == pid && (p.protected || protectedComms[p.comm]) {
 			return fmt.Sprintf("%s — на нём держится сессия пользователя", p.comm)
 		}
 	}
@@ -1106,6 +1036,8 @@ func (t *KillGuardTool) dangerous(pid int, procs []procInfo, ancestors map[int]b
 type procInfo struct {
 	pid, ppid     int
 	comm, cmdline string
+	argv          []string
+	protected     bool
 }
 
 // listProcs читает все процессы из procRoot. Процесс, завершившийся между
@@ -1164,6 +1096,7 @@ func readProc(dir string, pid int) (procInfo, error) {
 		ppid:    ppid,
 		comm:    s[start+1 : end],
 		cmdline: strings.TrimSpace(strings.ReplaceAll(string(cmdline), "\x00", " ")),
+		argv:    processArgs(cmdline),
 	}, nil
 }
 

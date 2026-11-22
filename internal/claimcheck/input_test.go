@@ -442,3 +442,62 @@ func TestBoundToolsStaysWithinBudgetWhenSplittingGaps(t *testing.T) {
 		}
 	}
 }
+
+func TestBoundToolsShowsMatchingLinesBeforeEdges(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 5000; i++ {
+		line := fmt.Sprintf("строка %d: обычный вывод", i)
+		if i == 2500 {
+			line = "строка 2500: ответ содержит 7921 бойцов"
+		}
+		lines = append(lines, line)
+	}
+	p := fixture(t,
+		ev("user", "t1", "проверь результат"),
+		ev("assistant", "t2", []any{map[string]any{"type": "tool_use", "id": "long", "name": "Bash", "input": map[string]any{"command": "cat result"}}}),
+		map[string]any{"type": "user", "timestamp": "t3", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "long", "content": strings.Join(lines, "\n")}}}},
+		ev("assistant", "t4", []any{map[string]any{"type": "text", "text": "Результат 7921 бойцов."}}),
+	)
+	input, err := BuildInput(p, 4, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := input.TurnTools[0].Output
+	if !strings.Contains(got, "строка 2500: ответ содержит 7921 бойцов") {
+		t.Fatalf("answer evidence line missing: %s", got)
+	}
+	if !strings.Contains(got, "[… ") || !strings.Contains(got, " строк …]") {
+		t.Fatalf("omitted lines lack explicit markers: %s", got)
+	}
+	if !strings.Contains(got, "строка 2499:") || !strings.Contains(got, "строка 2501:") {
+		t.Fatalf("neighboring lines missing: %s", got)
+	}
+}
+
+func TestExcerptAroundWordsKeepsMultipleAnswerWords(t *testing.T) {
+	text := "prefix " + strings.Repeat("a", 180) + " alpha evidence " + strings.Repeat("b", 180) + " omega evidence " + strings.Repeat("c", 180) + " suffix"
+	got := excerptWithWords(text, []string{"alpha", "omega"}, 500)
+	if !strings.Contains(got, "alpha evidence") || !strings.Contains(got, "omega evidence") {
+		t.Fatalf("multiple matching excerpts missing: %s", got)
+	}
+	if !strings.Contains(got, "[обрезано:") {
+		t.Fatalf("omitted characters lack an explicit marker: %s", got)
+	}
+	if size := utf8.RuneCountInString(got); size > 500 {
+		t.Fatalf("excerpt length=%d exceeds limit 500", size)
+	}
+}
+
+func TestExcerptWithWordsClipsLongMatchingLineInsideMultilineOutput(t *testing.T) {
+	line := "prefix " + strings.Repeat("a", 180) + " alpha evidence " + strings.Repeat("b", 180) + " omega evidence " + strings.Repeat("c", 180) + " suffix"
+	got := excerptWithWords("head\n"+line+"\ntail", []string{"alpha", "omega"}, 500)
+	if !strings.Contains(got, "alpha evidence") || !strings.Contains(got, "omega evidence") {
+		t.Fatalf("long matching line lost answer words: %s", got)
+	}
+	if !strings.Contains(got, "[обрезано:") {
+		t.Fatalf("clipped line lacks an explicit omission marker: %s", got)
+	}
+	if size := utf8.RuneCountInString(got); size > 500 {
+		t.Fatalf("excerpt length=%d exceeds limit 500", size)
+	}
+}

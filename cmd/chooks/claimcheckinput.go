@@ -11,6 +11,7 @@ import (
 func newClaimCheckInputCmd() *cobra.Command {
 	var transcript string
 	var line, contextLimit int
+	var unbounded bool
 	cmd := &cobra.Command{
 		Use:   "claim-check-input --transcript <jsonl> --line <N>",
 		Short: "Построить вход судьи из транскрипта на указанном событии",
@@ -19,7 +20,7 @@ func newClaimCheckInputCmd() *cobra.Command {
 			if transcript == "" || line < 1 {
 				return fmt.Errorf("--transcript and positive --line are required")
 			}
-			input, err := claimcheck.BuildInput(transcript, line, claimcheck.Options{ContextLimit: contextLimit})
+			input, err := claimcheck.BuildInput(transcript, line, claimcheck.Options{ContextLimit: contextLimit, Unbounded: unbounded})
 			if err != nil {
 				return err
 			}
@@ -31,5 +32,7 @@ func newClaimCheckInputCmd() *cobra.Command {
 	cmd.Flags().StringVar(&transcript, "transcript", "", "path to Claude Code JSONL transcript")
 	cmd.Flags().IntVar(&line, "line", 0, "one-based physical JSONL event line")
 	cmd.Flags().IntVar(&contextLimit, "context-limit", claimcheck.DefaultContextLimit, "maximum context size in characters")
+	cmd.Flags().BoolVar(&unbounded, "unbounded", false, "build full input for visibility measurement")
+	_ = cmd.Flags().MarkHidden("unbounded")
 	return cmd
 }

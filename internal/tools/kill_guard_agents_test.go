@@ -178,6 +178,10 @@ func TestKillGuardForeignUnitTexts(t *testing.T) {
 		if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), tc.reason) || !slices.ContainsFunc(r.Suggestions, func(h string) bool { return strings.HasPrefix(h, tc.hint) }) {
 			t.Errorf("%s: ждали отказ с «%s» и подсказкой «%s», получили %v %q", tc.command, tc.reason, tc.hint, r.IsValid, r.Suggestions)
 		}
+		// боец чужого мастера: путь назван, чтобы агент не уходил в сигналы по PID
+		if strings.HasPrefix(tc.hint, "Бойца снимает") && !strings.Contains(strings.Join(r.Suggestions, "\n"), "worker stop --other-master <id> по слову пользователя") {
+			t.Errorf("%s: подсказка без пути для бойца чужого мастера: %q", tc.command, r.Suggestions)
+		}
 	}
 	// своя сессия — прежняя причина: в юните идёт claude
 	r := validateKill(t, `systemctl --user stop agent-x-1.scope`)

@@ -67,7 +67,7 @@ func agentUnitReason(scope, name string) (reason, hint string) {
 			continue
 		}
 		if u.worker {
-			return u.reason, "Бойца снимает его мастер: worker stop <id> (id — из worker status), worker сам погасит юнит"
+			return u.reason, "Бойца снимает его мастер: worker stop <id> (id — из worker status), worker сам погасит юнит; боец чужого мастера — worker stop --other-master <id> по слову пользователя, затем сообщи его мастеру"
 		}
 		return u.reason, "Чужой юнит гасит его хозяин. Свой процесс в нём убей литералом: посмотри PID (" + scope + " status юнит) и kill 12345 — ядро не даст задеть чужой"
 	}

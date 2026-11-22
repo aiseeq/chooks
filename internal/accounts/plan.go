@@ -1,15 +1,12 @@
 package accounts
 
 import (
-	"bufio"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
-	"strconv"
-	"strings"
 	"time"
+
+	"github.com/aiseeq/akit/rates"
 )
 
 // UnitPlanUSD — цена подписки, в % недели которой показывается расход
@@ -118,92 +115,27 @@ type ratePlan struct {
 }
 
 // planPrice — plan_usd_month и tier поставщика по файлу курсов: действует
-// строка с наибольшим valid_from не позже now, при равных — нижняя (шапка
-// файла). Испорченная строка мешает, только если она и есть действующая:
+// самая поздняя строка (при равных — последняя в файле). Испорченная строка мешает, только если она и есть действующая:
 // строки задним числом не правятся, и старая порча не должна ломать перевод
 // навсегда
 func planPrice(path, provider string, now time.Time) (ratePlan, error) {
-	f, err := os.Open(path)
+	table, err := rates.Read(path, now)
 	if err != nil {
 		return ratePlan{}, fmt.Errorf("цены плана нет: %w", err)
 	}
-	defer f.Close()
-	var head []string
-	var since time.Time
-	found := false
-	var plan ratePlan
-	priceErr := error(nil)
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := sc.Text()
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		cols := strings.Split(line, "\t")
-		if head == nil {
-			head = cols
-			for _, need := range []string{"valid_from", "provider", "plan_usd_month"} {
-				if !slices.Contains(head, need) {
-					return ratePlan{}, fmt.Errorf("цены плана нет: в шапке %s нет %s", path, need)
-				}
-			}
-			continue
-		}
-		row := map[string]string{}
-		for i, h := range head {
-			if i < len(cols) {
-				row[h] = cols[i]
-			}
-		}
-		if row["provider"] != provider {
-			continue
-		}
-		from, err := validFrom(row["valid_from"], now.Location())
-		if err != nil {
-			return ratePlan{}, fmt.Errorf("цены плана нет: %s: %w", path, err)
-		}
-		if from.After(now) || (found && from.Before(since)) {
-			continue
-		}
-		found, since = true, from
-		plan.tier, plan.tierKnown = row["tier"], slices.Contains(head, "tier")
-		plan.usd, priceErr = rowPrice(row)
-		if priceErr != nil {
-			priceErr = fmt.Errorf("цены плана нет: %s: %w", path, priceErr)
-		}
+	if !table.HasColumn("plan_usd_month") {
+		return ratePlan{}, fmt.Errorf("цены плана нет: в шапке %s нет plan_usd_month", path)
 	}
-	if err := sc.Err(); err != nil {
-		return ratePlan{}, fmt.Errorf("цены плана нет: %s: %w", path, err)
+	row, ok := table.Latest(provider, "")
+	if !ok {
+		return ratePlan{}, fmt.Errorf("цены плана нет: в %s нет действующей строки %s", path, provider)
 	}
-	switch {
-	case head == nil:
-		return ratePlan{}, errors.New("цены плана нет: в " + path + " нет шапки")
-	case !found:
-		return ratePlan{}, errors.New("цены плана нет: в " + path + " нет действующей строки " + provider)
-	case priceErr != nil:
-		return ratePlan{}, priceErr
+	if row.InvalidPlan != nil {
+		return ratePlan{}, fmt.Errorf("цены плана нет: %w", row.InvalidPlan)
+	}
+	plan := ratePlan{usd: row.PlanUSDMonth, tierKnown: table.HasColumn("tier")}
+	if plan.tierKnown {
+		plan.tier, _ = row.Cell("tier")
 	}
 	return plan, nil
-}
-
-// validFrom — начало действия строки курсов: дата (местная полночь) или
-// RFC3339
-func validFrom(s string, location *time.Location) (time.Time, error) {
-	from, err := time.ParseInLocation(time.DateOnly, s, location)
-	if err != nil {
-		if from, err = time.Parse(time.RFC3339, s); err != nil {
-			return time.Time{}, fmt.Errorf("valid_from %q: %w", s, err)
-		}
-	}
-	return from, nil
-}
-
-// rowPrice — plan_usd_month строки курсов, положительный
-func rowPrice(row map[string]string) (float64, error) {
-	usd, err := strconv.ParseFloat(row["plan_usd_month"], 64)
-	if err != nil || usd <= 0 {
-		return 0, fmt.Errorf("plan_usd_month %q строки %s", row["plan_usd_month"], row["valid_from"])
-	}
-	return usd, nil
 }

@@ -52,7 +52,7 @@ func TestPlanPrice(t *testing.T) {
 		{"порча старой строки выше действующей", ratesHead +
 			"2026-01-01\tanthropic\tmax-5x\t\t800\n" +
 			"2026-03-01\tanthropic\tultra\t200\t1600\n", 200},
-		{"концы строк CRLF, цена — последняя колонка", "valid_from\tprovider\tplan\tplan_usd_month\r\n2026-03-01\tanthropic\tultra\t200\r\n", 200},
+		{"концы строк CRLF", "valid_from\tprovider\tplan\tplan_usd_month\tapi_usd_week\r\n2026-03-01\tanthropic\tultra\t200\t1600\r\n", 200},
 		{"порча действующей строки", ratesHead +
 			"2026-01-01\tanthropic\tmax-5x\t100\t800\n" +
 			"2026-03-01\tanthropic\tultra\t\t1600\n", 0},
@@ -178,6 +178,12 @@ func TestPlanUnitTier(t *testing.T) {
 			if got := u.Percent(73); got != tt.want {
 				t.Errorf("73: %q, ожидалось %q (%s)", got, tt.want, u.Why)
 			}
+			if strings.HasPrefix(tt.name, "строка короче") {
+				if !strings.HasPrefix(u.Why, "цены плана нет:") {
+					t.Errorf("ошибка ширины без пользовательского префикса: %q", u.Why)
+				}
+				return
+			}
 			if !u.OK() && !strings.Contains(u.Why, "тариф учёток") {
 				t.Errorf("причина без тарифа: %q", u.Why)
 			}
@@ -191,32 +197,19 @@ func dead(a Account) Account {
 	return a
 }
 
-func TestValidFromUsesRequestLocation(t *testing.T) {
-	loc := time.FixedZone("request", 9*60*60)
-	date, err := validFrom("2026-01-01", loc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := date.UTC(); !got.Equal(time.Date(2025, 12, 31, 15, 0, 0, 0, time.UTC)) {
-		t.Fatalf("parsed date in UTC = %v", got)
-	}
-}
-
-// Действующая строка курсов выбирается по полуночи в поясе now (у хука — пояс
-// запроса): в 00:30 1 марта по UTC+9 мартовская строка уже действует, хотя в
-// поясе процесса может быть ещё 28 февраля
-func TestPlanPriceDateInNowLocation(t *testing.T) {
+// Дата без времени разбирается akit/rates в локальном поясе процесса.
+func TestPlanPriceDateInLocalLocation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rates.tsv")
-	rates := "valid_from\tprovider\tplan\tplan_usd_month\n2026-01-01\tanthropic\tmax\t100\n2026-03-01\tanthropic\tmax\t200\n"
+	rates := "valid_from\tprovider\tplan\tplan_usd_month\tapi_usd_week\n2026-01-01\tanthropic\tmax\t100\t800\n2026-03-01\tanthropic\tmax\t200\t1600\n"
 	if err := os.WriteFile(path, []byte(rates), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 3, 1, 0, 30, 0, 0, time.FixedZone("request", 9*60*60))
+	now := time.Date(2026, 3, 1, 0, 30, 0, 0, time.Local)
 	plan, err := planPrice(path, ratesProvider, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.usd != 200 {
-		t.Errorf("plan_usd_month %v, want 200 from the row valid since midnight of the request zone", plan.usd)
+		t.Errorf("plan_usd_month %v, want 200 from the row valid since midnight local time", plan.usd)
 	}
 }

@@ -43,7 +43,7 @@ type ModelGuardTool struct {
 // NewModelGuardTool создаёт проверку выбранной модели.
 func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardTool, error) {
 	return &ModelGuardTool{
-		BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent"}, core.ShellTools...), logger),
+		BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent", "Write", "Edit"}, core.ShellTools...), logger),
 		userOnly: config.UserOnly,
 	}, nil
 }
@@ -55,6 +55,11 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 	}
 	if !t.IsEnabled() || input == nil {
 		return &core.ValidationResult{IsValid: true}, nil
+	}
+	if input.CWD == "" {
+		if request, ok := hookctx.Request(ctx); ok {
+			input.CWD = request.Cwd
+		}
 	}
 	candidates := modelCandidates(ctx, input, t.Logger())
 	if len(candidates) == 0 {
@@ -137,6 +142,9 @@ type modelCandidate struct {
 }
 
 func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
+	if input.ToolName == "Write" || input.ToolName == "Edit" {
+		return settingsWriteCandidates(input)
+	}
 	if input.ToolName != "Agent" && !core.IsShellTool(input.ToolName) {
 		return nil
 	}
@@ -179,7 +187,7 @@ func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Log
 		}
 		// Проверяем текст команды вместе с файлами: запись может обновлять
 		// уже существующий settings.json через dd, sponge и другие команды.
-		if writtenModel.Match([]byte(input.Command)) {
+		if writtenModel.Match([]byte(input.Command)) || writtenOverrides.Match([]byte(input.Command)) {
 			contents = append(contents, []byte(input.Command))
 		}
 		if len(contents) == 0 {
@@ -211,6 +219,50 @@ func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Log
 		candidates = append(candidates, modelCandidate{value: "settings path with unknown home", dynamic: true})
 	}
 	return candidates
+}
+
+func settingsWriteCandidates(input *core.ToolInput) []modelCandidate {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(input.ToolInput, &fields) != nil {
+		return nil
+	}
+	var path string
+	if json.Unmarshal(fields["file_path"], &path) != nil || (filepath.Base(path) != "settings.json" && filepath.Base(path) != "settings.local.json") {
+		return nil
+	}
+	var contents string
+	if input.ToolName == "Write" {
+		if json.Unmarshal(fields["content"], &contents) != nil {
+			return unknownSettingsWrite(path)
+		}
+		return settingsCandidates([]byte(contents), nil)
+	}
+	var oldText, newText string
+	if json.Unmarshal(fields["old_string"], &oldText) != nil || json.Unmarshal(fields["new_string"], &newText) != nil {
+		return unknownSettingsWrite(path)
+	}
+	if !filepath.IsAbs(path) && input.CWD != "" {
+		path = filepath.Join(input.CWD, path)
+	}
+	current, err := readSettingsFile(path)
+	if err != nil {
+		if strings.Contains(newText, "modelOverrides") || strings.Contains(oldText, "modelOverrides") {
+			return unknownSettingsWrite(path)
+		}
+		return nil
+	}
+	if oldText == "" || !strings.Contains(string(current), oldText) {
+		if strings.Contains(newText, "modelOverrides") || strings.Contains(oldText, "modelOverrides") {
+			return unknownSettingsWrite(path)
+		}
+		return nil
+	}
+	updated := strings.Replace(string(current), oldText, newText, 1)
+	return settingsCandidates([]byte(updated), nil)
+}
+
+func unknownSettingsWrite(path string) []modelCandidate {
+	return []modelCandidate{{value: path, unknownWrite: true}}
 }
 
 func settingsForCWD(ctx context.Context, cwd string, homes, configs pathSet, logger core.Logger, includeProject bool) []modelCandidate {
@@ -1009,6 +1061,7 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 			found = append(found, c)
 		}
 	}
+	found = append(found, writtenOverrideCandidates([]byte(decoded))...)
 	for _, match := range regexp.MustCompile(`(?m)^\s*model:\s*([^\s#]+)`).FindAllStringSubmatch(decoded, -1) {
 		found = append(found, modelCandidate{value: strings.Trim(match[1], `"'`), userOnlyCheck: true})
 	}
@@ -1618,6 +1671,22 @@ var jsonModelKey = regexp.MustCompile(`\b(?:model|[A-Z_]+_MODEL)\\*"\s*:`)
 // "model":"x" и "ANTHROPIC_MODEL":"x"
 var writtenModel = regexp.MustCompile(`"(model|` + modelEnvPattern() + `)"\s*:\s*"([^"]*)"`)
 
+// writtenOverrides finds model IDs embedded in settings JSON in shell text.
+var writtenOverrides = regexp.MustCompile(`"modelOverrides"\s*:\s*\{([^}]*)\}`)
+var writtenOverrideValue = regexp.MustCompile(`"[^"]+"\s*:\s*"([^"]*)"`)
+
+func writtenOverrideCandidates(raw []byte) []modelCandidate {
+	var found []modelCandidate
+	for _, object := range writtenOverrides.FindAllSubmatch(raw, -1) {
+		for _, value := range writtenOverrideValue.FindAllSubmatch(object[1], -1) {
+			if strings.TrimSpace(string(value[1])) != "" {
+				found = append(found, modelCandidate{value: string(value[1])})
+			}
+		}
+	}
+	return found
+}
+
 // jsonModelCandidates — модели в JSON флага claude: --settings (строка JSON
 // или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
 // Файла --settings ещё нет — модели в тексте команды, которая его пишет.
@@ -1717,12 +1786,19 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 			for _, m := range writtenModel.FindAllSubmatch(raw, -1) {
 				found.addField(string(m[1]), string(m[2]))
 			}
+			found = append(found, writtenOverrideCandidates(raw)...)
 		}
 		return found
 	}
 	var model string
 	if json.Unmarshal(settings["model"], &model) == nil {
 		found.add(model)
+	}
+	var overrides map[string]string
+	if json.Unmarshal(settings["modelOverrides"], &overrides) == nil {
+		for _, model := range overrides {
+			found.add(model)
+		}
 	}
 	var agent struct {
 		Model string `json:"model"`

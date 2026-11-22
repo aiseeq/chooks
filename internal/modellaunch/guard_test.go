@@ -33,6 +33,10 @@ var errDenied = errors.New("permission denied")
 
 type fakeProcess struct {
 	parent     map[int]int
+	tty        map[int]int64
+	ttyErr     map[int]error
+	cgroup     map[int]string
+	cgroupErr  map[int]error
 	exe        map[int]string
 	exeErr     map[int]error
 	comm       map[int]string
@@ -51,6 +55,10 @@ func (f *fakeProcess) Parent(pid int) (int, error) {
 		return 0, errors.New("proc unavailable")
 	}
 	return f.parent[pid], nil
+}
+func (f *fakeProcess) TTYNr(pid int) (int64, error) { return f.tty[pid], f.ttyErr[pid] }
+func (f *fakeProcess) Cgroup(pid int) (string, error) {
+	return f.cgroup[pid], f.cgroupErr[pid]
 }
 func (f *fakeProcess) Exe(pid int) (string, error) {
 	f.calls["exe:"+strconv.Itoa(pid)]++
@@ -86,6 +94,8 @@ func (f *fakeProcess) Cwd(pid int) (string, error) {
 
 func (f *fakeProcess) add(pid, parent int, exe string, env, argv []string) {
 	f.parent[pid], f.exe[pid], f.environ[pid], f.argv[pid], f.cwd[pid] = parent, exe, env, argv, "/work"
+	f.tty[pid] = 1
+	f.cgroup[pid] = "0::/user.slice/user-1000.slice/session-1.scope"
 }
 
 // nonDumpable — процесс, чей бинарь не читается (chmod 111): environ, cwd и
@@ -124,7 +134,7 @@ func runtimeGuard(t *testing.T, proc ProcessReader) *Guard {
 }
 
 func newFake() *fakeProcess {
-	return &fakeProcess{parent: map[int]int{}, exe: map[int]string{}, exeErr: map[int]error{}, comm: map[int]string{}, environ: map[int][]string{}, environErr: map[int]error{}, argv: map[int][]string{}, argvErr: map[int]error{}, cwd: map[int]string{}, cwdErr: map[int]error{}, calls: map[string]int{}}
+	return &fakeProcess{parent: map[int]int{}, tty: map[int]int64{}, ttyErr: map[int]error{}, cgroup: map[int]string{}, cgroupErr: map[int]error{}, exe: map[int]string{}, exeErr: map[int]error{}, comm: map[int]string{}, environ: map[int][]string{}, environErr: map[int]error{}, argv: map[int][]string{}, argvErr: map[int]error{}, cwd: map[int]string{}, cwdErr: map[int]error{}, calls: map[string]int{}}
 }
 
 // agentTree — хук 100, его родитель 90 (claude сессии), над ним bash 80
@@ -362,6 +372,40 @@ func TestRuntimeModelGuardAgentCases(t *testing.T) {
 			} else {
 				wantPass(t, agentTree(tc.argv, tc.env...))
 			}
+		})
+	}
+}
+
+func TestRuntimeDetachedLaunchClassification(t *testing.T) {
+	makeTree := func(model, cgroup string, tty int64, parentComm string) *fakeProcess {
+		f := agentTree([]string{"claude", "--model", model})
+		f.comm[80] = parentComm
+		f.cgroup[90], f.tty[90] = cgroup, tty
+		return f
+	}
+	for _, tc := range []struct {
+		name, cgroup, parent string
+		tty                  int64
+	}{
+		{"setsid in inherited agent scope", "0::/user.slice/agents.slice/agent-luna-123.scope", "bash", 1},
+		{"systemd run without tty", "0::/user.slice/run-abc.service", "bash", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantReject(t, makeTree("fable", tc.cgroup, tc.tty, tc.parent))
+			wantPass(t, makeTree("opus", tc.cgroup, tc.tty, tc.parent))
+		})
+	}
+
+	for _, tc := range []struct {
+		name, cgroup, parent string
+		tty                  int64
+	}{
+		{"cl in agent scope with tty", "0::/user.slice/agents.slice/agent-luna-123.scope", "cl", 1},
+		{"interactive session scope", "0::/user.slice/session-4.scope", "bash", 1},
+		{"Chrome app scope without tty", "0::/user.slice/app-com.google.Chrome-456.scope", "chrome", 0},
+	} {
+		t.Run("user "+tc.name, func(t *testing.T) {
+			wantPass(t, makeTree("fable", tc.cgroup, tc.tty, tc.parent))
 		})
 	}
 }

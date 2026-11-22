@@ -56,6 +56,9 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 	if !t.IsEnabled() || input == nil {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
+	if result := t.validateShellPrefix(input); result != nil {
+		return result, nil
+	}
 	candidates := modelCandidates(ctx, input, t.Logger())
 	if len(candidates) == 0 {
 		return &core.ValidationResult{IsValid: true}, nil
@@ -107,6 +110,45 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 	return t.reject(strings.Join(reasons, "; "), models), nil
+}
+
+func (t *ModelGuardTool) validateShellPrefix(input *core.ToolInput) *core.ValidationResult {
+	if !core.IsShellTool(input.ToolName) {
+		return nil
+	}
+	reason, err := shellPrefixViolation(input.Command, t.Logger())
+	if err != nil {
+		t.Logger().Warn("model_guard: значение префикса хуков не удалось проверить", "error", err)
+		return t.reject(shellPrefixFailure, nil)
+	}
+	if reason != "" {
+		return t.reject(reason, nil)
+	}
+	return nil
+}
+
+const shellPrefixFailure = "Claude Code запускает хуки через этот префикс одним словом; не путь к исполняемому файлу — все хуки молча падают со статусом 127"
+
+const executableMode = 0111
+
+func shellPrefixViolation(command string, logger core.Logger) (string, error) {
+	values, dynamic := shellEnvValues(command, "CLAUDE_CODE_SHELL_PREFIX", logger)
+	if dynamic {
+		return shellPrefixFailure + "; назови литералом", nil
+	}
+	for _, value := range values {
+		if !filepath.IsAbs(value) {
+			return shellPrefixFailure, nil
+		}
+		info, err := os.Stat(value)
+		if err != nil {
+			return "", fmt.Errorf("stat hook shell prefix %q: %w", value, err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&executableMode == 0 {
+			return shellPrefixFailure, nil
+		}
+	}
+	return "", nil
 }
 
 // CandidateModels exposes the model values found by the same parser used for
@@ -355,6 +397,24 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 				return true
 			}
 			cmd, ok := literalValue(n.Args[0])
+			if ok && cmd == "env" {
+				for _, arg := range n.Args[1:] {
+					value, literal := literalValue(arg)
+					if !literal {
+						start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
+						if start >= 0 && end >= start && end <= len(command) && strings.HasPrefix(command[start:end], name+"=") {
+							dynamic = true
+							continue
+						}
+						break
+					}
+					key, val, assigned := strings.Cut(value, "=")
+					if !assigned {
+						break
+					}
+					add(key, val, true, false)
+				}
+			}
 			if !ok || !declarers[cmd] || cmd == "local" {
 				return true
 			}

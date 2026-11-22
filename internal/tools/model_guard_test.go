@@ -207,6 +207,40 @@ func TestModelGuard(t *testing.T) {
 	}
 }
 
+func TestModelGuardShellPrefix(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	executable := filepath.Join(t.TempDir(), "prefix")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, command string
+		allowed       bool
+		message       string
+	}{
+		{"command prefix invalid", `CLAUDE_CODE_SHELL_PREFIX='timeout 60' claude --model opus`, false, "не путь к исполняемому файлу"},
+		{"export invalid", `export CLAUDE_CODE_SHELL_PREFIX='timeout 60'`, false, "не путь к исполняемому файлу"},
+		{"env invalid", `env CLAUDE_CODE_SHELL_PREFIX='timeout 60' claude --model opus`, false, "не путь к исполняемому файлу"},
+		{"dynamic value", `CLAUDE_CODE_SHELL_PREFIX="$PREFIX" claude --model opus`, false, "назови литералом"},
+		{"absolute executable", "CLAUDE_CODE_SHELL_PREFIX=" + executable + " claude --model opus", true, ""},
+		{"unset", `claude --model opus`, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid != tc.allowed {
+				t.Fatalf("ValidateTool allowed=%v, want %v; violations=%v", result.IsValid, tc.allowed, result.Violations)
+			}
+			if tc.message != "" && (len(result.Violations) != 1 || !strings.Contains(result.Violations[0].Message, tc.message)) {
+				t.Fatalf("violations=%v, want message containing %q", result.Violations, tc.message)
+			}
+		})
+	}
+}
+
 // причина отказа: модель из переменной — «задана переменной»; тело here-doc
 // за снятой обёрткой (sudo bash) с теми же перенаправлениями — один раз;
 // у одинаковых вызовов — по разу на вызов

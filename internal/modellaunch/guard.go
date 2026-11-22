@@ -39,6 +39,8 @@ var promptFlags = []string{"--system-prompt", "--append-system-prompt", "--syste
 // ProcessReader reads the process attributes used to identify and inspect Claude.
 type ProcessReader interface {
 	Parent(pid int) (int, error)
+	TTYNr(pid int) (int64, error)
+	Cgroup(pid int) (string, error)
 	Exe(pid int) (string, error)
 	Comm(pid int) (string, error)
 	Environ(pid int) ([]string, error)
@@ -288,7 +290,60 @@ func (c *check) classify(claudePID int) (agent bool, basis string, complete bool
 	if found {
 		return true, basis + ancestorBasis, true
 	}
+	if c.detachedAgent(claudePID, parent) {
+		return true, basis + "agent_scope_parent_not_cl", true
+	}
+	if c.nonInteractiveAgent(claudePID) {
+		return true, basis + "no_tty_outside_session_app_scope", true
+	}
 	return false, basis + "no_agent_markers_or_claude_ancestor", complete
+}
+
+func (c *check) detachedAgent(pid, parent int) bool {
+	cgroup, err := c.proc.Cgroup(pid)
+	if err != nil || !inAgentScope(cgroup) {
+		return false
+	}
+	comm, err := c.proc.Comm(parent)
+	return err == nil && strings.TrimSpace(comm) != "cl"
+}
+
+func (c *check) nonInteractiveAgent(pid int) bool {
+	tty, err := c.proc.TTYNr(pid)
+	if err != nil || tty != 0 {
+		return false
+	}
+	cgroup, err := c.proc.Cgroup(pid)
+	return err == nil && !inInteractiveScope(cgroup)
+}
+
+func cgroupPath(cgroup string) string {
+	for line := range strings.SplitSeq(cgroup, "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) == 3 {
+			return parts[2]
+		}
+	}
+	return ""
+}
+
+func inAgentScope(cgroup string) bool {
+	parts := strings.Split(cgroupPath(cgroup), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "agents.slice" && strings.HasPrefix(parts[i+1], "agent-") && strings.HasSuffix(parts[i+1], ".scope") {
+			return true
+		}
+	}
+	return false
+}
+
+func inInteractiveScope(cgroup string) bool {
+	for part := range strings.SplitSeq(cgroupPath(cgroup), "/") {
+		if (strings.HasPrefix(part, "session-") || strings.HasPrefix(part, "app-")) && strings.HasSuffix(part, ".scope") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *check) scanAncestors(pid int, markers bool) (bool, string, bool) {
@@ -738,19 +793,42 @@ func (p ProcReader) root() string {
 }
 
 func (p ProcReader) Parent(pid int) (int, error) {
-	data, err := os.ReadFile(filepath.Join(p.root(), strconv.Itoa(pid), "stat"))
+	fields, err := p.statFields(pid)
 	if err != nil {
 		return 0, err
 	}
-	close := strings.LastIndex(string(data), ")")
-	if close < 0 {
-		return 0, fmt.Errorf("malformed stat")
-	}
-	fields := strings.Fields(string(data[close+1:]))
 	if len(fields) < 2 {
 		return 0, fmt.Errorf("malformed stat")
 	}
 	return strconv.Atoi(fields[1])
+}
+
+func (p ProcReader) TTYNr(pid int) (int64, error) {
+	fields, err := p.statFields(pid)
+	if err != nil {
+		return 0, err
+	}
+	if len(fields) < 5 {
+		return 0, fmt.Errorf("malformed stat")
+	}
+	return strconv.ParseInt(fields[4], 10, 64)
+}
+
+func (p ProcReader) statFields(pid int) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join(p.root(), strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return nil, err
+	}
+	close := strings.LastIndex(string(data), ")")
+	if close < 0 {
+		return nil, fmt.Errorf("malformed stat")
+	}
+	return strings.Fields(string(data[close+1:])), nil
+}
+
+func (p ProcReader) Cgroup(pid int) (string, error) {
+	data, err := os.ReadFile(filepath.Join(p.root(), strconv.Itoa(pid), "cgroup"))
+	return string(data), err
 }
 
 func (p ProcReader) Exe(pid int) (string, error) {

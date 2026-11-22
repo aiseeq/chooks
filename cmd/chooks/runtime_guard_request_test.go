@@ -23,7 +23,9 @@ const runtimeGuardPID = 4242
 // может быть чужим процессом
 type fixtureProc struct{ calls *atomic.Int64 }
 
-func (p fixtureProc) Parent(int) (int, error) { p.calls.Add(1); return 1, nil }
+func (p fixtureProc) Parent(int) (int, error)    { p.calls.Add(1); return 1, nil }
+func (p fixtureProc) TTYNr(int) (int64, error)   { p.calls.Add(1); return 1, nil }
+func (p fixtureProc) Cgroup(int) (string, error) { p.calls.Add(1); return "", errFixtureProc }
 func (p fixtureProc) Exe(int) (string, error) {
 	p.calls.Add(1)
 	return "", errFixtureProc

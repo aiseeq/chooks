@@ -393,8 +393,10 @@ func (p runtimeProc) Parent(pid int) (int, error) {
 	}
 	return 1, nil
 }
-func (runtimeProc) Exe(int) (string, error)  { return "/opt/claude/claude", nil }
-func (runtimeProc) Comm(int) (string, error) { return "claude", nil }
+func (runtimeProc) TTYNr(int) (int64, error)   { return 1, nil }
+func (runtimeProc) Cgroup(int) (string, error) { return "0::/user.slice/session-1.scope", nil }
+func (runtimeProc) Exe(int) (string, error)    { return "/opt/claude/claude", nil }
+func (runtimeProc) Comm(int) (string, error)   { return "claude", nil }
 func (runtimeProc) Environ(int) ([]string, error) {
 	return []string{"CLAUDECODE=1"}, nil
 }

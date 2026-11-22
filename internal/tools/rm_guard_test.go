@@ -1,8 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,10 +70,6 @@ func TestRmGuard330CdShapeAndVariables(t *testing.T) {
 		{`cd ./work other && cd ./next && rmdir out/*`, true},
 		{`K=v cd ./build && cd ./next && rm -f cache/*`, true},
 		{`K=v cd ./work && cd ./next && rmdir out/*`, true},
-		{`cd ./build && cd ./next extra && rm -f cache/*`, true},
-		{`cd ./work && cd ./nested other && rmdir out/*`, true},
-		{`cd ./build && K=v cd ./next && rm -f cache/*`, true},
-		{`cd ./work && X=y cd ./nested && rmdir out/*`, true},
 		{`cd ./build >/dev/null && cd ./next && rm -f cache/*`, false},
 		{`cd ./work 2>/dev/null && cd ./next && rmdir out/*`, false},
 		{`A=/; false && rm -f ${A%z}/*.log`, true},
@@ -83,6 +83,83 @@ func TestRmGuard330CdShapeAndVariables(t *testing.T) {
 		if r.IsValid == tc.deny {
 			t.Errorf("deny=%v, ожидалось %v: %q %v", !r.IsValid, tc.deny, tc.command, r.Suggestions)
 		}
+	}
+	t.Run("PreToolUse", testRmGuardSubsequentCdHook)
+}
+
+// testRmGuardSubsequentCdHook проверяет выход процесса и текст, который
+// PreToolUse передаёт вызывающей стороне при блокировке.
+func testRmGuardSubsequentCdHook(t *testing.T) {
+	dir, err := os.MkdirTemp(".", ".rm-guard-hook-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("удаление временного каталога хука: %v", err)
+		}
+	})
+	dir, err = filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "chooks")
+	build := exec.Command("go", "build", "-o", binary, "../../cmd/chooks")
+	build.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("сборка хука: %v\n%s", err, out)
+	}
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte("logger:\n  level: error\ntools:\n  rm_guard:\n    enabled: true\n  git_guard:\n    enabled: false\n  rsync_guard:\n    enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd := filepath.Join(dir, "work")
+	for _, p := range []string{"build/next", "work/nested"} {
+		if err := os.MkdirAll(filepath.Join(cwd, p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		command string
+		target  string
+		deny    bool
+	}{
+		{`cd ./build && cd ./next extra && rm -f cache/*`, "cache/*", true},
+		{`cd ./work && cd ./nested other && rmdir out/*`, "out/*", true},
+		{`cd ./build && K=v cd ./next && rm -f cache/*`, "cache/*", true},
+		{`cd ./work && X=y cd ./nested && rmdir out/*`, "out/*", true},
+		{`cd ./build && cd ./next && rm -f cache/*`, "", false},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			input, err := json.Marshal(map[string]any{
+				"hook_event_name": "PreToolUse", "session_id": "rm-guard-test", "cwd": cwd,
+				"tool_name": "Bash", "tool_input": map[string]string{"command": tc.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(binary, "--config", config, "pre-tool-use")
+			cmd.Env = []string{"HOME=" + dir, "XDG_CONFIG_HOME=" + dir, "PATH=" + os.Getenv("PATH")}
+			cmd.Stdin = bytes.NewReader(input)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err = cmd.Run()
+			if !tc.deny {
+				if err != nil {
+					t.Fatalf("ожидался пропуск: %v; stderr: %s", err, stderr.String())
+				}
+				return
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Fatalf("ожидался rc=2, получено %v; stderr: %s", err, stderr.String())
+			}
+			for _, want := range []string{rmCdGlobHeader, "после cd каталог глоба", tc.target} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("нет %q в отказе: %s", want, stderr.String())
+				}
+			}
+		})
 	}
 }
 

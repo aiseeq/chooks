@@ -35,11 +35,9 @@ func validateRm(t *testing.T, command string) *core.ValidationResult {
 	return result
 }
 
-// TestRmGuardMatchesClaudeCode сверяет хук с вердиктами самого Claude Code
-// 2.1.305: каждую команду прогнали через claude -p в bypassPermissions, true —
-// Claude Code остановил её запросом «Dangerous rm operation on possibly-empty
-// variable path». Исключение — false && rm -f $HOME/*: там запрос о критическом
-// пути /home/…/*, переписывание с ${HOME:?} от него не спасает, хук его не трогает
+// TestRmGuardMatchesClaudeCode сверяет 198 команд с вердиктами Claude Code
+// 2.1.330 в bypassPermissions; true — Claude Code остановил команду запросом
+// о возможно пустой переменной или критическом пути.
 func TestRmGuardMatchesClaudeCode(t *testing.T) {
 	for _, tc := range []struct {
 		command string
@@ -53,7 +51,7 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`S=/home/u/sb; rm -f "$S/file1.zz"`, false},
 		{`S=/home/u/sb; rm -f $S/.hidden`, false},
 		{`S=/home/u/sb; ls $S && rm -f ${S}/*.zz`, true},
-		{`S=/home/u/sb; echo x | rm -f $S/*.zz`, false},
+		{`S=/home/u/sb; echo x | rm -f $S/*.zz`, true},
 		{`S=/home/u/sb; X=$(rm -f $S/*.zz)`, false},
 		{`S=/home/u/sb; echo "$(rm -f $S/*.zz)"`, true},
 		{"S=/home/u/sb; cat <<EOT\nrm -f $S/*.zz\nEOT", false},
@@ -66,10 +64,10 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`false && rm -f "$1"/*.zz`, true},
 		{`false && rm -f $UNSETVAR_XYZ/tmp`, true},
 		{`D=/home/u/sb; false && rm -f $D/tmp`, false},
-		{`false && rm -f $HOME/*`, false},
+		{`false && rm -f $HOME/*`, true},
 		{`D=$(pwd); false && rm -rf "$D"`, true},
 		{`S=/home/u/sb; find /home/u/sb -name '*.qq' -exec rm -f $S/{} \;`, false},
-		{`S=/home/u/sb; ls /home/u/sb | xargs -I{} rm -f $S/{}.zz`, false},
+		{`S=/home/u/sb; ls /home/u/sb | xargs -I{} rm -f $S/{}.zz`, true},
 		{`S=/home/u/sb; eval "rm -f $S/*.zz"`, false},
 		{`S=/home/u/sb; trap 'rm -f "$S"/*.zz' EXIT; echo t`, false},
 		{`S=/home/u/sb; rm -f '$S'/*.zz`, false},
@@ -113,7 +111,7 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`S=/home/u/sb; echo a > /dev/null; rm -f $S/*.zz`, false},
 		{`S=/home/u/sb; rm -f $S/*.zz 2>/dev/null`, false},
 		{`S=/home/u/sb; rm -f $S/*.zz || true`, false},
-		{`S=/home/u/sb; cat /home/u/sb/a.tmp | head -1; rm -f $S/*.zz`, false},
+		{`S=/home/u/sb; cat /home/u/sb/a.tmp | head -1; rm -f $S/*.zz`, true},
 		{`S=/home/u/sb; [ -d $S ] && rm -f $S/*.zz`, false},
 		{`S=/home/u/sb; test -d "$S" && rm -f "$S"/*.zz`, false},
 		{`S=/home/u/sb; mkdir -p $S; rm -f $S/*.zz; ls $S`, false},
@@ -125,10 +123,10 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`S=/home/u/sb; rm -rf $S/*.zz`, false},
 		{`S=/home/u/sb/nodir; rm -rf $S/`, false},
 		{`S=/home/u/sb; rm -f $S/*`, false},
-		{`S=/home/u/sb; ls $S | wc -l; rm -f $S/*.zz`, false},
+		{`S=/home/u/sb; ls $S | wc -l; rm -f $S/*.zz`, true},
 		{`S=/home/u/sb; echo "${S}"; rm -f $S/*.zz`, true},
 		{`S=/home/u/sb; echo $((1+1)); rm -f $S/*.zz`, false},
-		{`S=/home/u/sb; echo "a" | grep -q a && rm -f $S/*.zz`, false},
+		{`S=/home/u/sb; echo "a" | grep -q a && rm -f $S/*.zz`, true},
 		{"S=/home/u/sb; cat <<'EOT' >/dev/null\nhello\nEOT\nrm -f $S/*.zz", true},
 		{`S=/home/u/sb; rm -f $S/*.zz # cleanup`, false},
 		{`S=/home/u/sb && rm -f $S/*.zz`, false},
@@ -149,7 +147,7 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`S=/home/u/sb; rm -f $S/*.zz; (echo)`, true},
 		{"S=/home/u/sb; rm -f $S/*.zz; cat <<'EOT' >/dev/null\nx\nEOT", true},
 		{`cd /home/u/sb && S=/home/u/sb; rm -f $S/*.zz`, true},
-		{`S=/home/u/sb; echo a | read X; rm -f $S/*.zz`, false},
+		{`S=/home/u/sb; echo a | read X; rm -f $S/*.zz`, true},
 		{`S=/home/u/sb T=/home/u/sb; rm -f $S/*.zz`, true},
 		{`S=/home/u/sb false && rm -f $S/*.zz`, true},
 		{`declare S=/home/u/sb; rm -f $S/*.zz`, false},
@@ -164,7 +162,7 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`S=/home/u/sb; rm -f "$S"/*.zz $(echo /home/u/sb/none.zz)`, true},
 		{"S=/home/u/sb\necho a\nrm -f $S/*.zz", false},
 		{`S=/home/u/sb; echo a; echo b; rm -f $S/*.zz`, false},
-		{`S=/home/u/sb; ls /home/u/sb | while read f; do :; done; rm -f $S/*.zz`, false},
+		{`S=/home/u/sb; ls /home/u/sb | while read f; do :; done; rm -f $S/*.zz`, true},
 		{`S=/home/u/sb; [[ -d $S ]] && rm -f $S/*.zz`, false},
 		{`S=/home/u/sb; case x in x) rm -f $S/*.zz;; esac`, false},
 		{`S=/home/u/sb; time rm -f $S/*.zz`, false},
@@ -177,7 +175,6 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`true; S=/home/u/sb; rm -f $S/*.zz`, true},
 		{`echo $((1)); S=/home/u/sb; rm -f $S/*.zz`, true},
 		{`S=/home/u/sb; rm -f $S/*.zz; for f in a; do echo $f; done`, true},
-		// второй прогон: команды, которых не было при выводе правила
 		{`T=$(mktemp -d); false && rm -rf "$T"`, false},
 		{`T=$(mktemp -d); false && rm -rf "$T"/*`, true},
 		{`D=/home/u/sb; for f in $D/*.zz; do rm -f "$f"; done`, false},
@@ -190,7 +187,7 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`ls /home/u/sb >/dev/null && S=/home/u/sb && rm -f $S/*.zz`, true},
 		{`false && rm -rf "$WORKDIR_UNSET_Q"/*`, true},
 		{`false && rm -rf "${WORKDIR_UNSET_Q:?}"/*`, false},
-		{`S=/home/u/sb; X=$(ls $S | wc -l); rm -f $S/*.zz`, false},
+		{`S=/home/u/sb; X=$(ls $S | wc -l); rm -f $S/*.zz`, true},
 		{`S=/home/u/sb; echo "$(ls $S)" >/dev/null; rm -f $S/*.zz`, true},
 		{`S=/home/u/sb; rm -f $S/*.zz $S/*.yy`, false},
 		{`S=/home/u/sb; printf '%s\n' a; rm -f $S/*.zz`, false},
@@ -215,30 +212,26 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 		{`S=/home/u/sb; sh -c "rm -f '$S'/*.zz"`, false},
 		{`S=/home/u/sb; timeout 10 bash -c "rm -f $S/*.zz"`, false},
 		{`S=/home/u/sb; echo ${#S}; rm -f $S/*.zz`, true},
-		{`S=/home/u/sb; ls -la $S | head -3; rm -f "$S"/*.zz; ls $S`, false},
+		{`S=/home/u/sb; ls -la $S | head -3; rm -f "$S"/*.zz; ls $S`, true},
 		{`S=/home/u/sb; mkdir -p "$S" && touch "$S/x.zz" && rm -f "$S"/*.zz`, false},
 		{`false && sudo rm -rf $NOT_SET_Q/*`, true},
-		// проба 2.1.326 (17.11): отказ советует ${VAR:?}; любая форма ${VAR:?…}
-		// и ${VAR?} проходит без запроса, с сообщением и без кавычек тоже
 		{`S=/home/u/sb; rm -f "${S:?S пуст}"/b.zz`, false},
 		{`S=/home/u/sb; rm -rf "${S:?}/x"`, false},
 		{`false && rm -rf "${NOPE_Q:?нет NOPE}"/*`, false},
 		{`false && rm -rf "${NOPE_Q:?}/x"`, false},
 		{`false && rm -rf "${NOPE_Q:?msg}/usr"`, false},
 		{`false && rm -rf ${NOPE_Q:?}/*`, false},
-		{`false && rm -rf "${NOPE_Q?}"/*`, false},
+		{`false && rm -rf "${NOPE_Q?}"/*`, true},
 		{`false && rm -rf "${NOPE_Q:?}"`, false},
 		{`false && rm -rf "$NOPE_Q/usr"`, true},
-		// там же: прочие раскрытия, способные дать пустую строку, Claude Code
-		// не спрашивает, только - и :-
-		{`false && rm -rf "${NOPE_Q:=}"/*`, false},
-		{`false && rm -rf "${NOPE_Q=}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:=}"/*`, true},
+		{`false && rm -rf "${NOPE_Q=}"/*`, true},
 		{`false && rm -rf "${NOPE_Q:=}/usr"`, false},
-		{`false && rm -rf "${NOPE_Q:+x}"/*`, false},
-		{`false && rm -rf "${NOPE_Q%/}"/*`, false},
-		{`false && rm -rf "${NOPE_Q#x}"/*`, false},
-		{`false && rm -rf "${NOPE_Q/a/b}"/*`, false},
-		{`false && rm -rf "${NOPE_Q:0:3}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:+x}"/*`, true},
+		{`false && rm -rf "${NOPE_Q%/}"/*`, true},
+		{`false && rm -rf "${NOPE_Q#x}"/*`, true},
+		{`false && rm -rf "${NOPE_Q/a/b}"/*`, true},
+		{`false && rm -rf "${NOPE_Q:0:3}"/*`, true},
 		{`false && rm -rf "${NOPE_Q%/}/usr"`, false},
 		{`false && rm -rf "${NOPE_Q:=/home/nonexist-q}"/*`, false},
 		{`false && rm -rf "${NOPE_Q:-}"/*`, true},
@@ -256,8 +249,7 @@ func TestRmGuardMatchesClaudeCode(t *testing.T) {
 	}
 }
 
-// TestRmGuardExtra формы, которых не было в прогоне Claude Code: отклонение
-// выведено из того же правила
+// TestRmGuardExtra дополнительные проверки общих форм правила.
 func TestRmGuardExtra(t *testing.T) {
 	for _, tc := range []struct {
 		command string
@@ -293,6 +285,12 @@ func TestRmGuardReason(t *testing.T) {
 	for _, tc := range []struct {
 		command, want string
 	}{
+		{`S=/home/u/sb; echo x | rm -f $S/*.zz`,
+			"`rm -f $S/*.zz`: перепиши `rm -f \"${S:?}\"/*.zz` или укажи литеральный путь"},
+		{`false && rm -f $HOME/*`,
+			"`rm -f $HOME/*`: удаление всего в HOME Claude Code остановит, укажи более узкий литеральный путь"},
+		{`false && rm -f "${HOME:?}"/*`,
+			"`rm -f \"${HOME:?}\"/*`: удаление всего в HOME Claude Code остановит, укажи более узкий литеральный путь"},
 		{`cd /x && ls; S=/home/u/scratchpad/sl; rm -f $S/*; ls`,
 			"`rm -f $S/*`: перепиши `rm -f \"${S:?}\"/*` или укажи литеральный путь"},
 		{`false && rm -rf "$NOPE/"`,
@@ -320,13 +318,8 @@ func TestRmGuardReason(t *testing.T) {
 	}
 }
 
-// TestRmGuardCdGlobMatchesClaudeCode вторая форма: относительная цель с глобом
-// на конце в команде со сменой каталога. Каждую команду прогнали через
-// claude -p --model opus в bypassPermissions с песочницей вне рабочей папки
-// (Claude Code 2.1.308, первые три батча и на 2.1.304 — вердикты совпали), true —
-// Claude Code остановил её запросом «Dangerous rm operation on
-// statically-unresolvable target». cl/*/ и ../* без cd он спрашивает по другой
-// причине, хук их без cd не трогает
+// TestRmGuardCdGlobMatchesClaudeCode сверяет 105 команд с вердиктами Claude
+// Code 2.1.330 в bypassPermissions; true — Claude Code остановил команду.
 func TestRmGuardCdGlobMatchesClaudeCode(t *testing.T) {
 	for _, tc := range []struct {
 		command string
@@ -379,7 +372,6 @@ func TestRmGuardCdGlobMatchesClaudeCode(t *testing.T) {
 		{`cd "/home/u/sb" && rm -f "cl"/*`, true},
 		{`D=/home/u/sb; cd "$D" && rm -rf cl/* && echo ${D}`, true},
 		{`cd /home/u/sb/a && rm -rf .[!.]* *`, true},
-		// команда, всплывшая пользователю 22.10, в песочнице
 		{`cd /home/u/sb && rm -f cl/* && magick light/1440x900-full.png -crop 800x1100+320+0 +repage cl/l-%02d.png && magick dark/1440x900-full.png -crop 800x1100+320+0 +repage cl/d-%02d.png && ls cl`, true},
 		{`cd /home/u/sb && rm -f cl/* && ls cl`, true},
 		{`cd /home/u/sb && rm -f cl/* | cat`, true},
@@ -446,11 +438,156 @@ func TestRmGuardCdGlobMatchesClaudeCode(t *testing.T) {
 	}
 }
 
-// TestRmGuardCdGlobStricter формы, на которых Claude Code в прогоне не спросил,
-// а хук отклоняет: конвейер перед rm в команде без $, { }, ( ), here-doc и
-// циклов с переменной; cd на переменную цикла с rm в том же цикле. Граница
-// этих исключений в Claude Code не выяснена до конца, а лишний отказ стоит
-// агенту одной переписанной команды — пропущенный стоит человеку окна
+// TestRmGuard330Extras проверяет 80 проб Extra с CWD /home/u/proj.
+func TestRmGuard330Extras(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		deny    bool
+	}{
+		{`cd ./sub && rm -f cl/*`, false},
+		{`cd /home/u/proj/sub && rm -f cl/*`, false},
+		{`cd /home/u/proj/sub/ && rm -f cl/*`, false},
+		{`cd "/home/u/proj/sub" && rm -f cl/*`, false},
+		{`cd /home/u/proj && rm -f sub/cl/*`, false},
+		{`cd sub && rm -f cl/*`, true},
+		{`cd sub/a && rm -f cl/*`, true},
+		{`cd ./sub/a && rm -f cl/*`, false},
+		{`cd /home/aisee/.cache/claude-tmp/rmcc330/sb && rm -f cl/*`, true},
+		{`cd /home/aisee/.cache/claude-tmp/rmcc330/sb/Extra-0/sub && rm -f cl/*`, true},
+		{`cd ./nonexist && rm -f cl/*`, false},
+		{`cd /home/u/proj/nonexist && rm -f cl/*`, false},
+		{`cd ./sub; rm -f cl/*`, true},
+		{`cd ./sub && rm -rf cl/*/`, true},
+		{`cd ./sub && rm -rf cl/*`, false},
+		{`cd ./sub && rm -f ./cl/*`, false},
+		{`cd ./sub && echo x && rm -f cl/*`, false},
+		{`cd ./sub && rm -f ../sub/cl/*`, true},
+		{`cd ./sub && rm -f cl/* 2>/dev/null`, false},
+		{`cd ./sub && rmdir cl/*`, false},
+		{`cd ./sub && D=x && rm -f cl/*`, false},
+		{`cd ./sub/../.. && rm -f cl/*`, true},
+		{`cd ./../x && rm -f cl/*`, true},
+		{`cd /home/u/proj/../Extra-1 && rm -f cl/*`, true},
+		{`cd /home/u/proj/sub && rm -rf cl/*/`, false},
+		{`cd /home/u/proj/sub; rm -f cl/*`, false},
+		{`cd ~ && rm -f cl/*`, true},
+		{`cd . && rm -f cl/*`, false},
+		{`cd /home/u/proj && rm -f cl/*`, false},
+		{`cd -P ./sub && rm -f cl/*`, true},
+		{`cd ./sub || exit; rm -f cl/*`, true},
+		{`cd ./sub && cd cl && rm -f */x*`, false},
+		{`cd sub/ && rm -f cl/*`, true},
+		{`cd "./sub" && rm -f cl/*`, false},
+		{`cd ./sub && rm -f cl/*`, false},
+		{`cd ./sub ; rm -f cl/*`, true},
+		{`cd ./sub && rm -rf cl/*/`, true},
+		{`cd ./sub && rm -f ../sub/cl/*`, true},
+		{`cd ./sub && rm -f */x`, false},
+		{`cd /home/u/proj/sub && rm -f cl/*`, false},
+		{`cd /home/u/proj/sub ; rm -f cl/*`, false},
+		{`cd /home/u/proj/sub && rm -rf cl/*/`, false},
+		{`cd /home/u/proj/sub && rm -f ../sub/cl/*`, false},
+		{`cd /home/u/proj/sub && rm -f */x`, false},
+		{`cd . && rm -f cl/*`, false},
+		{`cd . ; rm -f cl/*`, true},
+		{`cd . && rm -rf cl/*/`, true},
+		{`cd . && rm -f ../sub/cl/*`, true},
+		{`cd . && rm -f */x`, false},
+		{`cd /home/u/proj && rm -f cl/*`, false},
+		{`cd /home/u/proj ; rm -f cl/*`, false},
+		{`cd /home/u/proj && rm -rf cl/*/`, false},
+		{`cd /home/u/proj && rm -f ../sub/cl/*`, false},
+		{`cd /home/u/proj && rm -f */x`, false},
+		{`cd sub && rm -f cl/*`, true},
+		{`cd sub ; rm -f cl/*`, true},
+		{`cd sub && rm -rf cl/*/`, true},
+		{`cd sub && rm -f ../sub/cl/*`, true},
+		{`cd sub && rm -f */x`, false},
+		{`S=/home/u/sb; echo x | rm -f $S/*.zz`, true},
+		{`false && rm -f $HOME/*`, true},
+		{`S=/home/u/sb; ls /home/u/sb | xargs -I{} rm -f $S/{}.zz`, true},
+		{`S=/home/u/sb; cat /home/u/sb/a.tmp | head -1; rm -f $S/*.zz`, true},
+		{`S=/home/u/sb; ls $S | wc -l; rm -f $S/*.zz`, true},
+		{`S=/home/u/sb; echo x | rm -f "${S:?}"/*.zz`, false},
+		{`false && rm -f "${HOME:?}"/*`, true},
+		{`S=/home/u/sb; ls /home/u/sb | xargs -I{} rm -f "${S:?}"/{}.zz`, false},
+		{`S=/home/u/sb; cat /home/u/sb/a.tmp | head -1; rm -f "${S:?}"/*.zz`, false},
+		{`S=/home/u/sb; ls $S | wc -l; rm -f "${S:?}"/*.zz`, false},
+		{`S=/home/u/sb; echo "a" | grep -q a && rm -f "${S:?}"/*.zz`, false},
+		{`S=/home/u/sb; echo a | read X; rm -f "${S:?}"/*.zz`, false},
+		{`S=/home/u/sb; ls /home/u/sb | while read f; do :; done; rm -f "${S:?}"/*.zz`, false},
+		{`S=/home/u/sb; X=$(ls $S | wc -l); rm -f "${S:?}"/*.zz`, false},
+		{`S=/home/u/sb; ls -la $S | head -3; rm -f "${S:?}"/*.zz; ls $S`, false},
+		{`false && rm -rf "${NOPE_Q:?}"/*`, false},
+		{`S=/home/u/sb; ls $S | wc -l; rm -f /home/u/sb/*.zz`, false},
+		{`S=/home/u/sb; ls $S | wc -l; rm -f $S/b.zz`, false},
+		{`S=/home/u/sb; ls /home/u/sb | wc -l; rm -f $S/*.zz`, true},
+		{`S=/home/u/sb; true | true; rm -f $S/*.zz`, true},
+		{`S=/home/u/sb; true; rm -f $S/*.zz`, false},
+	} {
+		r := validateRm(t, tc.command)
+		if r.IsValid == tc.deny {
+			t.Errorf("deny=%v, ожидалось %v: %q %v", !r.IsValid, tc.deny, tc.command, r.Suggestions)
+		}
+	}
+}
+
+// TestRmGuard330Gen checks 40 generalized Claude Code 2.1.330 probes at CWD /home/u/proj.
+func TestRmGuard330Gen(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		deny    bool
+	}{
+		{`S=/home/u/sb; rm -f $S/*.zz; ls | wc -l`, false},
+		{`S=/home/u/sb; ls | wc -l && rm -f "$S"/*.zz`, true},
+		{`S=/home/u/sb; rm -f $S/*.zz | cat`, false},
+		{`S=/home/u/sb; echo hi |& cat; rm -f $S/*.zz`, true},
+		{`S=/home/u/sb; ls $S | wc -l; rm -rf $S/sub`, false},
+		{`S=/home/u/sb; ls $S | wc -l; rm -f "$S"`, false},
+		{`S=/home/u/sb; ls | wc -l; rmdir $S/*`, true},
+		{`S=/home/u/sb; printf 'a|b\\n'; rm -f $S/*.zz`, false},
+		{`S=/home/u/sb; echo 'x | y'; rm -f $S/*.zz`, false},
+		{`S=/home/u/sb; ls | wc -l; rm -f ${S:?}/*.zz`, false},
+		{`false && rm -rf "${NOPE_Q:-/home/nonexist-q}"/*`, false},
+		{`false && rm -rf "${NOPE_Q:=$HOME}"/*`, true},
+		{`false && rm -rf "${NOPE_Q:-$PWD}"/*`, true},
+		{`false && rm -rf "${NOPE_Q:?x}/usr"`, false},
+		{`false && rm -rf "${NOPE_Q^^}"/*`, true},
+		{`false && rm -rf "${NOPE_Q,,}"/*`, true},
+		{`false && rm -rf "${#NOPE_Q}"/*`, false},
+		{`false && rm -rf "${!NOPE_Q}"/*`, false},
+		{`false && rm -f $HOME/*.log`, false},
+		{`false && rm -f "$HOME"/x/*`, false},
+		{`false && rm -f ${HOME}/*`, true},
+		{`false && rm -rf $HOME/.cache/*`, true},
+		{`cd ./a/b && rm -f c/*`, false},
+		{`cd ./a && cd ./b && rm -f c/*`, false},
+		{`cd . && cd ./a && rm -f c/*`, false},
+		{`cd ./a && ls && rm -f c/*`, false},
+		{`cd ./a && rm -f c/* d/*`, false},
+		{`cd ./a && rm -f "c"/*`, false},
+		{`cd './a' && rm -f c/*`, false},
+		{`cd ./a && sudo rm -f c/*`, false},
+		{`cd /home/u/sb/a && cd ./b && rm -f c/*`, true},
+		{`cd ./a && rm -f c/*.log && cd .. && rm -f d/*`, true},
+		{`cd /home/u/proj/a/b && rm -f c/*`, false},
+		{`cd /home/u/proj/a/../a && rm -f c/*`, true},
+		{`cd /home/u/proj/a && cd ./b && rm -f c/*`, false},
+		{`cd /home/u/proj/a && cd b && rm -f c/*`, false},
+		{`cd /home/u/proj/a; cd /home/u/sb; rm -f c/*`, true},
+		{`cd /home/u/proj/a && rm -rf ../a/c/*/`, true},
+		{`cd /home/u/projx && rm -f c/*`, true},
+		{`cd /home/u/proj/a && sudo rm -f c/*`, false},
+	} {
+		r := validateRm(t, tc.command)
+		if r.IsValid == tc.deny {
+			t.Errorf("deny=%v, ожидалось %v: %q %v", !r.IsValid, tc.deny, tc.command, r.Suggestions)
+		}
+	}
+}
+
+// TestRmGuardCdGlobStricter сохраняет намеренно строгие формы, не входившие
+// в таблицу вердиктов Claude Code 2.1.330.
 func TestRmGuardCdGlobStricter(t *testing.T) {
 	for _, command := range []string{
 		`cd /home/u/sb && ls | head -1; rm -f cl/*`,

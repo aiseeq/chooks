@@ -621,11 +621,7 @@ func WriteLimits(w io.Writer, steps bool, request hookctx.Context) error {
 	}
 	latest := latestWeek(weeks)
 	shown := map[int]bool{}
-	home := request.Getenv("HOME")
-	if home != "" {
-		home = request.Abs(home)
-	}
-	unit := store.PlanUnitForHome(now, home)
+	unit := store.PlanUnitForHome(now, request.Path(hookctx.EnvHome))
 	if unit.OK() {
 		fmt.Fprintf(w, "Доли — в %% %s (полная неделя учётки — %s)\n", unit.Name(), unit.Percent(100))
 	} else {
@@ -667,7 +663,7 @@ func WriteLimits(w io.Writer, steps bool, request hookctx.Context) error {
 			mark = "  ← тратит сейчас"
 		}
 		fmt.Fprintf(w, "сброс %s  %s  с %s, видно %s%s\n",
-			accounts.ShortTime(rec.ResetsAt), unit.Percent(rec.SevenDay), accounts.ShortTime(rec.At), accounts.ShortTime(rec.SeenAt), mark)
+			accounts.ShortTimeIn(rec.ResetsAt, now.Location()), unit.Percent(rec.SevenDay), accounts.ShortTimeIn(rec.At, now.Location()), accounts.ShortTimeIn(rec.SeenAt, now.Location()), mark)
 	}
 	fmt.Fprintf(w, "Шагов в журнале: %d (chooks limits --steps)\n", len(journal))
 	return nil
@@ -690,7 +686,7 @@ func writeAccount(w io.Writer, info accounts.Info, snapshot *limitsSnapshot, sho
 		rec := snapshot.Weeks[week]
 		shown[week] = true
 		fmt.Fprintf(w, "  неделя %s, сброс %s (доля с %s, видно %s)\n",
-			unit.Percent(rec.SevenDay), accounts.ShortTime(rec.ResetsAt), accounts.ShortTime(rec.At), accounts.ShortTime(rec.SeenAt))
+			unit.Percent(rec.SevenDay), accounts.ShortTimeIn(rec.ResetsAt, now.Location()), accounts.ShortTimeIn(rec.At, now.Location()), accounts.ShortTimeIn(rec.SeenAt, now.Location()))
 	} else {
 		fmt.Fprintln(w, "  неделя неизвестна или не начата")
 	}
@@ -703,7 +699,7 @@ func writeAccount(w io.Writer, info accounts.Info, snapshot *limitsSnapshot, sho
 		if left < 3*24*time.Hour {
 			note = " — скоро /login"
 		}
-		fmt.Fprintf(w, "  вход до %s%s\n", accounts.ShortTime(info.LoginExpires), note)
+		fmt.Fprintf(w, "  вход до %s%s\n", accounts.ShortTimeIn(info.LoginExpires, now.Location()), note)
 	}
 }
 

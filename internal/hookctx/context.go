@@ -2,9 +2,12 @@
 package hookctx
 
 import (
+	"archive/zip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,11 +37,105 @@ func UserHomeDir(ctx context.Context) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("hook request is missing")
 	}
-	home := request.Getenv("HOME")
+	home := request.Path(EnvHome)
 	if home == "" {
 		return "", fmt.Errorf("$HOME is not defined")
 	}
-	return request.Abs(home), nil
+	return home, nil
+}
+
+// PathKey — переменная env запроса, значение которой — путь к каталогу или
+// файлу. Других путей из env хуки не читают: Path — единственный вход
+type PathKey string
+
+// Переменные-пути env запроса. XDG_CONFIG_HOME среди них нет: у неё своё
+// правило относительного значения, его даёт ConfigDir
+const (
+	EnvHome             PathKey = "HOME"
+	EnvRuntimeDir       PathKey = "XDG_RUNTIME_DIR"
+	EnvTmpDir           PathKey = "TMPDIR"
+	EnvStateHome        PathKey = "XDG_STATE_HOME"
+	EnvClaudeConfigDir  PathKey = "CLAUDE_CONFIG_DIR"
+	EnvModelsApproved   PathKey = "MODELS_APPROVED"
+	EnvClaudeCodeTmpDir PathKey = "CLAUDE_CODE_TMPDIR"
+)
+
+// Path — значение key из env запроса как путь, который открывает из
+// исполнителя то же, что ОС открыла бы из cwd запроса (Abs). Нет переменной
+// или она пустая — "": вызывающий берёт своё умолчание, как база по пустому
+// os.Getenv. У CLI значение как есть, у демона относительное — от cwd запроса
+func (c Context) Path(key PathKey) string {
+	value := c.Getenv(string(key))
+	if value == "" {
+		return ""
+	}
+	return c.Abs(value)
+}
+
+// RootPath — значение key как корень, с которым сравнивают абсолютные
+// каталоги (лежит ли каталог под корнем), а не путь для открытия. У CLI
+// значение как есть: относительный корень с абсолютным каталогом не
+// совпадает никогда (filepath.Rel отказывает). У демона относительное
+// значение — "": Path сделал бы его абсолютным, и совпадение, которого у CLI
+// нет, появилось бы только у демона. Нет переменной или она пустая — ""
+func (c Context) RootPath(key PathKey) string {
+	value := c.Getenv(string(key))
+	if c.process || filepath.IsAbs(value) {
+		return value
+	}
+	return ""
+}
+
+// MatchPath — значение key для лексического сравнения с путями из ввода хука
+// (имя проекта по каталогу, ~/ в команде): как есть у CLI и у демона. Файл по
+// нему не открывается, и сравнение сырых строк даёт тот же исход, что у CLI;
+// Path дал бы другой: относительный $HOME у демона стал бы абсолютным и
+// совпал бы с абсолютным каталогом, с которым у CLI не совпадает
+func (c Context) MatchPath(key PathKey) string {
+	return c.Getenv(string(key))
+}
+
+// ChildDir — каталог запуска дочернего процесса запроса. У CLI ребёнок
+// наследует cwd хука, даже удалённый, и стартует (Cwd пуст, если os.Getwd
+// не смог). Демон в удалённый каталог chdir не сделает, и exec упал бы, хотя
+// у CLI ребёнок стартует; поэтому у демона без каталога — "/". Относительный
+// путь в env или аргументах ребёнка тогда ищется от "/", а у CLI не открылся
+// бы: точно повторит CLI только cwd прокси, переданный дескриптором
+func (c Context) ChildDir() string {
+	if c.process {
+		return c.Cwd
+	}
+	info, err := os.Stat(c.Cwd)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "/"
+	case err != nil:
+		// Иная ошибка stat: chdir ребёнка вернёт её сам при запуске
+		return c.Cwd
+	case !info.IsDir():
+		// На месте каталога файл: каталога cwd больше нет
+		return "/"
+	}
+	return c.Cwd
+}
+
+// ConfigDir — каталог конфигурации запроса по правилу os.UserConfigDir:
+// $XDG_CONFIG_HOME, без него $HOME/.config. Относительный $XDG_CONFIG_HOME —
+// ошибка, как у os.UserConfigDir в CLI базы: от cwd он не разрешается ни у
+// CLI, ни у демона. $HOME — по Path
+func (c Context) ConfigDir() (string, error) {
+	dir := c.Getenv("XDG_CONFIG_HOME")
+	switch {
+	case dir == "":
+		home := c.Path(EnvHome)
+		if home == "" {
+			return "", fmt.Errorf("neither $XDG_CONFIG_HOME nor $HOME are defined")
+		}
+		return filepath.Join(home, ".config"), nil
+	case !filepath.IsAbs(dir):
+		return "", fmt.Errorf("path in $XDG_CONFIG_HOME is relative")
+	}
+	return dir, nil
 }
 
 // Context contains the state of the hook process, not that of the executor.
@@ -112,11 +209,79 @@ func (c Context) Location() *time.Location {
 		}
 		return time.UTC
 	}
+	if !c.process {
+		loc, err := c.requestZone(tz)
+		if err == nil {
+			return loc
+		}
+		// Свой источник запроса пояса не дал или его нет: дальше системная
+		// база, как в time.LoadLocation после $ZONEINFO
+	}
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
 		return time.UTC
 	}
 	return loc
+}
+
+// platformZoneSources — каталоги базы поясов, где их ищет пакет time на unix
+// (zoneinfo_unix.go)
+var platformZoneSources = []string{"/usr/share/zoneinfo/", "/usr/share/lib/zoneinfo/", "/usr/lib/locale/TZ/", "/etc/zoneinfo"}
+
+// requestZone — то, что в процессе хука time.LoadLocation взял бы из его env,
+// а у демона взял бы из env демона. «Local» — пояс процесса: у хука с
+// TZ=Local это файл Local из системных каталогов (time.initLocal), иначе UTC.
+// $ZONEINFO запроса (каталог или несжатый zip, относительный — от cwd
+// запроса) смотрится до системной базы, как в time.LoadLocation.
+// errNoRequestZone — решает time.LoadLocation: имя без $ZONEINFO и без
+// «Local»; иная ошибка — $ZONEINFO пояса не дал, и time.LoadLocation тоже
+// идёт дальше, в системную базу
+func (c Context) requestZone(name string) (*time.Location, error) {
+	if name == "Local" {
+		for _, dir := range platformZoneSources {
+			if data, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
+				if loc, err := time.LoadLocationFromTZData(name, data); err == nil {
+					return loc, nil
+				}
+			}
+		}
+		return time.UTC, nil
+	}
+	zoneinfo := c.Getenv("ZONEINFO")
+	if zoneinfo == "" || name == "UTC" || strings.Contains(name, "..") || strings.HasPrefix(name, "\\") {
+		return nil, errNoRequestZone
+	}
+	data, err := zoneData(c.Abs(zoneinfo), name)
+	if err != nil {
+		return nil, fmt.Errorf("zone %s from $ZONEINFO: %w", name, err)
+	}
+	loc, err := time.LoadLocationFromTZData(name, data)
+	if err != nil {
+		return nil, fmt.Errorf("zone %s from $ZONEINFO: %w", name, err)
+	}
+	return loc, nil
+}
+
+// errNoRequestZone — у запроса нет своего источника пояса
+var errNoRequestZone = errors.New("no request zone source")
+
+// zoneData читает пояс name из каталога или zip-архива source, как
+// loadTzinfoFromDirOrZip пакета time
+func zoneData(source, name string) ([]byte, error) {
+	if !strings.HasSuffix(source, ".zip") {
+		return os.ReadFile(source + "/" + name)
+	}
+	archive, err := zip.OpenReader(source)
+	if err != nil {
+		return nil, fmt.Errorf("open zone archive: %w", err)
+	}
+	defer archive.Close()
+	file, err := archive.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("zone %s in archive %s: %w", name, source, err)
+	}
+	defer file.Close()
+	return io.ReadAll(file)
 }
 
 // Abs gives the path that opens, from the executor, the file the OS would open
@@ -149,27 +314,33 @@ func (c Context) Abs(path string) string {
 
 // RuntimeDir resolves the short-lived state directory from this request.
 func (c Context) RuntimeDir() string {
-	base := c.Getenv("XDG_RUNTIME_DIR")
+	base := c.Path(EnvRuntimeDir)
 	if base == "" {
-		base = c.Getenv("TMPDIR")
-		if base == "" {
-			base = "/tmp"
-		}
+		base = c.TempDir()
 	}
-	return filepath.Join(c.Abs(base), "chooks")
+	return filepath.Join(base, "chooks")
+}
+
+// TempDir — временный каталог запроса по правилу os.TempDir: $TMPDIR, без
+// него /tmp
+func (c Context) TempDir() string {
+	if dir := c.Path(EnvTmpDir); dir != "" {
+		return dir
+	}
+	return "/tmp"
 }
 
 // StateDir resolves the persistent chooks state directory for the request.
 func (c Context) StateDir() (string, error) {
-	base := c.Getenv("XDG_STATE_HOME")
+	base := c.Path(EnvStateHome)
 	if base == "" {
-		home := c.Getenv("HOME")
+		home := c.Path(EnvHome)
 		if home == "" {
 			return "", fmt.Errorf("cannot resolve home dir: $HOME is not defined")
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(c.Abs(base), "chooks"), nil
+	return filepath.Join(base, "chooks"), nil
 }
 
 // LookPath ищет name так, как LookPath из os/exec в процессе запроса. У CLI

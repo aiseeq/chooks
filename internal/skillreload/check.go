@@ -48,6 +48,9 @@ type Checker struct {
 	// транскрипта не заходят за него. Нулевое — без общего срока
 	Deadline time.Time
 	Now      func() time.Time
+	// Location — пояс времени в тексте выдачи: у хука — пояс запроса
+	// (hookctx.Context.Location); nil — time.Local
+	Location *time.Location
 	// Substage сообщает текущую подстадию для журнала таймаутов хука.
 	Substage func(string)
 	store    textStore
@@ -117,7 +120,7 @@ func (c Checker) Check(event Event) (Result, error) {
 		store = newDirStore(c.StateDir)
 	}
 	view := func(kind, path string) (fileView, error) { return diskViewAt(kind, pathFor(c.Abs, path), path) }
-	t := tracker{state: state, store: store, view: view, resolvePath: c.Abs}
+	t := tracker{state: state, store: store, view: view, resolvePath: c.Abs, loc: c.Location}
 	for _, ev := range scan.Events {
 		if ev.Kind == evSkillLoad || ev.Kind == evMemoryLoad {
 			result.NewLoads++
@@ -241,11 +244,18 @@ func transcriptFor(event Event) string {
 	return core.AgentTranscript(event.TranscriptPath, event.AgentID)
 }
 
-// Format — текст для контекста агента, по абзацу на файл
+// Format — текст для контекста агента, по абзацу на файл; время — в поясе
+// машины (time.Local)
 func Format(notices []Notice) string {
+	return FormatIn(notices, time.Local)
+}
+
+// FormatIn — Format со временем в поясе loc: у хука — пояс запроса
+// (hookctx.Context.Location), а не процесса, который его обслуживает
+func FormatIn(notices []Notice, loc *time.Location) string {
 	parts := make([]string, 0, len(notices))
 	for i := range notices {
-		parts = append(parts, notices[i].format())
+		parts = append(parts, notices[i].format(loc))
 	}
 	return strings.Join(parts, noticeSeparator)
 }
@@ -253,15 +263,15 @@ func Format(notices []Notice) string {
 // noticeSeparator — между выдачами по файлам
 const noticeSeparator = "\n\n"
 
-func (n *Notice) format() string {
+func (n *Notice) format(loc *time.Location) string {
 	var subject, reload string
 	if n.Kind == kindSkill {
 		subject = fmt.Sprintf("Скилл %s изменён после того, как попал тебе в контекст (текст в контексте от %s, файл изменён %s)",
-			n.Name, localTime(n.LoadedAt), localTime(n.ChangedAt))
+			n.Name, timeIn(n.LoadedAt, loc), timeIn(n.ChangedAt, loc))
 		reload = fmt.Sprintf("Вызови Skill %s заново, прежде чем работать по нему.", n.Name)
 	} else {
 		subject = fmt.Sprintf("Файл инструкций %s изменён на диске после того, как попал тебе в контекст (текст в контексте от %s, файл изменён %s)",
-			n.Path, localTime(n.LoadedAt), localTime(n.ChangedAt))
+			n.Path, timeIn(n.LoadedAt, loc), timeIn(n.ChangedAt, loc))
 		reload = fmt.Sprintf("Перечитай его (Read %s), прежде чем работать дальше.", n.Path)
 	}
 	switch {
@@ -304,7 +314,12 @@ func (n *Notice) formatSections(subject string) string {
 
 // localTime — время в поясе машины с его именем
 func localTime(t time.Time) string {
-	return t.Local().Format("02.01 15:04 MST")
+	return timeIn(t, time.Local)
+}
+
+// timeIn — время в поясе loc с его именем
+func timeIn(t time.Time, loc *time.Location) string {
+	return t.In(loc).Format("02.01 15:04 MST")
 }
 
 // within — срок t, не позже общего срока проверки
@@ -318,6 +333,10 @@ func (c Checker) within(t time.Time) time.Time {
 func (c Checker) now() time.Time {
 	if c.Now != nil {
 		return c.Now()
+	}
+	// Время пишется в запись сессии со смещением: пояс — запроса, как у CLI
+	if c.Location != nil {
+		return time.Now().In(c.Location)
 	}
 	return time.Now()
 }

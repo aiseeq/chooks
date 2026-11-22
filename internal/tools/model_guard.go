@@ -1093,11 +1093,7 @@ func claudeConfigDir(ctx context.Context) string {
 	if !ok {
 		return ""
 	}
-	config := request.Getenv("CLAUDE_CONFIG_DIR")
-	if config == "" {
-		return ""
-	}
-	return request.Abs(config)
+	return request.Path(hookctx.EnvClaudeConfigDir)
 }
 
 // modelClientWord — отдельное слово клиента из modelClients (не .claude/ и не claude-hooks)
@@ -1755,14 +1751,14 @@ func codexConfigCandidate(config word) (modelCandidate, bool) {
 
 func (t *ModelGuardTool) approvedPath(ctx context.Context) string {
 	if request, ok := hookctx.Request(ctx); ok {
-		if path := request.Getenv("MODELS_APPROVED"); path != "" {
-			return request.Abs(path)
+		if path := request.Path(hookctx.EnvModelsApproved); path != "" {
+			return path
 		}
 		if t.path != "" {
 			return request.Abs(t.path)
 		}
-		if home := request.Getenv("HOME"); home != "" {
-			return filepath.Join(request.Abs(home), ".config", "models", "approved")
+		if home := request.Path(hookctx.EnvHome); home != "" {
+			return filepath.Join(home, ".config", "models", "approved")
 		}
 		t.Logger().Warn("не удалось определить домашний каталог для списка моделей", "error", errors.New("$HOME is not defined"))
 		return request.Abs(defaultApprovedModelsPath)

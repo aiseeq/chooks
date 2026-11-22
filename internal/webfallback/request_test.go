@@ -50,3 +50,27 @@ func TestOpenRequestRelativePath(t *testing.T) {
 		t.Fatalf("text=%q err=%v", text, err)
 	}
 }
+
+// Удалённый cwd запроса: у CLI webtext наследует удалённый cwd и стартует,
+// у демона стартует из "/" — исход (вывод webtext) тот же
+func TestExecRunnerDeletedCwd(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	work := filepath.Join(dir, "work")
+	for _, p := range []string{bin, work} {
+		if err := os.Mkdir(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bin, "webtext"), []byte("#!/bin/sh\necho page\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(work); err != nil {
+		t.Fatal(err)
+	}
+	request := hookctx.New(nil, nil, nil, []string{"PATH=" + bin}, work, 1, 2)
+	out, code, err := ExecRunner(hookctx.WithRequest(context.Background(), request), nil)
+	if err != nil || code != 0 || string(out) != "page\n" {
+		t.Fatalf("out=%q code=%d err=%v, want webtext started as in the CLI", out, code, err)
+	}
+}

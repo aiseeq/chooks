@@ -23,6 +23,11 @@ import (
 // каталоги состояния, кэша akit и runtime сверяются со снимком до них
 // (newFakeEntries)
 func TestMain(m *testing.M) {
+	// Бинарь тестов как CLI chooks для TestRelativeEnvCLIAndRequest: до
+	// подмены HOME и до m.Run, env и cwd — запуска
+	if os.Getenv(relativeEnvHelper) == "1" {
+		os.Exit(runRelativeEnvCLI())
+	}
 	os.Exit(runIsolated(m.Run))
 }
 

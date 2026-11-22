@@ -371,7 +371,7 @@ func ExecRunner(ctx context.Context, args []string) ([]byte, int, error) {
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append([]string{}, request.Env...)
-	cmd.Dir = request.Cwd
+	cmd.Dir = request.ChildDir()
 	cmd.WaitDelay = time.Second
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -390,8 +390,8 @@ func webtextPathForRequest(request hookctx.Context) (string, error) {
 	if path, err := request.LookPath("webtext"); err == nil {
 		return path, nil
 	}
-	if home := request.Getenv("HOME"); home != "" {
-		path := filepath.Join(request.Abs(home), "bin", "webtext")
+	if home := request.Path(hookctx.EnvHome); home != "" {
+		path := filepath.Join(home, "bin", "webtext")
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			return path, nil
 		}

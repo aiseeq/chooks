@@ -201,3 +201,22 @@ func TestValidFromUsesRequestLocation(t *testing.T) {
 		t.Fatalf("parsed date in UTC = %v", got)
 	}
 }
+
+// Действующая строка курсов выбирается по полуночи в поясе now (у хука — пояс
+// запроса): в 00:30 1 марта по UTC+9 мартовская строка уже действует, хотя в
+// поясе процесса может быть ещё 28 февраля
+func TestPlanPriceDateInNowLocation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rates.tsv")
+	rates := "valid_from\tprovider\tplan\tplan_usd_month\n2026-01-01\tanthropic\tmax\t100\n2026-03-01\tanthropic\tmax\t200\n"
+	if err := os.WriteFile(path, []byte(rates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 3, 1, 0, 30, 0, 0, time.FixedZone("request", 9*60*60))
+	plan, err := planPrice(path, ratesProvider, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.usd != 200 {
+		t.Errorf("plan_usd_month %v, want 200 from the row valid since midnight of the request zone", plan.usd)
+	}
+}

@@ -42,13 +42,14 @@ type GitGuardTool struct {
 
 // NewGitGuardToolForRequest uses the hook's temporary directories.
 func NewGitGuardToolForRequest(config core.ToolConfig, logger core.Logger, request hookctx.Context) (*GitGuardTool, error) {
-	tmp := request.Getenv("TMPDIR")
+	// Корни сравниваются с каталогом git-вызова: RootPath, не Path
+	tmp := request.RootPath(hookctx.EnvTmpDir)
 	if tmp == "" {
 		tmp = "/tmp"
 	}
-	roots := []string{request.Abs(tmp), "/tmp"}
-	if dir := request.Getenv("CLAUDE_CODE_TMPDIR"); dir != "" {
-		roots = append(roots, request.Abs(dir))
+	roots := []string{tmp, "/tmp"}
+	if dir := request.RootPath(hookctx.EnvClaudeCodeTmpDir); dir != "" {
+		roots = append(roots, dir)
 	}
 	return &GitGuardTool{BaseTool: NewBaseTool("git_guard", config.Enabled, core.ShellTools, logger), tempRoots: roots}, nil
 }

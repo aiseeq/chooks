@@ -47,6 +47,8 @@ type tracker struct {
 	store       textStore
 	view        viewer
 	resolvePath func(string) string
+	// loc — пояс времени в тексте выдачи (Checker.Location); nil — time.Local
+	loc *time.Location
 }
 
 // apply применяет событие транскрипта к записи
@@ -275,7 +277,11 @@ func (t tracker) candidates() ([]candidate, []error) {
 
 // deliver укладывает правки в выдачу и сдвигает базу показанных целиком
 func (t tracker) deliver(candidates []candidate, now time.Time) []Notice {
-	notices := fitBudget(candidates, outputBudget)
+	loc := t.loc
+	if loc == nil {
+		loc = time.Local
+	}
+	notices := fitBudget(candidates, outputBudget, loc)
 	for i := range candidates {
 		c := &candidates[i]
 		if !c.notice.Overflow {
@@ -300,21 +306,21 @@ func rawSize(candidates []candidate) int {
 // целиком, пока остаётся место под перечень остальных, остальные — перечнем
 // разделов с пометкой Overflow. Правка, которая и одна больше бюджета, —
 // просьба перечитать, как правка больше sectionsLimit
-func fitBudget(candidates []candidate, budget int) []Notice {
+func fitBudget(candidates []candidate, budget int, loc *time.Location) []Notice {
 	sep := len(noticeSeparator)
 	full := make([]int, len(candidates))
 	short := make([]int, len(candidates))
 	reserve := 0
 	for i := range candidates {
 		n := &candidates[i].notice
-		full[i] = core.UTF16Len(n.format()) + sep
+		full[i] = core.UTF16Len(n.format(loc)) + sep
 		if full[i] > budget {
 			n.Diff, n.Full, n.Dropped = "", nil, nil
-			full[i] = core.UTF16Len(n.format()) + sep
+			full[i] = core.UTF16Len(n.format(loc)) + sep
 		}
 		overflow := *n
 		overflow.Overflow = true
-		short[i] = core.UTF16Len(overflow.format()) + sep
+		short[i] = core.UTF16Len(overflow.format(loc)) + sep
 		reserve += short[i]
 	}
 	order := make([]int, len(candidates))

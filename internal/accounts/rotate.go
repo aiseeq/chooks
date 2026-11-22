@@ -367,7 +367,7 @@ func noSwitchReasons(s *Store, usage map[string]Usage, now time.Time) []string {
 			if a.UUID == s.Active {
 				reasons = append(reasons, fmt.Sprintf("%s: остаётся активной по правилу выбора", label))
 			} else {
-				reasons = append(reasons, fmt.Sprintf("%s: неделя доступна (%s), сброс %s", label, unit.Percent(st.week.Used), ShortTime(st.resets)))
+				reasons = append(reasons, fmt.Sprintf("%s: неделя доступна (%s), сброс %s", label, unit.Percent(st.week.Used), ShortTimeIn(st.resets, now.Location())))
 			}
 		case accountWeekUnknown:
 			reasons = append(reasons, fmt.Sprintf("%s: неделя неизвестна или не начата", label))
@@ -612,11 +612,7 @@ func Forget(p Paths, name string) (string, error) {
 // Code, а прерванная таймаутом строки статуса ротация потеряла бы токен.
 // executable — свой бинарь, args — подкоманда ротации
 func MaybeRotate(p Paths, s *Store, usage map[string]Usage, now time.Time, executable string, request hookctx.Context, args ...string) (string, error) {
-	home := request.Getenv("HOME")
-	if home != "" {
-		home = request.Abs(home)
-	}
-	why, err := pendingWithUnit(p, s, usage, now, s.PlanUnitForHome(now, home))
+	why, err := pendingWithUnit(p, s, usage, now, s.PlanUnitForHome(now, request.Path(hookctx.EnvHome)))
 	if err != nil || why == "" {
 		return "", err
 	}
@@ -634,7 +630,7 @@ func MaybeRotate(p Paths, s *Store, usage map[string]Usage, now time.Time, execu
 	}
 	cmd := exec.Command(executable, args...)
 	cmd.Env = append([]string{}, request.Env...)
-	cmd.Dir = request.Cwd
+	cmd.Dir = request.ChildDir()
 	if err := desktop.StartDetached(cmd); err != nil {
 		return "", fmt.Errorf("rotation not started: %w", err)
 	}

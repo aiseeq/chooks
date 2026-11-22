@@ -146,11 +146,11 @@ func poolText(store *accounts.Store, f PoolForecast, unit accounts.Unit, now tim
 	var text string
 	switch f.Forecast.Pace {
 	case accounts.PaceOver:
-		text = fmt.Sprintf("пул кончится %s, до сброса %s %.0f ч", accounts.ShortTime(f.DryAt), store.ShortName(f.RefillEmail), f.RefillAt.Sub(f.DryAt).Hours())
+		text = fmt.Sprintf("пул кончится %s, до сброса %s %.0f ч", accounts.ShortTimeIn(f.DryAt, now.Location()), store.ShortName(f.RefillEmail), f.RefillAt.Sub(f.DryAt).Hours())
 	case accounts.PaceNear:
-		text = fmt.Sprintf("до %s хватит впритык: при темпе на четверть выше пул кончится", accounts.ShortTime(now.Add(accounts.PoolHorizon)))
+		text = fmt.Sprintf("до %s хватит впритык: при темпе на четверть выше пул кончится", accounts.ShortTimeIn(now.Add(accounts.PoolHorizon), now.Location()))
 	default:
-		text = fmt.Sprintf("до %s хватит с запасом", accounts.ShortTime(now.Add(accounts.PoolHorizon)))
+		text = fmt.Sprintf("до %s хватит с запасом", accounts.ShortTimeIn(now.Add(accounts.PoolHorizon), now.Location()))
 	}
 	if f.MixedTiers {
 		text += "; тарифы учёток разные, а доли недели прогноз считает равными"

@@ -153,10 +153,7 @@ func (n *Notifier) ProjectName(input *core.ToolInput) string {
 	if n.request == nil {
 		return "unknown"
 	}
-	home := n.request.Getenv("HOME")
-	if home != "" {
-		home = n.request.Abs(home)
-	}
+	home := n.request.MatchPath(hookctx.EnvHome)
 	projectName := func(dir string) string { return core.ProjectNameForDirWithHome(dir, home) }
 	if transcriptPath := input.TranscriptPath; transcriptPath != "" {
 		encoded := filepath.Base(filepath.Dir(transcriptPath))

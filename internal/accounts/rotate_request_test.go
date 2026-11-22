@@ -70,3 +70,35 @@ func TestMaybeRotateRequestEnvDir(t *testing.T) {
 		t.Fatalf("child inherited the process-only CHOOKS_PROCESS_ONLY=%q", value)
 	}
 }
+
+// Удалённый cwd запроса: у CLI ротация наследует удалённый cwd и стартует,
+// у демона стартует из "/"
+func TestMaybeRotateDeletedCwd(t *testing.T) {
+	root := t.TempDir()
+	cwd := filepath.Join(root, "gone")
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cwd); err != nil {
+		t.Fatal(err)
+	}
+	paths := Paths{ClaudeDir: filepath.Join(root, "claude"), GlobalConfig: filepath.Join(root, "claude.json"), StateDir: filepath.Join(root, "state")}
+	if err := os.MkdirAll(paths.ClaudeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Credentials(), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(paths.Credentials(), now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "probe.sh")
+	if err := os.WriteFile(script, []byte("exit 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req := hookctx.New(nil, nil, nil, []string{"PATH=/usr/bin:/bin", "HOME=" + root}, cwd, 7, 6)
+	if why, err := MaybeRotate(paths, &Store{}, nil, now, "/bin/sh", req, script); err != nil || why == "" {
+		t.Fatalf("rotation not started from a deleted cwd: why=%q err=%v", why, err)
+	}
+}

@@ -35,21 +35,20 @@ type Paths struct {
 // CLAUDE_CONFIG_DIR или ~/.claude, конфигурация рядом с каталогом из
 // CLAUDE_CONFIG_DIR или в домашнем каталоге
 func DefaultPaths(request hookctx.Context) (Paths, error) {
-	home := request.Getenv("HOME")
+	home := request.Path(hookctx.EnvHome)
 	if home == "" {
 		return Paths{}, fmt.Errorf("no home directory: $HOME is not defined")
 	}
-	home = request.Abs(home)
 	paths := Paths{ClaudeDir: filepath.Join(home, ".claude"), GlobalConfig: filepath.Join(home, ".claude.json")}
-	if dir := request.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		paths.ClaudeDir = request.Abs(dir)
+	if dir := request.Path(hookctx.EnvClaudeConfigDir); dir != "" {
+		paths.ClaudeDir = dir
 		paths.GlobalConfig = filepath.Join(paths.ClaudeDir, ".claude.json")
 	}
-	state := request.Getenv("XDG_STATE_HOME")
-	if state == "" {
-		state = filepath.Join(home, ".local", "state")
+	state, err := request.StateDir()
+	if err != nil {
+		return Paths{}, err
 	}
-	paths.StateDir = filepath.Join(request.Abs(state), "chooks")
+	paths.StateDir = state
 	return paths, nil
 }
 

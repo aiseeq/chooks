@@ -81,7 +81,8 @@ func inspectLogin(a *Account, now time.Time) accountEligibility {
 	} else {
 		status.usable = true
 		if family := o.family(); family > 0 {
-			status.loginEnds = time.UnixMilli(family)
+			// В поясе now: у хука это пояс запроса, а не процесса
+			status.loginEnds = time.UnixMilli(family).In(now.Location())
 			if !status.loginEnds.After(now.Add(loginMargin)) {
 				status.usable = false
 				status.reason = accountLoginExpiring
@@ -192,7 +193,7 @@ func chooseResultWithUnit(s *Store, usage map[string]Usage, now time.Time, unit 
 	// chooks limits (лид 12.11 17:39 по слову пользователя «вот прям везде»)
 	reason := "неделя не начата"
 	if best.weekKnown {
-		reason = fmt.Sprintf("сброс %s, неделя %s", ShortTime(best.resets), unit.Percent(best.week.Used))
+		reason = fmt.Sprintf("сброс %s, неделя %s", ShortTimeIn(best.resets, now.Location()), unit.Percent(best.week.Used))
 	}
 	if active := s.byUUID(s.Active); active != nil {
 		var activeState *state
@@ -261,6 +262,11 @@ var weekdays = [...]string{"вс", "пн", "вт", "ср", "чт", "пт", "сб
 
 // ShortTime пишет время местным: «пн 26.10 11:00»
 func ShortTime(at time.Time) string {
-	at = at.Local()
+	return ShortTimeIn(at, time.Local)
+}
+
+// ShortTimeIn — ShortTime в поясе loc: у хука — пояс запроса
+func ShortTimeIn(at time.Time, loc *time.Location) string {
+	at = at.In(loc)
 	return weekdays[at.Weekday()] + " " + at.Format("02.01 15:04")
 }

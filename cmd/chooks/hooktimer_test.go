@@ -202,7 +202,7 @@ func TestAwaitSkillCheckSkipsWhenOptionalBudgetSpent(t *testing.T) {
 func TestFinishSkillCheckLogsScanErrorWithExpiredDeadline(t *testing.T) {
 	logger := &captureLogger{}
 	readErr := errors.New("transcript read failed")
-	finishSkillCheck(eventPostToolBatch, &core.ToolInput{SessionID: "s1"}, logger, skillreload.Result{}, errors.Join(readErr, skillreload.ErrNoTime), io.Discard)
+	finishSkillCheck(eventPostToolBatch, &core.ToolInput{SessionID: "s1"}, logger, skillreload.Result{}, errors.Join(readErr, skillreload.ErrNoTime), io.Discard, time.Local)
 	if len(logger.warns) != 1 || !strings.Contains(logger.warns[0], readErr.Error()) {
 		t.Fatalf("ошибка чтения транскрипта потеряна: %q", logger.warns)
 	}

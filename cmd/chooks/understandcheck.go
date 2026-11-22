@@ -100,11 +100,10 @@ func understandCall(ctx context.Context, input *core.ToolInput, logger core.Logg
 	}
 	pid := request.Getenv("CLAUDE_PID")
 	if pid != "" {
-		home := request.Getenv("HOME")
+		home := request.Path(hookctx.EnvHome)
 		if home == "" {
 			return call
 		}
-		home = request.Abs(home)
 		var err error
 		call.Name, err = questioncheck.SessionName(filepath.Join(home, ".claude"), pid)
 		if err != nil {
@@ -134,7 +133,8 @@ func newUnderstandHook(ctx context.Context, logger core.Logger) (understandcheck
 		JournalPath: journal,
 		DeniedDir:   denied,
 		Budget:      understandBudget,
-		Now:         time.Now,
-		Warn:        logger.Warn,
+		// Время журнала пишется со смещением: пояс — запроса, как у CLI
+		Now:  func() time.Time { return time.Now().In(request.Location()) },
+		Warn: logger.Warn,
 	}, nil
 }

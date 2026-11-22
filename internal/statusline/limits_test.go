@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/chooks/internal/accounts"
 )
 
 // Рабочая неделя сбрасывается в понедельник, личная — в субботу
@@ -509,5 +511,44 @@ func TestMergeWeeklyLimitStaleFirstTwoResets(t *testing.T) {
 	}
 	if merged, verdict := merge(t, path, 95, workResets, "new", base.Add(3*time.Hour+2*time.Minute)); verdict != weekChanged || merged.used != 95 {
 		t.Errorf("доля выше прежнего пика: %v, полоса %v, ожидалось 95", verdict, merged.used)
+	}
+}
+
+// Время в сводке — в поясе запроса (TZ его env), а не в time.Local процесса
+func TestWriteLimitsInRequestLocation(t *testing.T) {
+	kathmandu, err := time.LoadLocation("Asia/Kathmandu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolateRender(t)
+	request := statusTestRequest(t)
+	request.Env = append(append([]string{}, request.Env...), "TZ=Asia/Kathmandu")
+	path, err := LimitsFile(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Add(-time.Hour)
+	resets := base.Add(5 * 24 * time.Hour).Truncate(time.Hour)
+	other := base.Add(3 * 24 * time.Hour).Truncate(time.Hour)
+	// неделя без учётки — строкой «неопознанных», без хранилища
+	merge(t, path, 61, resets, "work", base)
+	var out strings.Builder
+	if err := WriteLimits(&out, false, request); err != nil {
+		t.Fatal(err)
+	}
+	if want := accounts.ShortTimeIn(resets, kathmandu); !strings.Contains(out.String(), "сброс "+want) {
+		t.Errorf("сброс не в поясе запроса %q:\n%s", want, out.String())
+	}
+	// неделя учётки хранилища — строкой учётки, со сроком входа
+	writeStore(t, false)
+	if _, err := mergeLimits(path, sample{week: weeklyUsage{used: 30, resetsAt: other}, session: "s2", account: "work@example.com", exact: true}, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := WriteLimits(&out, false, request); err != nil {
+		t.Fatal(err)
+	}
+	if want := "сброс " + accounts.ShortTimeIn(other, kathmandu) + " (доля с"; !strings.Contains(out.String(), want) {
+		t.Errorf("сброс учётки не в поясе запроса %q:\n%s", want, out.String())
 	}
 }

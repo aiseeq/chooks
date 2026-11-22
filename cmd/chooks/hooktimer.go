@@ -65,6 +65,9 @@ type hookTimer struct {
 	// startErr — старт процесса не прочитан, отсчёт идёт от main
 	startErr error
 	now      func() time.Time
+	// loc — пояс запроса: время строки длительностей пишется в нём, а не
+	// в time.Local процесса; nil (таймер собран без запроса) — пояс at
+	loc *time.Location
 	// settingsPath — где взять таймаут хука; читается только у медленного
 	settingsPath func() (string, error)
 	startup      time.Duration
@@ -80,12 +83,12 @@ const durationsFile = "chooks-hooks.tsv"
 // newHookTimer начинает отсчёт со старта процесса: запуск бинаря под
 // свопом — тоже часть таймаута
 func newHookTimerForRequest(hook string, request hookctx.Context) *hookTimer {
-	t := &hookTimer{hook: hook, stderr: request.Stderr, now: time.Now, settingsPath: func() (string, error) {
-		if dir := request.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-			return filepath.Join(request.Abs(dir), "settings.json"), nil
+	t := &hookTimer{hook: hook, stderr: request.Stderr, now: time.Now, loc: request.Location(), settingsPath: func() (string, error) {
+		if dir := request.Path(hookctx.EnvClaudeConfigDir); dir != "" {
+			return filepath.Join(dir, "settings.json"), nil
 		}
-		if home := request.Getenv("HOME"); home != "" {
-			return filepath.Join(request.Abs(home), ".claude", "settings.json"), nil
+		if home := request.Path(hookctx.EnvHome); home != "" {
+			return filepath.Join(home, ".claude", "settings.json"), nil
 		}
 		return "", fmt.Errorf("cannot resolve home dir: $HOME is not defined")
 	}}
@@ -163,6 +166,9 @@ func (t *hookTimer) recordDuration(at time.Time, session string, elapsed time.Du
 	t.mu.Unlock()
 	if path == "" {
 		return
+	}
+	if t.loc != nil {
+		at = at.In(t.loc)
 	}
 	line := strings.Join([]string{
 		at.Format("2006-01-02T15:04:05.000Z07:00"), t.hook, session,

@@ -41,11 +41,10 @@ func newUnderstandCasesCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			home := request.Getenv("HOME")
+			home := request.Path(hookctx.EnvHome)
 			if home == "" {
 				return fmt.Errorf("$HOME is not defined")
 			}
-			home = request.Abs(home)
 			since := time.Now().AddDate(0, 0, -days)
 			cases, err := collectUnderstandCases(filepath.Join(home, ".claude", "projects"), project, since, request)
 			if err != nil {
@@ -84,7 +83,7 @@ func collectUnderstandCases(projects, project string, since time.Time, request h
 		if info.ModTime().Before(since) {
 			continue
 		}
-		collector := understandcheck.Collector{Session: sessionPrefix(path), Home: request.Abs(request.Getenv("HOME")), Stderr: request.Stderr}
+		collector := understandcheck.Collector{Session: sessionPrefix(path), Home: request.MatchPath(hookctx.EnvHome), Stderr: request.Stderr}
 		meta, err := transcript.Read(path, keepUnderstandLine, collector.Add)
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", path, err)

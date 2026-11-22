@@ -146,7 +146,7 @@ func DeliverInBackground(executable, watchCommand string, alert Alert) error {
 func DeliverInBackgroundForRequest(executable, watchCommand string, alert Alert, request hookctx.Context) error {
 	cmd := exec.Command(executable, WatchArgs(watchCommand, alert)...)
 	cmd.Env = append([]string{}, request.Env...)
-	cmd.Dir = request.Cwd
+	cmd.Dir = request.ChildDir()
 	if err := StartDetached(cmd); err != nil {
 		return fmt.Errorf("notification watcher: %w", err)
 	}

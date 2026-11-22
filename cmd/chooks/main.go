@@ -311,7 +311,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		return exitError, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	logger, err = core.NewLoggerTo(config.Logger, request.Stderr)
+	logger, err = core.NewLoggerIn(config.Logger, request.Stderr, request.Location())
 	if err != nil {
 		return exitError, fmt.Errorf("failed to create logger: %w", err)
 	}
@@ -544,7 +544,8 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 			crons = *input.SessionCrons
 		}
 		var active []core.BackgroundTask
-		active, err = core.RecordBackgroundIn(request.RuntimeDir(), input.SessionID, *input.BackgroundTasks, crons, time.Now())
+		// Время задач пишется со смещением пояса запроса, как у CLI
+		active, err = core.RecordBackgroundIn(request.RuntimeDir(), input.SessionID, *input.BackgroundTasks, crons, time.Now().In(request.Location()))
 		if err != nil {
 			// Failover на список Claude Code: брошенные задачи не отличить от
 			// живых, а про все задачи списка Claude Code сам сказал, что они живы
@@ -947,7 +948,7 @@ func runStatusLine(ctx context.Context, request hookctx.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-	logger, err := core.NewLoggerTo(config.Logger, request.Stderr)
+	logger, err := core.NewLoggerIn(config.Logger, request.Stderr, request.Location())
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}

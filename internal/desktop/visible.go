@@ -98,7 +98,7 @@ func discoverRequestBus(ctx context.Context, request hookctx.Context) (string, e
 	cmd.WaitDelay = 20 * time.Millisecond
 	cmd.Args[0] = "dbus-launch"
 	cmd.Env = append([]string{}, request.Env...)
-	cmd.Dir = request.Cwd
+	cmd.Dir = request.ChildDir()
 	data, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", err

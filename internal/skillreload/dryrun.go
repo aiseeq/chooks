@@ -443,7 +443,7 @@ func (c *dryRunCounts) add(n *Notice) {
 		c.maxDiff = max(c.maxDiff, n.DiffBytes)
 	case len(n.Full)+len(n.Dropped) > 0:
 		c.full++
-		c.maxFull = max(c.maxFull, len(n.format()))
+		c.maxFull = max(c.maxFull, len(n.format(time.Local)))
 	default:
 		c.large++
 		c.maxLarge = max(c.maxLarge, n.DiffBytes)

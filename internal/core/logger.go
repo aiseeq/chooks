@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/aiseeq/akit/secretmask"
 )
@@ -82,6 +83,12 @@ func NewLogger(config LoggerConfig) (Logger, error) {
 // NewLoggerTo sends console logs and rotation errors to the request's stderr.
 // Файл лога (output: file) закрывает вызывающий через Close
 func NewLoggerTo(config LoggerConfig, stderr io.Writer) (FileLogger, error) {
+	return NewLoggerIn(config, stderr, nil)
+}
+
+// NewLoggerIn — NewLoggerTo, у которого время строк — в поясе loc (TZ
+// запроса), а не в time.Local процесса; nil — time.Local, как у NewLoggerTo
+func NewLoggerIn(config LoggerConfig, stderr io.Writer, loc *time.Location) (FileLogger, error) {
 	applyLoggerDefaults(&config)
 
 	writer, err := openLogWriter(config, stderr)
@@ -93,7 +100,11 @@ func NewLoggerTo(config LoggerConfig, stderr io.Writer) (FileLogger, error) {
 		Level: parseLogLevel(config.Level),
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
-				a.Value = slog.StringValue(a.Value.Time().Format("2006-01-02 15:04:05"))
+				at := a.Value.Time()
+				if loc != nil {
+					at = at.In(loc)
+				}
+				a.Value = slog.StringValue(at.Format("2006-01-02 15:04:05"))
 				return a
 			}
 			return maskAttr(a)

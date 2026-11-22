@@ -80,7 +80,7 @@ func TestPoolTextDry(t *testing.T) {
 		Rate: 1, Pace: accounts.PaceOver, DryAt: dry, RefillAt: dry.Add(40 * time.Hour), RefillEmail: "x@work.example",
 	}, RateSpanHours: 72}
 	got := poolText(store, f, accounts.Unit{Scale: 2}, now)
-	if want := "Пул учёток: темп 48% в сутки (за 72 ч); пул кончится " + accounts.ShortTime(dry) + ", до сброса work.example 40 ч"; got != want {
+	if want := "Пул учёток: темп 48% в сутки (за 72 ч); пул кончится " + accounts.ShortTimeIn(dry, now.Location()) + ", до сброса work.example 40 ч"; got != want {
 		t.Errorf("строка пула:\n%s\nожидалось\n%s", got, want)
 	}
 }

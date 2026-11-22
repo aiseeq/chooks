@@ -148,6 +148,9 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	var snapshot *limitsSnapshot
 	limit := input.RateLimits.SevenDay
 	if week, ok := limit.usage(); ok {
+		// Сброс — в поясе запроса: снимок пишет время со смещением пояса, у
+		// CLI это пояс процесса, он же пояс запроса
+		week.resetsAt = week.resetsAt.In(now.Location())
 		smp := sample{week: week, session: input.SessionID, account: store.ActiveEmail()}
 		res, err := recordLimitsForContext(ctx, smp, now)
 		switch {
@@ -199,12 +202,9 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	if store != nil && len(store.Accounts) > 0 {
 		bar.pool = poolPace(ctx, store, snapshot, now, logger)
 	}
-	// HOME запроса — через request.Abs: у CLI как есть (как UserHomeDir из
+	// HOME запроса — через request.Path: у CLI как есть (как UserHomeDir из
 	// пакета os), у демона — от cwd запроса
-	home := request.Getenv("HOME")
-	if home != "" {
-		home = request.Abs(home)
-	}
+	home := request.Path(hookctx.EnvHome)
 	bar.unit = store.PlanUnitForHome(now, home)
 	visible := func() (bool, error) { return desktop.TabVisible(ctx) }
 	if input.Workspace.ProjectDir == "" && input.CWD == "" && input.Workspace.CurrentDir == "" {
@@ -214,7 +214,9 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 		}
 	}
 	used := contextFill(ctx, input, paths.ClaudeDir, logger)
-	line, title := buildForRuntime(request.RuntimeDir(), &home, input, used, bar, now, visible, logger)
+	// Имя проекта сравнивает каталог из ввода с $HOME лексически: MatchPath
+	match := request.MatchPath(hookctx.EnvHome)
+	line, title := buildForRuntime(request.RuntimeDir(), &match, input, used, bar, now, visible, logger)
 	titleErr := desktop.SetTerminalTitleForRequest(title, request)
 	if titleErr != nil {
 		logger.Warn("terminal title not set", "error", titleErr)

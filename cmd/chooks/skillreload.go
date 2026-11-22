@@ -65,14 +65,14 @@ func remindStaleSkills(ctx context.Context, eventName string, input *core.ToolIn
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	checker := skillreload.Checker{Context: ctx, StateDir: stateDir, Abs: request.Abs, ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
+	checker := skillreload.Checker{Context: ctx, StateDir: stateDir, Abs: request.Abs, Location: request.Location(), ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
 	var result skillreload.Result
 	if awaitSkillCheck(timer, logger, eventName, input, func() {
 		result, err = checker.Check(skillreload.Event{
 			SessionID: input.SessionID, AgentID: input.AgentID, AgentType: input.AgentType, TranscriptPath: input.TranscriptPath,
 		})
 	}) {
-		finishSkillCheck(eventName, input, logger, result, err, request.Stdout)
+		finishSkillCheck(eventName, input, logger, result, err, request.Stdout, request.Location())
 	}
 }
 
@@ -108,7 +108,7 @@ func warnSkillAbandoned(timer *hookTimer, logger core.Logger, eventName string, 
 		"agent", input.AgentID, "substage", timer.currentSubstage())
 }
 
-func finishSkillCheck(eventName string, input *core.ToolInput, logger core.Logger, result skillreload.Result, err error, out io.Writer) {
+func finishSkillCheck(eventName string, input *core.ToolInput, logger core.Logger, result skillreload.Result, err error, out io.Writer, loc *time.Location) {
 	if errors.Is(err, skillreload.ErrNoTime) {
 		// Напоминание останется для следующего события; сбой чтения
 		// транскрипта, случившийся после срока, — в поле error
@@ -141,7 +141,7 @@ func finishSkillCheck(eventName string, input *core.ToolInput, logger core.Logge
 	}
 	var output hookContextOutput
 	output.HookSpecificOutput.HookEventName = eventName
-	output.HookSpecificOutput.AdditionalContext = skillreload.Format(result.Notices)
+	output.HookSpecificOutput.AdditionalContext = skillreload.FormatIn(result.Notices, loc)
 	if err := json.NewEncoder(out).Encode(output); err != nil {
 		logger.Warn("skill reload reminder not printed", "error", err)
 		return

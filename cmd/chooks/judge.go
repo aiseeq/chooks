@@ -25,15 +25,15 @@ func newJudgeForRequest(model, effort string, request hookctx.Context) (question
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return questioncheck.CLIJudge{}, fmt.Errorf("create judge dir: %w", err)
 	}
-	path := request.Getenv("MODELS_APPROVED")
+	path := request.Path(hookctx.EnvModelsApproved)
 	if path == "" {
-		home := request.Getenv("HOME")
+		home := request.Path(hookctx.EnvHome)
 		if home == "" {
 			return questioncheck.CLIJudge{}, fmt.Errorf("cannot resolve home dir for the approved models list: $HOME is not defined")
 		}
 		path = filepath.Join(home, ".config", "models", "approved")
 	}
-	return questioncheck.NewCLIJudgeFromPath(model, effort, dir, request.Abs(path))
+	return questioncheck.NewCLIJudgeFromPath(model, effort, dir, path)
 }
 
 // stopBlockOutput — ответ Stop-хука, который не даёт ходу закончиться:

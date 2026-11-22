@@ -118,10 +118,7 @@ func (h Hook) Run(ctx context.Context, call Call) Outcome {
 	if !hasRequest {
 		return Outcome{Verdict: VerdictError, Skip: "hook request is missing"}
 	}
-	home := request.Getenv("HOME")
-	if home != "" {
-		home = request.Abs(home)
-	}
+	home := request.MatchPath(hookctx.EnvHome)
 	kind, file, action, ok := classifyForHome(call.Tool, call.Input, home, request.Stderr)
 	if !ok {
 		return Outcome{Skip: "действие не проверяется"}
@@ -326,10 +323,7 @@ func ReadTurn(path string, request hookctx.Context) (Turn, error) {
 
 // scanTurn проходит события окна по порядку тем же Collector, что сухой прогон
 func scanTurn(buf []byte, request hookctx.Context) Turn {
-	home := request.Getenv("HOME")
-	if home != "" {
-		home = request.Abs(home)
-	}
+	home := request.MatchPath(hookctx.EnvHome)
 	c := Collector{Home: home, Stderr: request.Stderr}
 	parser := transcript.NewParser()
 	for line := range bytes.SplitSeq(buf, []byte("\n")) {

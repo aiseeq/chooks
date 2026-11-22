@@ -75,16 +75,9 @@ func LoadConfig(configPath string) (*Config, error) {
 // открывается от cwd запроса (hookctx.Context.Abs), в ошибках — открытый путь
 func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, error) {
 	if configPath == "" {
-		dir := request.Getenv("XDG_CONFIG_HOME")
-		switch {
-		case dir == "":
-			home := request.Getenv("HOME")
-			if home == "" {
-				return nil, fmt.Errorf("failed to resolve default config path: neither $XDG_CONFIG_HOME nor $HOME are defined")
-			}
-			dir = filepath.Join(home, ".config")
-		case !filepath.IsAbs(dir):
-			return nil, fmt.Errorf("failed to resolve default config path: path in $XDG_CONFIG_HOME is relative")
+		dir, err := request.ConfigDir()
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve default config path: %w", err)
 		}
 		configPath = filepath.Join(dir, "chooks", "config.yaml")
 	}
@@ -92,7 +85,7 @@ func LoadConfigForRequest(configPath string, request hookctx.Context) (*Config, 
 	expand := func(config *Config) error {
 		path := config.Logger.LogFile
 		if strings.HasPrefix(path, "~/") {
-			home := request.Getenv("HOME")
+			home := request.Path(hookctx.EnvHome)
 			if home == "" {
 				return fmt.Errorf("cannot expand ~ in %q: $HOME is not defined", path)
 			}

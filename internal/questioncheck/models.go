@@ -32,9 +32,11 @@ func NewCLIJudgeFromPath(name, effort, dir, path string) (CLIJudge, error) {
 		return CLIJudge{}, fmt.Errorf("model %q is not in %s", name, path)
 	}
 	switch effort {
-	case "low", "medium", "high":
+	// не ниже high: пользователь 22.11 (tl 27d21ddd:21210) «Ни одну из моделей
+	// нельзя использовать менее чем на high»
+	case "high", "xhigh":
 	default:
-		return CLIJudge{}, fmt.Errorf("unknown effort %q", effort)
+		return CLIJudge{}, fmt.Errorf("effort %q: allowed high, xhigh", effort)
 	}
 	return CLIJudge{Name: name, ID: id, Effort: effort, Dir: dir}, nil
 }

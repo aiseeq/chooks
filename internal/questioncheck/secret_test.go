@@ -63,7 +63,7 @@ func (*recordingCLI) capture(t *testing.T, model, input string) (string, string)
 	script("claude", `{"result":"{\"verdict\":\"pass\"}"}`)
 	script("codex", `{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"pass\"}"}}`)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	judge := CLIJudge{Name: model, ID: "id-" + model, Effort: "low", Dir: bin, Prompt: SaidPrompt}
+	judge := CLIJudge{Name: model, ID: "id-" + model, Effort: "high", Dir: bin, Prompt: SaidPrompt}
 	req, err := hookctx.FromProcess()
 	if err != nil {
 		t.Fatal(err)

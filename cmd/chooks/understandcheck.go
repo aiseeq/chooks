@@ -18,12 +18,13 @@ import (
 // включает проверку строка хука в settings.json
 const understandCheckTool = "understand_check"
 
-// Судья проверки понимания — сравнение на 182 случаях сухого прогона 02.11
-// (тикет understand-check-dryrun): opus/medium дал 63 верные поправки и 35
-// ложных против 66 и 44 у opus/high, пропусков 4 против 1
+// Судья проверки понимания — opus/high: пользователь 22.11 (tl
+// 27d21ddd:21210) «Ни одну из моделей нельзя использовать менее чем на
+// high». Сухой прогон 02.11 на 182 случаях (тикет understand-check-dryrun):
+// high — 66 верных поправок, 44 ложных, 1 пропуск; medium — 63, 35 и 4
 const (
 	understandModel  = "opus"
-	understandEffort = "medium"
+	understandEffort = "high"
 )
 
 // understandBudget — сколько ждать судью. Таймаут хука в settings.json — 40 с:

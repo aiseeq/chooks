@@ -100,7 +100,7 @@ func newSaidBenchCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&model, "model", "luna", "модель судьи из ~/.config/models/approved")
-	cmd.Flags().StringVar(&effort, "effort", "medium", "усилие рассуждения: low, medium, high")
+	cmd.Flags().StringVar(&effort, "effort", "high", "усилие рассуждения: high или xhigh")
 	cmd.Flags().BoolVar(&bench.given, "given", true, "давать судье цитаты примера")
 	cmd.Flags().IntVar(&bench.search, "search", 5, "сколько реплик журнала добавить поиском по словам сообщения")
 	cmd.Flags().IntVar(&jobs, "jobs", 4, "сколько судей звать одновременно")

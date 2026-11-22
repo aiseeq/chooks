@@ -146,7 +146,7 @@ kind, action) и спрашивает судью, расходится ли де
 		},
 	}
 	cmd.Flags().StringVar(&model, "model", understandModel, "модель судьи из ~/.config/models/approved")
-	cmd.Flags().StringVar(&effort, "effort", understandEffort, "усилие рассуждения: low, medium, high")
+	cmd.Flags().StringVar(&effort, "effort", understandEffort, "усилие рассуждения: high или xhigh")
 	cmd.Flags().IntVar(&jobs, "jobs", 2, "сколько судей звать одновременно")
 	cmd.Flags().DurationVar(&limit, "timeout", 3*time.Minute, "предел на один вызов судьи")
 	return cmd

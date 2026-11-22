@@ -14,14 +14,19 @@ func TestNewCLIJudgeReadsModelsApproved(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("MODELS_APPROVED", path)
-	judge, err := NewCLIJudge("probe", "low", t.TempDir())
+	judge, err := NewCLIJudge("probe", "high", t.TempDir())
 	if err != nil || judge.ID != "probe-id-1" {
 		t.Fatalf("judge = %+v, err = %v", judge, err)
 	}
-	if _, err := NewCLIJudge("opus", "low", t.TempDir()); err == nil {
+	if _, err := NewCLIJudge("opus", "high", t.TempDir()); err == nil {
 		t.Fatal("модель вне списка MODELS_APPROVED принята")
 	}
-	if _, err := NewCLIJudge("probe", "extreme", t.TempDir()); err == nil {
-		t.Fatal("неизвестное усилие принято")
+	for _, effort := range []string{"extreme", "low", "medium", ""} {
+		if _, err := NewCLIJudge("probe", effort, t.TempDir()); err == nil {
+			t.Fatalf("усилие %q ниже high принято", effort)
+		}
+	}
+	if _, err := NewCLIJudge("probe", "xhigh", t.TempDir()); err != nil {
+		t.Fatalf("xhigh не принято: %v", err)
 	}
 }

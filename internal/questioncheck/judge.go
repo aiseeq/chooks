@@ -34,7 +34,7 @@ type CLIJudge struct {
 	// Name — имя модели из ~/.config/models/approved (opus, sol, luna), ID — её id там
 	Name string
 	ID   string
-	// Effort — усилие рассуждения (low, medium, high)
+	// Effort — усилие рассуждения: high или xhigh (не ниже high)
 	Effort string
 	// Dir — пустой каталог запуска: в нём нет CLAUDE.md и AGENTS.md
 	Dir string

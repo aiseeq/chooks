@@ -29,16 +29,18 @@ var protectedComms = map[string]bool{
 // предков хука (claude, терминал), оболочку, исполняющую команду
 type KillGuardTool struct {
 	*BaseTool
-	procRoot string
-	selfPID  int
+	procRoot    string
+	selfPID     int
+	resolvePath func(string) (string, error)
 }
 
 // NewKillGuardToolForPID protects the process tree of this hook request.
 func NewKillGuardToolForPID(config core.ToolConfig, logger core.Logger, pid int) (*KillGuardTool, error) {
 	return &KillGuardTool{
-		BaseTool: NewBaseTool("kill_guard", config.Enabled, core.ShellTools, logger),
-		procRoot: "/proc",
-		selfPID:  pid,
+		BaseTool:    NewBaseTool("kill_guard", config.Enabled, core.ShellTools, logger),
+		procRoot:    "/proc",
+		selfPID:     pid,
+		resolvePath: filepath.EvalSymlinks,
 	}, nil
 }
 
@@ -925,7 +927,13 @@ func (s *killScan) loadProcs() error {
 		return err
 	}
 	for i := range procs {
-		procs[i].protected = protectedComms[procs[i].comm] || dbusSessionBus(procs[i], s.busAddress)
+		bus, err := dbusSessionBus(procs[i], s.busAddress, s.tool.resolvePath)
+		if err != nil {
+			s.tool.Logger().Debug("D-Bus address path could not be resolved; process remains protected", "pid", procs[i].pid, "error", err)
+			procs[i].protected = true
+			continue
+		}
+		procs[i].protected = protectedComms[procs[i].comm] || bus
 	}
 	s.procs = procs
 	return nil
@@ -1025,6 +1033,7 @@ func (t *KillGuardTool) dangerous(pid int, procs []procInfo, ancestors map[int]b
 type procInfo struct {
 	pid, ppid     int
 	comm, cmdline string
+	argv          []string
 	protected     bool
 }
 
@@ -1084,6 +1093,7 @@ func readProc(dir string, pid int) (procInfo, error) {
 		ppid:    ppid,
 		comm:    s[start+1 : end],
 		cmdline: strings.TrimSpace(strings.ReplaceAll(string(cmdline), "\x00", " ")),
+		argv:    processArgs(cmdline),
 	}, nil
 }
 

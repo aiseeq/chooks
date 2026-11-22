@@ -61,7 +61,10 @@ func (c Context) busKeys(keys, key string) string {
 	return keys
 }
 
-// ConnectBus bounds both dialing and the D-Bus authentication handshake.
+// ConnectBus bounds dialing, the D-Bus authentication handshake and Hello by
+// ctx: on expiry the raw socket is closed (AfterFunc). The returned connection
+// is not tied to ctx (no dbus.WithContext): callers such as the Konsole title
+// keep using it after the connecting function returned.
 // Nonce transports are treated as unavailable rather than starting an
 // uninterruptible nonce-file read in the serving process.
 func (c Context) ConnectBus(ctx context.Context, address string) (*dbus.Conn, error) {
@@ -136,9 +139,9 @@ func (c Context) ConnectBus(ctx context.Context, address string) (*dbus.Conn, er
 				last = fmt.Errorf("unexpected D-Bus unix connection type")
 				continue
 			}
-			conn, err = dbus.ConnectUnix(unixConn, dbus.WithContext(ctx))
+			conn, err = dbus.ConnectUnix(unixConn)
 		} else {
-			conn, err = dbus.NewConn(raw, dbus.WithContext(ctx))
+			conn, err = dbus.NewConn(raw)
 			if err == nil {
 				err = conn.Auth(nil)
 			}
@@ -156,8 +159,10 @@ func (c Context) ConnectBus(ctx context.Context, address string) (*dbus.Conn, er
 		if err == nil {
 			return conn, nil
 		}
+		// Сокет открылся, а auth или Hello не прошли: godbus (getTransport,
+		// затем Auth) к следующему адресу списка тогда не переходит
 		_ = raw.Close()
-		last = err
+		return nil, err
 	}
 	if last == nil {
 		last = fmt.Errorf("empty D-Bus address")

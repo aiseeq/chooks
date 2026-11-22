@@ -215,7 +215,14 @@ func (c Context) Location() *time.Location {
 			return loc
 		}
 		// Свой источник запроса пояса не дал или его нет: дальше системная
-		// база, как в time.LoadLocation после $ZONEINFO
+		// база, как в time.LoadLocation после $ZONEINFO. time.LoadLocation
+		// сам смотрит $ZONEINFO исполнителя, а он запросу не принадлежит
+		if loc, err := platformZone(tz); err == nil {
+			return loc
+		}
+		if _, set := os.LookupEnv("ZONEINFO"); set {
+			return time.UTC
+		}
 	}
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
@@ -260,6 +267,30 @@ func (c Context) requestZone(name string) (*time.Location, error) {
 		return nil, fmt.Errorf("zone %s from $ZONEINFO: %w", name, err)
 	}
 	return loc, nil
+}
+
+// platformZone — пояс name из системных каталогов, как loadLocation пакета
+// time после $ZONEINFO. UTC и имена, которые time.LoadLocation отвергает,
+// решает он сам (errNoRequestZone)
+func platformZone(name string) (*time.Location, error) {
+	if name == "UTC" || name == "Local" || strings.Contains(name, "..") || strings.HasPrefix(name, "\\") {
+		return nil, errNoRequestZone
+	}
+	last := fmt.Errorf("zone %s not in system zoneinfo", name)
+	for _, dir := range platformZoneSources {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			last = err
+			continue
+		}
+		loc, err := time.LoadLocationFromTZData(name, data)
+		if err != nil {
+			last = err
+			continue
+		}
+		return loc, nil
+	}
+	return nil, last
 }
 
 // errNoRequestZone — у запроса нет своего источника пояса

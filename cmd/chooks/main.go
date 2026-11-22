@@ -274,8 +274,6 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	if err := validateHookRequest(ctx, request); err != nil {
 		return exitError, err
 	}
-	ctx, cancelRequest := context.WithTimeout(ctx, request.Timeout)
-	defer cancelRequest()
 	timer := newHookTimerForRequest(hookType, request)
 	exit, cli := ctx.Value(cliTerminationKey{}).(func(int))
 	if cli {

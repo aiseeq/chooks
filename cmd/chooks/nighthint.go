@@ -56,7 +56,8 @@ func nightHintDepsContext(ctx context.Context, config *core.Config, deadline tim
 	if err != nil {
 		return nighthint.Deps{}, err
 	}
-	skillCalled := autonomousSkillCalledContext(ctx, config, deadline, func() (string, error) { return skillDir, nil })
+	// Срок в поясе запроса: он попадает в текст ошибки и в лог
+	skillCalled := autonomousSkillCalledContext(ctx, config, deadline.In(request.Location()), func() (string, error) { return skillDir, nil })
 	return nighthint.Deps{Now: func() time.Time { return time.Now().In(request.Location()) }, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: filepath.Join(state, "night-hint")}, SkillCalled: skillCalled}, nil
 }
 

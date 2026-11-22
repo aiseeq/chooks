@@ -2,8 +2,11 @@ package hookctx
 
 import (
 	"archive/zip"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,6 +82,10 @@ func TestLocationWithoutTZ(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Пояс исполнителя — не /etc/localtime: запрос без TZ не должен его брать
+	executor := time.Local
+	time.Local = time.FixedZone("EXECUTOR", 12345)
+	t.Cleanup(func() { time.Local = executor })
 	daemon := New(nil, nil, nil, nil, "/", 1, 2)
 	for _, at := range []time.Time{time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC), time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)} {
 		_, wantOffset := at.In(want).Zone()
@@ -86,4 +93,53 @@ func TestLocationWithoutTZ(t *testing.T) {
 			t.Errorf("request without TZ at %v: offset %d, want %d of /etc/localtime", at, offset, wantOffset)
 		}
 	}
+}
+
+// $ZONEINFO исполнителя запросу не принадлежит: запрос без своего ZONEINFO
+// берёт пояс из системной базы, как процесс хука без $ZONEINFO. Пакет time
+// читает $ZONEINFO один раз за процесс, поэтому проверка идёт в свежем
+// процессе теста с $ZONEINFO исполнителя с самого старта
+func TestLocationIgnoresExecutorZoneinfo(t *testing.T) {
+	if dir := os.Getenv("CHOOKS_EXECUTOR_ZONEINFO_CHILD"); dir != "" {
+		checkExecutorZoneinfo(t, dir)
+		return
+	}
+	dir := t.TempDir()
+	utc, err := os.ReadFile("/usr/share/zoneinfo/UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nepal, err := os.ReadFile("/usr/share/zoneinfo/Asia/Kathmandu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"America/New_York": utc, "Chooks/ExecutorOnly": nepal} {
+		if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(name)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLocationIgnoresExecutorZoneinfo$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "ZONEINFO="+dir, "CHOOKS_EXECUTOR_ZONEINFO_CHILD="+dir)
+	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "executor zoneinfo checked") {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+}
+
+func checkExecutorZoneinfo(t *testing.T, dir string) {
+	// Пояс есть и в системной базе: берётся оттуда (-5 ч зимой), не из
+	// подделки исполнителя (UTC)
+	req := New(nil, nil, nil, []string{"TZ=America/New_York"}, dir, 1, 2)
+	if _, offset := time.Date(2026, 1, 1, 12, 0, 0, 0, req.Location()).Zone(); offset != -18000 {
+		t.Fatalf("request TZ=America/New_York without ZONEINFO: offset %d, want -18000: executor $ZONEINFO used", offset)
+	}
+	// Пояса нет нигде, кроме $ZONEINFO исполнителя: у процесса хука его нет
+	// вовсе, и пояс — UTC
+	req = New(nil, nil, nil, []string{"TZ=Chooks/ExecutorOnly"}, dir, 1, 2)
+	if _, offset := time.Date(2026, 1, 1, 12, 0, 0, 0, req.Location()).Zone(); offset != 0 {
+		t.Fatalf("request TZ=Chooks/ExecutorOnly found only in executor $ZONEINFO: offset %d, want 0 (UTC)", offset)
+	}
+	fmt.Println("executor zoneinfo checked")
 }

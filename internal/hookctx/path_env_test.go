@@ -154,6 +154,13 @@ func TestChildDirDeletedCwd(t *testing.T) {
 	if got := daemon.ChildDir(); got != "/" {
 		t.Errorf("deleted cwd: %q, want /", got)
 	}
+	// На месте каталога файл: каталога cwd тоже нет
+	if err := os.WriteFile(cwd, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := daemon.ChildDir(); got != "/" {
+		t.Errorf("file in place of cwd: %q, want /", got)
+	}
 	cli := Context{Cwd: cwd, process: true}
 	if got := cli.ChildDir(); got != cwd {
 		t.Errorf("CLI: %q, want %q as given", got, cwd)

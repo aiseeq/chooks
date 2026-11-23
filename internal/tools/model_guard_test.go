@@ -489,6 +489,7 @@ func TestModelGuardApprovedModels(t *testing.T) {
 	}
 	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true}, logger)
 	agentPath := filepath.Join(t.TempDir(), ".claude", "agents", "written.md")
+	settingsPath := filepath.Join(filepath.Dir(filepath.Dir(agentPath)), "settings.json")
 	cases := []struct {
 		name, tool, raw, command string
 		reject                   bool
@@ -525,6 +526,10 @@ func TestModelGuardApprovedModels(t *testing.T) {
 		{"запись агента gpt-4o вне списка", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\nmodel: gpt-4o\n---\nEOF\nclaude -p hi", agentPath), true},
 		{"запись агента sonnet вне списка", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\nmodel: sonnet\n---\nEOF\nclaude -p hi", agentPath), true},
 		{"запись агента inherit", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\nmodel: inherit\n---\nEOF\nclaude -p hi", agentPath), false},
+		{"запись агента heredoc <<- с табами", "Bash", "", fmt.Sprintf("cat > %s <<-'EOF'\n\t---\n\tname: written\n\tmodel: fable\n\t---\n\tEOF\nclaude -p hi", agentPath), true},
+		{"дозапись определения агента неизвестна", "Bash", "", fmt.Sprintf("cat >> %s <<'EOF'\nmodel: fable\n---\nEOF\nclaude --agent written -p hi", agentPath), true},
+		{"запись агента без frontmatter неизвестна", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\nmodel: inherit\nEOF\nclaude -p hi", agentPath), true},
+		{"inherit агента вместе с нераспознанной записью", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\nmodel: inherit\n---\nEOF\ncp /tmp/unknown.json %s\nclaude -p hi", agentPath, settingsPath), true},
 		{"model вне frontmatter", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\n---\nПример:\n  model: gpt-4o\nEOF\nclaude -p hi", agentPath), false},
 		{"HAIKU в settings env", "Bash", "", `claude -p --settings '{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}' hi`, true},
 		{"HAIKU своя модель", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5 claude -p hi", false},

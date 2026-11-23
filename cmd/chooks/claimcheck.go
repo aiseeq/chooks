@@ -192,9 +192,14 @@ func claimAlert(request hookctx.Context, title, message string) error {
 	if err != nil {
 		return fmt.Errorf("failed to locate own executable: %w", err)
 	}
-	alert := desktop.Alert{Title: title, Message: message, AppName: "chooks", Icon: "dialog-warning",
+	return desktop.DeliverInBackgroundForRequest(executable, notifier.WatchCommand, warningAlert(title, message), request)
+}
+
+// warningAlert — предупреждение chooks на рабочий стол: сбои судьи
+// claim-check, уход хуков мимо демона
+func warningAlert(title, message string) desktop.Alert {
+	return desktop.Alert{Title: title, Message: message, AppName: "chooks", Icon: "dialog-warning",
 		Urgency: desktop.UrgencyNormal, Desktop: true}
-	return desktop.DeliverInBackgroundForRequest(executable, notifier.WatchCommand, alert, request)
 }
 
 // sessionNameOf — имя сессии Claude Code по CLAUDE_PID, только для журнала

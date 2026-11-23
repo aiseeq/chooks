@@ -284,11 +284,9 @@ func noteCLIFallback(ctx context.Context, config *core.Config, request hookctx.C
 	if !decision.Alert {
 		return
 	}
-	alert := desktop.Alert{
-		Title:   "chooks: хуки идут мимо демона",
-		Message: fmt.Sprintf("За час %d вызовов хуков исполнил CLI мимо демона chooks serve. Причины: %s", decision.Count, decision.Summary()),
-		AppName: "chooks", Icon: "dialog-warning", Timeout: 30 * time.Second, Urgency: desktop.UrgencyNormal, Desktop: true,
-	}
+	alert := warningAlert("chooks: хуки идут мимо демона",
+		fmt.Sprintf("За час %d вызовов хуков исполнил CLI мимо демона chooks serve. Причины: %s", decision.Count, decision.Summary()))
+	alert.Timeout = 30 * time.Second
 	fields := []any{"hook", hookType, "count", decision.Count, "threshold", config.Daemon.FallbackThreshold(), "reasons", decision.Summary()}
 	executable, err := os.Executable()
 	if err == nil {

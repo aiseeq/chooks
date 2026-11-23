@@ -6,7 +6,42 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/aiseeq/chooks/internal/questioncheck"
 )
+
+type bodyJudge struct{ body string }
+
+func (j *bodyJudge) Model() string { return "stub" }
+func (j *bodyJudge) Ask(_ context.Context, _ string, body string) (string, questioncheck.Usage, error) {
+	j.body = body
+	return `{"final":"","sourced":false,"marked":false,"evidence":""}`, questioncheck.Usage{}, nil
+}
+
+func TestV6StopJudgeInput(t *testing.T) {
+	j := &bodyJudge{}
+	h := testHook(t, j)
+	h.Prompt = "v6"
+	event := stopEvent(t)
+	if got := h.Stop(context.Background(), event); got.Result != OutcomePass {
+		t.Fatalf("%+v", got)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(j.body), &body); err != nil {
+		t.Fatal(err)
+	}
+	var answer string
+	var calls []map[string]json.RawMessage
+	if err := json.Unmarshal(body["answer"], &answer); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body["turnTools"], &calls); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 3 || body["userPrompt"] == nil || answer != event.LastMessage || len(calls) != 1 || calls[0]["output"] != nil || calls[0]["input"] == nil {
+		t.Fatalf("judge body: %s", j.body)
+	}
+}
 
 func TestV6Stop(t *testing.T) {
 	for _, tc := range []struct {
@@ -76,6 +111,7 @@ func TestTurnBoundaryDeliveries(t *testing.T) {
 	final := ev("assistant", "t", []any{map[string]any{"type": "text", "text": "ответ"}})
 	notification := map[string]any{"type": "user", "origin": map[string]any{"kind": "task-notification"}, "message": map[string]any{"content": "уведомление"}}
 	peerAttachment := map[string]any{"type": "attachment", "attachment": map[string]any{"type": "queued_command", "origin": map[string]any{"kind": "peer"}, "prompt": "письмо"}}
+	notificationAttachment := map[string]any{"type": "attachment", "attachment": map[string]any{"type": "queued_command", "commandMode": "task-notification", "origin": map[string]any{"kind": "task-notification"}, "prompt": "уведомление"}}
 	humanAttachment := map[string]any{"type": "attachment", "attachment": map[string]any{"type": "queued_command", "origin": map[string]any{"kind": "human"}, "prompt": "новый вопрос"}}
 	duration := map[string]any{"type": "system", "subtype": "turn_duration"}
 	for _, tc := range []struct {
@@ -85,6 +121,12 @@ func TestTurnBoundaryDeliveries(t *testing.T) {
 		tools  []string
 	}{
 		{"notification", []any{ev("user", "t", "вопрос"), call("before"), duration, notification, call("after"), final}, "вопрос", []string{"before", "after"}},
+		{"notification attachment", []any{ev("user", "t", "вопрос"), call("before"), notificationAttachment, call("after"), final}, "вопрос", []string{"before", "after"}},
+		{"peer attachment during turn", []any{ev("user", "t", "вопрос"), call("before"), peerAttachment, call("after"), final}, "вопрос", []string{"before", "after"}},
+		{"peer attachment after turn", []any{ev("user", "t", "вопрос"), duration, peerAttachment, call("after"), final}, "письмо", []string{"after"}},
+		{"peer attachment after peer user", []any{ev("user", "t", "вопрос"), duration, map[string]any{"type": "user", "origin": map[string]any{"kind": "peer"}, "message": map[string]any{"content": "первое письмо"}}, peerAttachment, call("after"), final}, "письмо", []string{"after"}},
+		{"multiple queued human", []any{ev("user", "t", "вопрос"), call("before"), humanAttachment, call("middle"), map[string]any{"type": "attachment", "attachment": map[string]any{"type": "queued_command", "origin": map[string]any{"kind": "human"}, "prompt": "последний вопрос"}}, call("after"), final}, "последний вопрос", []string{"middle", "after"}},
+		{"compact after prompt", []any{ev("user", "t", "вопрос"), call("before"), map[string]any{"type": "system", "subtype": "compact_boundary"}, call("after"), final}, "вопрос", []string{"after"}},
 		{"queued human", []any{ev("system", "t", ""), ev("user", "t", "вопрос"), call("before"), peerAttachment, humanAttachment, call("after"), final}, "новый вопрос", []string{"after"}},
 		{"peer user", []any{ev("user", "t", "вопрос"), call("before"), map[string]any{"type": "user", "origin": map[string]any{"kind": "peer"}, "message": map[string]any{"content": "письмо"}}, call("after"), final}, "письмо", []string{"after"}},
 	} {
@@ -108,6 +150,20 @@ func TestTurnBoundaryDeliveries(t *testing.T) {
 	}
 }
 
+func TestAnswerAndSendTurnEnd(t *testing.T) {
+	duration := map[string]any{"type": "system", "subtype": "turn_duration"}
+	text := func(s string) any { return ev("assistant", "t", []any{map[string]any{"type": "text", "text": s}}) }
+	notice := map[string]any{"type": "user", "origin": map[string]any{"kind": "task-notification"}, "message": map[string]any{"content": "уведомление"}}
+	p := fixture(t, ev("user", "t", "вопрос"), text("старый"), duration, notice, text("новый"))
+	in, err := BuildInput(p, 5, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.Answer != "новый" || in.TurnLine != 4 || in.UserPrompt.Text != "вопрос" {
+		t.Fatalf("%+v", in)
+	}
+}
+
 func TestCallsOnlyKeepsCallsWhenOutputsExhaustOldBudget(t *testing.T) {
 	events := []any{ev("user", "t", "проверка")}
 	for i := range 60 {
@@ -127,5 +183,17 @@ func TestCallsOnlyKeepsCallsWhenOutputsExhaustOldBudget(t *testing.T) {
 		if call.Skipped > 0 {
 			t.Fatalf("skipped %+v", call)
 		}
+	}
+}
+
+func TestCallsOnlyKeepsLongCommandAction(t *testing.T) {
+	command := strings.Repeat("x", 640) + " git commit -m done\n" + strings.Repeat("y", 250)
+	p := fixture(t, ev("user", "t", "сделай"), ev("assistant", "t", []any{map[string]any{"type": "tool_use", "id": "a", "name": "Bash", "input": map[string]any{"command": command}}}), ev("assistant", "t", []any{map[string]any{"type": "text", "text": "готово"}}))
+	in, err := BuildInput(p, 3, Options{CallsOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.TurnTools) != 1 || !strings.Contains(in.TurnTools[0].Input, "git commit") {
+		t.Fatalf("calls: %+v", in.TurnTools)
 	}
 }

@@ -116,6 +116,7 @@ const (
 	largeAnswerWordThreshold   = 250
 	shortAnswerInputCharLimit  = 24300
 	toolInputCharLimit         = 300
+	callsOnlyInputCharLimit    = 1000
 	toolOutputCharLimit        = 1600
 	lastTurnToolsKept          = 5
 	skippedToolName            = "[пропущено]"
@@ -185,11 +186,15 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	start, err := turnStart(rows, line)
+	start, promptStart, err := turnStart(rows, line)
 	if err != nil {
 		return nil, err
 	}
-	kind, answer, target, err := decision(rows, line, start)
+	answerStart, err := legacyTurnStart(rows, line)
+	if err != nil {
+		return nil, err
+	}
+	kind, answer, target, err := decision(rows, line, answerStart)
 	if err != nil {
 		return nil, err
 	}
@@ -198,8 +203,8 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 	}
 	input := newInput(kind, answer, target.E.Timestamp)
 	input.CallsOnly = options.CallsOnly
-	if start < len(rows) {
-		input.TurnLine = rows[start].Line
+	if answerStart < len(rows) {
+		input.TurnLine = rows[answerStart].Line
 	}
 	words := answerWords(answer)
 	answerWordCount := countAnswerWords(answer)
@@ -218,6 +223,16 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 	}
 	if err := appendTurn(ctx, input, rows, results, start, line, answer, words, matcher, options.Unbounded, turnLimit); err != nil {
 		return nil, err
+	}
+	if promptStart >= 0 {
+		input.UserPrompt, _, err = userPrompt(&rows[promptStart])
+		if err != nil {
+			return nil, fmt.Errorf("read user prompt at line %d: %w", rows[promptStart].Line, err)
+		}
+		input.Attachments, err = attachments(&rows[promptStart])
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -383,26 +398,124 @@ func messageText(blocks []block) string {
 
 func isSend(name string) bool { return name == "SendMessage" || name == "SendToProject" }
 
-// A human message, including a delivered queued_command, starts a new span.
-// A peer message in a user record starts one too; peer attachments and task
-// notifications are deliveries within the current span, even across turn_duration.
-// Queue operations are only enqueues; tools start at the delivered message.
-func turnStart(rows []row, line int) (int, error) {
-	start := 0
+// The prompt is the latest human or peer user message; a peer attachment can
+// start a response only after a turn ends. Notifications never replace it.
+// Consecutive queued human messages in one turn share the first one's tools.
+// Compaction limits tools but does not replace the prompt. Answer and Send
+// retry boundaries use the original per-turn rule independently.
+func turnStart(rows []row, line int) (int, int, error) {
+	start, prompt, queued, compact, lastEnd, lastHuman := 0, -1, -1, -1, -1, -1
 	for i := range rows {
 		r := &rows[i]
 		if r.Line >= line {
 			break
 		}
+		if r.E.Type == "system" && r.E.Subtype == "turn_duration" {
+			lastEnd, queued = i, -1
+			continue
+		}
+		isCompact, err := isCompactSummary(r)
+		if err != nil {
+			return 0, 0, err
+		}
+		if isCompact || (r.E.Type == "system" && r.E.Subtype == "compact_boundary") {
+			compact = i
+			continue
+		}
 		begins, err := beginsTurn(r)
 		if err != nil {
-			return 0, fmt.Errorf("classify transcript line %d as turn start: %w", r.Line, err)
+			return 0, 0, fmt.Errorf("classify transcript line %d as turn start: %w", r.Line, err)
 		}
+		peerDelivery := r.E.Type == "attachment" && r.E.Attachment.Type == "queued_command" && r.E.Attachment.Origin.Kind == "peer" && r.E.Attachment.CommandMode != "task-notification" && lastEnd >= 0 && lastHuman <= lastEnd
+		begins = begins || peerDelivery
 		if begins {
+			prompt = i
+			if r.E.Type == "attachment" && r.E.Attachment.Origin.Kind == "human" || r.E.Type == "user" && r.E.Origin.Kind != "peer" {
+				lastHuman = i
+			}
+			if r.E.Type == "attachment" && r.E.Attachment.Origin.Kind == "human" {
+				if queued < 0 {
+					queued = i
+				}
+				start = queued
+			} else {
+				queued, start = -1, i
+			}
+		}
+	}
+	if compact > start {
+		start = compact
+	}
+	if prompt < 0 && compact >= 0 {
+		prompt = compact
+	}
+	return start, prompt, nil
+}
+
+func legacyTurnStart(rows []row, line int) (int, error) {
+	lastEnd := -1
+	for i := range rows {
+		r := &rows[i]
+		if r.Line >= line {
+			break
+		}
+		if r.E.Type == "system" && r.E.Subtype == "turn_duration" {
+			lastEnd = i
+		}
+	}
+	start := lastEnd + 1
+	found := false
+	for i := start; i < len(rows) && rows[i].Line < line; i++ {
+		begins, err := legacyBeginsTurn(&rows[i])
+		if err != nil {
+			return 0, fmt.Errorf("classify transcript line %d as turn start: %w", rows[i].Line, err)
+		}
+		if !begins {
+			continue
+		}
+		if !found || earlierEvent(rows[i], rows[start]) {
 			start = i
+			found = true
 		}
 	}
 	return start, nil
+}
+
+func earlierEvent(a, b row) bool {
+	ta, errA := time.Parse(time.RFC3339Nano, a.E.Timestamp)
+	tb, errB := time.Parse(time.RFC3339Nano, b.E.Timestamp)
+	if errA == nil && errB == nil {
+		return ta.Before(tb)
+	}
+	return a.Line < b.Line
+}
+
+func legacyBeginsTurn(r *row) (bool, error) {
+	compact, err := isCompactSummary(r)
+	if err != nil {
+		return false, err
+	}
+	if compact {
+		return true, nil
+	}
+	if r.E.Type == "system" && r.E.Subtype == "compact_boundary" {
+		return true, nil
+	}
+	if r.E.Type == "attachment" {
+		return legacyBeginsAttachmentTurn(r), nil
+	}
+	if r.E.Type != "user" {
+		return false, nil
+	}
+	if r.E.Origin.Kind == "task-notification" {
+		return true, nil
+	}
+	return beginsUserTurn(r)
+}
+
+func legacyBeginsAttachmentTurn(r *row) bool {
+	kind := r.E.Attachment.Origin.Kind
+	return r.E.Attachment.CommandMode == "task-notification" || (r.E.Attachment.Type == "queued_command" && (kind == "human" || kind == "peer" || kind == "task-notification"))
 }
 
 func newInput(kind, answer, answerTime string) *Input {
@@ -468,7 +581,7 @@ func appendCallTools(ctx context.Context, out *Input, r *row, rows []row, result
 		if b.Type != "tool_use" {
 			continue
 		}
-		t, err := toolFromCall(ctx, r, b, rows, results, index, line, words, matcher, unbounded)
+		t, err := toolFromCall(ctx, r, b, rows, results, index, line, words, matcher, unbounded, out.CallsOnly)
 		if err != nil {
 			return err
 		}
@@ -512,7 +625,7 @@ func appendContext(ctx context.Context, out *Input, rows []row, results map[stri
 	}
 	for _, call := range recent {
 		r := &rows[call.rowIndex]
-		tool, err := toolFromCall(ctx, r, &r.Blocks[call.blockIndex], rows, results, call.rowIndex, r.Line, words, matcher, unbounded)
+		tool, err := toolFromCall(ctx, r, &r.Blocks[call.blockIndex], rows, results, call.rowIndex, r.Line, words, matcher, unbounded, false)
 		if err != nil {
 			return err
 		}
@@ -1075,7 +1188,7 @@ func indexToolResults(rows []row) map[string]toolResultRef {
 	return results
 }
 
-func toolFromCall(ctx context.Context, r *row, b *block, rows []row, results map[string]toolResultRef, index, end int, words []string, matcher *wordMatcher, unbounded bool) (Tool, error) {
+func toolFromCall(ctx context.Context, r *row, b *block, rows []row, results map[string]toolResultRef, index, end int, words []string, matcher *wordMatcher, unbounded, callsOnly bool) (Tool, error) {
 	var err error
 	input := string(b.Input)
 	if b.Name == "Bash" {
@@ -1133,6 +1246,9 @@ func toolFromCall(ctx context.Context, r *row, b *block, rows []row, results map
 	// Mask before cropping: a crop could split a secret so the mask no longer recognises it.
 	maskedInput, maskedOutput := mask(input), mask(out)
 	inputLimit, outputLimit := toolInputCharLimit, toolOutputCharLimit
+	if callsOnly {
+		inputLimit = callsOnlyInputCharLimit
+	}
 	if unbounded {
 		inputLimit, outputLimit = len([]rune(maskedInput)), len([]rune(maskedOutput))
 	}
@@ -1524,6 +1640,9 @@ func fitTool(tool Tool, budget int) (Tool, bool, error) {
 	}
 	tool.cropWords = nil
 	inputLimit, outputLimit := toolInputCharLimit, toolOutputCharLimit
+	if tool.callsOnly {
+		inputLimit = callsOnlyInputCharLimit
+	}
 	for {
 		tool.Input = toolInputExcerpt(tool, inputLimit)
 		tool.Output = toolOutputExcerpt(tool, outputLimit)

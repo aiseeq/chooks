@@ -1671,40 +1671,41 @@ func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger
 }
 
 func shellCommandStrings(args []string) []string {
+	commandMode := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
-			return nil
-		}
-		if arg == "--command" || arg == "-c" || (strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg[1:], "c")) {
-			if i+1 < len(args) {
-				next := i + 1
-				if args[next] == "--" {
-					next++
-				}
-				if next < len(args) {
-					return []string{args[next]}
-				}
+			if commandMode && i+1 < len(args) {
+				return []string{args[i+1]}
 			}
 			return nil
 		}
-		if !strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "+") || arg == "-" || arg == "+" {
+		if arg == "--command" {
+			commandMode = true
+			continue
+		}
+		if arg == "--rcfile" || arg == "--init-file" || arg == "--startup-file" {
+			i++
+			continue
+		}
+		if arg == "-" || arg == "+" || (!strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "+")) {
+			if commandMode {
+				return []string{arg}
+			}
 			return nil
 		}
-		if slices.Contains([]string{"--rcfile", "--init-file", "--startup-file", "-o", "+o", "-O", "+O"}, arg) {
-			i++
+		if strings.HasPrefix(arg, "--") || len(arg) < 2 {
 			continue
 		}
-		if strings.HasPrefix(arg, "--rcfile=") || strings.HasPrefix(arg, "--init-file=") || strings.HasPrefix(arg, "--startup-file=") {
-			continue
-		}
-		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 2 && (strings.HasSuffix(arg, "o") || strings.HasSuffix(arg, "O")) {
-			i++
-			continue
-		}
-		if strings.HasPrefix(arg, "+") && len(arg) > 2 && (strings.HasSuffix(arg, "o") || strings.HasSuffix(arg, "O")) {
-			i++
-			continue
+		for _, option := range arg[1:] {
+			switch option {
+			case 'c':
+				commandMode = true
+			case 'o', 'O':
+				// Bash consumes the following argv word for -o/-O even
+				// when the option occurs in a short-option cluster.
+				i++
+			}
 		}
 	}
 	return nil
@@ -1725,22 +1726,41 @@ func scriptCommandStrings(args []string) []string {
 		if after, ok := strings.CutPrefix(arg, "--command="); ok {
 			return []string{after}
 		}
-		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg[1:], "c") {
-			if i+1 < len(args) {
-				return []string{args[i+1]}
-			}
-			return nil
-		}
 		if slices.Contains([]string{"-I", "-O", "-B", "-T", "-m", "-E", "-o", "--log-in", "--log-out", "--log-io", "--log-timing", "--logging-format", "--echo", "--output-limit"}, arg) {
 			i++
 			continue
 		}
-		if strings.HasPrefix(arg, "--log-in=") || strings.HasPrefix(arg, "--log-out=") || strings.HasPrefix(arg, "--log-io=") || strings.HasPrefix(arg, "--log-timing=") || strings.HasPrefix(arg, "--logging-format=") || strings.HasPrefix(arg, "--echo=") || strings.HasPrefix(arg, "--output-limit=") {
+		if strings.HasPrefix(arg, "--") {
 			continue
 		}
-		// script принимает имя файла timing только в приписанном виде: -tFILE.
-		if strings.HasPrefix(arg, "-t") {
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
 			continue
+		}
+		// Разбираем короткие опции как getopt: параметрная опция
+		// поглощает остаток слова, а -c — отдельный флаг.
+		cluster := arg[1:]
+		for pos := 0; pos < len(cluster); pos++ {
+			option := cluster[pos]
+			if option == 'c' {
+				if pos+1 < len(cluster) {
+					return []string{cluster[pos+1:]}
+				}
+				if i+1 < len(args) {
+					return []string{args[i+1]}
+				}
+				return nil
+			}
+			if strings.ContainsRune("IOBTmEo", rune(option)) {
+				if pos+1 == len(cluster) {
+					i++
+				}
+				break
+			}
+			if option == 't' {
+				// -t has an optional attached argument; it never consumes
+				// the next word when written by itself.
+				break
+			}
 		}
 	}
 	return nil

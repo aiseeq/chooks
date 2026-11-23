@@ -143,6 +143,22 @@ func TestMeasureShellPrefix(t *testing.T) {
 		{`script -O /tmp/o -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
 		{`script -m advanced -T /tmp/t -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
 		{`script --echo never -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		// круг 9, ревью cdf950d: c у bash — флаг, команда — первое позиционное слово после опций
+		{`timeout 5 bash -co pipefail "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -oc pipefail "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -c -o pipefail "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -c -e "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 sh -c -e "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 zsh -c -o errexit "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -oe pipefail -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -Oe extglob -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash +eo pipefail -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -c "echo ok" -o "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, true},
+		// script: значение, приписанное к опции, — не -c
+		{`script -mclassic -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -O/tmp/c.log -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -qc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -O/tmp/c.log /tmp/CLAUDE_CODE_SHELL_PREFIX.log`, true},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})

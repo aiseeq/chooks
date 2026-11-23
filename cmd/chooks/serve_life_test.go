@@ -1084,13 +1084,55 @@ func TestSystemdSocketUnit(t *testing.T) {
 	v1 := servedPID(t, filepath.Join(home, "starts"), "v1")
 	installVersion(t, exe, "v2")
 	serveAs("v2")
-	show := exec.Command("systemctl", "--user", "show", "-p", "NRestarts", unit+".service")
+	show := exec.Command("systemctl", "--user", "show", "-p", "NRestarts", "-p", "LoadState", unit+".service")
 	show.Env = env
 	if out, err := show.CombinedOutput(); err != nil {
-		t.Fatalf("systemctl show NRestarts: %v: %s", err, out)
-	} else if got := strings.TrimSpace(strings.TrimPrefix(string(out), "NRestarts=")); got != "0" {
-		t.Errorf("NRestarts = %q after v2 served; want 0", got)
+		t.Fatalf("systemctl show NRestarts LoadState: %v: %s", err, out)
+	} else {
+		properties := make(map[string]string)
+		for _, line := range lines(string(out)) {
+			key, value, ok := strings.Cut(line, "=")
+			if ok {
+				properties[key] = value
+			}
+		}
+		if got := properties["LoadState"]; got != "loaded" {
+			t.Errorf("LoadState = %q for %s.service; want loaded", got, unit)
+		}
+		if got := properties["NRestarts"]; got != "0" {
+			t.Errorf("NRestarts = %q after v2 served; want 0", got)
+		}
 	}
+	// После замены v1 должен заметить новый файл. Если проверка случилась
+	// после accept, он обязан ответить «upgrade»; молчаливое удержание
+	// соединения заканчивается таймаутом ack.
+	var changeWhen []string
+	afterAccept := 0
+	whenRE := regexp.MustCompile(`when="([^"]+)"`)
+	for _, line := range lines(readFile(t, log)) {
+		if strings.Contains(line, `msg="daemon: executable changed, stop accepting"`) && strings.Contains(line, "version=v1") {
+			if match := whenRE.FindStringSubmatch(line); len(match) == 2 {
+				changeWhen = append(changeWhen, match[1])
+				if match[1] == "after accept" {
+					afterAccept++
+				}
+			}
+		}
+	}
+	if len(changeWhen) == 0 {
+		t.Errorf("v1 did not log executable change; log:\n%s", readFile(t, log))
+	}
+	upgradeFallbacks := 0
+	for _, reason := range lines(readFile(t, runs)) {
+		if reason == upgradeReason {
+			upgradeFallbacks++
+		}
+	}
+	if upgradeFallbacks < afterAccept {
+		t.Errorf("v1 logged %d executable changes after accept, but only %d calls reached CLI with %q; when values: %q; fallbacks: %q",
+			afterAccept, upgradeFallbacks, upgradeReason, changeWhen, lines(readFile(t, runs)))
+	}
+	t.Logf("v1 executable change when values: %q", changeWhen)
 	if !waitFor(t, 10*time.Second, func() bool { return !processAlive(v1) }) {
 		t.Fatalf("v1 (pid %d) still alive after v2 served", v1)
 	}

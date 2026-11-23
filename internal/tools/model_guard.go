@@ -675,31 +675,64 @@ func systemdRunAssignments(args []*syntax.Word) []string {
 		if !strings.HasPrefix(arg, "-") {
 			break
 		}
-		for _, prefix := range []string{"--setenv=", "-E"} {
-			if after, ok := strings.CutPrefix(arg, prefix); ok {
-				assignments = append(assignments, after)
-				break
-			}
+		if after, ok := strings.CutPrefix(arg, "--setenv="); ok {
+			assignments = append(assignments, after)
+			continue
 		}
-		if systemdRunOptionTakesValue(arg) {
+		if strings.HasPrefix(arg, "--") {
+			if systemdRunOptionTakesValue(arg) {
+				i++
+			}
+			continue
+		}
+		value, isSetenv, consumesNext := systemdRunShortValue(arg, args, i)
+		if isSetenv {
+			assignments = append(assignments, value)
+		}
+		if consumesNext {
 			i++
 		}
 	}
 	return assignments
 }
 
+func systemdRunShortValue(arg string, args []*syntax.Word, index int) (value string, isSetenv, consumesNext bool) {
+	for j := 1; j < len(arg); j++ {
+		option := "-" + string(arg[j])
+		if !systemdRunOptionTakesValue(option) {
+			continue
+		}
+		isSetenv = option == "-E"
+		if attached := arg[j+1:]; attached != "" {
+			return attached, isSetenv, false
+		}
+		if index+1 < len(args) {
+			if isSetenv {
+				value, _ = literalValue(args[index+1])
+			}
+			return value, isSetenv, true
+		}
+		return "", isSetenv, false
+	}
+	return "", false, false
+}
+
 func systemdRunOptionTakesValue(arg string) bool {
+	// An explicit value belongs to this word, even when the option normally
+	// takes a separate argument.
+	if strings.Contains(arg, "=") {
+		return false
+	}
 	if slices.Contains([]string{
-		"-u", "--unit", "--description", "--slice", "-p", "--property", "--service-type",
+		"-u", "--unit", "--description", "--slice", "-p", "--property", "-E", "--setenv", "--service-type",
 		"--uid", "--gid", "--nice", "--working-directory", "--root-directory", "--expand-environment", "-M", "--machine",
 		"-H", "--host", "--json", "--job-mode", "--background", "--path-property",
 		"--socket-property", "--timer-property", "--on-active", "--on-boot", "--on-startup",
-		"--on-unit-active", "--on-unit-inactive", "--on-calendar",
+		"--on-unit-active", "--on-unit-inactive", "--on-calendar", "-C", "--capsule",
 	}, arg) {
 		return true
 	}
-	return strings.HasPrefix(arg, "--") && (strings.HasSuffix(arg, "-property") ||
-		(strings.HasPrefix(arg, "--on-") && arg != "--on-timezone-change" && arg != "--on-clock-change"))
+	return false
 }
 
 func shellWordTextFromWord(word *syntax.Word) string {
@@ -1654,12 +1687,49 @@ func shellCommandStrings(args []string) []string {
 			}
 			return nil
 		}
+		if !strings.HasPrefix(args[i], "-") || args[i] == "-" {
+			return nil
+		}
+		if slices.Contains([]string{"--rcfile", "--init-file", "--startup-file", "-o", "+o", "-O", "+O"}, args[i]) {
+			i++
+			continue
+		}
+		if strings.HasPrefix(args[i], "--rcfile=") || strings.HasPrefix(args[i], "--init-file=") || strings.HasPrefix(args[i], "--startup-file=") {
+			continue
+		}
 	}
 	return nil
 }
 
 func scriptCommandStrings(args []string) []string {
-	return shellCommandStrings(args)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return nil
+		}
+		if arg == "--command" || arg == "-c" {
+			if i+1 < len(args) {
+				return []string{args[i+1]}
+			}
+			return nil
+		}
+		if after, ok := strings.CutPrefix(arg, "--command="); ok {
+			return []string{after}
+		}
+		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg[1:], "c") {
+			if i+1 < len(args) {
+				return []string{args[i+1]}
+			}
+			return nil
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			return nil
+		}
+		if slices.Contains([]string{"-T", "-B", "--log-in", "--log-out", "--log-io"}, arg) {
+			i++
+		}
+	}
+	return nil
 }
 
 // callEnvModels — модели из присваиваний простого вызова n: префикс и

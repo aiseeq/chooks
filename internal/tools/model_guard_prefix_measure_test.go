@@ -113,6 +113,19 @@ func TestMeasureShellPrefix(t *testing.T) {
 		{`script -eqc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
 		{`script -fqc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
 		{`script --command "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		// круг 7, ревью r6: опция systemd-run со значением через = не берёт следующее слово
+		{`systemd-run --user --on-active=30 -E CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`systemd-run --user --on-calendar=daily -E CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`systemd-run --user --on-active=5m --setenv=CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`systemd-run --user --on-active=30 grep -E CLAUDE_CODE_SHELL_PREFIX=timeout f`, true},
+		// круг 7, ревью r6: -C (--capsule) со значением, склейка коротких флагов, script --command=
+		{`systemd-run --user -C cap -E CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`systemd-run --user -qtE CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`script --command="CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		// круг 7, ревью r6: сломанный вложенный скрипт с именем — «не проверить»
+		{`timeout 5 bash -c 'grep -E CLAUDE_CODE_SHELL_PREFIX=x f; echo $(('`, false},
+		// круг 7, ревью r6: после имени скрипта аргументы позиционные
+		{`timeout 5 bash ./check.sh -c "CLAUDE_CODE_SHELL_PREFIX=timeout"`, true},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})

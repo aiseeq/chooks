@@ -15,3 +15,9 @@ var JudgePrompt string
 //
 //go:embed verdict-schema.json
 var Schema []byte
+
+//go:embed prompt-v6.md
+var JudgePromptV6 string
+
+//go:embed verdict-schema-v6.json
+var SchemaV6 []byte

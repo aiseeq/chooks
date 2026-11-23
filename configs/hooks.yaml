@@ -44,6 +44,8 @@ tools:
   # ~/.local/state/chooks/claim-check.jsonl. Без ключа включено
   claim_check:
     enabled: true
+    # v3 — все утверждения; v6 — только итоговое утверждение Stop
+    prompt: v3
     # учётки codex (CODEX_HOME) по порядку: без кредитов — метка на час,
     # вызов на следующую
     codex_homes: [~/.codex, ~/.codex-personal]

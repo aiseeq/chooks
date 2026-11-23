@@ -89,6 +89,7 @@ func newClaimHook(ctx context.Context, config *core.Config, logger core.Logger, 
 	}
 	slotDir := filepath.Join(request.RuntimeDir(), "claimcheck")
 	deps := claimDepsOf(ctx)
+	prompt := config.Tools[claimCheckTool].Prompt
 	judge := deps.judge
 	if judge == nil {
 		cli, err := newJudgeForRequest(claimModel, claimEffort, request)
@@ -96,7 +97,10 @@ func newClaimHook(ctx context.Context, config *core.Config, logger core.Logger, 
 			return claimcheck.Hook{}, err
 		}
 		cli.Prompt = claimcheck.JudgePrompt
-		cli.OutputSchema, err = writeClaimSchema(slotDir)
+		if prompt == "v6" {
+			cli.Prompt = claimcheck.JudgePromptV6
+		}
+		cli.OutputSchema, err = writeClaimSchemaVersion(slotDir, prompt)
 		if err != nil {
 			return claimcheck.Hook{}, err
 		}
@@ -116,6 +120,7 @@ func newClaimHook(ctx context.Context, config *core.Config, logger core.Logger, 
 	}
 	return claimcheck.Hook{
 		Judge:       judge,
+		Prompt:      prompt,
 		Accounts:    accounts,
 		WorkerMarks: workerMarks,
 		StateDir:    stateDir,
@@ -128,17 +133,21 @@ func newClaimHook(ctx context.Context, config *core.Config, logger core.Logger, 
 	}, nil
 }
 
-// writeClaimSchema кладёт схему ответа рядом с местами судей: codex читает
+// writeClaimSchemaVersion кладёт схему ответа рядом с местами судей: codex читает
 // её из файла. Файл переписывается, только если отличается
-func writeClaimSchema(dir string) (string, error) {
-	path := filepath.Join(dir, "verdict-schema.json")
-	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, claimcheck.Schema) {
+func writeClaimSchemaVersion(dir, version string) (string, error) {
+	schema, name := claimcheck.Schema, "verdict-schema.json"
+	if version == "v6" {
+		schema, name = claimcheck.SchemaV6, "verdict-schema-v6.json"
+	}
+	path := filepath.Join(dir, name)
+	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, schema) {
 		return path, nil
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create claim check dir: %w", err)
 	}
-	if err := atomicfile.Write(path, claimcheck.Schema, 0o600); err != nil {
+	if err := atomicfile.Write(path, schema, 0o600); err != nil {
 		return "", fmt.Errorf("write judge schema: %w", err)
 	}
 	return path, nil
@@ -264,6 +273,9 @@ func runClaimStop(ctx context.Context, data []byte, config *core.Config, logger 
 // runClaimSend судит письмо SendMessage; не письмо или пустой текст — без
 // судьи
 func runClaimSend(ctx context.Context, input *core.ToolInput, config *core.Config, logger core.Logger) claimcheck.Outcome {
+	if config.Tools[claimCheckTool].Prompt == "v6" {
+		return claimcheck.Outcome{Result: claimcheck.OutcomeSkip}
+	}
 	var call struct {
 		Message string `json:"message"`
 	}

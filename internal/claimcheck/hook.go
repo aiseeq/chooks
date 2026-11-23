@@ -69,7 +69,8 @@ type Asker interface {
 
 // Hook — проверка утверждений по ходу
 type Hook struct {
-	Judge Asker
+	Judge  Asker
+	Prompt string
 	// Accounts — каталоги учёток codex по порядку: учётка без кредитов
 	// метится на час, вызов идёт на следующую. Пусто — один вызов без учётки
 	Accounts []string
@@ -98,14 +99,19 @@ type Hook struct {
 
 // Entry — строка журнала
 type Entry struct {
-	Time       string `json:"time"`
-	Session    string `json:"session,omitempty"`
-	SessionID  string `json:"session_id"`
-	Transcript string `json:"transcript,omitempty"`
-	Event      string `json:"event"`
-	Outcome    string `json:"outcome"`
-	Reason     string `json:"reason,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Prompt     string  `json:"prompt,omitempty"`
+	Final      *string `json:"final,omitempty"`
+	Sourced    *bool   `json:"sourced,omitempty"`
+	Marked     *bool   `json:"marked,omitempty"`
+	Evidence   *string `json:"evidence,omitempty"`
+	Time       string  `json:"time"`
+	Session    string  `json:"session,omitempty"`
+	SessionID  string  `json:"session_id"`
+	Transcript string  `json:"transcript,omitempty"`
+	Event      string  `json:"event"`
+	Outcome    string  `json:"outcome"`
+	Reason     string  `json:"reason,omitempty"`
+	Error      string  `json:"error,omitempty"`
 	// LatencyMS — от начала хука до исхода; SlotWaitMS — из них ожидание места
 	LatencyMS  int64 `json:"latency_ms"`
 	SlotWaitMS int64 `json:"slot_wait_ms"`
@@ -175,6 +181,9 @@ func (h Hook) Stop(ctx context.Context, event StopEvent) Outcome {
 	started := h.now()
 	entry := Entry{Time: started.Format(time.RFC3339), Session: event.Name, SessionID: event.SessionID,
 		Transcript: event.TranscriptPath, Event: EventStop}
+	if h.Prompt == "v6" {
+		entry.Prompt = "v6"
+	}
 	if event.StopHookActive {
 		entry.Outcome, entry.Answer = OutcomeSecondAnswer, questioncheck.Excerpt(event.LastMessage, answerExcerpt)
 		h.write(entry)
@@ -189,9 +198,23 @@ func (h Hook) Stop(ctx context.Context, event StopEvent) Outcome {
 	if err != nil {
 		return h.fail(entry, started, FailInput, err)
 	}
+	if h.Prompt == "v6" {
+		input.Answer = mask(event.LastMessage)
+		input.CallsOnly = true
+	}
 	verdict, err := h.verdict(ctx, &entry, input, started)
 	if err != nil {
 		return Outcome{Result: entry.Outcome}
+	}
+	if h.Prompt == "v6" {
+		if strings.TrimSpace(*entry.Final) == "" || *entry.Sourced || *entry.Marked {
+			entry.Outcome = OutcomePass
+			h.finish(entry, started)
+			return Outcome{Result: OutcomePass}
+		}
+		entry.Outcome = OutcomeBlock
+		h.finish(entry, started)
+		return Outcome{Block: true, Reason: fmt.Sprintf("Итоговое утверждение: «%s». Чем проверить: %s. Проверь утверждение или пометь, что оно не проверено.", *entry.Final, *entry.Evidence), Result: OutcomeBlock}
 	}
 	flagged := verdict.FlaggedClaims()
 	if len(flagged) == 0 {
@@ -208,6 +231,9 @@ func (h Hook) Stop(ctx context.Context, event StopEvent) Outcome {
 // (retry_same); изменённый судится заново, но отказов за ход сессии не больше
 // sendDenialLimit — дальше пропуск (retry_limit)
 func (h Hook) Send(ctx context.Context, event SendEvent) Outcome {
+	if h.Prompt == "v6" {
+		return Outcome{Result: OutcomeSkip}
+	}
 	started := h.now()
 	entry := Entry{Time: started.Format(time.RFC3339), Session: event.Name, SessionID: event.SessionID,
 		Transcript: event.TranscriptPath, Event: EventSend, Key: textKey(event.Text)}
@@ -324,6 +350,18 @@ func (h Hook) verdict(ctx context.Context, entry *Entry, input *Input, started t
 		h.judgeFailed(reason, h.now())
 		entry.Outcome = OutcomeError
 		return Verdict{}, err
+	}
+	if h.Prompt == "v6" {
+		v, parseErr := parseV6(answer)
+		if parseErr != nil {
+			h.fail(*entry, started, FailParse, parseErr)
+			h.judgeFailed(FailParse, h.now())
+			entry.Outcome = OutcomeError
+			return Verdict{}, parseErr
+		}
+		entry.Final, entry.Sourced, entry.Marked, entry.Evidence = v.Final, v.Sourced, v.Marked, v.Evidence
+		h.judgeAnswered(*entry, h.now())
+		return Verdict{}, nil
 	}
 	verdict, unknown, err := ParseClaims(answer)
 	if err != nil {
@@ -484,7 +522,10 @@ func (h Hook) waitLine(ctx context.Context, path string, latest bool, find func(
 				err   error
 			}
 			done := make(chan result, 1)
-			go func() { input, err := build(ctx, path, found, Options{}); done <- result{input, err} }()
+			go func() {
+				input, err := build(ctx, path, found, Options{CallsOnly: h.Prompt == "v6"})
+				done <- result{input, err}
+			}()
 			select {
 			case got := <-done:
 				return got.input, got.err
@@ -704,4 +745,27 @@ func writeFlags(b *strings.Builder, flagged []Claim) {
 			fmt.Fprintf(b, "  Чем проверить: %s\n", c.CouldCheck)
 		}
 	}
+}
+
+// v6 uses pointers to reject missing or null fields instead of guessing.
+type finalVerdict struct {
+	Final    *string `json:"final"`
+	Sourced  *bool   `json:"sourced"`
+	Marked   *bool   `json:"marked"`
+	Evidence *string `json:"evidence"`
+}
+
+func parseV6(answer string) (finalVerdict, error) {
+	for i := strings.Index(answer, "{"); i >= 0; {
+		var v finalVerdict
+		if err := json.NewDecoder(strings.NewReader(answer[i:])).Decode(&v); err == nil && v.Final != nil && v.Sourced != nil && v.Marked != nil && v.Evidence != nil {
+			return v, nil
+		}
+		next := strings.Index(answer[i+1:], "{")
+		if next < 0 {
+			break
+		}
+		i += next + 1
+	}
+	return finalVerdict{}, fmt.Errorf("invalid v6 judge answer")
 }

@@ -430,8 +430,15 @@ func TestServeStopsOnExecutableChange(t *testing.T) {
 		t.Logf("from the rename to the daemon stop: %s", time.Since(replaced))
 		_, _ = late.Write(hookwire.EncodeRequest(selfRequest(t, hookPreToolUse, env, `{}`)))
 		_ = late.SetReadDeadline(time.Now().Add(time.Second))
-		if n, err := late.Read(make([]byte, 1)); n != 0 || err == nil {
-			t.Fatalf("connection after the replacement answered: %d %v", n, err)
+		// Тишина — соединение осталось в очереди сокета; «в CLI: upgrade» —
+		// демон застал обработчик первого запроса ещё не снявшим счётчик
+		// (клиент получает код раньше) и дообслуживал: старый код не исполняет
+		// и так, и так
+		reply := make([]byte, 64)
+		if n, err := late.Read(reply); n != 0 && !(reply[0] == hookwire.Fallback && bytes.Contains(reply[:n], []byte(upgradeReason))) {
+			t.Fatalf("connection after the replacement answered: %q %v", reply[:n], err)
+		} else if n == 0 && err == nil {
+			t.Fatal("connection after the replacement: empty read without error")
 		}
 		if n := calls.Load(); n != 1 {
 			t.Fatalf("runner called %d times, want 1", n)

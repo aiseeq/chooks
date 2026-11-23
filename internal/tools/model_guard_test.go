@@ -254,6 +254,8 @@ func TestModelGuardEnvReasons(t *testing.T) {
 		// fish вне подмножества akit: присваивание из переменной найдено в тексте
 		{"fish -c 'set -x ANTHROPIC_MODEL $M; claude -p hi; and true'", "модель задана переменной, назови её литералом", 1},
 		{"sudo bash <<'EOF'\nANTHROPIC_MODEL=sonnet claude -p hi\nEOF", `модель "sonnet" не одобрена`, 1},
+		{`bash -c "ANTHROPIC_MODEL=haiku claude -p hi"`, `модель "haiku" не одобрена`, 1},
+		{`script -qc "ANTHROPIC_MODEL=haiku claude -p hi" /dev/null`, `модель "haiku" не одобрена`, 1},
 		{"env ANTHROPIC_MODEL=sonnet claude -p hi; env ANTHROPIC_MODEL=sonnet claude -p hi", `модель "sonnet" не одобрена`, 2},
 	} {
 		got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})
@@ -262,6 +264,22 @@ func TestModelGuardEnvReasons(t *testing.T) {
 		}
 		if got.IsValid || strings.Count(got.Violations[0].Message, tc.want) != tc.count {
 			t.Errorf("%q: %+v, want %d× %q", tc.command, got.Violations, tc.count, tc.want)
+		}
+	}
+}
+
+func TestSystemdRunOptionArity(t *testing.T) {
+	for _, tc := range []struct {
+		option string
+		value  bool
+	}{
+		{"-t", false}, {"--nice", true}, {"--on-active", true}, {"--on-timezone-change", false},
+		{"--root-directory", true}, {"--json", true}, {"--job-mode", true},
+		{"--path-property", true}, {"--socket-property", true}, {"--timer-property", true},
+		{"--on-clock-change", false}, {"--expand-environment", true},
+	} {
+		if got := systemdRunOptionTakesValue(tc.option); got != tc.value {
+			t.Errorf("systemdRunOptionTakesValue(%q) = %v, want %v", tc.option, got, tc.value)
 		}
 	}
 }

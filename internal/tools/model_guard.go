@@ -390,20 +390,22 @@ func shellEnvValues(command, name string, logger core.Logger) ([]string, bool) {
 	calls, callsErr := shellcmd.Calls(command)
 	if callsErr != nil {
 		logger.Warn("model_guard: вложенные вызовы оболочки не полностью разобраны", "error", callsErr)
-	} else {
-		for i := range calls {
-			c := &calls[i]
-			var scripts []string
-			if shellcmd.IsShell(c.Name) {
-				scripts = shellCommandStrings(c.Args)
-			} else if c.Name == "script" {
-				scripts = scriptCommandStrings(c.Args)
-			}
-			for _, nested := range scripts {
-				found, unknown := shellEnvValues(nested, name, logger)
-				values = append(values, found...)
-				dynamic = dynamic || unknown
-			}
+		if nested, ok := errors.AsType[*shellcmd.NestedError](callsErr); ok && strings.Contains(nested.Script, name) {
+			dynamic = true
+		}
+	}
+	for i := range calls {
+		c := &calls[i]
+		var scripts []string
+		if shellcmd.IsShell(c.Name) {
+			scripts = shellCommandStrings(c.Args)
+		} else if c.Name == "script" {
+			scripts = scriptCommandStrings(c.Args)
+		}
+		for _, nested := range scripts {
+			found, unknown := shellEnvValues(nested, name, logger)
+			values = append(values, found...)
+			dynamic = dynamic || unknown
 		}
 	}
 	declaredValues, declaredDynamic := shellEnvDeclarations(file, command, name)
@@ -655,6 +657,9 @@ func systemdRunAssignments(args []*syntax.Word) []string {
 	for i := 0; i < len(args); i++ {
 		arg, literal := literalValue(args[i])
 		if !literal {
+			if strings.HasPrefix(shellWordTextFromWord(args[i]), "-") {
+				continue
+			}
 			break
 		}
 		if arg == "-E" || arg == "--setenv" {
@@ -676,11 +681,35 @@ func systemdRunAssignments(args []*syntax.Word) []string {
 				break
 			}
 		}
-		if slices.Contains([]string{"-u", "--unit", "--description", "--slice", "-p", "--property", "-t", "--service-type", "--uid", "--gid", "--working-directory", "-M", "--machine", "-H", "--host", "--capability", "--pty-attribute"}, arg) {
+		if systemdRunOptionTakesValue(arg) {
 			i++
 		}
 	}
 	return assignments
+}
+
+func systemdRunOptionTakesValue(arg string) bool {
+	if slices.Contains([]string{
+		"-u", "--unit", "--description", "--slice", "-p", "--property", "--service-type",
+		"--uid", "--gid", "--nice", "--working-directory", "--root-directory", "--expand-environment", "-M", "--machine",
+		"-H", "--host", "--json", "--job-mode", "--background", "--path-property",
+		"--socket-property", "--timer-property", "--on-active", "--on-boot", "--on-startup",
+		"--on-unit-active", "--on-unit-inactive", "--on-calendar",
+	}, arg) {
+		return true
+	}
+	return strings.HasPrefix(arg, "--") && (strings.HasSuffix(arg, "-property") ||
+		(strings.HasPrefix(arg, "--on-") && arg != "--on-timezone-change" && arg != "--on-clock-change"))
+}
+
+func shellWordTextFromWord(word *syntax.Word) string {
+	if len(word.Parts) == 0 {
+		return ""
+	}
+	if lit, ok := word.Parts[0].(*syntax.Lit); ok {
+		return lit.Value
+	}
+	return ""
 }
 
 func envCallAssignments(args []string, name string) ([]string, bool) {
@@ -1595,16 +1624,10 @@ func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger
 			found = append(found, nestedEnvModels(r.Body, logger)...)
 		}
 	}
-	// shellcmd распознаёт внутренние вызовы за снятыми обёртками, но узел
-	// оболочки тогда уже не совпадает с внешним CallExpr по Offset. Разбираем
-	// строки -c напрямую из извлечённых вызовов тем же рекурсивным путём.
+	// `script` не относится к оболочкам shellcmd и его командная строка
+	// не попадает в callEnvModels; разбираем её здесь.
 	for i := range calls {
 		c := &calls[i]
-		if shellcmd.IsShell(c.Name) {
-			for _, command := range shellCommandStrings(c.Args) {
-				found = append(found, nestedEnvModels(command, logger)...)
-			}
-		}
 		if c.Name == "script" {
 			for _, command := range scriptCommandStrings(c.Args) {
 				found = append(found, nestedEnvModels(command, logger)...)
@@ -1619,9 +1642,15 @@ func shellCommandStrings(args []string) []string {
 		if args[i] == "--" {
 			return nil
 		}
-		if args[i] == "-c" || args[i] == "--command" {
+		if args[i] == "--command" || args[i] == "-c" || (strings.HasPrefix(args[i], "-") && !strings.HasPrefix(args[i], "--") && strings.Contains(args[i][1:], "c")) {
 			if i+1 < len(args) {
-				return []string{args[i+1]}
+				next := i + 1
+				if args[next] == "--" {
+					next++
+				}
+				if next < len(args) {
+					return []string{args[next]}
+				}
 			}
 			return nil
 		}
@@ -1630,25 +1659,7 @@ func shellCommandStrings(args []string) []string {
 }
 
 func scriptCommandStrings(args []string) []string {
-	for i := range args {
-		arg := args[i]
-		if arg == "--" {
-			return nil
-		}
-		if arg == "-c" || arg == "-qc" || arg == "-cq" {
-			if i+1 < len(args) {
-				return []string{args[i+1]}
-			}
-			return nil
-		}
-		if arg == "-q" && i+1 < len(args) && args[i+1] == "-c" {
-			if i+2 < len(args) {
-				return []string{args[i+2]}
-			}
-			return nil
-		}
-	}
-	return nil
+	return shellCommandStrings(args)
 }
 
 // callEnvModels — модели из присваиваний простого вызова n: префикс и

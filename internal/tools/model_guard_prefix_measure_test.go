@@ -92,6 +92,27 @@ func TestMeasureShellPrefix(t *testing.T) {
 		// HOME и CLAUDE_CONFIG_DIR в тексте промпта — не запуск
 		{`claude --model opus -p 'проверь: env CLAUDE_CONFIG_DIR=$DIR claude'`, true},
 		{`claude --model opus -p 'проверь: env HOME=$X claude'`, true},
+		// круг 6, ревью r5: systemd-run — нелитеральная опция, опции с значением, -t без значения
+		{`systemd-run --user --unit="agent-$N" -E CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`systemd-run --user --working-directory="$PWD" -E CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`systemd-run --user --nice 5 -E CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`systemd-run --user --on-active 30 -E CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`systemd-run --user -t -E CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh`, false},
+		{`systemd-run --user -t grep -E CLAUDE_CODE_SHELL_PREFIX=timeout f`, true},
+		// круг 6, ревью r5: ошибка разбора соседнего скрипта не снимает проверку
+		{`setsid -f bash -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"; bash -c 'echo $(('`, false},
+		{`script -qc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null; sh -c 'if'`, false},
+		{`timeout 5 bash -c "env CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh; echo \$(("`, false},
+		// круг 6, ревью r5: флаги оболочки, склеенные с -c, и -- после -c за обёрткой
+		{`timeout 5 bash -lc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -ec "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`setsid -f bash -c -- "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`setsid -f bash -c "timeout 5 bash -lc 'CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh'"`, false},
+		{`timeout 5 bash -lc "echo CLAUDE_CODE_SHELL_PREFIX=timeout"`, true},
+		// круг 6, ревью r5: script — другие склейки и --command
+		{`script -eqc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -fqc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script --command "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})

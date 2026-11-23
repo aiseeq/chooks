@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -156,10 +157,10 @@ func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, er
 	if j.CodexHome != "" {
 		env = []string{"CODEX_HOME=" + j.CodexHome}
 	}
-	out, err := runCLIEnv(ctx, cmd, j.Dir, j.Prompt+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input, env)
-	if err != nil {
-		return "", Usage{}, err
-	}
+	// stdout разбирается и при ненулевом коде: отказ хода (кредиты учётки)
+	// codex пишет событием turn.failed или error в stdout, а stderr может его
+	// не нести (ревью Terra 5ec62fa, п. 4)
+	out, runErr := runCLIEnv(ctx, cmd, j.Dir, j.Prompt+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input, env)
 	var message, failed string
 	var usage Usage
 	scanner := bufio.NewScanner(bytes.NewReader(out))
@@ -203,8 +204,15 @@ func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, er
 			usage.OutputTokens += event.Usage.OutputTokens
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return "", usage, fmt.Errorf("read codex output: %w", err)
+	scanErr := scanner.Err()
+	if runErr != nil {
+		if failed != "" {
+			return "", usage, fmt.Errorf("codex turn failed: %s: %w", Excerpt(failed, 300), runErr)
+		}
+		return "", usage, runErr
+	}
+	if scanErr != nil {
+		return "", usage, fmt.Errorf("read codex output: %w", scanErr)
 	}
 	if failed != "" && message == "" {
 		return "", usage, fmt.Errorf("codex turn failed: %s", Excerpt(failed, 300))
@@ -231,7 +239,8 @@ func runCLI(ctx context.Context, cmd *exec.Cmd, dir, stdin string) ([]byte, erro
 
 // runCLIEnv — runCLI с переменными extra поверх env запроса. CLI идёт своей
 // группой процессов: по отмене контекста группа убивается целиком, и потомки
-// CLI не остаются после хука
+// CLI не остаются после хука. При ошибке возвращается и stdout: в нём бывает
+// причина отказа
 func runCLIEnv(ctx context.Context, cmd *exec.Cmd, dir, stdin string, extra []string) ([]byte, error) {
 	cmd.Dir = dir
 	request, ok := hookctx.Request(ctx)
@@ -247,11 +256,55 @@ func runCLIEnv(ctx context.Context, cmd *exec.Cmd, dir, stdin string, extra []st
 	cmd.Stdin = strings.NewReader(stdin)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, err := runTracked(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("%s failed: %w: %s", cmd.Args[0], err, Excerpt(strings.TrimSpace(stderr.String()), 300))
+		return out, fmt.Errorf("%s failed: %w: %s", cmd.Args[0], err, Excerpt(strings.TrimSpace(stderr.String()), 300))
 	}
 	return out, nil
+}
+
+// judgeGroups — группы процессов запущенных судей: по SIGTERM хука
+// KillJudgeGroups убивает их до выхода процесса, иначе судья в своей группе
+// пережил бы хук (ревью Terra 5ec62fa, п. 1)
+var judgeGroups = struct {
+	sync.Mutex
+	pids        map[int]bool
+	terminating bool
+}{pids: map[int]bool{}}
+
+// runTracked запускает cmd с учётом его группы и ждёт конца, как cmd.Output
+func runTracked(cmd *exec.Cmd) ([]byte, error) {
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	judgeGroups.Lock()
+	if judgeGroups.terminating {
+		judgeGroups.Unlock()
+		return nil, fmt.Errorf("hook is terminating, judge not started")
+	}
+	if err := cmd.Start(); err != nil {
+		judgeGroups.Unlock()
+		return nil, err
+	}
+	pid := cmd.Process.Pid
+	judgeGroups.pids[pid] = true
+	judgeGroups.Unlock()
+	err := cmd.Wait()
+	judgeGroups.Lock()
+	delete(judgeGroups.pids, pid)
+	judgeGroups.Unlock()
+	return stdout.Bytes(), err
+}
+
+// KillJudgeGroups убивает группы всех идущих судей и запрещает новые: его
+// зовёт обработчик SIGTERM CLI-хука перед выходом. Возвращает число групп
+func KillJudgeGroups() int {
+	judgeGroups.Lock()
+	defer judgeGroups.Unlock()
+	judgeGroups.terminating = true
+	for pid := range judgeGroups.pids {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}
+	return len(judgeGroups.pids)
 }
 
 // withEnv заменяет в env переменные из extra («ИМЯ=значение»)

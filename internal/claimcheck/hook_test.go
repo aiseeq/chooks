@@ -492,3 +492,60 @@ func TestSendInputIsLetterCall(t *testing.T) {
 		t.Fatalf("by text: %+v err %v", input, err)
 	}
 }
+
+// panicJudge паникует первым вызовом, дальше отвечает
+type panicJudge struct {
+	stubJudge
+	panicked atomic.Bool
+}
+
+func (p *panicJudge) Ask(ctx context.Context, account, input string) (string, questioncheck.Usage, error) {
+	if p.panicked.CompareAndSwap(false, true) {
+		panic("judge panic")
+	}
+	return p.stubJudge.Ask(ctx, account, input)
+}
+
+// Восстановленная паника судьи не держит место: следующий вызов в том же
+// процессе (демон) берёт его без queue_timeout (ревью Terra 5ec62fa, п. 2)
+func TestSlotReleasedAfterPanic(t *testing.T) {
+	judge := &panicJudge{stubJudge: stubJudge{answer: answerOf(okClaim)}}
+	h := testHook(t, judge)
+	h.Slots, h.Budget = 1, 500*time.Millisecond
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("judge did not panic")
+			}
+		}()
+		h.Stop(context.Background(), stopEvent(t))
+	}()
+	if got := h.Stop(context.Background(), stopEvent(t)); got.Result != OutcomePass {
+		t.Fatalf("after recovered panic: %+v", got)
+	}
+}
+
+// Два одновременных одинаковых письма: один вызов судьи, второе —
+// retry_same; изменённое письмо после них ещё судится (ревью Terra 5ec62fa, п. 3)
+func TestSendParallelSameLetter(t *testing.T) {
+	letter := "тест прошёл"
+	path := sendTranscript(t, letter, letter, "тест прошёл, проверено")
+	judge := &stubJudge{answer: answerOf(flagClaim), delay: 300 * time.Millisecond}
+	h := testHook(t, judge)
+	results := make([]Outcome, 2)
+	var wg sync.WaitGroup
+	for i := range 2 {
+		wg.Go(func() {
+			results[i] = h.Send(context.Background(), SendEvent{SessionID: "s1", TranscriptPath: path, ToolUseID: fmt.Sprintf("send%d", i), Text: letter})
+		})
+	}
+	wg.Wait()
+	got := []string{results[0].Result, results[1].Result}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{OutcomeDeny, OutcomeRetrySame}) || judge.calls.Load() != 1 {
+		t.Fatalf("results %v, judge calls %d", got, judge.calls.Load())
+	}
+	if out := h.Send(context.Background(), SendEvent{SessionID: "s1", TranscriptPath: path, ToolUseID: "send2", Text: "тест прошёл, проверено"}); out.Result != OutcomeDeny {
+		t.Fatalf("changed letter after the pair: %+v", out)
+	}
+}

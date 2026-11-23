@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -49,6 +52,11 @@ func newClaimEnv(t *testing.T) claimEnv {
 echo $$ >> "$FAKE_PIDS/codex"
 printf '%s\n' "CODEX_HOME=$CODEX_HOME $*" >> "$FAKE_PIDS/codex-args"
 cat > /dev/null
+if [ -n "$FAKE_CODEX_OUT_HOME" ] && [ "$CODEX_HOME" = "$FAKE_CODEX_OUT_HOME" ]; then
+	echo '{"type":"turn.started"}'
+	echo '{"type":"turn.failed","error":{"message":"Your workspace is out of credits. Ask your workspace owner to refill."}}'
+	exit 1
+fi
 sleep "$FAKE_CODEX_DELAY" &
 echo $! >> "$FAKE_PIDS/codex"
 wait $!
@@ -339,5 +347,114 @@ func TestClaimAccounts(t *testing.T) {
 	marks, err := workerAccountMarks(hookctx.New(nil, nil, nil, []string{"HOME=/h", "WORKER_STATE=/ws"}, "/w", 1, 1))
 	if err != nil || marks["/h/.codex"] != "/ws/accounts/work.json" || marks["/h/.codex-personal"] != "/ws/accounts/personal.json" {
 		t.Fatalf("worker marks %v %v", marks, err)
+	}
+}
+
+func writeStopTranscript(t *testing.T, dir, answer string) string {
+	t.Helper()
+	lines := []string{
+		`{"type":"user","message":{"role":"user","content":"сделай"},"timestamp":"2026-11-23T00:00:00Z","origin":{"kind":"human"}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + answer + `"}]},"timestamp":"2026-11-23T00:00:05Z"}`,
+	}
+	path := filepath.Join(dir, "t.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// codex выходит с ненулевым кодом, а отказ по кредитам — turn.failed в JSON
+// stdout: учётка метится, вызов идёт на вторую (ревью Terra 5ec62fa, п. 4)
+func TestClaimStopFailoverOnCreditsExit(t *testing.T) {
+	e := newClaimEnv(t)
+	answer := "Готово: тест прошёл."
+	transcript := writeStopTranscript(t, e.root, answer)
+	home := filepath.Join(e.root, "home")
+	work, personal := filepath.Join(home, ".codex"), filepath.Join(home, ".codex-personal")
+	var stdout bytes.Buffer
+	req := e.request(&stdout, "FAKE_CODEX_DELAY=0", "FAKE_CODEX_OUT_HOME="+work)
+	ctx := context.WithValue(hookctx.WithRequest(context.Background(), req), claimDepsKey{}, claimDeps{notify: func(string, string) error { return nil }})
+	config, logger := silentConfig(t)
+	data, _ := json.Marshal(map[string]any{"session_id": "s1", "transcript_path": transcript, "hook_event_name": "Stop", "last_assistant_message": answer})
+	runClaimStop(ctx, data, config, logger, &stdout)
+	var out stopBlockOutput
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil || out.Decision != "block" {
+		t.Fatalf("no block after failover: %q %v", stdout.String(), err)
+	}
+	args, _ := os.ReadFile(filepath.Join(e.pids, "codex-args"))
+	if !strings.Contains(string(args), "CODEX_HOME="+work+" ") || !strings.Contains(string(args), "CODEX_HOME="+personal+" ") {
+		t.Fatalf("codex calls %q", args)
+	}
+	marks, _ := filepath.Glob(filepath.Join(e.root, "state", "chooks", "claim-check", "accounts", "codex-*.json"))
+	if len(marks) != 1 {
+		t.Fatalf("account marks %v", marks)
+	}
+	journal := readJournal(t, claimcheck.JournalPath(filepath.Join(e.root, "state", "chooks")))
+	if journal[0]["account"] != personal || journal[0]["outcome"] != claimcheck.OutcomeBlock {
+		t.Fatalf("journal %v", journal)
+	}
+}
+
+// SIGTERM CLI-хука (таймаут или отмена хода в Claude Code) не оставляет
+// судью: заглушка codex жива до сигнала и мертва после выхода хука (ревью
+// Terra 5ec62fa, п. 1)
+func TestClaimStopSIGTERMKillsJudge(t *testing.T) {
+	e := newClaimEnv(t)
+	answer := "Готово: тест прошёл."
+	transcript := writeStopTranscript(t, e.root, answer)
+	if err := os.MkdirAll(filepath.Join(e.root, "tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]any{"session_id": "s1", "transcript_path": transcript, "hook_event_name": "Stop", "last_assistant_message": answer})
+	cmd := exec.Command(testBinary(t), hookClaimStop)
+	cmd.Env = append(append([]string{}, e.env...), "FAKE_CODEX_DELAY=60", argvCLIHelper+"=1", "TMPDIR="+filepath.Join(e.root, "tmp"),
+		"XDG_CONFIG_HOME="+filepath.Join(e.root, "config"), "DBUS_SESSION_BUS_ADDRESS=unix:path="+filepath.Join(e.root, "no-bus"))
+	cmd.Dir = e.root
+	cmd.Stdin = bytes.NewReader(data)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pidsPath := filepath.Join(e.pids, "codex")
+	var pids []int
+	deadline := time.Now().Add(20 * time.Second)
+	for len(pids) < 2 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		pids = nil
+		raw, _ := os.ReadFile(pidsPath)
+		for line := range strings.FieldsSeq(string(raw)) {
+			if pid, err := strconv.Atoi(line); err == nil {
+				pids = append(pids, pid)
+			}
+		}
+	}
+	if len(pids) < 2 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("codex stub not started: %v, stderr %s", pids, stderr.String())
+	}
+	for _, pid := range pids {
+		if !alive(pid) {
+			t.Fatalf("codex process %d not alive before the signal", pid)
+		}
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != killedExitCode {
+		t.Errorf("hook exit %v, want %d", err, killedExitCode)
+	}
+	left := 0
+	for _, pid := range pids {
+		if alive(pid) {
+			left++
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+	if left > 0 {
+		t.Fatalf("%d codex processes left after hook SIGTERM", left)
 	}
 }

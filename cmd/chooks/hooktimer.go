@@ -15,6 +15,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/hookctx"
+	"github.com/aiseeq/chooks/internal/questioncheck"
 )
 
 // slowFloor — меньше этого хук не медленный ни при каком таймауте: самый
@@ -204,12 +205,16 @@ func (t *hookTimer) terminationStatus(elapsed time.Duration) (string, error) {
 
 // watchTermination пишет в лог, на какой стадии хук оборван: Claude Code шлёт
 // SIGTERM по таймауту (проба 02.11, claude 2.1.316) и при отмене хода
-// (hook_cancelled в транскрипте, 04.11, claude 2.1.317) и выбрасывает вывод
+// (hook_cancelled в транскрипте, 04.11, claude 2.1.317) и выбрасывает вывод.
+// До выхода убивает группы запущенных судей: судья идёт своей группой и без
+// этого пережил бы хук. Убивает сразу, а не отменой контекста: отмена шлёт
+// SIGKILL из горутины exec и гонится с os.Exit (ревью Terra 5ec62fa, п. 1)
 func (t *hookTimer) watchTermination(exit func(int)) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM)
 	go func() {
 		<-signals
+		questioncheck.KillJudgeGroups()
 		t.reportTermination()
 		exit(killedExitCode)
 	}()

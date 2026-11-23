@@ -222,6 +222,18 @@ func (h Hook) Send(ctx context.Context, event SendEvent) Outcome {
 	if err != nil {
 		return h.fail(entry, started, FailInput, err)
 	}
+	// Одно письмо судится одним судьёй: тот же текст, пришедший параллельно,
+	// ждёт здесь записи отказа и уходит retry_same (ревью Terra 5ec62fa, п. 3)
+	unlock, err := lockWithin(ctx, filepath.Join(h.SlotDir, "send", event.SessionID+"-"+entry.Key+".lock"), h.SlotPoll)
+	if errors.Is(err, errQueueTimeout) {
+		entry.Outcome, entry.Error = OutcomeQueueTimeout, "same letter is being judged: "+err.Error()
+		h.finish(entry, started)
+		return Outcome{Result: OutcomeQueueTimeout}
+	}
+	if err != nil {
+		return h.fail(entry, started, FailState, err)
+	}
+	defer unlock()
 	turn := fmt.Sprintf("%s:%d", event.TranscriptPath, input.TurnLine)
 	state, err := h.readSendState(statePath, turn)
 	if err != nil {
@@ -249,7 +261,8 @@ func (h Hook) Send(ctx context.Context, event SendEvent) Outcome {
 	}
 	// Отказ — только с записанным ключом: иначе повтор того же текста снова
 	// попал бы к судье. Предел проверяется под блокировкой: параллельные
-	// письма хода не превышают его
+	// письма хода не превышают его. Свой ключ здесь не перепроверяется: его
+	// пишет только держатель блокировки письма, взятой выше
 	outcome := OutcomeDeny
 	err = withFileLock(statePath+".lock", func() error {
 		state, err := h.readSendState(statePath, turn)
@@ -298,8 +311,7 @@ func (h Hook) verdict(ctx context.Context, entry *Entry, input *Input, started t
 		entry.Outcome = OutcomeError
 		return Verdict{}, err
 	}
-	answer, usage, account, err := h.ask(ctx, body)
-	release()
+	answer, usage, account, err := h.askInSlot(ctx, body, release)
 	entry.Model, entry.Account = h.Judge.Model(), account
 	if usage != (questioncheck.Usage{}) {
 		entry.Usage = &usage
@@ -330,6 +342,14 @@ func (h Hook) verdict(ctx context.Context, entry *Entry, input *Input, started t
 		h.finish(bad, started)
 	}
 	return verdict, nil
+}
+
+// askInSlot зовёт судью и освобождает место и при панике: в живом демоне
+// восстановленная паника иначе держала бы место до queue_timeout у следующих
+// (ревью Terra 5ec62fa, п. 2)
+func (h Hook) askInSlot(ctx context.Context, body string, release func()) (string, questioncheck.Usage, string, error) {
+	defer release()
+	return h.ask(ctx, body)
 }
 
 // ask проходит учётки по порядку: отказ по кредитам метит учётку на час и

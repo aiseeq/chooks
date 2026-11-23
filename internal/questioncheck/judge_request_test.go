@@ -2,10 +2,15 @@ package questioncheck
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/chooks/internal/hookctx"
 )
@@ -30,5 +35,80 @@ printf '{"result":"%s|%s|%s","is_error":false}' "$REQUEST_MARK" "$PWD" "${CLAUDE
 	got, _, err := judge.Ask(hookctx.WithRequest(context.Background(), req), "test")
 	if err != nil || got != strings.Join([]string{"one", work, "unset"}, "|") {
 		t.Fatalf("result=%q err=%v", got, err)
+	}
+}
+
+// codex с ненулевым кодом и отказом хода в JSON stdout: причина отказа — в
+// ошибке, по ней хук метит учётку (ревью Terra 5ec62fa, п. 4)
+func TestCodexFailedTurnOnNonZeroExit(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stub := `#!/bin/sh
+cat > /dev/null
+echo '{"type":"turn.started"}'
+echo '{"type":"turn.failed","error":{"message":"Your workspace is out of credits."}}'
+echo 'stderr tail' >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(stub), 0700); err != nil {
+		t.Fatal(err)
+	}
+	req := hookctx.New(nil, nil, nil, []string{"PATH=" + bin + ":/usr/bin:/bin"}, root, 456, 123)
+	judge := CLIJudge{Name: "luna", ID: "gpt-6-luna", Effort: "high", Dir: root, Prompt: "test"}
+	_, _, err := judge.Ask(hookctx.WithRequest(context.Background(), req), "test")
+	if err == nil || !strings.Contains(err.Error(), "out of credits") || !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// KillJudgeGroups убивает всю группу идущего судьи, и потомка тоже, и не
+// даёт запустить нового (ревью Terra 5ec62fa, п. 1)
+func TestKillJudgeGroups(t *testing.T) {
+	t.Cleanup(func() {
+		judgeGroups.Lock()
+		judgeGroups.terminating = false
+		judgeGroups.Unlock()
+	})
+	root := t.TempDir()
+	pidFile := filepath.Join(root, "child")
+	cmd := exec.Command("/bin/sh", "-c", `sleep 60 & echo $! > "$1"; wait`, "sh", pidFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	done := make(chan error, 1)
+	go func() {
+		_, err := runTracked(cmd)
+		done <- err
+	}()
+	var child int
+	for deadline := time.Now().Add(10 * time.Second); child == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		raw, _ := os.ReadFile(pidFile)
+		child, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+	}
+	if child == 0 {
+		t.Fatal("judge child not started")
+	}
+	if n := KillJudgeGroups(); n != 1 {
+		t.Errorf("killed groups %d, want 1", n)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("judge not killed")
+	}
+	// Потомок без wait родителя остаётся зомби до init: смотрим состояние
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child))
+		if err != nil || strings.Contains(string(stat), ") Z ") {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(child, syscall.SIGKILL)
+			t.Fatalf("judge child %d survived", child)
+		}
+	}
+	if _, err := runTracked(exec.Command("/bin/true")); err == nil {
+		t.Error("judge started after KillJudgeGroups")
 	}
 }

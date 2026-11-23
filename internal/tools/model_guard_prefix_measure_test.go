@@ -159,6 +159,20 @@ func TestMeasureShellPrefix(t *testing.T) {
 		{`script -O/tmp/c.log -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
 		{`script -qc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
 		{`script -O/tmp/c.log /tmp/CLAUDE_CODE_SHELL_PREFIX.log`, true},
+		// круг 10, ревью 01dd953: - и + после -c — конец опций
+		{`timeout 5 bash -c - "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -c + "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -o pipefail -c - "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash --norc --login -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash --norc ./x.sh -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, true},
+		// script: сокращения длинных опций getopt_long
+		{`script --comm "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script --co="CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script --comman "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script --ech never -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -c"CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -qE never -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -qtc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, true},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})

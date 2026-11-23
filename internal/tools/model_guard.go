@@ -1688,7 +1688,14 @@ func shellCommandStrings(args []string) []string {
 			i++
 			continue
 		}
-		if arg == "-" || arg == "+" || (!strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "+")) {
+		if arg == "-" || arg == "+" {
+			if commandMode && i+1 < len(args) {
+				// bash -c -/+ word assigns -/+ to $0; word is the command.
+				return []string{args[i+1]}
+			}
+			return nil
+		}
+		if !strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "+") {
 			if commandMode {
 				return []string{arg}
 			}
@@ -1712,25 +1719,75 @@ func shellCommandStrings(args []string) []string {
 }
 
 func scriptCommandStrings(args []string) []string {
+	// getopt_long accepts an unambiguous prefix of a long option. Keep the
+	// argument behavior alongside the option names so abbreviations are
+	// handled exactly like their full spelling.
+	longOptions := []struct {
+		name        string
+		requiresArg bool
+		optionalArg bool
+	}{
+		{name: "append"},
+		{name: "command", requiresArg: true},
+		{name: "return"},
+		{name: "flush"},
+		{name: "quiet"},
+		{name: "force"},
+		{name: "log-in", requiresArg: true},
+		{name: "log-out", requiresArg: true},
+		{name: "log-io", requiresArg: true},
+		{name: "log-timing", optionalArg: true},
+		{name: "logging-format", requiresArg: true},
+		{name: "echo", requiresArg: true},
+		{name: "output-limit", requiresArg: true},
+		{name: "shell", requiresArg: true},
+		{name: "session-command"},
+		{name: "help"},
+		{name: "version"},
+	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
 			return nil
 		}
-		if arg == "--command" || arg == "-c" {
+		if arg == "-c" {
 			if i+1 < len(args) {
 				return []string{args[i+1]}
 			}
 			return nil
 		}
-		if after, ok := strings.CutPrefix(arg, "--command="); ok {
-			return []string{after}
-		}
 		if slices.Contains([]string{"-I", "-O", "-B", "-T", "-m", "-E", "-o", "--log-in", "--log-out", "--log-io", "--log-timing", "--logging-format", "--echo", "--output-limit"}, arg) {
 			i++
 			continue
 		}
-		if strings.HasPrefix(arg, "--") {
+		if after, ok := strings.CutPrefix(arg, "--"); ok {
+			name, value, hasValue := strings.Cut(after, "=")
+			var match *struct {
+				name        string
+				requiresArg bool
+				optionalArg bool
+			}
+			matches := 0
+			for j := range longOptions {
+				if strings.HasPrefix(longOptions[j].name, name) {
+					match = &longOptions[j]
+					matches++
+				}
+			}
+			if matches == 1 {
+				if match.name == "command" {
+					if hasValue {
+						return []string{value}
+					}
+					if i+1 < len(args) {
+						return []string{args[i+1]}
+					}
+					return nil
+				}
+				if match.requiresArg && !hasValue || match.optionalArg && !hasValue {
+					i++
+				}
+			}
 			continue
 		}
 		if !strings.HasPrefix(arg, "-") || arg == "-" {

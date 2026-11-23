@@ -998,8 +998,10 @@ func processAlive(pid int) bool {
 // каталоге теста (systemd-run --socket-property), свойства — из
 // configs/systemd/chooks.service и chooks.socket, сервис — копия бинаря
 // тестов. Первый запрос исполняет v1; после замены файла v1 выходит, systemd
-// поднимает v2 на том же сокете, следующий запрос исполняет v2, «connect:»
-// и «ack:» не бывает. Наблюдатель уведомления, запущенный обработчиком v1 через
+// поднимает v2 на том же сокете, следующий запрос исполняет v2. Таймаут ack
+// при медленном старте v2 допустим, остальные уходы прокси недопустимы.
+// NRestarts проверяет, что v2 поднялся от сокетного запроса, а не после
+// RestartSec. Наблюдатель уведомления, запущенный обработчиком v1 через
 // desktop.StartDetached, переживает выход v1 (ревью 8f10b59, п. 1:
 // KillMode=control-group убил бы его вместе с демоном). Настоящий
 // chooks.service не трогается
@@ -1081,24 +1083,14 @@ func TestSystemdSocketUnit(t *testing.T) {
 	}
 	v1 := servedPID(t, filepath.Join(home, "starts"), "v1")
 	installVersion(t, exe, "v2")
-	// Проверяем обновление несколькими одновременными вызовами. При обычном
-	// запуске v2 на очереди сокета возможен единичный таймаут ack (100 мс)
-	// под нагрузкой. При Restart=always RestartSec=200 мс держит сервис
-	// недоступным целое окно, поэтому в CLI уходят сразу несколько вызовов.
-	const updateProbes = 3
-	probes := make(chan proxyRun, updateProbes)
-	for range updateProbes {
-		go func() {
-			probes <- runBinary(t, proxyHelper, []string{hookPreToolUse}, proxy, home, []byte(preToolUseLS))
-		}()
-	}
-	for range updateProbes {
-		result := <-probes
-		if result.code != exitAllowed {
-			t.Errorf("update probe code %d stderr %q", result.code, result.stderr)
-		}
-	}
 	serveAs("v2")
+	show := exec.Command("systemctl", "--user", "show", "-p", "NRestarts", unit+".service")
+	show.Env = env
+	if out, err := show.CombinedOutput(); err != nil {
+		t.Fatalf("systemctl show NRestarts: %v: %s", err, out)
+	} else if got := strings.TrimSpace(strings.TrimPrefix(string(out), "NRestarts=")); got != "0" {
+		t.Errorf("NRestarts = %q after v2 served; want 0", got)
+	}
 	if !waitFor(t, 10*time.Second, func() bool { return !processAlive(v1) }) {
 		t.Fatalf("v1 (pid %d) still alive after v2 served", v1)
 	}
@@ -1117,16 +1109,18 @@ func TestSystemdSocketUnit(t *testing.T) {
 			unavailable = append(unavailable, reason)
 		}
 	}
-	// Один ack может истечь под нагрузкой; несколько одновременных уходов
-	// означают, что v2 не поднялся на очереди сокета, а ждёт RestartSec.
-	if len(unavailable) > 1 {
-		t.Errorf("calls left to CLI as daemon unavailable during the update: %q; want at most one transient ack timeout", unavailable)
+	// Медленный старт v2 под нагрузкой может истечь ack (100 мс) у любого
+	// числа вызовов. Сброс, EOF, lost и остальные причины означают потерю вызова.
+	for _, reason := range unavailable {
+		if reason != "ack: connection timed out" {
+			t.Errorf("call left to CLI as daemon unavailable during the update: %q; only ack timeout is transient", reason)
+		}
 	}
 	writeFiles(t, home, map[string]string{"release": ""})
 	if !waitFor(t, 10*time.Second, func() bool { return !processAlive(watcher) }) {
 		t.Errorf("notification watcher %d did not exit after release", watcher)
 	}
-	t.Logf("starts:\n%s\nfallbacks: %q; counted as daemon unavailable: %d", readFile(t, filepath.Join(home, "starts")), lines(readFile(t, runs)), len(unavailable))
+	t.Logf("starts:\n%s\nfallbacks: %q; daemon unavailable: %d", readFile(t, filepath.Join(home, "starts")), lines(readFile(t, runs)), len(unavailable))
 }
 
 // servedPID — pid запуска version из журнала стартов

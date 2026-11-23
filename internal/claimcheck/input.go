@@ -2111,11 +2111,24 @@ func lineAnswerWords(line string, words []string) []string {
 }
 
 func lineAnswerWordsWithMatcher(line string, words []string, matcher *wordMatcher) []string {
-	if matcher == nil || !slices.Equal(matcher.words, words) {
+	if matcher == nil {
+		matcher = newWordMatcher(words)
+	} else if !sameWordSlice(matcher.words, words) {
+		// A line may only need words that have not appeared in earlier lines.
+		// Keep using the turn-wide automaton and filter its matches instead of
+		// rebuilding an automaton for every long line.
+		if len(words) <= len(matcher.words) && sortedWordsContain(matcher.words, words) {
+			found, _ := matcher.wordsInLine(context.Background(), line)
+			return intersectWords(found, words)
+		}
 		matcher = newWordMatcher(words)
 	}
 	found, _ := matcher.wordsInLine(context.Background(), line)
 	return found
+}
+
+func sameWordSlice(a, b []string) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
 }
 
 func exactLineAnswerWords(line string, words []string) []string {
@@ -2359,6 +2372,22 @@ func intersectWords(lineWords, words []string) []string {
 		}
 	}
 	return out
+}
+
+func sortedWordsContain(words, subset []string) bool {
+	i, j := 0, 0
+	for i < len(subset) && j < len(words) {
+		switch {
+		case subset[i] == words[j]:
+			i++
+			j++
+		case subset[i] > words[j]:
+			j++
+		default:
+			return false
+		}
+	}
+	return i == len(subset)
 }
 
 func matches(s string, words []string) bool {

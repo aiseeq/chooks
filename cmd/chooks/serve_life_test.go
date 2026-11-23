@@ -1081,6 +1081,23 @@ func TestSystemdSocketUnit(t *testing.T) {
 	}
 	v1 := servedPID(t, filepath.Join(home, "starts"), "v1")
 	installVersion(t, exe, "v2")
+	// Проверяем обновление несколькими одновременными вызовами. При обычном
+	// запуске v2 на очереди сокета возможен единичный таймаут ack (100 мс)
+	// под нагрузкой. При Restart=always RestartSec=200 мс держит сервис
+	// недоступным целое окно, поэтому в CLI уходят сразу несколько вызовов.
+	const updateProbes = 3
+	probes := make(chan proxyRun, updateProbes)
+	for range updateProbes {
+		go func() {
+			probes <- runBinary(t, proxyHelper, []string{hookPreToolUse}, proxy, home, []byte(preToolUseLS))
+		}()
+	}
+	for range updateProbes {
+		result := <-probes
+		if result.code != exitAllowed {
+			t.Errorf("update probe code %d stderr %q", result.code, result.stderr)
+		}
+	}
 	serveAs("v2")
 	if !waitFor(t, 10*time.Second, func() bool { return !processAlive(v1) }) {
 		t.Fatalf("v1 (pid %d) still alive after v2 served", v1)
@@ -1100,10 +1117,10 @@ func TestSystemdSocketUnit(t *testing.T) {
 			unavailable = append(unavailable, reason)
 		}
 	}
-	// Выход v1 с кодом 0 — без паузы RestartSec: v2 поднимает сокет на
-	// соединении из очереди, и ни один вызов не уходит в CLI по «ack:»
-	if len(unavailable) > 0 {
-		t.Errorf("calls left to CLI as daemon unavailable during the update: %q", unavailable)
+	// Один ack может истечь под нагрузкой; несколько одновременных уходов
+	// означают, что v2 не поднялся на очереди сокета, а ждёт RestartSec.
+	if len(unavailable) > 1 {
+		t.Errorf("calls left to CLI as daemon unavailable during the update: %q; want at most one transient ack timeout", unavailable)
 	}
 	writeFiles(t, home, map[string]string{"release": ""})
 	if !waitFor(t, 10*time.Second, func() bool { return !processAlive(watcher) }) {

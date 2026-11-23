@@ -52,6 +52,19 @@ func TestWideSearchMaxdepth(t *testing.T) {
 		{"-exec мелкий find", `find ~ -maxdepth 2 -name x -exec find {} -maxdepth 1 \;`, "/tmp", false},
 		// + кончает -exec только после {}
 		{"+ не после {}", `find ~ -exec echo + -maxdepth 1 \;`, "/tmp", true},
+		// круг 4, ревью cfa2723: обёртка перед find (была паника), перенаправление, вывод find в рекурсивную команду без xargs
+		{"timeout find | xargs du", "timeout 10 find ~ -maxdepth 1 | xargs du -s", "/tmp", true},
+		{"nice ionice find | xargs du", "nice -n 19 ionice -c3 find ~ -maxdepth 1|xargs du", "/tmp", true},
+		{"sudo find | xargs du", "sudo find ~ -maxdepth 1 | xargs du -s", "/tmp", true},
+		{"find 2>&1 | xargs du", "find ~ -maxdepth 1 2>&1 | xargs du -s", "/tmp", true},
+		{"find | grep ';' | xargs du", "find ~ -maxdepth 1 | grep -v ';' | xargs du -s", "/tmp", true},
+		{"find | while read du", `find ~ -maxdepth 1 | while read d; do du -s "$d"; done`, "/tmp", true},
+		{"for in $(find) du", `for d in $(find ~ -maxdepth 1 -type d); do du -s "$d"; done`, "/tmp", true},
+		{"du $(find)", "du -sh $(find ~ -maxdepth 1 -type d)", "/tmp", true},
+		{"| parallel du", "find ~ -maxdepth 1 | parallel du -s", "/tmp", true},
+		// рекурсивная команда со своим известным путём — вывод find она не обходит
+		{"find | head; ls | xargs du /tmp/a", "find ~ -maxdepth 1 | head; xargs du -s /tmp/a < /dev/null", "/tmp", false},
+		{"find | xargs -r du /tmp/a", "find ~ -maxdepth 1 -newer x | xargs -r du -s /tmp/a", "/tmp", false},
 		// tree вне списка, на который пользователь дал «да» (тикет wide-search-hint): подсказки нет
 		{"tree ~", "tree ~", "/tmp", false},
 		{"tree -L 1 ~", "tree -L 1 ~", "/tmp", false},

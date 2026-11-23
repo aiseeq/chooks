@@ -42,8 +42,14 @@ func WideSearch(command, cwd, home string) (string, error) {
 			cwd = changeDir(c, cwd, home)
 			continue
 		}
-		if c.Name == "find" && shallowFind(c.Args) && !findPipedToRecursiveXargs(command, c, calls) {
-			continue
+		if c.Name == "find" && shallowFind(c.Args) {
+			unknown, err := hasUnknownRecursivePath(calls, home)
+			if err != nil {
+				return "", fmt.Errorf("wide search: %w", err)
+			}
+			if !unknown {
+				continue
+			}
 		}
 		paths, ok := walkPaths(c)
 		if !ok {
@@ -132,20 +138,60 @@ func execWalksRecursively(args []string) bool {
 	return false
 }
 
-// findPipedToRecursiveXargs keeps a shallow find wide when its output feeds a
-// recursive xargs command in the same pipeline (possibly through other xargs).
-func findPipedToRecursiveXargs(command string, find *shellcmd.Call, calls []shellcmd.Call) bool {
-	end := min(find.Offset+len(find.Raw), len(command))
+// hasUnknownRecursivePath keeps a shallow find wide when another recursive
+// call in the command can consume paths produced at runtime.
+func hasUnknownRecursivePath(calls []shellcmd.Call, home string) (bool, error) {
 	for i := range calls {
 		c := &calls[i]
-		if c.Offset <= find.Offset || c.Offset > len(command) || !slices.Contains(c.Via, "xargs") {
+		if slices.Contains(c.Via, "find") {
 			continue
 		}
-		if _, recursive := walkPaths(c); !recursive {
+		if c.Name == "parallel" {
+			unknown, err := parallelHasUnknownRecursivePath(c, home)
+			if err != nil {
+				return false, err
+			}
+			if unknown {
+				return true, nil
+			}
 			continue
 		}
-		between := command[end:c.Offset]
-		if strings.Contains(between, "|") && !strings.ContainsAny(between, ";&\n") {
+		if recursivePathUnknown(c, home, slices.Contains(c.Via, "xargs") || slices.Contains(c.Via, "parallel")) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func parallelHasUnknownRecursivePath(c *shellcmd.Call, home string) (bool, error) {
+	if len(c.Args) == 0 {
+		return false, nil
+	}
+	command, err := shellcmd.Calls(literalShellWords(c.Args))
+	if err != nil {
+		return false, err
+	}
+	for i := range command {
+		if recursivePathUnknown(&command[i], home, true) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func recursivePathUnknown(c *shellcmd.Call, home string, implicitPath bool) bool {
+	paths, recursive := walkPaths(c)
+	if !recursive {
+		return false
+	}
+	if len(paths) == 0 {
+		return implicitPath
+	}
+	for _, p := range paths {
+		if p.text == "{}" {
+			return true
+		}
+		if _, known := knownPath(p.text, home); !known {
 			return true
 		}
 	}

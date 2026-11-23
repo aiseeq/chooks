@@ -126,6 +126,23 @@ func TestMeasureShellPrefix(t *testing.T) {
 		{`timeout 5 bash -c 'grep -E CLAUDE_CODE_SHELL_PREFIX=x f; echo $(('`, false},
 		// круг 7, ревью r6: после имени скрипта аргументы позиционные
 		{`timeout 5 bash ./check.sh -c "CLAUDE_CODE_SHELL_PREFIX=timeout"`, true},
+		// круг 8, ревью r7: опции оболочки со значением и флаги с + за обёрткой
+		{`timeout 5 bash -o pipefail -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`setsid -f bash -o pipefail -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -euo pipefail -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -O extglob -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash +O extglob -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash +x -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash --rcfile ./rc -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 zsh -o errexit -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash - -c "CLAUDE_CODE_SHELL_PREFIX=timeout"`, true},
+		{`timeout 5 bash -o pipefail ./check.sh -c "CLAUDE_CODE_SHELL_PREFIX=timeout"`, true},
+		// круг 8, ревью r7: script разбирает опции и после имени файла; опции script со значением
+		{`script -q /tmp/log -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`script -E never -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -O /tmp/o -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -m advanced -T /tmp/t -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script --echo never -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})

@@ -1671,11 +1671,12 @@ func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger
 }
 
 func shellCommandStrings(args []string) []string {
-	for i := range args {
-		if args[i] == "--" {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
 			return nil
 		}
-		if args[i] == "--command" || args[i] == "-c" || (strings.HasPrefix(args[i], "-") && !strings.HasPrefix(args[i], "--") && strings.Contains(args[i][1:], "c")) {
+		if arg == "--command" || arg == "-c" || (strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg[1:], "c")) {
 			if i+1 < len(args) {
 				next := i + 1
 				if args[next] == "--" {
@@ -1687,14 +1688,22 @@ func shellCommandStrings(args []string) []string {
 			}
 			return nil
 		}
-		if !strings.HasPrefix(args[i], "-") || args[i] == "-" {
+		if !strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "+") || arg == "-" || arg == "+" {
 			return nil
 		}
-		if slices.Contains([]string{"--rcfile", "--init-file", "--startup-file", "-o", "+o", "-O", "+O"}, args[i]) {
+		if slices.Contains([]string{"--rcfile", "--init-file", "--startup-file", "-o", "+o", "-O", "+O"}, arg) {
 			i++
 			continue
 		}
-		if strings.HasPrefix(args[i], "--rcfile=") || strings.HasPrefix(args[i], "--init-file=") || strings.HasPrefix(args[i], "--startup-file=") {
+		if strings.HasPrefix(arg, "--rcfile=") || strings.HasPrefix(arg, "--init-file=") || strings.HasPrefix(arg, "--startup-file=") {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 2 && (strings.HasSuffix(arg, "o") || strings.HasSuffix(arg, "O")) {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "+") && len(arg) > 2 && (strings.HasSuffix(arg, "o") || strings.HasSuffix(arg, "O")) {
+			i++
 			continue
 		}
 	}
@@ -1722,11 +1731,16 @@ func scriptCommandStrings(args []string) []string {
 			}
 			return nil
 		}
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			return nil
-		}
-		if slices.Contains([]string{"-T", "-B", "--log-in", "--log-out", "--log-io"}, arg) {
+		if slices.Contains([]string{"-I", "-O", "-B", "-T", "-m", "-E", "-o", "--log-in", "--log-out", "--log-io", "--log-timing", "--logging-format", "--echo", "--output-limit"}, arg) {
 			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--log-in=") || strings.HasPrefix(arg, "--log-out=") || strings.HasPrefix(arg, "--log-io=") || strings.HasPrefix(arg, "--log-timing=") || strings.HasPrefix(arg, "--logging-format=") || strings.HasPrefix(arg, "--echo=") || strings.HasPrefix(arg, "--output-limit=") {
+			continue
+		}
+		// script принимает имя файла timing только в приписанном виде: -tFILE.
+		if strings.HasPrefix(arg, "-t") {
+			continue
 		}
 	}
 	return nil

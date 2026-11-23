@@ -559,3 +559,41 @@ func TestKillGuardSystemdRunParallel(t *testing.T) {
 		}
 	}
 }
+
+// Демон хуков chooks (hooks-daemon, этап 2б, сценарий 7): остановка юнита,
+// pkill и killall по имени — отказ с подсказкой, что демон обновляется сам;
+// запуск и чтение — пропуск
+func TestKillGuardChooksDaemon(t *testing.T) {
+	for _, command := range []string{
+		`systemctl --user stop chooks`,
+		`systemctl --user stop chooks.service`,
+		`systemctl --user stop chooks.socket chooks.service`,
+		`systemctl --user kill chooks.service`,
+		`systemctl --user restart chooks`,
+		`systemctl --user --now disable chooks.socket`,
+		userMgr + `StopUnit ss chooks.service replace`,
+		`pkill chooks`,
+		`pkill -f 'chooks serve'`,
+		`killall chooks`,
+	} {
+		r := validateKill(t, command)
+		if r.IsValid {
+			t.Errorf("должно блокироваться: %s", command)
+			continue
+		}
+		if strings.HasPrefix(command, "systemctl") && !slices.ContainsFunc(r.Suggestions, func(s string) bool { return strings.Contains(s, "обновляется сам") }) {
+			t.Errorf("%s: нет подсказки об обновлении демона: %v", command, r.Suggestions)
+		}
+	}
+	for _, command := range []string{
+		`systemctl --user start chooks.socket`,
+		`systemctl --user enable --now chooks.socket`,
+		`systemctl --user status chooks.service chooks.socket`,
+		`journalctl --user -u chooks.service`,
+		`systemctl --user stop chooks-test-1.service`,
+	} {
+		if r := validateKill(t, command); !r.IsValid {
+			t.Errorf("не должно блокироваться: %s: %v", command, r.Suggestions)
+		}
+	}
+}

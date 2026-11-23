@@ -1,13 +1,15 @@
 // Package hookproxy — прокси хука chooks-hook: пересылает вызов хука демону
 // chooks serve по unix-сокету и отдаёт его stdout, stderr и код. Демона нет
 // или «принято» не пришло в срок — execve нынешнего CLI chooks с тем же stdin.
-// Импорты — только os, syscall, x/sys/unix, time и hookwire: запуск прокси — часть
-// времени каждого хука.
+// Импорты — только os, os/signal, sync, syscall, x/sys/unix, time и hookwire:
+// запуск прокси — часть времени каждого хука.
 package hookproxy
 
 import (
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,29 +37,65 @@ const AckWindow = 100 * time.Millisecond
 // читает дольше, а прокси не должен уходить в CLI из-за размера
 const ackPerMiB = 20 * time.Millisecond
 
+// KilledExitCode — код выхода прокси по SIGTERM, как у CLI chooks
+// (killedExitCode): 128 + SIGTERM
+const KilledExitCode = 128 + int(syscall.SIGTERM)
+
 // Main — прокси целиком: args — os.Args. Возвращает код выхода; на запасном
 // пути не возвращается (execve)
 func Main(args []string) int {
-	p := proxy{args: args, fd: -1}
+	p := &proxy{args: args, fd: -1, term: termState{fd: -1}}
 	return p.run()
 }
 
 type proxy struct {
 	args []string
-	fd   int // сокет демона; -1 — нет
+	fd   int // сокет демона; -1 — нет. Только горутина run
+	term termState
+}
+
+// termState — что видит горутина SIGTERM: сокет, по которому слать 'T', и
+// отправлен ли 'C'. close снимает сокет отсюда до его закрытия: номер fd не
+// переиспользуется под 'T'
+type termState struct {
+	mu        sync.Mutex
+	fd        int  // -1 — 'T' слать некуда
+	committed bool // 'C' отправлен: исполнение у демона
+}
+
+// watchTerm — SIGTERM от Claude Code (таймаут хука или отмена хода). После
+// 'C' прокси сообщает демону 'T': демон пишет исход «killed» или «cancelled»,
+// как CLI на SIGTERM, и отменяет запрос. Выход — KilledExitCode, как у CLI.
+// На запасном пути после execve обработчик снят: SIGTERM получает CLI
+func (p *proxy) watchTerm() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM)
+	go func() {
+		<-signals
+		p.term.mu.Lock()
+		if p.term.committed && p.term.fd >= 0 {
+			_, _ = syscall.SendmsgN(p.term.fd, []byte{hookwire.Terminate}, nil, nil, syscall.MSG_NOSIGNAL|syscall.MSG_DONTWAIT)
+		}
+		p.term.mu.Unlock()
+		os.Exit(KilledExitCode)
+	}()
 }
 
 func (p *proxy) run() int {
+	p.watchTerm()
 	path := socketPath()
 	if path == "" {
 		return p.fallback(nil, false, "connect: no socket path")
 	}
-	var err error
-	p.fd, err = dial(path, time.Now().Add(AckWindow))
+	fd, err := dial(path, time.Now().Add(AckWindow))
 	if err != nil {
 		// Демона нет: stdin не тронут, CLI читает его сам
 		return p.fallback(nil, false, "connect: "+err.Error())
 	}
+	p.fd = fd
+	p.term.mu.Lock()
+	p.term.fd = fd
+	p.term.mu.Unlock()
 	stdin, err := readAll(0)
 	if err != nil {
 		p.close()
@@ -102,13 +140,21 @@ func (p *proxy) run() int {
 		p.close()
 		return p.fallback(stdin, true, "commit: "+err.Error())
 	}
-	return p.await()
+	p.term.mu.Lock()
+	p.term.committed = true
+	p.term.mu.Unlock()
+	return p.await(stdin)
 }
+
+// lateReasonWait — срок чтения причины 'F' после 'C': демон пишет её одним
+// кадром
+const lateReasonWait = time.Second
 
 // await ждёт результат без срока: срок хука держит Claude Code, а демон
 // отменяет запрос по своему сроку и по обрыву. Обрыв — код 1 без повтора:
-// эффект хука мог уже случиться
-func (p *proxy) await() int {
+// эффект хука мог уже случиться. 'F' вместо результата — демон 'C' не
+// дождался и запрос не исполнял: CLI исполнит его один раз (ревью 2б-1, п. 8)
+func (p *proxy) await(stdin []byte) int {
 	r := deadlineReader{fd: p.fd}
 	if err := setTimeout(p.fd, syscall.SO_RCVTIMEO, 0); err != nil {
 		return p.lost(err)
@@ -116,6 +162,14 @@ func (p *proxy) await() int {
 	var b [1]byte
 	if err := readFull(p.fd, b[:], time.Time{}); err != nil {
 		return p.lost(err)
+	}
+	if b[0] == hookwire.Fallback {
+		reason, err := hookwire.ReadReason(deadlineReader{fd: p.fd, deadline: time.Now().Add(lateReasonWait)})
+		if err != nil {
+			return p.lost(err)
+		}
+		p.close()
+		return p.fallback(stdin, true, "commit: "+reason)
 	}
 	if b[0] != hookwire.Result {
 		return p.lost(syscall.EPROTO)
@@ -141,6 +195,9 @@ func (p *proxy) lost(err error) int {
 }
 
 func (p *proxy) close() {
+	p.term.mu.Lock()
+	p.term.fd, p.term.committed = -1, false
+	p.term.mu.Unlock()
 	if p.fd >= 0 {
 		_ = syscall.Close(p.fd)
 		p.fd = -1

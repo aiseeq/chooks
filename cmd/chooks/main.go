@@ -290,6 +290,14 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	exit, cli := ctx.Value(cliTerminationKey{}).(func(int))
 	if cli {
 		timer.watchTermination(exit)
+		if reason, _ := ctx.Value(fallbackReasonKey{}).(string); reason != "" {
+			timer.setExecutor(executorCLI, reason)
+		}
+	}
+	var terminated <-chan struct{}
+	if call, ok := ctx.Value(daemonCallKey{}).(*daemonCall); ok {
+		terminated = call.terminated
+		timer.setExecutor(executorDaemon, "")
 	}
 	// Файл лога закрывает владелец запроса. У CLI это процесс: обработчик
 	// SIGTERM подписан до выхода и после возврата runHook ещё пишет строку
@@ -301,6 +309,14 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		status := "ok"
 		if err != nil || code == exitError {
 			status = "error"
+		}
+		// Прокси сообщил о SIGTERM ('T'), и обработчик вернулся по отмене:
+		// исход — как у CLI под SIGTERM (killed или cancelled), а не «error».
+		// Пишется здесь, а не сторожем: строка уходит до закрытия лога запроса
+		select {
+		case <-terminated:
+			timer.reportTermination()
+		default:
 		}
 		timer.finish(status)
 		if !cli {
@@ -327,7 +343,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	}
 	timer.setLogger(logger)
 	timer.setDurations(config.Logger)
-	logCLIFallback(ctx, config, request, hookType)
+	noteCLIFallback(ctx, config, request, hookType, logger)
 
 	timer.stage("work")
 	switch hookType {
@@ -967,7 +983,7 @@ func runStatusLine(ctx context.Context, request hookctx.Context) error {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
 	defer closeRequestLogger(logger)
-	logCLIFallback(ctx, config, request, hookStatusLine)
+	noteCLIFallback(ctx, config, request, hookStatusLine, logger)
 	line, err := statusline.Render(ctx, request.Stdin, logger)
 	if err != nil {
 		return err

@@ -99,18 +99,24 @@ func autonomousSkillCalledContext(ctx context.Context, config *core.Config, dead
 			called bool
 			err    error
 		}
+		// Ответ — в буфер канала: брошенная горутина не пишет в запрос после
+		// его ответа; паника в ней — как в awaitSkillCheck (goRequest)
 		result := make(chan skillCallResult, 1)
-		go func() {
+		task := goRequest(ctx, func() {
 			called, err := skillreload.SkillCalledContext(ctx, dir, sessionID, nighthint.AutonomousSkills(), wait)
 			result <- skillCallResult{called: called, err: err}
-		}()
+		})
 		var called bool
 		select {
-		case answer := <-result:
+		case <-task.done:
+			task.wait()
+			answer := <-result
 			called, err = answer.called, answer.err
 		case <-ctx.Done():
+			task.leave()
 			return false, ctx.Err()
 		case <-time.After(time.Until(deadline)):
+			task.leave()
 			return false, fmt.Errorf("skill-reload record read abandoned at hook deadline: %w", skillreload.ErrNoTime)
 		}
 		if errors.Is(err, skillreload.ErrNoState) {

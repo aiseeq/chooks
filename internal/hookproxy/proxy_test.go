@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -312,4 +313,77 @@ func getPeerPID(fd int) (int32, error) {
 		return 0, err
 	}
 	return cred.Pid, nil
+}
+
+// Ревью 2б-1, п. 8: 'C' пришёл к демону после его срока ожидания — демон
+// отвечает 'F' и запрос не исполняет; прокси уходит в CLI со всем stdin и
+// причиной «commit: …», вызов не теряется
+func TestLateCommitFallsBack(t *testing.T) {
+	d := startFake(t, func(conn *net.UnixConn, request hookwire.Request) {
+		_, _ = conn.Write([]byte{hookwire.Accepted})
+		if b, err := readByte(conn, 5*time.Second); err != nil || b != hookwire.Commit {
+			t.Errorf("commit: %q %v", b, err)
+			return
+		}
+		_, _ = conn.Write(hookwire.EncodeFallback("late"))
+	})
+	stub := newCLIStub(t)
+	r := runProxy(t, d.path, stub, bigInput, "stop")
+	if calls := stub.calls(t); r.code != 7 || len(calls) != 1 || calls[0] != "commit: late|stop" {
+		t.Fatalf("code %d stderr %q calls %q", r.code, r.stderr, calls)
+	}
+	if data, _ := os.ReadFile(stub.stdin); !bytes.Equal(data, bigInput) {
+		t.Fatalf("CLI stdin %d bytes, want %d", len(data), len(bigInput))
+	}
+}
+
+// Ревью 2б-1, п. 2: SIGTERM прокси после 'C' (таймаут хука у Claude Code) —
+// демон получает 'T', прокси выходит с кодом 143, как CLI, и CLI не зовёт
+func TestSIGTERMAfterCommitTellsDaemon(t *testing.T) {
+	committed := make(chan struct{})
+	got := make(chan byte, 1)
+	d := startFake(t, func(conn *net.UnixConn, request hookwire.Request) {
+		_, _ = conn.Write([]byte{hookwire.Accepted})
+		if b, err := readByte(conn, 5*time.Second); err != nil || b != hookwire.Commit {
+			t.Errorf("commit: %q %v", b, err)
+			return
+		}
+		close(committed)
+		b, err := readByte(conn, 10*time.Second)
+		if err != nil {
+			t.Errorf("after commit: %v", err)
+		}
+		got <- b
+	})
+	stub := newCLIStub(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "webfetch-fallback")
+	cmd.Env = append(os.Environ(), proxyHelper+"=1", EnvSocket+"="+d.path, EnvCLI+"="+stub.path)
+	cmd.Stdin = strings.NewReader(`{}`)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-committed:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("no commit")
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Wait()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != KilledExitCode {
+		t.Fatalf("proxy exit %v, want code %d", err, KilledExitCode)
+	}
+	if b := <-got; b != hookwire.Terminate {
+		t.Fatalf("daemon got %q, want 'T'", b)
+	}
+	if calls := stub.calls(t); len(calls) != 0 {
+		t.Fatalf("CLI called: %q", calls)
+	}
 }

@@ -75,7 +75,22 @@ type hookTimer struct {
 	// durations — файл длительностей; пусто — лог не в файле (тесты, отладка)
 	durations      string
 	durationsMaxMB int
+	// executor и fallback — кто исполнил вызов прокси chooks-hook (executorDaemon
+	// или executorCLI) и причина запасного пути; пусто — вызов не через прокси
+	executor, fallback string
+	// endMu и terminated — исход SIGTERM пишется один раз, и finish после
+	// него молчит (запрос демона: обработчик вернулся по отмене после 'T').
+	// SIGTERM после finish пишет свою строку, как в базе CLI
+	endMu      sync.Mutex
+	terminated bool
 }
+
+// Кто исполнил вызов хука, пришедший через прокси chooks-hook: столбец 7
+// файла длительностей
+const (
+	executorDaemon = "daemon"
+	executorCLI    = "cli"
+)
 
 // durationsFile — файл длительностей рядом с логом: в основной лог строка
 // на каждый запуск (порядка 100 тыс. в сутки) вытеснила бы остальное
@@ -85,13 +100,7 @@ const durationsFile = "chooks-hooks.tsv"
 // свопом — тоже часть таймаута
 func newHookTimerForRequest(hook string, request hookctx.Context) *hookTimer {
 	t := &hookTimer{hook: hook, stderr: request.Stderr, now: time.Now, loc: request.Location(), settingsPath: func() (string, error) {
-		if dir := request.Path(hookctx.EnvClaudeConfigDir); dir != "" {
-			return filepath.Join(dir, "settings.json"), nil
-		}
-		if home := request.Path(hookctx.EnvHome); home != "" {
-			return filepath.Join(home, ".claude", "settings.json"), nil
-		}
-		return "", fmt.Errorf("cannot resolve home dir: $HOME is not defined")
+		return settingsPathFor(request)
 	}}
 	t.mark = t.now()
 	start, err := processStartPID(request.PID)
@@ -106,6 +115,18 @@ func newHookTimerForRequest(hook string, request hookctx.Context) *hookTimer {
 	t.stages = append(t.stages, formatStage("startup", t.startup))
 	t.current = "input"
 	return t
+}
+
+// settingsPathFor — settings.json Claude Code по env запроса:
+// $CLAUDE_CONFIG_DIR/settings.json, иначе ~/.claude/settings.json
+func settingsPathFor(request hookctx.Context) (string, error) {
+	if dir := request.Path(hookctx.EnvClaudeConfigDir); dir != "" {
+		return filepath.Join(dir, "settings.json"), nil
+	}
+	if home := request.Path(hookctx.EnvHome); home != "" {
+		return filepath.Join(home, ".claude", "settings.json"), nil
+	}
+	return "", fmt.Errorf("cannot resolve home dir: $HOME is not defined")
 }
 
 // stage закрывает текущую стадию и начинает name
@@ -146,6 +167,13 @@ func (t *hookTimer) setLogger(logger core.Logger) {
 	t.logger = logger
 }
 
+// setExecutor — кто исполнил вызов прокси и причина запасного пути
+func (t *hookTimer) setExecutor(executor, fallback string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.executor, t.fallback = executor, fallback
+}
+
 // setDurations включает файл длительностей рядом с файлом лога
 func (t *hookTimer) setDurations(logger core.LoggerConfig) {
 	t.mu.Lock()
@@ -158,12 +186,16 @@ func (t *hookTimer) setDurations(logger core.LoggerConfig) {
 }
 
 // recordDuration пишет строку TSV: время, хук, сессия, мс всего, мс запуска,
-// исход (ok, error, killed или cancelled). Запуск, убитый или упавший до чтения конфига,
+// исход (ok, error, killed или cancelled). Вызов через прокси chooks-hook
+// добавляет ещё два столбца: кто исполнил (daemon или cli) и причину
+// запасного пути; у вызова CLI напрямую столбцов шесть, как раньше (их
+// разбирает dream/dreamstats). Запуск, убитый или упавший до чтения конфига,
 // строки не оставляет: путь файла — из конфига. Сбой записи — в лог: хук от
 // него не страдает
 func (t *hookTimer) recordDuration(at time.Time, session string, elapsed time.Duration, status string) {
 	t.mu.Lock()
 	path, maxMB, logger, startup := t.durations, t.durationsMaxMB, t.logger, t.startup
+	executor, fallback := t.executor, t.fallback
 	t.mu.Unlock()
 	if path == "" {
 		return
@@ -171,13 +203,22 @@ func (t *hookTimer) recordDuration(at time.Time, session string, elapsed time.Du
 	if t.loc != nil {
 		at = at.In(t.loc)
 	}
-	line := strings.Join([]string{
+	fields := []string{
 		at.Format("2006-01-02T15:04:05.000Z07:00"), t.hook, session,
 		strconv.FormatInt(elapsed.Milliseconds(), 10), strconv.FormatInt(startup.Milliseconds(), 10), status,
-	}, "\t")
+	}
+	if executor != "" {
+		fields = append(fields, executor, tsvField(fallback))
+	}
+	line := strings.Join(fields, "\t")
 	if err := core.AppendLine(path, maxMB, line); err != nil && logger != nil {
 		logger.Warn("hook duration not recorded", "hook", t.hook, "error", err)
 	}
+}
+
+// tsvField — значение без табуляций и переводов строк: столбец не рвётся
+func tsvField(value string) string {
+	return strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(value)
 }
 
 // deadline — срок необязательной работы от старта процесса
@@ -223,6 +264,12 @@ func (t *hookTimer) watchTermination(exit func(int)) {
 // reportTermination пишет исход запуска, оборванного SIGTERM, в лог и в файл
 // длительностей
 func (t *hookTimer) reportTermination() {
+	t.endMu.Lock()
+	defer t.endMu.Unlock()
+	if t.terminated {
+		return
+	}
+	t.terminated = true
 	t.mu.Lock()
 	at := t.now()
 	elapsed := at.Sub(t.start)
@@ -261,6 +308,11 @@ func (t *hookTimer) reportTermination() {
 // finish пишет длительность запуска, а в лог — строку, если хук шёл дольше
 // половины своего таймаута
 func (t *hookTimer) finish(status string) {
+	t.endMu.Lock()
+	defer t.endMu.Unlock()
+	if t.terminated {
+		return
+	}
 	t.mu.Lock()
 	now := t.now()
 	t.stages = append(t.stages, formatStage(t.current, now.Sub(t.mark)))

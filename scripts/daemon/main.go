@@ -78,8 +78,9 @@ func (b *binaries) resolve() error {
 	return nil
 }
 
-// daemon — `chooks serve` на сокете во временном каталоге /tmp (путь сокета
-// не длиннее 107 байт); HOME, cwd и PATH у него свои, не песочницы
+// daemon — `chooks serve` на сокете во временном каталоге TMPDIR, а при
+// длинном TMPDIR — /tmp (путь сокета не длиннее 107 байт); HOME, cwd и PATH у
+// него свои, не песочницы
 type daemon struct {
 	cmd    *exec.Cmd
 	socket string
@@ -87,7 +88,11 @@ type daemon struct {
 }
 
 func startDaemon(cli string, logFile *os.File) (*daemon, error) {
-	dir, err := os.MkdirTemp("/tmp", "chooks-d-")
+	base := os.TempDir()
+	if len(base) > 60 {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, "chooks-d-")
 	if err != nil {
 		return nil, fmt.Errorf("socket dir: %w", err)
 	}

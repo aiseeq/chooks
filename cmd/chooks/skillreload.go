@@ -67,7 +67,7 @@ func remindStaleSkills(ctx context.Context, eventName string, input *core.ToolIn
 	defer cancel()
 	checker := skillreload.Checker{Context: ctx, StateDir: stateDir, Abs: request.Abs, Location: request.Location(), ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
 	var result skillreload.Result
-	if awaitSkillCheck(timer, logger, eventName, input, func() {
+	if awaitSkillCheck(ctx, timer, logger, eventName, input, func() {
 		result, err = checker.Check(skillreload.Event{
 			SessionID: input.SessionID, AgentID: input.AgentID, AgentType: input.AgentType, TranscriptPath: input.TranscriptPath,
 		})
@@ -78,26 +78,27 @@ func remindStaleSkills(ctx context.Context, eventName string, input *core.ToolIn
 
 // awaitSkillCheck ограничивает ожидание Check абсолютным сроком от старта
 // процесса. Ушедшая горутина может закончить начатую запись, но хук её не ждёт.
-func awaitSkillCheck(timer *hookTimer, logger core.Logger, eventName string, input *core.ToolInput, check func()) bool {
+// Паника в Check — паника запроса, пока его ждут, и строка в лог демона после
+// (goRequest): процесс демона она не роняет (ревью 2б-1, п. 5)
+func awaitSkillCheck(ctx context.Context, timer *hookTimer, logger core.Logger, eventName string, input *core.ToolInput, check func()) bool {
 	if !timer.now().Before(timer.deadline(optionalBudget)) {
 		logger.Warn("skill reload skipped: hook budget spent", "hook", eventName, "session", input.SessionID, "agent", input.AgentID)
 		return false
 	}
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		check()
-	}()
+	task := goRequest(ctx, check)
 	wait := time.Until(timer.deadline(skillHardBudget))
 	if wait <= 0 {
+		task.leave()
 		warnSkillAbandoned(timer, logger, eventName, input)
 		return false
 	}
 	select {
-	case <-finished:
+	case <-task.done:
+		task.wait()
 		timer.setSubstage("")
 		return true
 	case <-time.After(wait):
+		task.leave()
 		warnSkillAbandoned(timer, logger, eventName, input)
 		return false
 	}

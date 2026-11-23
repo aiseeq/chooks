@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"runtime"
 	"testing"
+	"testing/iotest"
 	"unicode/utf8"
 )
 
@@ -83,5 +85,32 @@ func TestReasonCutAtRune(t *testing.T) {
 	got, err := ReadReason(bytes.NewReader(long[1:]))
 	if err != nil || !utf8.ValidString(got) || len(got) > MaxReason || len(got) < MaxReason-1 {
 		t.Fatalf("reason %d bytes, valid %v, err %v", len(got), utf8.ValidString(got), err)
+	}
+}
+
+// Ревью 2б-1, п. 6: заголовок с длиной 80 МБ и десятком байт тела не
+// выделяет память по длине из заголовка — буфер растёт по мере чтения
+func TestReadRequestAllocatesByData(t *testing.T) {
+	head := appendU32([]byte(Magic), 80<<20)
+	raw := append(head, bytes.Repeat([]byte{'x'}, 10)...)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := ReadRequest(bytes.NewReader(raw))
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err %v, want unexpected EOF", err)
+	}
+	if grown := after.TotalAlloc - before.TotalAlloc; grown > 1<<20 {
+		t.Fatalf("allocated %d bytes for 10 bytes of body", grown)
+	}
+	// Тело больше шага роста читается целиком, по кускам любого размера
+	want := Request{Subcommand: "stop", Stdin: bytes.Repeat([]byte{7}, 3*readChunk+5)}
+	got, err := ReadRequest(iotest.OneByteReader(bytes.NewReader(EncodeRequest(want))))
+	if err != nil || !bytes.Equal(got.Stdin, want.Stdin) {
+		t.Fatalf("chunked read: %d bytes, %v", len(got.Stdin), err)
+	}
+	// Тело без единого байта — io.EOF, как у io.ReadFull
+	if _, err := ReadRequest(bytes.NewReader(head)); !errors.Is(err, io.EOF) {
+		t.Fatalf("no body: %v", err)
 	}
 }

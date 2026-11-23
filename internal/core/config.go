@@ -18,6 +18,32 @@ type Config struct {
 	Tools  map[string]ToolConfig `yaml:"tools"`
 	Logger LoggerConfig          `yaml:"logger"`
 	Style  StyleConfig           `yaml:"style"`
+	Daemon DaemonConfig          `yaml:"daemon,omitempty"`
+}
+
+// DefaultFallbackAlert — порог уведомления о запасном пути по умолчанию:
+// уходов в CLI за скользящий час (тикет hooks-daemon, этап 2б-2)
+const DefaultFallbackAlert = 10
+
+// DaemonConfig — демон хуков chooks serve и его запасной путь
+type DaemonConfig struct {
+	// FallbackAlert — сколько вызовов прокси chooks-hook, исполненных CLI мимо
+	// демона, терпится за скользящий час: на следующем — одно уведомление на
+	// рабочий стол, не чаще раза в час. 0 — DefaultFallbackAlert,
+	// отрицательное — без уведомления
+	FallbackAlert int `yaml:"fallback_alert"`
+}
+
+// FallbackThreshold — порог уведомления о запасном пути; 0 — уведомления нет
+func (d DaemonConfig) FallbackThreshold() int {
+	switch {
+	case d.FallbackAlert < 0:
+		return 0
+	case d.FallbackAlert == 0:
+		return DefaultFallbackAlert
+	default:
+		return d.FallbackAlert
+	}
 }
 
 // StyleConfig — ключи задач для chooks style: префиксы проектов и адрес

@@ -17,14 +17,32 @@ tools:
 
 tasks:
   build:
-    desc: собрать бинарь в bin/
+    desc: собрать бинари в bin/ - chooks и прокси хуков chooks-hook
     run:
       - [go, build, -ldflags, '-X main.Version=${GRAFT_VERSION}', -o, bin/chooks, ./cmd/chooks]
+      - [go, build, -o, bin/chooks-hook, ./cmd/chooks-hook]
   install:
-    desc: установить бинарь в ~/bin и конфигурацию в ~/.config/chooks
+    desc: установить chooks и chooks-hook в ~/bin, unit-файлы демона в ~/.config/systemd/user (не включая) и конфигурацию в ~/.config/chooks
     deps: [build]
     run:
       - {install: bin/chooks}
+      - {install: bin/chooks-hook}
+      - sh: |
+          set -eu
+          # Unit-файлы демона хуков: только кладутся. Включение и запуск
+          # (systemctl --user enable --now chooks.socket) - отдельный шаг
+          # (тикет hooks-daemon, этап 2б-3); запущенный демон после замены
+          # ~/bin/chooks выходит сам, и systemd поднимает новый
+          units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+          mkdir -p "$units"
+          for unit in chooks.socket chooks.service; do
+            if cmp -s "configs/systemd/$unit" "$units/$unit"; then
+              continue
+            fi
+            install -m 0644 "configs/systemd/$unit" "$units/$unit.new"
+            mv -f "$units/$unit.new" "$units/$unit"
+            echo "Unit обновлён: $units/$unit (systemctl --user daemon-reload, если демон включён)"
+          done
       - sh: |
           set -eu
           config="${XDG_CONFIG_HOME:-$HOME/.config}/chooks/config.yaml"
@@ -48,8 +66,8 @@ tasks:
     run:
       - sh: |
           set -eu
-          rm -f "$HOME/bin/chooks"
-          echo "Удалён $HOME/bin/chooks (конфигурация оставлена)"
+          rm -f "$HOME/bin/chooks" "$HOME/bin/chooks-hook"
+          echo "Удалены $HOME/bin/chooks и $HOME/bin/chooks-hook (конфигурация и unit-файлы оставлены)"
   test:
     desc: тесты
     usage: <флаги go test, например -run TestX>

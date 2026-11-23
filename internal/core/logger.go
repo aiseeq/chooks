@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aiseeq/akit/secretmask"
@@ -95,7 +96,44 @@ func NewLoggerIn(config LoggerConfig, stderr io.Writer, loc *time.Location) (Fil
 	if err != nil {
 		return nil, err
 	}
+	return newSlogLogger(config, writer, loc), nil
+}
 
+// NewLongLivedLoggerIn — логгер долгоживущего процесса (демон chooks serve):
+// файл лога открывается на каждую строку с той же ротацией, что у CLI
+// (AppendLine), — после ротации, сделанной хуком CLI, строки идут в новый
+// файл, а не в chooks.log.1 (ревью 2б-1, п. 1). Вывод не в файл — как у
+// NewLoggerIn
+func NewLongLivedLoggerIn(config LoggerConfig, stderr io.Writer, loc *time.Location) (FileLogger, error) {
+	applyLoggerDefaults(&config)
+	if config.Output != "file" {
+		return NewLoggerIn(config, stderr, loc)
+	}
+	if config.LogFile == "" {
+		return nil, fmt.Errorf("log file path is required when output is 'file'")
+	}
+	if err := os.MkdirAll(filepath.Dir(config.LogFile), 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create log directory: %w", err)
+	}
+	return newSlogLogger(config, &appendWriter{path: config.LogFile, maxSizeMB: config.MaxSizeMB}, loc), nil
+}
+
+// appendWriter — запись строки лога через AppendLine: открыть, ротировать,
+// дописать, закрыть. slog пишет запись одним Write
+type appendWriter struct {
+	path      string
+	maxSizeMB int
+}
+
+func (w *appendWriter) Write(p []byte) (int, error) {
+	line := strings.TrimSuffix(string(p), "\n")
+	if err := AppendLine(w.path, w.maxSizeMB, line); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func newSlogLogger(config LoggerConfig, writer io.Writer, loc *time.Location) *slogLogger {
 	opts := &slog.HandlerOptions{
 		Level: parseLogLevel(config.Level),
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
@@ -122,7 +160,7 @@ func NewLoggerIn(config LoggerConfig, stderr io.Writer, loc *time.Location) (Fil
 	if file, ok := writer.(*os.File); ok && config.Output == "file" {
 		logger.file = file
 	}
-	return logger, nil
+	return logger
 }
 
 // Close закрывает файл лога, открытый NewLoggerTo; у вывода в stderr — ничего.

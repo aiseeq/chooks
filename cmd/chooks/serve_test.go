@@ -25,10 +25,12 @@ import (
 	"github.com/aiseeq/akit/proc"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/fallbackwatch"
 	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/hookproxy"
 	"github.com/aiseeq/chooks/internal/hookwire"
 	"github.com/aiseeq/chooks/internal/modellaunch"
+	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
 
 // Режимы бинаря тестов (TestMain): CLI chooks с argv запуска, прокси
@@ -41,6 +43,13 @@ const (
 
 func runServeHelper() (int, bool) {
 	switch {
+	// Уведомление (desktop.DeliverInBackgroundForRequest): бинарь тестов не
+	// доставляет его, а пишет в журнал теста
+	case len(os.Args) > 1 && os.Args[1] == notifier.WatchCommand:
+		return recordTestAlert(), true
+	case os.Getenv(daemonHelper) == "1":
+		_ = os.Unsetenv(daemonHelper)
+		return runTestDaemon(), true
 	case os.Getenv(argvCLIHelper) == "1":
 		_ = os.Unsetenv(argvCLIHelper)
 		return runCLI(), true
@@ -111,6 +120,11 @@ func startServer(t *testing.T, run hookRunner, options ...serverOption) *testSer
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- srv.serve(ctx, listener) }()
+	// Строка stats при старте — serve готов: ожидание accept и горутина stats
+	// уже есть, база горутин и fd тестов не плывёт
+	if !waitFor(t, 10*time.Second, func() bool { return strings.Contains(readFile(t, logPath), `msg="daemon: stats"`) }) {
+		t.Fatalf("daemon did not start; log:\n%s", readFile(t, logPath))
+	}
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -900,6 +914,18 @@ func normalizeFixture(text, root string, pid int) string {
 	return strings.Join(kept, "\n")
 }
 
+// sixColumns — строки chooks-hooks.tsv без столбцов исполнителя и причины:
+// они есть только у вызова через прокси
+func sixColumns(text string) string {
+	rows := strings.Split(text, "\n")
+	for i, row := range rows {
+		if fields := strings.Split(row, "\t"); len(fields) > 6 {
+			rows[i] = strings.Join(fields[:6], "\t")
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
 // fixtureTree — файлы фикстуры после вызова, нормализованные
 func fixtureTree(t *testing.T, root string, pid int) map[string]string {
 	t.Helper()
@@ -909,14 +935,20 @@ func fixtureTree(t *testing.T, root string, pid int) map[string]string {
 			return err
 		}
 		rel, _ := filepath.Rel(root, path)
-		if rel == "home/cli-runs" || strings.HasSuffix(rel, ".sh") {
+		// Счёт ухода в CLI (fallbackwatch) пишет только CLI запасного пути
+		base := filepath.Base(rel)
+		if rel == "home/cli-runs" || strings.HasSuffix(rel, ".sh") || base == fallbackwatch.FileName || base == fallbackwatch.LockName {
 			return nil
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		tree[rel] = normalizeFixture(string(data), root, pid)
+		text := string(data)
+		if base == durationsFile {
+			text = sixColumns(text)
+		}
+		tree[rel] = normalizeFixture(text, root, pid)
 		return nil
 	})
 	if err != nil {

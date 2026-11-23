@@ -1,7 +1,9 @@
 package core
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,5 +136,40 @@ func TestLogger_HidesSecretsInEveryField(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Errorf("no %q in the log:\n%s", want, log)
 		}
+	}
+}
+
+// Ревью 2б-1, п. 1: логгер демона после ротации, сделанной другим процессом
+// (CLI переименовал chooks.log в chooks.log.1), пишет в новый chooks.log, а
+// сам ротирует файл по порогу, как AppendLine
+func TestLongLivedLoggerFollowsRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chooks.log")
+	logger, err := NewLongLivedLoggerIn(LoggerConfig{Level: "info", Output: "file", LogFile: path, MaxSizeMB: 1}, io.Discard, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+	logger.Info("before rotation")
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("after rotation")
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(current), "after rotation") || strings.Contains(string(current), "before rotation") || strings.Contains(string(old), "after rotation") {
+		t.Fatalf("current %q\nold %q", current, old)
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("over the threshold")
+	if current, err = os.ReadFile(path); err != nil || strings.TrimSpace(string(current)) == "" || !strings.Contains(string(current), "over the threshold") || len(current) > 1<<10 {
+		t.Fatalf("after own rotation: %d bytes %v", len(current), err)
 	}
 }

@@ -8,13 +8,19 @@
 //	демон → прокси  ответ приёма: 'A' — принято, или 'F', u32 длина, причина —
 //	                «в CLI: <причина>», после него демон закрывает соединение
 //	прокси → демон  'C' — прокси получил «принято» в свой срок и ждёт результат
-//	демон → прокси  результат: 'R', i32 код, u32 длина, stdout, u32 длина, stderr
+//	демон → прокси  результат: 'R', i32 код, u32 длина, stdout, u32 длина, stderr;
+//	                или 'F' с причиной — 'C' пришёл после срока ожидания демона,
+//	                запрос не исполнялся
+//	прокси → демон  'T' (после 'C', по желанию) — прокси получил SIGTERM от
+//	                Claude Code (таймаут или отмена хода) и выходит
 //
 // Демон исполняет запрос только после 'C': прокси, не дождавшийся «принято»
 // к сроку, закрывает соединение без 'C' и уходит в CLI — исполнение не
-// начинается, и эффект хука не удваивается. После 'C' прокси в CLI не уходит:
-// обрыв — код 1. Любое чтение демона после 'C' (обрыв, лишние байты) отменяет
-// запрос.
+// начинается, и эффект хука не удваивается. 'C' после срока демона даёт 'F':
+// демон решает один раз — исполнить или ответить 'F', — и прокси на 'F'
+// уходит в CLI, не теряя вызов. После 'C' без 'F' прокси в CLI не уходит:
+// обрыв — код 1. Любое чтение демона после 'C' (обрыв, 'T', лишние байты)
+// отменяет запрос.
 //
 // Числа — big-endian. Строка — u32 длина и байты.
 package hookwire
@@ -34,7 +40,13 @@ const (
 	Fallback = 'F'
 	Commit   = 'C'
 	Result   = 'R'
+	// Terminate — прокси получил SIGTERM после 'C'
+	Terminate = 'T'
 )
+
+// readChunk — шаг роста буфера тела запроса: память растёт по мере прихода
+// байт, а не по длине из заголовка
+const readChunk = 64 << 10
 
 // Пределы: запрос сверх них демон не читает и отвечает «в CLI»
 const (
@@ -114,7 +126,9 @@ func EncodeRequest(r Request) []byte {
 }
 
 // ReadRequest читает запрос: начало, длину и тело целиком. Ошибка чтения
-// (обрыв, срок) возвращается как есть — запрос не прочитан целиком
+// (обрыв, срок) возвращается как есть — запрос не прочитан целиком. Буфер
+// тела растёт по мере чтения: заголовок с большой длиной без тела не
+// занимает память демона (ревью 2б-1, п. 6)
 func ReadRequest(r io.Reader) (Request, error) {
 	var head [8]byte
 	if _, err := io.ReadFull(r, head[:]); err != nil {
@@ -127,11 +141,38 @@ func ReadRequest(r io.Reader) (Request, error) {
 	if size > MaxRequest {
 		return Request{}, ErrTooLarge
 	}
-	body := make([]byte, size)
-	if _, err := io.ReadFull(r, body); err != nil {
+	body, err := readBody(r, int(size))
+	if err != nil {
 		return Request{}, err
 	}
 	return DecodeRequest(body)
+}
+
+// readBody читает ровно size байт, наращивая буфер не больше чем вдвое от
+// прочитанного; обрыв до size — как у io.ReadFull: io.EOF без единого байта,
+// иначе io.ErrUnexpectedEOF
+func readBody(r io.Reader, size int) ([]byte, error) {
+	body := make([]byte, 0, min(size, readChunk))
+	for len(body) < size {
+		if len(body) == cap(body) {
+			grown := make([]byte, len(body), min(size, max(2*cap(body), readChunk)))
+			copy(grown, body)
+			body = grown
+		}
+		n, err := r.Read(body[len(body):cap(body)])
+		body = body[:len(body)+n]
+		if err == nil {
+			continue
+		}
+		if len(body) == size {
+			break
+		}
+		if err == io.EOF && len(body) > 0 {
+			return nil, io.ErrUnexpectedEOF
+		}
+		return nil, err
+	}
+	return body, nil
 }
 
 type decoder struct {

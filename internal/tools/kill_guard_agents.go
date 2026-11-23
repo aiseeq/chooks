@@ -23,11 +23,15 @@ var agentUnits = []struct {
 	re     *regexp.Regexp
 	reason string
 	worker bool
+	// hint — своя подсказка вместо общей «чужой юнит гасит его хозяин»
+	hint string
 }{
-	{regexp.MustCompile(`^agent-.+\.scope$`), "юнит другого агента (agents.slice/agent-*.scope): с ним гаснет его сессия Claude", false},
-	{workerUnitRe, "юнит бойца (worker-*.service): с ним гаснет его работа, а мастер не узнает почему", true},
-	{regexp.MustCompile(`^graft-heavy-.+\.scope$`), "тяжёлая команда graft другого агента (graft-heavy-*.scope): гаснут его сборка или тесты", false},
-	{regexp.MustCompile(`^run-.+\.(service|scope|timer|path|socket)$`), "юнит systemd-run без имени (run-*): в нём может идти работа другого агента", false},
+	{re: regexp.MustCompile(`^chooks\.(service|socket)$`), reason: "демон хуков chooks (chooks.service, chooks.socket): без него хуки всех сессий идут в CLI мимо демона",
+		hint: "Демон обновляется сам: после graft install в chooks он выходит на следующем вызове, systemd поднимает новый. Остановить или перезапустить его может только пользователь"},
+	{regexp.MustCompile(`^agent-.+\.scope$`), "юнит другого агента (agents.slice/agent-*.scope): с ним гаснет его сессия Claude", false, ""},
+	{workerUnitRe, "юнит бойца (worker-*.service): с ним гаснет его работа, а мастер не узнает почему", true, ""},
+	{regexp.MustCompile(`^graft-heavy-.+\.scope$`), "тяжёлая команда graft другого агента (graft-heavy-*.scope): гаснут его сборка или тесты", false, ""},
+	{regexp.MustCompile(`^run-.+\.(service|scope|timer|path|socket)$`), "юнит systemd-run без имени (run-*): в нём может идти работа другого агента", false, ""},
 }
 
 // workerUnitRe юнит бойца (worker run)
@@ -65,6 +69,9 @@ func agentUnitReason(scope, name string) (reason, hint string) {
 	for _, u := range agentUnits {
 		if !u.re.MatchString(name) {
 			continue
+		}
+		if u.hint != "" {
+			return u.reason, u.hint
 		}
 		if u.worker {
 			return u.reason, "Бойца снимает его мастер: worker stop <id> (id — из worker status), worker сам погасит юнит; боец чужого мастера — worker stop --other-master <id> по слову пользователя, затем сообщи его мастеру"

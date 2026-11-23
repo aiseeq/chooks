@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -32,8 +33,9 @@ import (
 // executeHook, что и хуки
 const hookStatusLine = "statusline"
 
-// hookTimeouts — таймаут хука в settings.json по подкоманде, единственная
-// таблица сроков демона. Значения — из configs/settings-snippet.json;
+// hookTimeouts — подкоманды, которые обслуживает демон, и запасной таймаут
+// хука, когда его нет в settings.json запроса (hookTimeout): у statusLine
+// таймаута в settings нет вовсе. Значения — из configs/settings-snippet.json;
 // understand-check и night-hint в сниппете нет — их таймауты из
 // ~/.claude/settings.json на 22.11 (3 с у night-hint); understand-check (90 с)
 // и claim-stop (120 с) — из configs/claim-check-hooks.json. У statusLine
@@ -59,6 +61,10 @@ const (
 	// serveDeadlineMargin — запас до таймаута хука: срок запроса в демоне —
 	// старт прокси + таймаут − запас, чтобы ответ успел дойти до Claude Code
 	serveDeadlineMargin = 500 * time.Millisecond
+	// serveStuckGrace — сколько после срока запроса демон ждёт обработчик,
+	// прежде чем ответить без него: обработчик, не слушающий отмену, держит
+	// слот, но прокси получает ответ до SIGTERM от Claude Code (срок + запас)
+	serveStuckGrace = serveDeadlineMargin / 2
 	// serveMaxInFlight — предел запросов, исполняемых одновременно; сверх
 	// него — «в CLI: busy»: зависшие обработчики не вытесняют остальные хуки
 	serveMaxInFlight = 128
@@ -68,6 +74,16 @@ const (
 	serveCommitTimeout = 2 * time.Second
 	// serveWriteTimeout — срок записи результата прокси
 	serveWriteTimeout = 5 * time.Second
+	// serveStatsEvery — как часто демон пишет в лог RSS, живую кучу,
+	// горутины и fd (противник этапа 2б, сценарий 4: утечки — замерами на
+	// живом трафике, без синтетической нагрузки)
+	serveStatsEvery = time.Hour
+)
+
+// Причины отмены запроса после 'C'
+var (
+	errProxyGone       = errors.New("proxy gone")
+	errProxyTerminated = errors.New("proxy got SIGTERM")
 )
 
 // hookRunner исполняет принятый запрос; у демона — executeHook, тест
@@ -83,53 +99,91 @@ type server struct {
 	uid      int
 	// start — старт процесса прокси, от него отсчитывается срок запроса
 	start func(pid int) (time.Time, error)
+	// exe — сверка своего исполняемого файла на каждом accept (exeWatch);
+	// nil — без сверки (не прочитан при старте)
+	exe exeChecker
+	// commitTimeout и stuckGrace — serveCommitTimeout и serveStuckGrace;
+	// тест укорачивает
+	commitTimeout, stuckGrace time.Duration
+	statsEvery                time.Duration
+	started                   time.Time
+	// Счётчики для строки stats
+	served, refused, stuck atomic.Int64
 }
 
 func newServer(logger core.Logger) *server {
-	return &server{logger: logger, run: executeHook, sem: make(chan struct{}, serveMaxInFlight), uid: os.Getuid(), start: processStartPID}
+	s := &server{logger: logger, run: executeHook, sem: make(chan struct{}, serveMaxInFlight), uid: os.Getuid(), start: processStartPID,
+		commitTimeout: serveCommitTimeout, stuckGrace: serveStuckGrace, statsEvery: serveStatsEvery, started: time.Now()}
+	if exe, err := newExeWatch(); err != nil {
+		logger.Warn("daemon: own executable unreadable, update after install not detected", "error", err)
+	} else {
+		s.exe = exe
+	}
+	return s
 }
 
 func newServeCmd() *cobra.Command {
 	var socket string
 	cmd := &cobra.Command{
-		Use:   "serve --socket <путь>",
+		Use:   "serve [--socket <путь>]",
 		Short: "Демон хуков: исполнять вызовы прокси chooks-hook, пришедшие по unix-сокету",
-		Long: `Слушает unix-сокет (права 0600) и исполняет вызовы хуков от прокси chooks-hook
-той же функцией, что CLI, с env, cwd, pid и stdin вызова. Вызов, который демон
-не может исполнить так же, как CLI (чужой uid или pid, относительные пути в env,
-transcript_path не обычный файл, неизвестная подкоманда), отдаётся прокси «в CLI»
-до «принято». SIGTERM и SIGINT: перестать принимать, дообслужить идущие вызовы.`,
+		Long: `Слушает unix-сокет и исполняет вызовы хуков от прокси chooks-hook той же
+функцией, что CLI, с env, cwd, pid и stdin вызова. Сокет — от systemd
+(LISTEN_FDS, configs/systemd/chooks.socket) или свой по --socket (права 0600).
+Вызов, который демон не может исполнить так же, как CLI (чужой uid или pid,
+относительные пути в env, transcript_path не обычный файл, неизвестная
+подкоманда), отдаётся прокси «в CLI» до «принято».
+
+На каждом accept демон сверяет inode и mtime своего исполняемого файла:
+сменился (graft install) — перестаёт принимать, дообслуживает принятые и
+выходит; следующее соединение systemd отдаёт новому процессу. SIGTERM и
+SIGINT: перестать принимать, дообслужить идущие вызовы. Раз в час — строка
+stats в лог: RSS, живая куча после GC, горутины, fd.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if socket == "" {
-				return fmt.Errorf("не задан --socket")
-			}
 			request, err := commandRequest(cmd)
 			if err != nil {
 				return err
+			}
+			listener, activated, err := activationListener()
+			if err != nil {
+				return err
+			}
+			if listener == nil {
+				if socket == "" {
+					return fmt.Errorf("не задан --socket, и systemd не передал сокет (LISTEN_FDS)")
+				}
+			} else if socket != "" {
+				_ = listener.Close()
+				return fmt.Errorf("--socket не задаётся, когда сокет передал systemd (LISTEN_FDS)")
 			}
 			config, err := core.LoadConfigForRequest(commandConfigPath(cmd), request)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
-			logger, err := core.NewLoggerIn(config.Logger, request.Stderr, request.Location())
+			logger, err := core.NewLongLivedLoggerIn(config.Logger, request.Stderr, request.Location())
 			if err != nil {
 				return fmt.Errorf("failed to create logger: %w", err)
 			}
 			defer closeRequestLogger(logger)
-			listener, err := listenSocket(socket)
-			if err != nil {
-				return err
+			if listener == nil {
+				if listener, err = listenSocket(socket); err != nil {
+					return err
+				}
 			}
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 			defer stop()
-			logger.Info("daemon: serving", "socket", socket, "pid", os.Getpid(), "version", Version)
+			where := socket
+			if activated {
+				where = "systemd:" + listener.Addr().String()
+			}
+			logger.Info("daemon: serving", "socket", where, "pid", os.Getpid(), "version", Version)
 			err = newServer(logger).serve(ctx, listener)
-			logger.Info("daemon: stopped", "socket", socket, "error", err)
+			logger.Info("daemon: stopped", "socket", where, "version", Version, "error", err)
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&socket, "socket", "", "путь unix-сокета")
+	cmd.Flags().StringVar(&socket, "socket", "", "путь unix-сокета (без systemd)")
 	return cmd
 }
 
@@ -160,27 +214,73 @@ func listenSocket(path string) (*net.UnixListener, error) {
 	return listener, nil
 }
 
-// serve принимает соединения до отмены ctx, затем ждёт идущие запросы.
-// Запросы ctx сервера не наследуют: остановка демона их не обрывает
+// serve принимает соединения до отмены ctx или до смены своего исполняемого
+// файла, затем ждёт идущие запросы. Запросы ctx сервера не наследуют:
+// остановка демона их не обрывает. Зависшие обработчики (serveStuckGrace) не
+// ждутся: их прокси уже получил ответ
 func (s *server) serve(ctx context.Context, listener *net.UnixListener) error {
-	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	waiter, err := newAcceptWaiter(listener)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	defer waiter.close()
+	stop := context.AfterFunc(ctx, func() {
+		_ = listener.Close()
+		waiter.close()
+	})
 	defer stop()
-	var err error
+	go s.reportStats(ctx)
 	for {
+		if waitErr := waiter.wait(); waitErr != nil {
+			if ctx.Err() == nil {
+				err = waitErr
+			}
+			break
+		}
+		// Сверка до accept: соединение остаётся в очереди сокета, и при
+		// сокете от systemd его примет новый процесс
+		if s.exeChanged("before accept") {
+			break
+		}
 		conn, acceptErr := listener.AcceptUnix()
 		if acceptErr != nil {
 			if ctx.Err() == nil {
 				err = acceptErr
-				_ = listener.Close()
 			}
+			break
+		}
+		// Замена между сверкой и accept: принятое соединение — «в CLI»,
+		// старый код его не исполняет
+		if s.exeChanged("after accept") {
+			s.inFlight.Go(func() {
+				defer conn.Close()
+				s.refuse(conn, "", "upgrade")
+			})
 			break
 		}
 		s.inFlight.Go(func() {
 			s.handle(conn)
 		})
 	}
+	_ = listener.Close()
 	s.inFlight.Wait()
 	return err
+}
+
+// exeChanged — исполняемый файл демона заменён: строка в лог, приём
+// прекращается
+func (s *server) exeChanged(when string) bool {
+	if s.exe == nil {
+		return false
+	}
+	changed, reason := s.exe.changed()
+	if changed {
+		s.logger.Info("daemon: executable changed, stop accepting", "when", when, "reason", reason, "version", Version)
+	}
+	return changed
 }
 
 // handle обслуживает одно соединение: проверки до «принято», 'C' от прокси,
@@ -218,65 +318,145 @@ func (s *server) handle(conn *net.UnixConn) {
 	select {
 	case s.sem <- struct{}{}:
 	default:
-		s.refuse(conn, wire.Subcommand, "busy")
+		reason := "busy"
+		if stuck := s.stuck.Load(); stuck > 0 {
+			reason = fmt.Sprintf("busy: %d stuck", stuck)
+		}
+		s.refuse(conn, wire.Subcommand, reason)
 		return
 	}
-	defer func() { <-s.sem }()
-	deadline := s.requestDeadline(wire.PID, wire.Subcommand, accepted)
+	// Слот освобождает тот, кто дождался обработчика: handle или, у
+	// зависшего, его сторож
+	release := func() { <-s.sem }
+	deadline := s.requestDeadline(wire.PID, wire.Subcommand, admitted.env, accepted)
 	if !time.Now().Before(deadline) {
+		release()
 		s.refuse(conn, wire.Subcommand, "deadline")
 		return
 	}
 
-	_ = conn.SetWriteDeadline(time.Now().Add(serveCommitTimeout))
-	if _, err := conn.Write([]byte{hookwire.Accepted}); err != nil {
-		s.logger.Debug("daemon: proxy left before accept", "hook", wire.Subcommand, "error", err)
-		return
-	}
-	// Исполнение — только после 'C': прокси, не дождавшийся «принято»,
-	// ушёл в CLI, и второй раз запрос не исполняется
-	_ = conn.SetReadDeadline(time.Now().Add(serveCommitTimeout))
-	var commit [1]byte
-	if _, err := io.ReadFull(conn, commit[:]); err != nil || commit[0] != hookwire.Commit {
-		s.logger.Info("daemon: request left to CLI by proxy before commit", "hook", wire.Subcommand, "pid", wire.PID, "error", err)
+	if !s.acceptAndCommit(conn, wire) {
+		release()
 		return
 	}
 
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	ctx, cancelCause := context.WithCancelCause(context.Background())
+	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	_ = conn.SetReadDeadline(time.Time{})
-	// После 'C' прокси молчит: любое чтение (обрыв, закрытие, лишние байты) —
-	// прокси больше не ждёт, работа запроса отменяется
+	// После 'C' прокси молчит до 'T' (свой SIGTERM): любое чтение (обрыв,
+	// закрытие, 'T', лишние байты) — прокси больше не ждёт, работа запроса
+	// отменяется
+	terminated, gone := make(chan struct{}), make(chan struct{})
 	go func() {
 		var b [1]byte
-		_, _ = conn.Read(b[:])
-		cancel()
+		n, _ := conn.Read(b[:])
+		if n == 1 && b[0] == hookwire.Terminate {
+			close(terminated)
+			cancelCause(errProxyTerminated)
+			return
+		}
+		close(gone)
+		cancelCause(errProxyGone)
 	}()
+	call := &daemonCall{terminated: terminated, orphan: func(value any, stack []byte) {
+		s.logger.Error("daemon: panic in hook goroutine after its request answered", "hook", wire.Subcommand, "pid", wire.PID, "panic", fmt.Sprint(value), "stack", string(stack))
+	}}
+	ctx = context.WithValue(ctx, daemonCallKey{}, call)
 	stdout, stderr := &outputBuffer{}, &outputBuffer{}
 	request := hookctx.New(bytes.NewReader(admitted.stdin), stdout, stderr, admitted.env, wire.Cwd, wire.PID, wire.PPID)
 	request.ConfigPath, request.Verbose, request.Timeout = admitted.config, admitted.verbose, admitted.timeout
-	code := s.execute(ctx, request, wire.Subcommand)
+	code := s.executeWatched(ctx, request, wire, deadline, release)
+	// Вывод после ответа (брошенные горутины обработчика) отбрасывается
+	stdout.seal()
+	stderr.seal()
 	if stdout.truncatedOutput() || stderr.truncatedOutput() {
 		s.logger.Warn("daemon: hook output truncated", "hook", wire.Subcommand, "pid", wire.PID, "limit", hookwire.MaxOutput)
 	}
-	if ctx.Err() != nil && context.Cause(ctx) == context.Canceled {
+	select {
+	case <-gone:
 		s.logger.Info("daemon: request cancelled, proxy gone", "hook", wire.Subcommand, "pid", wire.PID)
+	case <-terminated:
+		s.logger.Info("daemon: request cancelled, proxy got SIGTERM", "hook", wire.Subcommand, "pid", wire.PID)
+	default:
 	}
+	s.served.Add(1)
+	s.logger.Debug("daemon: request done", "hook", wire.Subcommand, "pid", wire.PID, "code", code,
+		"elapsed_ms", time.Since(accepted).Milliseconds(), "version", Version)
 	_ = conn.SetWriteDeadline(time.Now().Add(serveWriteTimeout))
 	if _, err := conn.Write(hookwire.EncodeResult(code, stdout.Bytes(), stderr.Bytes())); err != nil {
 		s.logger.Info("daemon: result not delivered", "hook", wire.Subcommand, "pid", wire.PID, "error", err)
 	}
 }
 
+// acceptAndCommit отвечает «принято» и ждёт 'C'. Исполнение — только после
+// 'C': прокси, не дождавшийся «принято», ушёл в CLI, и второй раз запрос не
+// исполняется. 'C' не пришёл к сроку — 'F' «late»: прокси, приславший его
+// позже, уйдёт в CLI, а не потеряет вызов (ревью 2б-1, п. 8)
+func (s *server) acceptAndCommit(conn *net.UnixConn, wire hookwire.Request) bool {
+	_ = conn.SetWriteDeadline(time.Now().Add(s.commitTimeout))
+	if _, err := conn.Write([]byte{hookwire.Accepted}); err != nil {
+		s.logger.Debug("daemon: proxy left before accept", "hook", wire.Subcommand, "error", err)
+		return false
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(s.commitTimeout))
+	var commit [1]byte
+	if _, err := io.ReadFull(conn, commit[:]); err != nil || commit[0] != hookwire.Commit {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			s.refuse(conn, wire.Subcommand, "late")
+		}
+		s.logger.Info("daemon: request left to CLI by proxy before commit", "hook", wire.Subcommand, "pid", wire.PID, "error", err)
+		return false
+	}
+	return true
+}
+
+// stuckMessage — stderr ответа без зависшего обработчика
+const stuckMessage = "chooks: обработчик хука не вернулся к сроку запроса, демон ответил без него\n"
+
+// executeWatched исполняет запрос и ждёт его не дольше срока + stuckGrace
+// (ревью 2б-1, п. 4). Обработчик, не слушающий отмену, держит слот до своего
+// конца, но не молча: строка Error в лог, счётчик stuck в строке stats и в
+// причине «busy», прокси — код 1 со строкой stderr до SIGTERM от Claude Code.
+// release освобождает слот
+func (s *server) executeWatched(ctx context.Context, request hookctx.Context, wire hookwire.Request, deadline time.Time, release func()) int {
+	result := make(chan int, 1)
+	go func() { result <- s.execute(ctx, request, wire.Subcommand) }()
+	watch := time.NewTimer(time.Until(deadline) + s.stuckGrace)
+	defer watch.Stop()
+	select {
+	case code := <-result:
+		release()
+		return code
+	case <-watch.C:
+	}
+	stuck := s.stuck.Add(1)
+	stuckAt := time.Now()
+	s.logger.Error("daemon: hook handler stuck past its deadline, slot held", "hook", wire.Subcommand, "pid", wire.PID,
+		"stuck", stuck, "slots", cap(s.sem))
+	_, _ = io.WriteString(request.Stderr, stuckMessage)
+	go func() {
+		code := <-result
+		release()
+		left := s.stuck.Add(-1)
+		s.logger.Info("daemon: stuck hook handler returned", "hook", wire.Subcommand, "pid", wire.PID, "code", code,
+			"late_ms", time.Since(stuckAt).Milliseconds(), "stuck", left)
+	}()
+	return exitError
+}
+
 // execute исполняет запрос с перехватом паники. Ответ на панику — как у CLI:
 // «panic: …» и стек в stderr, код 2 (код выхода Go на панике), строка Error
-// в лог демона
+// в лог демона. Паника горутины запроса (goRequest) — с её исходным стеком
 func (s *server) execute(ctx context.Context, request hookctx.Context, hookType string) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
-			stack := debug.Stack()
-			fmt.Fprintf(request.Stderr, "panic: %v\n\n%s", r, stack)
-			s.logger.Error("daemon: panic in hook request", "hook", hookType, "pid", request.PID, "panic", fmt.Sprint(r), "stack", string(stack))
+			value, stack := r, debug.Stack()
+			if p, ok := r.(goroutinePanic); ok {
+				value, stack = p.value, p.stack
+			}
+			fmt.Fprintf(request.Stderr, "panic: %v\n\n%s", value, stack)
+			s.logger.Error("daemon: panic in hook request", "hook", hookType, "pid", request.PID, "panic", fmt.Sprint(value), "stack", string(stack))
 			code = exitBlocked
 		}
 	}()
@@ -285,6 +465,7 @@ func (s *server) execute(ctx context.Context, request hookctx.Context, hookType 
 
 // refuse отвечает «в CLI: reason» и пишет причину в лог демона
 func (s *server) refuse(conn *net.UnixConn, hookType, reason string) {
+	s.refused.Add(1)
 	s.logger.Info("daemon: request left to CLI", "hook", hookType, "reason", reason)
 	_ = conn.SetWriteDeadline(time.Now().Add(serveCommitTimeout))
 	if _, err := conn.Write(hookwire.EncodeFallback(reason)); err != nil {
@@ -293,14 +474,29 @@ func (s *server) refuse(conn *net.UnixConn, hookType, reason string) {
 }
 
 // requestDeadline — срок запроса: старт процесса прокси (с него Claude Code
-// отсчитывает таймаут, а прокси жив до ответа) + таймаут хука − запас. Старт
-// не прочитан — от accept
-func (s *server) requestDeadline(pid int, hookType string, accepted time.Time) time.Time {
+// отсчитывает таймаут, а прокси жив до ответа) + таймаут хука − запас.
+// Таймаут — из settings.json запроса, как у CLI (hookTimeout, ревью 2б-1,
+// п. 3); нет там — запасной из hookTimeouts. Старт не прочитан — от accept
+func (s *server) requestDeadline(pid int, hookType string, env []string, accepted time.Time) time.Time {
 	start, err := s.start(pid)
 	if err != nil || start.After(accepted) {
 		start = accepted
 	}
-	return start.Add(hookTimeouts[hookType] - serveDeadlineMargin)
+	return start.Add(requestHookTimeout(env, hookType) - serveDeadlineMargin)
+}
+
+// requestHookTimeout — таймаут подкоманды из settings.json по env запроса;
+// не прочитан или не задан — запасной из hookTimeouts
+func requestHookTimeout(env []string, hookType string) time.Duration {
+	path, err := settingsPathFor(hookctx.New(nil, nil, nil, env, "/", 0, 0))
+	if err != nil {
+		return hookTimeouts[hookType]
+	}
+	timeout, err := hookTimeout(path, hookType)
+	if err != nil {
+		return hookTimeouts[hookType]
+	}
+	return timeout
 }
 
 // admitted — проверенный запрос: env без CHOOKS_FALLBACK и флаги хука
@@ -541,16 +737,21 @@ func withoutEnv(env []string, key string) []string {
 }
 
 // outputBuffer — stdout или stderr запроса: пишут обработчик и его
-// горутины; сверх hookwire.MaxOutput байты отбрасываются
+// горутины; сверх hookwire.MaxOutput байты отбрасываются, после ответа
+// (seal) — тоже
 type outputBuffer struct {
 	mu        sync.Mutex
 	buf       bytes.Buffer
 	truncated bool
+	sealed    bool
 }
 
 func (b *outputBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.sealed {
+		return len(p), nil
+	}
 	if room := hookwire.MaxOutput - b.buf.Len(); len(p) > room {
 		b.truncated = true
 		b.buf.Write(p[:max(room, 0)])
@@ -558,6 +759,13 @@ func (b *outputBuffer) Write(p []byte) (int, error) {
 	}
 	b.buf.Write(p)
 	return len(p), nil
+}
+
+// seal — ответ ушёл: дальнейшие записи отбрасываются
+func (b *outputBuffer) seal() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sealed = true
 }
 
 func (b *outputBuffer) truncatedOutput() bool {
@@ -589,12 +797,11 @@ func takeFallbackReason(request *hookctx.Context) string {
 	return reason
 }
 
-// logFallback пишет в chooks.log строку о запасном пути: CLI исполняет вызов,
-// который прокси не отдал демону. Только при логе в файл: строка в stderr
-// попала бы в вывод хука
-func logCLIFallback(ctx context.Context, config *core.Config, request hookctx.Context, hookType string) {
-	reason, _ := ctx.Value(fallbackReasonKey{}).(string)
-	if reason == "" || config.Logger.Output != "file" || config.Logger.LogFile == "" {
+// logCLIFallback пишет в chooks.log строку о запасном пути: CLI исполняет
+// вызов, который прокси не отдал демону. Только при логе в файл: строка в
+// stderr попала бы в вывод хука
+func logCLIFallback(config *core.Config, request hookctx.Context, hookType, reason string) {
+	if config.Logger.Output != "file" || config.Logger.LogFile == "" {
 		return
 	}
 	line := fmt.Sprintf("time=%q level=INFO msg=%q hook=%s reason=%q pid=%d",

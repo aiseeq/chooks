@@ -1,0 +1,18 @@
+# Демон хуков chooks: исполняет вызовы прокси chooks-hook (chooks serve).
+# Сокет — от chooks.socket (LISTEN_FDS). Демон выходит сам после замены
+# своего исполняемого файла (graft install), Restart=always поднимает новый.
+# Лимит запусков — 30 за минуту: два install подряд и падения укладываются,
+# а цикл падений останавливается, и хуки идут в CLI (счёт и уведомление —
+# на стороне CLI)
+[Unit]
+Description=chooks hooks daemon
+Requires=chooks.socket
+After=chooks.socket
+StartLimitIntervalSec=60
+StartLimitBurst=30
+
+[Service]
+Type=simple
+ExecStart=%h/bin/chooks serve
+Restart=always
+RestartSec=200ms

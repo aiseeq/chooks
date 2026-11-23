@@ -130,6 +130,9 @@ var sharedEntries = []string{
 	// statusline: ротация учёток (accounts): хранилище (atomicfile.WriteSync),
 	// его блокировка, журнал переключений, отметка запуска ротации
 	"accounts.json", ".accounts.json.tmp-*", ".accounts.lock", "account-switches.jsonl", ".rotate-spawn",
+	// CLI запасного пути хуков (fallbackwatch): счёт уходов мимо демона, его
+	// временный файл и блокировка
+	"fallbacks.json", ".fallbacks.json.tmp-*", ".fallbacks.lock",
 	// understand-check всех сессий: общий журнал решений
 	"understand-check.jsonl",
 	// skill-reload: отметка суточной чистки и каталог текстов скиллов

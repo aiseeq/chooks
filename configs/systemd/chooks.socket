@@ -1,0 +1,16 @@
+# Сокет демона хуков chooks: прокси chooks-hook подключается к
+# $XDG_RUNTIME_DIR/chooks.sock. systemd держит сокет и запускает chooks.service
+# на первое соединение; при замене ~/bin/chooks (graft install) демон выходит,
+# а соединения ждут в очереди сокета нового процесса.
+# Ставит graft install в ~/.config/systemd/user/; включение — отдельно
+# (systemctl --user enable --now chooks.socket)
+[Unit]
+Description=chooks hooks daemon socket
+
+[Socket]
+ListenStream=%t/chooks.sock
+SocketMode=0600
+Accept=no
+
+[Install]
+WantedBy=sockets.target

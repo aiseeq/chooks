@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/aiseeq/chooks/internal/fallbackwatch"
 )
 
 // Набор 1 — equal.py: лог в stderr на уровне error, notifier и skill_reload
@@ -321,12 +323,15 @@ func replacePID(raw []byte, pid int) []byte {
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
-// tsvNorm — время и длительности в журнале хуков
+// tsvNorm — время и длительности в журнале хуков. Столбцы сверх шести —
+// исполнитель (daemon, cli) и причина ухода в CLI — есть только у вызова
+// через прокси: у отдельного CLI их нет, сверка — по первым шести
 func tsvNorm(raw []byte) []byte {
 	var lines []string
 	for line := range strings.SplitSeq(strings.TrimSuffix(string(raw), "\n"), "\n") {
 		f := strings.Split(line, "\t")
 		if len(f) >= 6 {
+			f = f[:6]
 			f[0], f[3], f[4] = "<time>", "N", "N"
 		}
 		lines = append(lines, strings.Join(f, "\t"))
@@ -354,6 +359,8 @@ func snapshot(root string, pid int) (map[string]string, error) {
 				return fmt.Errorf("readlink: %w", err)
 			}
 			snap[rel] = "symlink:" + target
+		case fallbackState(rel):
+			// Счёт ухода в CLI (fallbackwatch) пишет только CLI запасного пути
 		case d.IsDir():
 			snap[rel] = "<dir>"
 		default:
@@ -373,6 +380,12 @@ func snapshot(root string, pid int) (map[string]string, error) {
 		return nil, fmt.Errorf("walk sandbox: %w", err)
 	}
 	return snap, nil
+}
+
+// fallbackState — файлы счёта fallbackwatch в каталоге состояния chooks
+func fallbackState(rel string) bool {
+	base := filepath.Base(rel)
+	return base == fallbackwatch.FileName || base == fallbackwatch.LockName || strings.HasPrefix(base, "."+fallbackwatch.FileName+".tmp-")
 }
 
 // observed — наблюдаемое вызова после нормализации

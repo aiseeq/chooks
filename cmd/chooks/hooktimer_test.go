@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -126,7 +127,7 @@ func TestAwaitSkillCheckAbandonsAtHardDeadlineWithSubstage(t *testing.T) {
 	input := &core.ToolInput{SessionID: "session-1", AgentID: "agent-2"}
 	finished := make(chan struct{})
 	started := time.Now()
-	awaitSkillCheck(timer, logger, eventPostToolBatch, input, func() {
+	awaitSkillCheck(context.Background(), timer, logger, eventPostToolBatch, input, func() {
 		timer.setSubstage("notices")
 		<-finished
 	})
@@ -168,7 +169,7 @@ func TestAwaitSlowSkillCheckerReturnsBeforeHardDeadline(t *testing.T) {
 	input := &core.ToolInput{SessionID: "session-1", AgentID: "agent-2"}
 	started := time.Now()
 	checkDone := make(chan struct{})
-	awaitSkillCheck(timer, logger, eventUserPromptSubmit, input, func() {
+	awaitSkillCheck(context.Background(), timer, logger, eventUserPromptSubmit, input, func() {
 		defer close(checkDone)
 		_, _ = checker.Check(skillreload.Event{SessionID: input.SessionID, TranscriptPath: transcript})
 	})
@@ -190,7 +191,7 @@ func TestAwaitSkillCheckSkipsWhenOptionalBudgetSpent(t *testing.T) {
 	timer.start = time.Now().Add(-2100 * time.Millisecond)
 	timer.now = time.Now
 	called := false
-	awaitSkillCheck(timer, logger, eventUserPromptSubmit, &core.ToolInput{SessionID: "s1"}, func() { called = true })
+	awaitSkillCheck(context.Background(), timer, logger, eventUserPromptSubmit, &core.ToolInput{SessionID: "s1"}, func() { called = true })
 	if called {
 		t.Fatal("Check запущен после срока optionalBudget")
 	}

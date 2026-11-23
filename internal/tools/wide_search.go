@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/akit/shellcmd"
@@ -41,6 +42,9 @@ func WideSearch(command, cwd, home string) (string, error) {
 			cwd = changeDir(c, cwd, home)
 			continue
 		}
+		if c.Name == "find" && shallowFind(c.Args) {
+			continue
+		}
 		paths, ok := walkPaths(c)
 		if !ok {
 			continue
@@ -59,6 +63,34 @@ func WideSearch(command, cwd, home string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// shallowFind — у find литеральный -maxdepth от 0 до 3 (тикет
+// wide-search-shallow-find); GNU find берёт его в любом месте выражения
+func shallowFind(args []string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "-maxdepth" {
+			continue
+		}
+		depth := args[i+1]
+		if depth == "" {
+			continue
+		}
+		literal := true
+		for _, r := range depth {
+			if r < '0' || r > '9' {
+				literal = false
+				break
+			}
+		}
+		if !literal {
+			continue
+		}
+		if n, err := strconv.Atoi(depth); err == nil && n <= 3 {
+			return true
+		}
+	}
+	return false
 }
 
 // changeDir — cwd после cd или pushd c; путь с неизвестной подстановкой

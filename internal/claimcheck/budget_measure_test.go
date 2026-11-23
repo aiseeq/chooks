@@ -65,6 +65,25 @@ func TestMeasureBuildInputLongTurn(t *testing.T) {
 	}
 }
 
+func TestMeasureExcerptManyLongOutputs(t *testing.T) {
+	path, line := longTurnTranscript(t, 10, 2000, 3000)
+	cpuBefore := processCPU(t)
+	started := time.Now()
+	input, err := BuildInput(path, line, Options{})
+	cpu := processCPU(t) - cpuBefore
+	took := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input == nil || input.Answer == "" {
+		t.Fatalf("empty input: %+v", input)
+	}
+	t.Logf("BuildInput 10 calls × 2000 output lines, 3000 answer words: cpu %v, wall %v", cpu, took)
+	if cpu > 3*time.Second {
+		t.Fatalf("BuildInput on many long outputs used %v of CPU, want under 3s", cpu)
+	}
+}
+
 // processCPU — процессорное время процесса (user + system): тесты пакета
 // идут без t.Parallel, так что разность — время одной сборки и её GC
 func processCPU(t *testing.T) time.Duration {

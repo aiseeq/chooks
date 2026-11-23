@@ -35,6 +35,26 @@ func TestWideSearchMaxdepth(t *testing.T) {
 		{"последний -maxdepth 2", "find ~ -maxdepth 10 -maxdepth 2 -name x", "/tmp", false},
 		// неглубокий -exec неглубокой команды остаётся неглубоким
 		{"мелкий find -exec basename", `find ~ -maxdepth 1 -exec basename {} \;`, "/tmp", false},
+		// круг 3, ревью cf6d958: обёртки внутри -exec
+		{"-exec sh -c du", `find ~ -maxdepth 1 -exec sh -c 'du -s "$1"' _ {} \;`, "/tmp", true},
+		{"-exec bash -c grep -r", `find ~ -maxdepth 1 -exec bash -c 'grep -r x "$0"' {} \;`, "/tmp", true},
+		{"-exec sudo du", `find ~ -maxdepth 1 -exec sudo du -s {} \;`, "/tmp", true},
+		{"-exec timeout du", `find ~ -maxdepth 1 -exec timeout 5 du -s {} \;`, "/tmp", true},
+		{"-exec /usr/bin/du", `find ~ -maxdepth 1 -exec /usr/bin/du -s {} \;`, "/tmp", true},
+		// пайп мелкого find в xargs рекурсивной команды
+		{"| xargs du", "find ~ -maxdepth 1 | xargs du -sh", "/tmp", true},
+		{"| xargs -0 du", "find ~ -maxdepth 1 -print0 | xargs -0 du -s", "/tmp", true},
+		{"| xargs -I grep -r", "find ~ -maxdepth 1 -type d | xargs -I{} grep -r x {}", "/tmp", true},
+		{"| xargs dirname | xargs du", "find ~/git -maxdepth 2 -name .git -type d | xargs -n1 dirname | xargs -I{} du -sh {}", "/tmp", true},
+		{"| xargs basename", "find ~ -maxdepth 1 | xargs basename", "/tmp", false},
+		{"| head", "find ~ -maxdepth 2 -name x | head", "/tmp", false},
+		// внутренний мелкий find в -exec не рекурсивен
+		{"-exec мелкий find", `find ~ -maxdepth 2 -name x -exec find {} -maxdepth 1 \;`, "/tmp", false},
+		// + кончает -exec только после {}
+		{"+ не после {}", `find ~ -exec echo + -maxdepth 1 \;`, "/tmp", true},
+		// tree вне списка, на который пользователь дал «да» (тикет wide-search-hint): подсказки нет
+		{"tree ~", "tree ~", "/tmp", false},
+		{"tree -L 1 ~", "tree -L 1 ~", "/tmp", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

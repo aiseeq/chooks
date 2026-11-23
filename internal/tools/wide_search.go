@@ -42,7 +42,7 @@ func WideSearch(command, cwd, home string) (string, error) {
 			cwd = changeDir(c, cwd, home)
 			continue
 		}
-		if c.Name == "find" && shallowFind(c.Args) {
+		if c.Name == "find" && shallowFind(c.Args) && !findPipedToRecursiveXargs(command, c, calls) {
 			continue
 		}
 		paths, ok := walkPaths(c)
@@ -104,7 +104,7 @@ func isFindExec(arg string) bool {
 
 func findExecEnd(args []string, start int) int {
 	for i := start; i < len(args); i++ {
-		if args[i] == ";" || args[i] == `\;` || args[i] == "+" && i > start && args[i-1] == "{}" {
+		if args[i] == ";" || args[i] == "+" && i > start && args[i-1] == "{}" {
 			return i
 		}
 	}
@@ -115,8 +115,41 @@ func execWalksRecursively(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	_, recursive := walkPaths(&shellcmd.Call{Name: args[0], Args: args[1:]})
-	return recursive
+	parsed, err := shellcmd.Calls(literalShellWords(args))
+	if err != nil && len(parsed) == 0 {
+		return false
+	}
+	for i := range parsed {
+		c := &parsed[i]
+
+		if c.Name == "find" && shallowFind(c.Args) {
+			continue
+		}
+		if _, recursive := walkPaths(c); recursive {
+			return true
+		}
+	}
+	return false
+}
+
+// findPipedToRecursiveXargs keeps a shallow find wide when its output feeds a
+// recursive xargs command in the same pipeline (possibly through other xargs).
+func findPipedToRecursiveXargs(command string, find *shellcmd.Call, calls []shellcmd.Call) bool {
+	end := min(find.Offset+len(find.Raw), len(command))
+	for i := range calls {
+		c := &calls[i]
+		if c.Offset <= find.Offset || c.Offset > len(command) || !slices.Contains(c.Via, "xargs") {
+			continue
+		}
+		if _, recursive := walkPaths(c); !recursive {
+			continue
+		}
+		between := command[end:c.Offset]
+		if strings.Contains(between, "|") && !strings.ContainsAny(between, ";&\n") {
+			return true
+		}
+	}
+	return false
 }
 
 // changeDir — cwd после cd или pushd c; путь с неизвестной подстановкой
@@ -174,8 +207,6 @@ func walkPaths(c *shellcmd.Call) ([]walkArg, bool) {
 		if !hasFlag(c.Args, 'R', "--recursive") {
 			return nil, false
 		}
-		return positional(c, nil, false), true
-	case "tree":
 		return positional(c, nil, false), true
 	}
 	return nil, false

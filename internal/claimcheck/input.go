@@ -176,6 +176,7 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 		input.TurnLine = rows[start].Line
 	}
 	words := answerWords(answer)
+	answerWordCount := countAnswerWords(answer)
 	matcher := newWordMatcher(words)
 	results := indexToolResults(rows)
 	input.AnswerTime = prefixTime(rows, line, input.AnswerTime)
@@ -184,7 +185,7 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 	if limit <= 0 {
 		limit = DefaultContextLimit
 	}
-	if len(words) <= largeAnswerWordThreshold {
+	if answerWordCount <= largeAnswerWordThreshold {
 		turnLimit = shortAnswerTurnToolsLimit
 	} else {
 		limit = min(limit, longAnswerContextLimit)
@@ -201,7 +202,7 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if !options.Unbounded && len(words) <= largeAnswerWordThreshold {
+	if !options.Unbounded && answerWordCount <= largeAnswerWordThreshold {
 		for {
 			size, err := inputJSONSize(input)
 			if err != nil {
@@ -539,7 +540,7 @@ func appendMatchingTools(ctx context.Context, out *Input, rows []row, start int,
 	fullWords := make([][]string, len(candidates))
 	minimumSizes := make([]int, len(candidates))
 	for i, tool := range candidates {
-		fullWords[i] = wordsVisibleInTool(Tool{Input: tool.fullInput, Output: tool.fullOutput}, words)
+		fullWords[i] = wordsVisibleInTool(Tool{Input: tool.fullInput, Output: tool.fullOutput, matcher: matcher}, words)
 		minimum, err := toolsJSONSize([]Tool{{Name: tool.Name}})
 		if err != nil {
 			return err
@@ -1243,7 +1244,7 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 			return nil, err
 		}
 		fullWords[i] = append(fullWords[i], cachedOutputWords(tool.outputWords)...)
-		fullWords[i] = append(fullWords[i], lineAnswerWords(tool.fullInput, words)...)
+		fullWords[i] = append(fullWords[i], lineAnswerWordsWithMatcher(tool.fullInput, words, tool.matcher)...)
 		minimum, err := toolsJSONSize([]Tool{{Name: tool.Name}})
 		if err != nil {
 			return nil, err
@@ -1419,20 +1420,19 @@ func wordsVisibleInTool(tool Tool, words []string) []string {
 			seen[token] = struct{}{}
 		}
 	})
-	if len(seen) == 0 {
-		var found []string
-		for _, word := range words {
-			if strings.Contains(input, word) || strings.Contains(output, word) {
-				found = append(found, word)
-			}
-		}
-		return found
+	matcher := tool.matcher
+	if matcher == nil || !slices.Equal(matcher.words, words) {
+		matcher = newWordMatcher(words)
 	}
-	found := make([]string, 0, len(seen))
+	found, _ := matcher.wordsInLine(context.Background(), input+"\n"+output)
+	for _, word := range found {
+		seen[word] = struct{}{}
+	}
+	visible := make([]string, 0, len(seen))
 	for word := range seen {
-		found = append(found, word)
+		visible = append(visible, word)
 	}
-	return found
+	return visible
 }
 
 func unseenWords(words []string, remaining map[string]bool) []string {
@@ -1669,7 +1669,7 @@ func excerptWithWordsIndexed(s string, words []string, limit int, cachedLines []
 		}
 		if utf8.RuneCountInString(line) > limit && len(lineWords[i]) > 0 {
 			lines[i] = excerptAroundWords(line, words, max(limit-80, 1), matcher, positions, i)
-			lineWords[i] = lineAnswerWords(lines[i], words)
+			lineWords[i] = lineAnswerWordsWithMatcher(lines[i], words, matcher)
 		}
 	}
 	evidence := make([]bool, len(lines))
@@ -1751,60 +1751,106 @@ func excerptWithWordsIndexed(s string, words []string, limit int, cachedLines []
 		}
 		windowWords := make([][]string, len(lines))
 		for i := range lines {
+			seen := make(map[string]struct{})
 			for j := max(0, i-1); j <= min(len(lines)-1, i+1); j++ {
 				for _, word := range lineWords[j] {
-					if !slices.Contains(windowWords[i], word) {
+					if _, ok := seen[word]; !ok {
+						seen[word] = struct{}{}
 						windowWords[i] = append(windowWords[i], word)
 					}
 				}
 			}
 		}
-		attempted := make([]bool, len(lines))
-		for {
-			best, bestScore, bestCost := -1, 0, 0
-			for i := range lines {
-				if attempted[i] || len(lineWords[i]) == 0 {
-					continue
-				}
-				score := 0
-				for _, word := range windowWords[i] {
-					if remaining[word] {
-						score++
-					}
-				}
-				cost := 0
-				for j := max(0, i-1); j <= min(len(lines)-1, i+1); j++ {
-					if !selected[j] {
-						cost += lineLengths[j] + 1
-					}
-				}
-				if cost < 1 {
-					cost = 1
-				}
-				if score*bestCost > bestScore*cost || score*bestCost == bestScore*cost && score > bestScore {
-					best, bestScore, bestCost = i, score, cost
+		type window struct{ index, score, cost int }
+		windows := make([]window, 0, len(lines))
+		for i := range lines {
+			if len(lineWords[i]) == 0 {
+				continue
+			}
+			score, cost := 0, 0
+			for _, word := range windowWords[i] {
+				if remaining[word] {
+					score++
 				}
 			}
-			if best < 0 {
-				break
+			for j := max(0, i-1); j <= min(len(lines)-1, i+1); j++ {
+				cost += lineLengths[j] + 1
 			}
-			attempted[best] = true
+			if cost < 1 {
+				cost = 1
+			}
+			windows = append(windows, window{i, score, cost})
+		}
+		sort.Slice(windows, func(i, j int) bool {
+			a, b := windows[i], windows[j]
+			if a.score*b.cost != b.score*a.cost {
+				return a.score*b.cost > b.score*a.cost
+			}
+			if a.score != b.score {
+				return a.score > b.score
+			}
+			return a.index < b.index
+		})
+		selectedCount, selectedRunes, omittedRuns := 0, 0, 1
+		setSelected := func(i int, value bool) {
+			if selected[i] == value {
+				return
+			}
+			leftOmitted := i > 0 && !selected[i-1]
+			rightOmitted := i+1 < len(selected) && !selected[i+1]
+			if value {
+				selectedCount++
+				selectedRunes += lineLengths[i]
+				if leftOmitted && rightOmitted {
+					omittedRuns++
+				} else if leftOmitted || rightOmitted { /* same run */
+				} else {
+					omittedRuns--
+				}
+			} else {
+				selectedCount--
+				selectedRunes -= lineLengths[i]
+				if leftOmitted && rightOmitted {
+					omittedRuns--
+				} else if !leftOmitted && !rightOmitted {
+					omittedRuns++
+				}
+			}
+			selected[i] = value
+		}
+		fits := func() bool {
+			// An omitted run marker is under 32 runes; this conservative bound
+			// keeps fit checks constant-time while leaving room for separators.
+			segments := selectedCount + omittedRuns
+			return selectedRunes+32*omittedRuns+max(segments-1, 0) <= limit
+		}
+		for _, candidate := range windows {
+			best := candidate.index
+			score := 0
+			for _, word := range windowWords[best] {
+				if remaining[word] {
+					score++
+				}
+			}
+			if score == 0 {
+				continue
+			}
 			from, to := max(0, best-1), min(len(lines)-1, best+1)
 			var added []int
 			for j := from; j <= to; j++ {
 				if !selected[j] {
-					selected[j] = true
+					setSelected(j, true)
 					added = append(added, j)
 				}
 			}
-			if renderLength() > limit {
-				for _, j := range added {
-					selected[j] = false
+			if !fits() {
+				for i := len(added) - 1; i >= 0; i-- {
+					setSelected(added[i], false)
 				}
 				if !selected[best] {
-					selected[best] = true
-					if renderLength() > limit {
-						selected[best] = false
+					setSelected(best, true)
+					if !fits() {
+						setSelected(best, false)
 						continue
 					}
 				}
@@ -2048,23 +2094,28 @@ func answerWords(s string) []string {
 	return a
 }
 
-// lineAnswerWords uses token lookup for the common exact match case. The
-// fallback retains matches' substring behavior for unusual token boundaries.
-func lineAnswerWords(line string, words []string) []string {
-	lower := strings.ToLower(line)
-	seen := exactLineAnswerWords(lower, words)
-	// Exact token matches dominate ordinary output. Only run the substring
-	// compatibility path when no token matched, avoiding a words×tokens scan
-	// for every line in large answers.
-	if len(seen) == 0 {
-		for _, word := range words {
-			if strings.Contains(lower, word) {
-				seen = append(seen, word)
-			}
+func countAnswerWords(s string) int {
+	count := 0
+	for _, word := range wordRE.FindAllString(strings.ToLower(s), -1) {
+		if len([]rune(word)) >= 3 {
+			count++
 		}
 	}
-	sort.Strings(seen)
-	return seen
+	return count
+}
+
+// lineAnswerWords retains substring matches across token boundaries such as
+// paths and inflected words. Callers with an existing matcher reuse it below.
+func lineAnswerWords(line string, words []string) []string {
+	return lineAnswerWordsWithMatcher(line, words, nil)
+}
+
+func lineAnswerWordsWithMatcher(line string, words []string, matcher *wordMatcher) []string {
+	if matcher == nil || !slices.Equal(matcher.words, words) {
+		matcher = newWordMatcher(words)
+	}
+	found, _ := matcher.wordsInLine(context.Background(), line)
+	return found
 }
 
 func exactLineAnswerWords(line string, words []string) []string {
@@ -2116,14 +2167,22 @@ func answerLineWords(ctx context.Context, lines []string, matcher *wordMatcher) 
 	indexed := make([][]string, len(lines))
 	for i, line := range lines {
 		indexed[i] = exactLineAnswerWords(strings.ToLower(line), matcher.words)
-		if len(indexed[i]) > 0 {
-			continue
-		}
-		var err error
-		indexed[i], err = matcher.wordsInLine(ctx, line)
+		found, err := matcher.wordsInLine(ctx, line)
 		if err != nil {
 			return nil, err
 		}
+		seen := make(map[string]struct{}, len(indexed[i])+len(found))
+		for _, word := range indexed[i] {
+			seen[word] = struct{}{}
+		}
+		for _, word := range found {
+			seen[word] = struct{}{}
+		}
+		indexed[i] = indexed[i][:0]
+		for word := range seen {
+			indexed[i] = append(indexed[i], word)
+		}
+		sort.Strings(indexed[i])
 	}
 	return indexed, nil
 }

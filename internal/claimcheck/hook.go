@@ -452,7 +452,10 @@ func (h Hook) waitLine(ctx context.Context, path string, latest bool, find func(
 		}
 	}
 	if wait <= 0 {
-		return nil, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, context.DeadlineExceeded
 	}
 	deadline := time.Now().Add(wait)
 	cursor := transcriptCursor{}

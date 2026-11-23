@@ -1,10 +1,12 @@
 package claimcheck
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -221,6 +223,63 @@ func TestBuildInputFixtures(t *testing.T) {
 			t.Fatalf("%+v", got)
 		}
 	})
+}
+
+func TestAnswerWordsKeepSubstringMatchesAlongsideExactTokens(t *testing.T) {
+	words := answerWords("FAIL input.go конфиг")
+	for _, tc := range []struct{ line, want string }{
+		{"internal/claimcheck/input.go:42: FAIL boom", "input.go"},
+		{"файл конфига обновлён", "конфиг"},
+	} {
+		got := lineAnswerWords(tc.line, words)
+		if !slices.Contains(got, tc.want) {
+			t.Errorf("lineAnswerWords(%q) = %v, missing %q", tc.line, got, tc.want)
+		}
+	}
+	indexed, err := answerLineWords(context.Background(), []string{
+		"internal/claimcheck/input.go:42: FAIL boom",
+		"файл конфига обновлён",
+	}, newWordMatcher(words))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(indexed[0], "input.go") || !slices.Contains(indexed[0], "fail") || !slices.Contains(indexed[1], "конфиг") {
+		t.Fatalf("answerLineWords = %v", indexed)
+	}
+	toolWords := wordsVisibleInTool(Tool{Input: "FAIL internal/claimcheck/input.go", Output: "файл конфига обновлён"}, words)
+	for _, want := range []string{"fail", "input.go", "конфиг"} {
+		if !slices.Contains(toolWords, want) {
+			t.Errorf("wordsVisibleInTool = %v, missing %q", toolWords, want)
+		}
+	}
+}
+
+func TestLongAnswerThresholdCountsRepeatedWords(t *testing.T) {
+	answer := strings.TrimSpace(strings.Repeat("альфа бета гамма дельта ", 63))
+	if countAnswerWords(answer) <= largeAnswerWordThreshold || len(answerWords(answer)) >= largeAnswerWordThreshold {
+		t.Fatal("fixture must contain over 250 total words and fewer than 250 unique words")
+	}
+	rows := []any{ev("user", "2026-01-01T00:00:00Z", "проверь")}
+	for i := range 10 {
+		id := fmt.Sprintf("c%d", i)
+		rows = append(rows,
+			ev("assistant", fmt.Sprintf("2026-01-01T00:00:%02dZ", i+1), []any{map[string]any{"type": "tool_use", "id": id, "name": "Bash", "input": map[string]any{"command": "check " + id}}}),
+			map[string]any{"type": "user", "timestamp": fmt.Sprintf("2026-01-01T00:01:%02dZ", i), "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "content": strings.Repeat("альфа бета гамма дельта ", 100)}}}},
+		)
+	}
+	rows = append(rows, ev("assistant", "2026-01-01T00:02:00Z", []any{map[string]any{"type": "text", "text": answer}}))
+	path := fixture(t, rows...)
+	input, err := BuildInput(path, len(rows), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(input.TurnTools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if utf8.RuneCountInString(string(encoded)) <= shortAnswerTurnToolsLimit {
+		t.Fatalf("used short-answer turn budget: %d chars", utf8.RuneCountInString(string(encoded)))
+	}
 }
 
 func TestBoundToolsKeepsRelevantAndBoundaryCalls(t *testing.T) {

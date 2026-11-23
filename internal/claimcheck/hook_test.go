@@ -549,3 +549,106 @@ func TestSendParallelSameLetter(t *testing.T) {
 		t.Fatalf("changed letter after the pair: %+v", out)
 	}
 }
+
+func TestWaitLinePassesCancellationToBuild(t *testing.T) {
+	path := fixture(t, ev("assistant", "t1", []any{map[string]any{"type": "text", "text": "ответ"}}))
+	h := testHook(t, &stubJudge{answer: answerOf(okClaim)})
+	started, exited := make(chan struct{}), make(chan struct{})
+	h.Build = func(ctx context.Context, _ string, _ int, _ Options) (*Input, error) {
+		close(started)
+		<-ctx.Done()
+		close(exited)
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.waitLine(ctx, path, false, func(r *row) bool { return messageText(r.Blocks) == "ответ" })
+		done <- err
+	}()
+	<-started
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitLine error = %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("build did not receive cancellation")
+	}
+}
+
+func TestScanTranscriptTailWaitsForCompleteLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	data, err := json.Marshal(ev("assistant", "t1", []any{map[string]any{"type": "text", "text": "готово"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := len(data) / 2
+	if err := os.WriteFile(path, data[:cut], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cursor := transcriptCursor{}
+	seen := 0
+	if err := scanTranscriptTail(path, &cursor, func(*row) { seen++ }); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 0 || cursor.offset != 0 {
+		t.Fatalf("partial line consumed: seen=%d cursor=%+v", seen, cursor)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(append(data[cut:], '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := scanTranscriptTail(path, &cursor, func(r *row) {
+		seen++
+		if messageText(r.Blocks) != "готово" {
+			t.Errorf("row=%+v", r)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 1 {
+		t.Fatalf("complete row count = %d", seen)
+	}
+}
+
+func TestWaitLineLatestDropsEarlierMatch(t *testing.T) {
+	path := fixture(t,
+		ev("assistant", "t1", []any{map[string]any{"type": "text", "text": "ранний ответ"}}),
+		ev("assistant", "t2", []any{map[string]any{"type": "text", "text": "новый ответ"}}),
+	)
+	h := testHook(t, &stubJudge{answer: answerOf(okClaim)})
+	var builds atomic.Int64
+	h.Build = func(context.Context, string, int, Options) (*Input, error) { builds.Add(1); return &Input{}, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := h.waitLine(ctx, path, true, func(r *row) bool { return messageText(r.Blocks) == "ранний ответ" })
+	if err == nil {
+		t.Fatal("waitLine accepted an earlier answer after a newer one")
+	}
+	if builds.Load() != 0 {
+		t.Fatalf("build called %d times", builds.Load())
+	}
+}
+
+type expiredLiveContext struct{}
+
+func (expiredLiveContext) Deadline() (time.Time, bool) { return time.Now().Add(-time.Second), true }
+func (expiredLiveContext) Done() <-chan struct{}       { return nil }
+func (expiredLiveContext) Err() error                  { return nil }
+func (expiredLiveContext) Value(any) any               { return nil }
+
+func TestWaitLineNonPositiveWaitReturnsDeadlineError(t *testing.T) {
+	path := fixture(t)
+	_, err := (Hook{}).waitLine(expiredLiveContext{}, path, false, func(*row) bool { return false })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waitLine error = %v, want deadline exceeded", err)
+	}
+}

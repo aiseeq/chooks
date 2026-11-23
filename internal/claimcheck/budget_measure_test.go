@@ -66,7 +66,7 @@ func TestMeasureBuildInputLongTurn(t *testing.T) {
 }
 
 func TestMeasureExcerptManyLongOutputs(t *testing.T) {
-	path, line := longTurnTranscript(t, 10, 2000, 3000)
+	path, line := longTurnTranscript(t, 40, 2000, 3000)
 	cpuBefore := processCPU(t)
 	started := time.Now()
 	input, err := BuildInput(path, line, Options{})
@@ -78,9 +78,82 @@ func TestMeasureExcerptManyLongOutputs(t *testing.T) {
 	if input == nil || input.Answer == "" {
 		t.Fatalf("empty input: %+v", input)
 	}
-	t.Logf("BuildInput 10 calls × 2000 output lines, 3000 answer words: cpu %v, wall %v", cpu, took)
-	if cpu > 3*time.Second {
-		t.Fatalf("BuildInput on many long outputs used %v of CPU, want under 3s", cpu)
+	t.Logf("BuildInput 40 calls × 2000 output lines, 3000 answer words: cpu %v, wall %v", cpu, took)
+	if cpu > 10*time.Second {
+		t.Fatalf("BuildInput on many long outputs used %v of CPU, want under 10s", cpu)
+	}
+}
+
+func longWriteTranscript(t *testing.T, calls, lines, words int) (string, int) {
+	t.Helper()
+	vocab := make([]string, words)
+	for i := range vocab {
+		vocab[i] = fmt.Sprintf("слово%dзнач", i)
+	}
+	answer := strings.Join(vocab, " ")
+	rows := []any{ev("user", "2026-01-01T00:00:00Z", "запиши документ и проверь")}
+	const wordsPerLine = 42
+	for c := range calls {
+		id := fmt.Sprintf("write-%d", c)
+		at := time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC).Add(time.Duration(c) * time.Second).Format(time.RFC3339)
+		var content strings.Builder
+		for l := range lines {
+			fmt.Fprintf(&content, "Строка %d:", l)
+			for w := range wordsPerLine {
+				fmt.Fprintf(&content, " %s", vocab[(c*lines*wordsPerLine+l*wordsPerLine+w)%words])
+			}
+			content.WriteByte('\n')
+		}
+		rows = append(rows,
+			ev("assistant", at, []any{map[string]any{"type": "tool_use", "id": id, "name": "Write", "input": map[string]any{"file_path": fmt.Sprintf("/work/report-%d.md", c), "content": content.String()}}}),
+			map[string]any{"type": "user", "timestamp": at, "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "content": "file written"}}}},
+		)
+	}
+	rows = append(rows, ev("assistant", "2026-01-02T00:00:00Z", []any{map[string]any{"type": "text", "text": answer}}))
+	return fixture(t, rows...), len(rows)
+}
+
+// Длинные Write проверяют общий матчёр на строках больше лимита входа.
+// Предел оставляет не менее пятикратный запас относительно 11 с CPU на машине.
+func TestMeasureBuildInputManyLongWrites(t *testing.T) {
+	for _, tc := range []struct {
+		calls, words int
+		cpuLimit     time.Duration
+	}{
+		{calls: 8, words: 1500, cpuLimit: 15 * time.Second},
+	} {
+		path, line := longWriteTranscript(t, tc.calls, 100, tc.words)
+		cpuBefore := processCPU(t)
+		started := time.Now()
+		input, err := BuildInput(path, line, Options{})
+		cpu := processCPU(t) - cpuBefore
+		took := time.Since(started)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if input == nil || input.Answer == "" {
+			t.Fatalf("empty input: %+v", input)
+		}
+		writes := 0
+		croppedWrites := 0
+		for _, tool := range input.TurnTools {
+			if tool.Name == "Write" {
+				writes++
+				if strings.Contains(tool.Input, "[обрезано:") {
+					croppedWrites++
+				}
+			}
+		}
+		if writes == 0 {
+			t.Fatal("BuildInput retained no Write calls")
+		}
+		if croppedWrites == 0 {
+			t.Fatal("BuildInput retained no cropped long Write inputs")
+		}
+		t.Logf("BuildInput %d Write × 100 lines × ~600 chars, %d answer words (%d retained, %d cropped): cpu %v, wall %v", tc.calls, tc.words, writes, croppedWrites, cpu, took)
+		if cpu > tc.cpuLimit {
+			t.Fatalf("BuildInput on %d long Write inputs used %v of CPU, want under %v", tc.calls, cpu, tc.cpuLimit)
+		}
 	}
 }
 

@@ -1080,6 +1080,10 @@ func (p markerProc) Parent(pid int) (int, error) {
 	return p.real.Parent(pid)
 }
 
+func (p markerProc) TTYNr(pid int) (int64, error) { return p.real.TTYNr(pid) }
+
+func (p markerProc) Cgroup(pid int) (string, error) { return p.real.Cgroup(pid) }
+
 func (p markerProc) Exe(pid int) (string, error) {
 	if _, ok := p.model(pid); ok {
 		return "/opt/claude/claude", nil

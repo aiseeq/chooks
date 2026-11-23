@@ -22,6 +22,19 @@ func TestWideSearchMaxdepth(t *testing.T) {
 		{"мелкий find и grep -r в одной команде", "find ~ -maxdepth 1 -name x; grep -r y ~/.cache", "/tmp", true},
 		{"мелкий find по ~ и широкий find по ~/.cache", "find ~ -maxdepth 1 -name x && find ~/.cache -name y", "/tmp", true},
 		{"find -mindepth 2 без -maxdepth", "find ~ -mindepth 2 -name x", "/tmp", true},
+		// круг 2, ревью 1cd2fe2: -maxdepth внутри -exec — не глубина внешнего find
+		{"-maxdepth только внутри -exec", `find ~ -name '*.go' -exec find {} -maxdepth 1 \;`, "/tmp", true},
+		{"-maxdepth только внутри -execdir", "find ~ -name x -execdir ls -maxdepth 1 {} +", "/tmp", true},
+		// мелкий find с -exec рекурсивной команды — широкий обход
+		{"мелкий find -exec du", `find ~ -maxdepth 1 -exec du -sh {} \;`, "/tmp", true},
+		{"мелкий find -exec grep -r", "find ~ -maxdepth 2 -type d -exec grep -rl x {} +", "/tmp", true},
+		{"мелкий find -exec find", `find ~ -maxdepth 1 -type d -exec find {} -name x \;`, "/tmp", true},
+		{"мелкий find -ok du", `find ~ -maxdepth 1 -ok du -s {} \;`, "/tmp", true},
+		// GNU find берёт последний -maxdepth
+		{"последний -maxdepth 10", "find ~ -maxdepth 1 -maxdepth 10 -name x", "/tmp", true},
+		{"последний -maxdepth 2", "find ~ -maxdepth 10 -maxdepth 2 -name x", "/tmp", false},
+		// неглубокий -exec неглубокой команды остаётся неглубоким
+		{"мелкий find -exec basename", `find ~ -maxdepth 1 -exec basename {} \;`, "/tmp", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

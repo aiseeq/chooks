@@ -68,29 +68,55 @@ func WideSearch(command, cwd, home string) (string, error) {
 // shallowFind — у find литеральный -maxdepth от 0 до 3 (тикет
 // wide-search-shallow-find); GNU find берёт его в любом месте выражения
 func shallowFind(args []string) bool {
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] != "-maxdepth" {
-			continue
-		}
-		depth := args[i+1]
-		if depth == "" {
-			continue
-		}
-		literal := true
-		for _, r := range depth {
-			if r < '0' || r > '9' {
-				literal = false
-				break
+	var maxDepth string
+	foundDepth := false
+	recursiveExec := false
+	for i := 0; i < len(args); i++ {
+		if isFindExec(args[i]) {
+			end := findExecEnd(args, i+1)
+			if execWalksRecursively(args[i+1 : end]) {
+				recursiveExec = true
 			}
-		}
-		if !literal {
+			i = end
 			continue
 		}
-		if n, err := strconv.Atoi(depth); err == nil && n <= 3 {
-			return true
+		if args[i] != "-maxdepth" || i+1 >= len(args) {
+			continue
+		}
+		maxDepth, foundDepth = args[i+1], true
+		i++
+	}
+	if !foundDepth || recursiveExec {
+		return false
+	}
+	n, err := strconv.Atoi(maxDepth)
+	return err == nil && n <= 3
+}
+
+func isFindExec(arg string) bool {
+	switch arg {
+	case "-exec", "-execdir", "-ok", "-okdir":
+		return true
+	default:
+		return false
+	}
+}
+
+func findExecEnd(args []string, start int) int {
+	for i := start; i < len(args); i++ {
+		if args[i] == ";" || args[i] == `\;` || args[i] == "+" && i > start && args[i-1] == "{}" {
+			return i
 		}
 	}
-	return false
+	return len(args)
+}
+
+func execWalksRecursively(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	_, recursive := walkPaths(&shellcmd.Call{Name: args[0], Args: args[1:]})
+	return recursive
 }
 
 // changeDir — cwd после cd или pushd c; путь с неизвестной подстановкой
@@ -148,6 +174,8 @@ func walkPaths(c *shellcmd.Call) ([]walkArg, bool) {
 		if !hasFlag(c.Args, 'R', "--recursive") {
 			return nil, false
 		}
+		return positional(c, nil, false), true
+	case "tree":
 		return positional(c, nil, false), true
 	}
 	return nil, false

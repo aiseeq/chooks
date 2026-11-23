@@ -791,7 +791,9 @@ func agentToolCandidates(input *core.ToolInput, agentModels func(string) []model
 			return []modelCandidate{{value: string(raw)}}
 		}
 		if strings.TrimSpace(model) != "" {
-			return []modelCandidate{{value: model}}
+			if !strings.EqualFold(strings.TrimSpace(model), "inherit") {
+				return []modelCandidate{{value: model}}
+			}
 		}
 	}
 	var agentType string
@@ -1281,6 +1283,7 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 var whichClaudeSubstitution = regexp.MustCompile(`\$\(\s*which\s+claude\s*\)`)
 
 var protectedSettingsTarget = regexp.MustCompile(`(?i)(?:settings(?:\.local)?\.json|agents/[^\s"';&|<>]+\.md)`)
+var writtenAgentTarget = regexp.MustCompile(`(?:^|/)agents/.+\.md$`)
 
 func protectedWriteTargets(command string) []string {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
@@ -1378,6 +1381,7 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 	decoded := strings.ReplaceAll(command, "\\\"", "\"")
 	decoded = strings.ReplaceAll(decoded, "\\\\n", "\n")
 	var found []modelCandidate
+	recognizedAgentDefinition := false
 	for _, match := range writtenModel.FindAllStringSubmatch(decoded, -1) {
 		if match[1] == "model" {
 			found = append(found, modelCandidate{value: match[2]})
@@ -1396,10 +1400,50 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 	if len(objects) == 0 {
 		found = append(found, writtenOverrideCandidates([]byte(decoded))...)
 	}
-	for _, match := range regexp.MustCompile(`(?m)^\s*model:\s*([^\s#]+)`).FindAllStringSubmatch(decoded, -1) {
-		found = append(found, modelCandidate{value: strings.Trim(match[1], `"'`)})
+	allWritesAreAgentDefinitions := true
+	for _, target := range protectedWriteTargets(command) {
+		if !writtenAgentTarget.MatchString(strings.Trim(target, `"'`)) {
+			allWritesAreAgentDefinitions = false
+			break
+		}
 	}
-	if len(found) == 0 {
+	if file, err := syntax.NewParser().Parse(strings.NewReader(decoded), ""); err == nil {
+		syntax.Walk(file, func(node syntax.Node) bool {
+			stmt, ok := node.(*syntax.Stmt)
+			if !ok {
+				return true
+			}
+			var targets []string
+			var body string
+			for _, redirect := range stmt.Redirs {
+				if redirect.Word == nil {
+					continue
+				}
+				if redirect.Hdoc != nil {
+					body = redirect.Hdoc.Lit()
+					continue
+				}
+				target, literal := literalValue(redirect.Word)
+				if literal && (redirect.Op.String() == ">" || redirect.Op.String() == ">>" || redirect.Op.String() == ">|") {
+					targets = append(targets, strings.Trim(target, `"'`))
+				}
+			}
+			if body != "" {
+				for _, target := range targets {
+					if !writtenAgentTarget.MatchString(target) {
+						continue
+					}
+					_, model := agentFrontmatter([]byte(body), target)
+					recognizedAgentDefinition = true
+					if model != "" && !strings.EqualFold(model, "inherit") {
+						found = append(found, modelCandidate{value: model})
+					}
+				}
+			}
+			return true
+		})
+	}
+	if len(found) == 0 && !(recognizedAgentDefinition && allWritesAreAgentDefinitions) {
 		return []modelCandidate{{value: "written settings or agent contents", unknownWrite: true}}
 	}
 	return found
@@ -1541,17 +1585,14 @@ func envTextCandidates(script string) []modelCandidate {
 	return found
 }
 
-// modelEnvNames — переменные, задающие модель Claude Code (имена — из
-// бинаря claude 2.1.330, приёмка 20.11). true — модель проверяется целиком;
-// false — модель быстрых запросов (haiku): её Claude Code задаёт сам, она не
-// одобряется списком и проверяется только на модель «только пользователь»
-var modelEnvNames = map[string]bool{
-	"ANTHROPIC_MODEL": true, "ANTHROPIC_DEFAULT_MODEL": true,
-	"ANTHROPIC_DEFAULT_OPUS_MODEL": true, "ANTHROPIC_DEFAULT_SONNET_MODEL": true,
-	"ANTHROPIC_DEFAULT_FABLE_MODEL": true, "CLAUDE_CODE_SUBAGENT_MODEL": true,
-	"CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL": true,
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL":       false, "ANTHROPIC_SMALL_FAST_MODEL": false,
-	"CLAUDE_CODE_AUTO_MODE_MODEL": false, "CLAUDE_CODE_BG_CLASSIFIER_MODEL": false,
+// modelEnvNames — переменные Claude Code, которые явно задают модель.
+var modelEnvNames = map[string]struct{}{
+	"ANTHROPIC_MODEL": {}, "ANTHROPIC_DEFAULT_MODEL": {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL": {}, "ANTHROPIC_DEFAULT_SONNET_MODEL": {},
+	"ANTHROPIC_DEFAULT_FABLE_MODEL": {}, "CLAUDE_CODE_SUBAGENT_MODEL": {},
+	"CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL": {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":       {}, "ANTHROPIC_SMALL_FAST_MODEL": {},
+	"CLAUDE_CODE_AUTO_MODE_MODEL": {}, "CLAUDE_CODE_BG_CLASSIFIER_MODEL": {},
 }
 
 // ModelEnvironmentNames returns the environment keys inspected by model_guard.

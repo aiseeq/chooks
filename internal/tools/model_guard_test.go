@@ -476,7 +476,7 @@ func TestModelGuardSettingsTildeForms(t *testing.T) {
 // правила о моделях в ~/.claude/CLAUDE.md (номер строки плавает)
 const wantModelGuardHint = `Правило ~/.claude/CLAUDE.md, раздел «Что разрешает «да»»: «Модели бери только из ~/.config/models/approved» (кому какая — в шапке файла); бойцы GPT — через worker; новая модель — только через бенчмарк llmark и одобрение пользователя`
 
-// TestModelGuardApprovedModels checks model candidates against the approved list.
+// TestModelGuardApprovedModels проверяет явный выбор моделей по списку одобренных.
 func TestModelGuardApprovedModels(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "approved")
 	if err := os.WriteFile(path, []byte("opus claude-opus-5-5\nluna gpt-6-luna\nhaiku claude-haiku-5-5\n"), 0600); err != nil {
@@ -488,6 +488,7 @@ func TestModelGuardApprovedModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true}, logger)
+	agentPath := filepath.Join(t.TempDir(), ".claude", "agents", "written.md")
 	cases := []struct {
 		name, tool, raw, command string
 		reject                   bool
@@ -496,6 +497,7 @@ func TestModelGuardApprovedModels(t *testing.T) {
 		{"Agent id fable", "Agent", `{"model":"claude-fable-5-2"}`, "", true},
 		{"Agent fable [1m]", "Agent", `{"model":"claude-fable-5-2[1m]"}`, "", true},
 		{"Agent opus", "Agent", `{"model":"opus"}`, "", false},
+		{"Agent inherit", "Agent", `{"model":"inherit"}`, "", false},
 		{"Agent без модели", "Agent", `{"subagent_type":"general-purpose"}`, "", false},
 		{"claude -p fable", "Bash", "", "claude -p --model fable hi", true},
 		{"cl id fable", "Bash", "", "cl --model claude-fable-5-2", true},
@@ -516,6 +518,14 @@ func TestModelGuardApprovedModels(t *testing.T) {
 		{"HAIKU fable", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-fable-5-2 claude -p hi", true},
 		{"SMALL_FAST fable", "Bash", "", "ANTHROPIC_SMALL_FAST_MODEL=fable claude -p hi", true},
 		{"SMALL_FAST opus", "Bash", "", "ANTHROPIC_SMALL_FAST_MODEL=claude-opus-5-5 claude -p hi", false},
+		{"HAIKU вне списка", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5 claude -p hi", true},
+		{"SMALL_FAST вне списка", "Bash", "", "ANTHROPIC_SMALL_FAST_MODEL=gpt-4o claude -p hi", true},
+		{"AUTO_MODE вне списка", "Bash", "", "CLAUDE_CODE_AUTO_MODE_MODEL=sonnet claude -p hi", true},
+		{"запись агента haiku вне списка", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\nmodel: claude-haiku-4-5\n---\nEOF\nclaude -p hi", agentPath), true},
+		{"запись агента gpt-4o вне списка", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\nmodel: gpt-4o\n---\nEOF\nclaude -p hi", agentPath), true},
+		{"запись агента sonnet вне списка", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\nmodel: sonnet\n---\nEOF\nclaude -p hi", agentPath), true},
+		{"запись агента inherit", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\nmodel: inherit\n---\nEOF\nclaude -p hi", agentPath), false},
+		{"model вне frontmatter", "Bash", "", fmt.Sprintf("cat > %s <<'EOF'\n---\nname: written\n---\nПример:\n  model: gpt-4o\nEOF\nclaude -p hi", agentPath), false},
 		{"HAIKU в settings env", "Bash", "", `claude -p --settings '{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}' hi`, true},
 		{"HAIKU своя модель", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5 claude -p hi", false},
 		{"HAIKU из переменной", "Bash", "", `ANTHROPIC_SMALL_FAST_MODEL="$H" claude -p hi`, true},
@@ -560,9 +570,7 @@ func TestModelGuardApprovedModels(t *testing.T) {
 	}
 }
 
-// TestModelGuardAgentDefinition — модель в определении агента разрешается
-// через общий список одобренных моделей.
-// (приёмка 20.11, тикет model-guard-user-only-agent-files)
+// TestModelGuardSettingsAgentReference проверяет разрешение ссылки на агента в settings.
 func TestModelGuardSettingsAgentReference(t *testing.T) {
 	called := ""
 	candidates := settingsCandidates([]byte(`{"agent":"fx"}`), func(name string) []modelCandidate {
@@ -799,6 +807,7 @@ func TestModelGuardRoundThree(t *testing.T) {
 	})
 }
 
+// TestModelGuardAgentDefinition проверяет чтение модели и frontmatter агентов с диска.
 func TestModelGuardAgentDefinition(t *testing.T) {
 	home, project := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)

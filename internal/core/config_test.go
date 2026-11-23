@@ -133,3 +133,20 @@ func TestSaveAndLoadConfig(t *testing.T) {
 		t.Error("состав инструментов изменился при сохранении")
 	}
 }
+
+func TestClaimCheckPromptConfig(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{{"v3", true}, {"v6", true}, {"v7", false}} {
+		t.Run(tc.value, func(t *testing.T) {
+			cfg, err := LoadConfig(writeConfig(t, "tools:\n  claim_check:\n    prompt: "+tc.value+"\n"))
+			if (err == nil) != tc.valid {
+				t.Fatalf("config=%+v error=%v", cfg, err)
+			}
+			if err == nil && cfg.Tools["claim_check"].Prompt != tc.value {
+				t.Fatalf("config=%+v", cfg)
+			}
+		})
+	}
+}

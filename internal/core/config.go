@@ -78,6 +78,7 @@ type ToolConfig struct {
 	// порядку: учётка без кредитов метится на час, судья идёт на следующую.
 	// Пусто — ~/.codex, затем ~/.codex-personal; ~/ раскрывается по HOME запроса
 	CodexHomes []string `yaml:"codex_homes"`
+	Prompt     string   `yaml:"prompt,omitempty"`
 }
 
 // LoadConfig загружает конфигурацию из файла.
@@ -230,6 +231,9 @@ func DefaultConfig() *Config {
 
 // validateConfig проверяет корректность конфигурации
 func validateConfig(config *Config) error {
+	if p := config.Tools["claim_check"].Prompt; p != "" && p != "v3" && p != "v6" {
+		return fmt.Errorf("invalid tools.claim_check.prompt: %q (expected v3 or v6)", p)
+	}
 	validLevels := []string{"debug", "info", "warn", "warning", "error"}
 	if !containsFold(validLevels, config.Logger.Level) {
 		return fmt.Errorf("invalid logger level: %q (expected one of %s)",

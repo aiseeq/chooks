@@ -30,7 +30,8 @@ type Input struct {
 	LastEventTime string   `json:"lastEventTime"`
 	// TurnLine — строка транскрипта, с которой начат ход: ключ хода у хука,
 	// судье не идёт
-	TurnLine int `json:"-"`
+	TurnLine  int  `json:"-"`
+	CallsOnly bool `json:"-"`
 }
 type Prompt struct {
 	Type string `json:"type"`
@@ -45,6 +46,7 @@ type Tool struct {
 	ExitCode     *int   `json:"exitCode,omitempty"`
 	IsError      *bool  `json:"is_error,omitempty"`
 	Skipped      int    `json:"skipped,omitempty"`
+	callsOnly    bool
 	relevant     bool
 	// fullInput and fullOutput are the masked, uncropped texts: every refit crops
 	// from them, so the crop marker counts the real length.
@@ -72,8 +74,27 @@ func (t Tool) MarshalJSON() ([]byte, error) {
 			Skipped int    `json:"skipped"`
 		}{Name: t.Name, Skipped: t.Skipped})
 	}
+	if t.callsOnly {
+		return json.Marshal(struct {
+			Time  string `json:"time"`
+			Name  string `json:"name"`
+			Input string `json:"input"`
+		}{t.Time, t.Name, t.Input})
+	}
 	type toolAlias Tool
 	return json.Marshal(toolAlias(t))
+}
+
+func (in Input) MarshalJSON() ([]byte, error) {
+	if in.CallsOnly {
+		return json.Marshal(struct {
+			UserPrompt *Prompt `json:"userPrompt"`
+			Answer     string  `json:"answer"`
+			TurnTools  []Tool  `json:"turnTools"`
+		}{in.UserPrompt, in.Answer, in.TurnTools})
+	}
+	type alias Input
+	return json.Marshal(alias(in))
 }
 
 type Context struct {
@@ -84,6 +105,7 @@ type Context struct {
 type Options struct {
 	ContextLimit int
 	Unbounded    bool
+	CallsOnly    bool
 }
 
 const (
@@ -171,7 +193,11 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 	if err != nil {
 		return nil, err
 	}
+	if options.CallsOnly && kind == "stop" {
+		answer = messageText(target.Blocks)
+	}
 	input := newInput(kind, answer, target.E.Timestamp)
+	input.CallsOnly = options.CallsOnly
 	if start < len(rows) {
 		input.TurnLine = rows[start].Line
 	}
@@ -185,7 +211,7 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 	if limit <= 0 {
 		limit = DefaultContextLimit
 	}
-	if answerWordCount <= largeAnswerWordThreshold {
+	if answerWordCount <= largeAnswerWordThreshold && !options.CallsOnly {
 		turnLimit = shortAnswerTurnToolsLimit
 	} else {
 		limit = min(limit, longAnswerContextLimit)
@@ -195,6 +221,9 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if options.CallsOnly {
+		return input, nil
 	}
 	if err := appendContext(ctx, input, rows, results, start, answer, words, matcher, limit, options.Unbounded); err != nil {
 		return nil, err
@@ -354,42 +383,26 @@ func messageText(blocks []block) string {
 
 func isSend(name string) bool { return name == "SendMessage" || name == "SendToProject" }
 
+// A human message, including a delivered queued_command, starts a new span.
+// A peer message in a user record starts one too; peer attachments and task
+// notifications are deliveries within the current span, even across turn_duration.
+// Queue operations are only enqueues; tools start at the delivered message.
 func turnStart(rows []row, line int) (int, error) {
-	lastEnd := -1
+	start := 0
 	for i := range rows {
 		r := &rows[i]
 		if r.Line >= line {
 			break
 		}
-		if r.E.Type == "system" && r.E.Subtype == "turn_duration" {
-			lastEnd = i
-		}
-	}
-	start := lastEnd + 1
-	found := false
-	for i := start; i < len(rows) && rows[i].Line < line; i++ {
-		begins, err := beginsTurn(&rows[i])
+		begins, err := beginsTurn(r)
 		if err != nil {
-			return 0, fmt.Errorf("classify transcript line %d as turn start: %w", rows[i].Line, err)
+			return 0, fmt.Errorf("classify transcript line %d as turn start: %w", r.Line, err)
 		}
-		if !begins {
-			continue
-		}
-		if !found || earlierEvent(rows[i], rows[start]) {
+		if begins {
 			start = i
-			found = true
 		}
 	}
 	return start, nil
-}
-
-func earlierEvent(a, b row) bool {
-	ta, errA := time.Parse(time.RFC3339Nano, a.E.Timestamp)
-	tb, errB := time.Parse(time.RFC3339Nano, b.E.Timestamp)
-	if errA == nil && errB == nil {
-		return ta.Before(tb)
-	}
-	return a.Line < b.Line
 }
 
 func newInput(kind, answer, answerTime string) *Input {
@@ -458,6 +471,13 @@ func appendCallTools(ctx context.Context, out *Input, r *row, rows []row, result
 		t, err := toolFromCall(ctx, r, b, rows, results, index, line, words, matcher, unbounded)
 		if err != nil {
 			return err
+		}
+		if out.CallsOnly {
+			t.callsOnly = true
+			t.Output, t.fullOutput = "", ""
+			t.outputWords = nil
+			t.OutputLength, t.ExitCode, t.IsError = 0, nil, nil
+			t.relevant = matches(t.Input, words)
 		}
 		out.TurnTools = append(out.TurnTools, t)
 	}
@@ -805,7 +825,7 @@ func beginsTurn(r *row) (bool, error) {
 		return true, nil
 	}
 	if r.E.Type == "attachment" {
-		return beginsAttachmentTurn(r), nil
+		return r.E.Attachment.Type == "queued_command" && r.E.Attachment.Origin.Kind == "human", nil
 	}
 	if r.E.Type != "user" {
 		return false, nil
@@ -813,14 +833,12 @@ func beginsTurn(r *row) (bool, error) {
 	return beginsUserTurn(r)
 }
 
-func beginsAttachmentTurn(r *row) bool {
-	kind := r.E.Attachment.Origin.Kind
-	return r.E.Attachment.CommandMode == "task-notification" || (r.E.Attachment.Type == "queued_command" && (kind == "human" || kind == "peer" || kind == "task-notification"))
-}
-
 func beginsUserTurn(r *row) (bool, error) {
-	if r.E.Origin.Kind == "peer" || r.E.Origin.Kind == "task-notification" {
+	if r.E.Origin.Kind == "peer" {
 		return true, nil
+	}
+	if r.E.Origin.Kind == "task-notification" {
+		return false, nil
 	}
 	if r.E.IsMeta || (r.E.Origin.Kind != "" && r.E.Origin.Kind != "human") {
 		return false, nil

@@ -213,16 +213,7 @@ func TestBuildInputFixtures(t *testing.T) {
 			t.Fatalf("prompt=%+v", got.UserPrompt)
 		}
 	})
-	t.Run("task notification begins turn", func(t *testing.T) {
-		p := fixture(t, ev("assistant", "t1", []any{map[string]any{"type": "text", "text": "старый"}}), map[string]any{"type": "attachment", "timestamp": "t2", "attachment": map[string]any{"type": "queued_command", "commandMode": "task-notification", "prompt": []any{map[string]any{"type": "text", "text": "задача "}, map[string]any{"type": "text", "text": "завершилась"}}}}, ev("assistant", "t3", []any{map[string]any{"type": "text", "text": "ответ задачи"}}))
-		got, e := BuildInput(p, 3, Options{})
-		if e != nil {
-			t.Fatal(e)
-		}
-		if got.Answer != "ответ задачи" || got.UserPrompt == nil || strings.Join(strings.Fields(got.UserPrompt.Text), " ") != "задача завершилась" || got.Context.PreviousAnswer != "старый" {
-			t.Fatalf("%+v", got)
-		}
-	})
+
 }
 
 func TestAnswerWordsKeepSubstringMatchesAlongsideExactTokens(t *testing.T) {

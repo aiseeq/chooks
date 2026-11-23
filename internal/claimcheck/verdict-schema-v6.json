@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["final","sourced","evidence","marked"],"properties":{"final":{"type":"string"},"sourced":{"type":"boolean"},"evidence":{"type":"string"},"marked":{"type":"boolean"}}}

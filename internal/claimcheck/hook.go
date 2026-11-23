@@ -88,8 +88,10 @@ type Hook struct {
 	SlotPoll time.Duration
 	// Budget — срок судьи вместе с ожиданием места
 	Budget time.Duration
-	Now    func() time.Time
-	Warn   func(msg string, args ...any)
+	// Build overrides input construction when provided.
+	Build func(context.Context, string, int, Options) (*Input, error)
+	Now   func() time.Time
+	Warn  func(msg string, args ...any)
 	// Notify — уведомление на рабочий стол о сбоях подряд; nil — без него
 	Notify func(title, message string) error
 }
@@ -165,7 +167,7 @@ const (
 
 // transcriptWait — сколько ждать, пока транскрипт догонит вход хука:
 // последний ответ или вызов письма ещё могут быть не дописаны
-const transcriptWait = 3 * time.Second
+const transcriptWait = 15 * time.Second
 
 // Stop судит ответ в конце хода. Второй ответ после блока (stop_hook_active)
 // судье не идёт: один круг на ход, факт второго ответа — в журнал
@@ -412,43 +414,83 @@ func failReason(ctx context.Context, err error) string {
 // входа Stop: ждём, пока последний ответ в нём совпадёт с last_assistant_message
 func (h Hook) stopInput(ctx context.Context, event StopEvent) (*Input, error) {
 	want := normalizeSpace(event.LastMessage)
-	return h.waitLine(ctx, event.TranscriptPath, func(path string) (int, bool, error) {
-		line, text, err := lastAnswerLine(path)
-		if err != nil || line == 0 {
-			return line, false, err
-		}
-		got := normalizeSpace(text)
-		return line, got != "" && (strings.Contains(want, got) || strings.Contains(got, want)), nil
+	return h.waitLine(ctx, event.TranscriptPath, true, func(r *row) bool {
+		got := normalizeSpace(messageText(r.Blocks))
+		return got != "" && (strings.Contains(want, got) || strings.Contains(got, want))
 	})
 }
 
 // sendInput — вход судьи на вызове письма: строка с tool_use этого вызова
 func (h Hook) sendInput(ctx context.Context, event SendEvent) (*Input, error) {
-	return h.waitLine(ctx, event.TranscriptPath, func(path string) (int, bool, error) {
-		line, err := sendCallLine(path, event.ToolUseID, event.Text)
-		return line, line > 0, err
+	return h.waitLine(ctx, event.TranscriptPath, false, func(r *row) bool {
+		for i := range r.Blocks {
+			b := &r.Blocks[i]
+			if b.Type != "tool_use" || !isSend(b.Name) {
+				continue
+			}
+			if event.ToolUseID != "" && b.ID == event.ToolUseID {
+				return true
+			}
+			if event.ToolUseID == "" {
+				if message, err := stringField(b.Input, "message"); err == nil && message == event.Text {
+					return true
+				}
+			}
+		}
+		return false
 	})
 }
 
-func (h Hook) waitLine(ctx context.Context, path string, find func(string) (int, bool, error)) (*Input, error) {
+func (h Hook) waitLine(ctx context.Context, path string, latest bool, find func(*row) bool) (*Input, error) {
 	if path == "" {
 		return nil, errors.New("no transcript path in hook input")
 	}
-	deadline := time.Now().Add(transcriptWait)
+	wait := transcriptWait
+	if deadline, ok := ctx.Deadline(); ok {
+		if third := time.Until(deadline) / 3; third < wait {
+			wait = third
+		}
+	}
+	if wait <= 0 {
+		return nil, ctx.Err()
+	}
+	deadline := time.Now().Add(wait)
+	cursor := transcriptCursor{}
+	lastLine := 0
+	found := 0
 	for {
-		line, ok, err := find(path)
+		err := scanTranscriptTail(path, &cursor, func(r *row) {
+			if latest && messageText(r.Blocks) != "" {
+				found = 0
+			}
+			if find(r) {
+				found = r.Line
+			}
+		})
+		lastLine = cursor.line
 		if err != nil {
 			return nil, err
 		}
-		if ok {
-			input, err := BuildInput(path, line, Options{})
-			if err != nil {
-				return nil, err
+		if found > 0 {
+			build := h.Build
+			if build == nil {
+				build = BuildInputContext
 			}
-			return input, nil
+			type result struct {
+				input *Input
+				err   error
+			}
+			done := make(chan result, 1)
+			go func() { input, err := build(ctx, path, found, Options{}); done <- result{input, err} }()
+			select {
+			case got := <-done:
+				return got.input, got.err
+			case <-ctx.Done():
+				return nil, fmt.Errorf("build claim-check input: %w", ctx.Err())
+			}
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("transcript %s has no matching event yet (last candidate line %d)", path, line)
+			return nil, fmt.Errorf("transcript %s has no matching event yet (last candidate line %d)", path, lastLine)
 		}
 		select {
 		case <-ctx.Done():
@@ -456,6 +498,56 @@ func (h Hook) waitLine(ctx context.Context, path string, find func(string) (int,
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
+}
+
+type transcriptCursor struct {
+	offset int64
+	line   int
+}
+
+// scanTranscriptTail consumes only complete JSONL records appended since the
+// prior pass. The offset stays at the start of an incomplete trailing record.
+func scanTranscriptTail(path string, cursor *transcriptCursor, fn func(*row)) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open transcript: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Seek(cursor.offset, 0); err != nil {
+		return fmt.Errorf("seek transcript: %w", err)
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat transcript: %w", err)
+	}
+	var consumed int64
+	for scanner.Scan() {
+		data := scanner.Bytes()
+		lineBytes := int64(len(data)) + 1
+		if cursor.offset+consumed+lineBytes > info.Size() {
+			break
+		}
+		consumed += lineBytes
+		cursor.line++
+		if !bytes.Contains(data, []byte(`"assistant"`)) {
+			continue
+		}
+		var e event
+		if json.Unmarshal(data, &e) != nil || e.Type != "assistant" {
+			continue
+		}
+		blocks, err := parseBlocks(e.Message.Content)
+		if err == nil {
+			fn(&row{Line: cursor.line, E: e, Blocks: blocks})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read transcript: %w", err)
+	}
+	cursor.offset += consumed
+	return nil
 }
 
 // lastAnswerLine — номер и текст последней строки ответа агента с текстом

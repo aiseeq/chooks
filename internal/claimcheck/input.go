@@ -4,13 +4,16 @@ package claimcheck
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/aiseeq/akit/secretmask"
@@ -45,9 +48,21 @@ type Tool struct {
 	relevant     bool
 	// fullInput and fullOutput are the masked, uncropped texts: every refit crops
 	// from them, so the crop marker counts the real length.
-	fullInput   string
-	fullOutput  string
-	answerWords []string
+	fullInput      string
+	fullOutput     string
+	answerWords    []string
+	cropWords      []string
+	outputLines    []string
+	outputWords    [][]string
+	outputLengths  []int
+	outputRunes    int
+	inputLines     []string
+	inputWords     [][]string
+	inputLengths   []int
+	inputRunes     int
+	matcher        *wordMatcher
+	positions      map[int]map[string]int
+	inputPositions map[int]map[string]int
 }
 
 func (t Tool) MarshalJSON() ([]byte, error) {
@@ -77,7 +92,7 @@ const (
 	shortAnswerTurnToolsLimit  = 11500
 	longAnswerContextLimit     = 10000
 	largeAnswerWordThreshold   = 250
-	shortAnswerInputCharLimit  = 24500
+	shortAnswerInputCharLimit  = 24300
 	toolInputCharLimit         = 300
 	toolOutputCharLimit        = 1600
 	lastTurnToolsKept          = 5
@@ -133,11 +148,19 @@ type row struct {
 
 // BuildInput builds the judge input at the physical, one-based JSONL line.
 func BuildInput(path string, line int, options Options) (*Input, error) {
+	return BuildInputContext(context.Background(), path, line, options)
+}
+
+// BuildInputContext builds the judge input and stops when ctx is canceled.
+func BuildInputContext(ctx context.Context, path string, line int, options Options) (*Input, error) {
 	if line < 1 {
 		return nil, fmt.Errorf("line must be positive")
 	}
-	rows, err := readRows(path, line)
+	rows, err := readRowsContext(ctx, path, line)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	start, err := turnStart(rows, line)
@@ -153,6 +176,8 @@ func BuildInput(path string, line int, options Options) (*Input, error) {
 		input.TurnLine = rows[start].Line
 	}
 	words := answerWords(answer)
+	matcher := newWordMatcher(words)
+	results := indexToolResults(rows)
 	input.AnswerTime = prefixTime(rows, line, input.AnswerTime)
 	turnLimit := turnToolsCharLimit
 	limit := options.ContextLimit
@@ -164,10 +189,16 @@ func BuildInput(path string, line int, options Options) (*Input, error) {
 	} else {
 		limit = min(limit, longAnswerContextLimit)
 	}
-	if err := appendTurn(input, rows, start, line, answer, options.Unbounded, turnLimit); err != nil {
+	if err := appendTurn(ctx, input, rows, results, start, line, answer, words, matcher, options.Unbounded, turnLimit); err != nil {
 		return nil, err
 	}
-	if err := appendContext(input, rows, start, answer, limit, options.Unbounded); err != nil {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := appendContext(ctx, input, rows, results, start, answer, words, matcher, limit, options.Unbounded); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if !options.Unbounded && len(words) <= largeAnswerWordThreshold {
@@ -185,7 +216,7 @@ func BuildInput(path string, line int, options Options) (*Input, error) {
 			}
 			limit = reduced
 			input.Context = Context{}
-			if err := appendContext(input, rows, start, answer, limit, false); err != nil {
+			if err := appendContext(ctx, input, rows, results, start, answer, words, matcher, limit, false); err != nil {
 				return nil, err
 			}
 			if limit == 0 {
@@ -205,6 +236,10 @@ func inputJSONSize(input *Input) (int, error) {
 }
 
 func readRows(path string, line int) ([]row, error) {
+	return readRowsContext(context.Background(), path, line)
+}
+
+func readRowsContext(ctx context.Context, path string, line int) ([]row, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open transcript: %w", err)
@@ -214,6 +249,11 @@ func readRows(path string, line int) ([]row, error) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
 	for n := 1; scanner.Scan(); n++ {
+		if n&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if n > line {
 			break
 		}
@@ -366,8 +406,7 @@ func prefixTime(rows []row, line int, answerTime string) string {
 	return answerTime
 }
 
-func appendTurn(out *Input, rows []row, start, line int, answer string, unbounded bool, limit int) error {
-	words := answerWords(answer)
+func appendTurn(ctx context.Context, out *Input, rows []row, results map[string]toolResultRef, start, line int, answer string, words []string, matcher *wordMatcher, unbounded bool, limit int) error {
 	if start >= 0 && start < len(rows) {
 		p, hasPrompt, err := userPrompt(&rows[start])
 		if err != nil {
@@ -383,18 +422,21 @@ func appendTurn(out *Input, rows []row, start, line int, answer string, unbounde
 		out.Attachments = append(out.Attachments, attachments...)
 	}
 	for i := start; i < len(rows) && rows[i].Line <= line; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		r := &rows[i]
 		if r.Line < line && r.E.Timestamp != "" {
 			out.LastEventTime = r.E.Timestamp
 		}
 		if r.E.Type == "assistant" {
-			if err := appendCallTools(out, r, rows, i, line, words, unbounded); err != nil {
+			if err := appendCallTools(ctx, out, r, rows, results, i, line, words, matcher, unbounded); err != nil {
 				return err
 			}
 		}
 	}
 	if !unbounded {
-		tools, err := boundTools(out.TurnTools, answer, limit)
+		tools, err := boundToolsContext(ctx, out.TurnTools, answer, limit)
 		if err != nil {
 			return err
 		}
@@ -403,13 +445,16 @@ func appendTurn(out *Input, rows []row, start, line int, answer string, unbounde
 	return nil
 }
 
-func appendCallTools(out *Input, r *row, rows []row, index, line int, words []string, unbounded bool) error {
+func appendCallTools(ctx context.Context, out *Input, r *row, rows []row, results map[string]toolResultRef, index, line int, words []string, matcher *wordMatcher, unbounded bool) error {
 	for j := range r.Blocks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		b := &r.Blocks[j]
 		if b.Type != "tool_use" {
 			continue
 		}
-		t, err := toolFromCall(r, b, rows, index, line, words, unbounded)
+		t, err := toolFromCall(ctx, r, b, rows, results, index, line, words, matcher, unbounded)
 		if err != nil {
 			return err
 		}
@@ -418,28 +463,47 @@ func appendCallTools(out *Input, r *row, rows []row, index, line int, words []st
 	return nil
 }
 
-func appendContext(out *Input, rows []row, start int, answer string, limit int, unbounded bool) error {
+func appendContext(ctx context.Context, out *Input, rows []row, results map[string]toolResultRef, start int, answer string, words []string, matcher *wordMatcher, limit int, unbounded bool) error {
 	priorCalls := make(map[string]*block)
-	words := answerWords(answer)
+	type recentCall struct{ rowIndex, blockIndex int }
+	recent := make([]recentCall, 0, maxContextToolCalls)
 	for i := range start {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		r := &rows[i]
 		if r.E.Type == "assistant" {
 			text := messageText(r.Blocks)
 			if text != "" {
 				out.Context.PreviousAnswer = mask(text)
 			}
-			if err := addPriorCalls(out, r, rows, i, priorCalls, words, unbounded); err != nil {
-				return err
+			for j := range r.Blocks {
+				if r.Blocks[j].Type != "tool_use" {
+					continue
+				}
+				priorCalls[r.Blocks[j].ID] = &r.Blocks[j]
+				recent = append(recent, recentCall{i, j})
+				if len(recent) > maxContextToolCalls {
+					recent = recent[1:]
+				}
 			}
 		}
 	}
-	if len(out.Context.RecentTools) > maxContextToolCalls {
-		out.Context.RecentTools = out.Context.RecentTools[len(out.Context.RecentTools)-maxContextToolCalls:]
+	for _, call := range recent {
+		r := &rows[call.rowIndex]
+		tool, err := toolFromCall(ctx, r, &r.Blocks[call.blockIndex], rows, results, call.rowIndex, r.Line, words, matcher, unbounded)
+		if err != nil {
+			return err
+		}
+		if !unbounded {
+			tool.Output = excerptWithWordsCached(tool.fullOutput, words, contextRecentOutputLimit, tool.matcher, tool.positions)
+		}
+		out.Context.RecentTools = append(out.Context.RecentTools, tool)
 	}
 	if !unbounded {
 		out.Context.PreviousAnswer = excerpt(out.Context.PreviousAnswer, contextPreviousAnswerLimit)
 	}
-	if err := appendMatchingTools(out, rows, start, priorCalls, answer, limit, unbounded); err != nil {
+	if err := appendMatchingTools(ctx, out, rows, start, priorCalls, answer, limit, unbounded); err != nil {
 		return err
 	}
 	if !unbounded {
@@ -448,33 +512,18 @@ func appendContext(out *Input, rows []row, start int, answer string, limit int, 
 	return nil
 }
 
-func addPriorCalls(out *Input, r *row, rows []row, index int, calls map[string]*block, words []string, unbounded bool) error {
-	for j := range r.Blocks {
-		b := &r.Blocks[j]
-		if b.Type != "tool_use" {
-			continue
-		}
-		calls[b.ID] = b
-		tool, err := toolFromCall(r, b, rows, index, r.Line, words, unbounded)
-		if err != nil {
-			return err
-		}
-		if !unbounded {
-			tool.Output = excerptWithWords(tool.fullOutput, words, contextRecentOutputLimit)
-		}
-		out.Context.RecentTools = append(out.Context.RecentTools, tool)
-	}
-	return nil
-}
-
-func appendMatchingTools(out *Input, rows []row, start int, calls map[string]*block, answer string, limit int, unbounded bool) error {
+func appendMatchingTools(ctx context.Context, out *Input, rows []row, start int, calls map[string]*block, answer string, limit int, unbounded bool) error {
 	words := answerWords(answer)
+	matcher := newWordMatcher(words)
 	var candidates []Tool
 	for i := range start {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		r := &rows[i]
 		for j := range r.Blocks {
 			b := &r.Blocks[j]
-			tool, _, ok, err := matchingTool(r, b, calls, words, int(^uint(0)>>1), true)
+			tool, _, ok, err := matchingTool(ctx, r, b, calls, words, matcher, int(^uint(0)>>1), true)
 			if err != nil {
 				return err
 			}
@@ -487,10 +536,22 @@ func appendMatchingTools(out *Input, rows []row, start int, calls map[string]*bl
 		out.Context.MatchingTools = append(out.Context.MatchingTools, candidates...)
 		return nil
 	}
+	fullWords := make([][]string, len(candidates))
+	minimumSizes := make([]int, len(candidates))
+	for i, tool := range candidates {
+		fullWords[i] = wordsVisibleInTool(Tool{Input: tool.fullInput, Output: tool.fullOutput}, words)
+		minimum, err := toolsJSONSize([]Tool{{Name: tool.Name}})
+		if err != nil {
+			return err
+		}
+		minimumSizes[i] = minimum
+	}
 	selected := make([]bool, len(candidates))
-	remaining := make(map[string]bool, len(words))
-	for _, word := range words {
-		remaining[word] = true
+	remaining := make(map[string]bool)
+	for _, visible := range fullWords {
+		for _, word := range visible {
+			remaining[word] = true
+		}
 	}
 	for _, tool := range out.Context.RecentTools {
 		for _, word := range wordsVisibleInTool(tool, words) {
@@ -506,12 +567,42 @@ func appendMatchingTools(out *Input, rows []row, start int, calls map[string]*bl
 		available := limit - currentSize - 32
 		best, bestScore, bestSize := -1, 0, 0
 		var bestTool Tool
+		unseen := unseenWords(words, remaining)
 		for i := range candidates {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if selected[i] {
 				continue
 			}
+			canAdd := false
+			for _, word := range fullWords[i] {
+				if remaining[word] {
+					canAdd = true
+					break
+				}
+			}
+			if !canAdd {
+				selected[i] = true
+				continue
+			}
 			candidate := candidates[i]
-			candidate.answerWords = unseenWords(words, remaining)
+			candidate.answerWords = unseen
+			if available < minimumSizes[i] {
+				selected[i] = true
+				continue
+			}
+			if candidate.outputLines == nil {
+				if err := indexToolOutput(ctx, &candidate); err != nil {
+					return err
+				}
+			}
+			if candidate.inputLines == nil {
+				if err := indexToolInput(ctx, &candidate); err != nil {
+					return err
+				}
+			}
+			candidates[i] = candidate
 			fit, ok, err := fitContextTool(candidate, available)
 			if err != nil {
 				return err
@@ -563,10 +654,20 @@ func fitContextTool(tool Tool, budget int) (Tool, bool, error) {
 	if budget <= 0 {
 		return Tool{}, false, nil
 	}
+	if len(tool.cropWords) > 0 && sameWords(tool.answerWords, tool.cropWords) {
+		size, err := toolsJSONSize([]Tool{tool})
+		if err != nil {
+			return Tool{}, false, err
+		}
+		if size <= budget {
+			return tool, true, nil
+		}
+	}
+	tool.cropWords = nil
 	inputLimit, outputLimit := toolInputCharLimit, contextOutputCharLimit
 	for {
-		tool.Input = excerptWithWords(tool.fullInput, tool.answerWords, inputLimit)
-		tool.Output = excerptWithWords(tool.fullOutput, tool.answerWords, outputLimit)
+		tool.Input = toolInputExcerpt(tool, inputLimit)
+		tool.Output = toolOutputExcerpt(tool, outputLimit)
 		size, err := toolsJSONSize([]Tool{tool})
 		if err != nil {
 			return Tool{}, false, err
@@ -588,7 +689,21 @@ func fitContextTool(tool Tool, budget int) (Tool, bool, error) {
 	}
 }
 
-func matchingTool(r *row, b *block, calls map[string]*block, words []string, budget int, unbounded bool) (Tool, string, bool, error) {
+func toolInputExcerpt(tool Tool, limit int) string {
+	if tool.inputLines == nil {
+		return excerptWithWordsCached(tool.fullInput, tool.answerWords, limit, tool.matcher, tool.inputPositions)
+	}
+	return excerptWithWordsIndexed(tool.fullInput, tool.answerWords, limit, tool.inputLines, tool.inputWords, tool.inputLengths, tool.inputRunes, tool.matcher, tool.inputPositions)
+}
+
+func toolOutputExcerpt(tool Tool, limit int) string {
+	if tool.outputLines == nil {
+		return excerptWithWordsCached(tool.fullOutput, tool.answerWords, limit, tool.matcher, tool.positions)
+	}
+	return excerptWithWordsIndexed(tool.fullOutput, tool.answerWords, limit, tool.outputLines, tool.outputWords, tool.outputLengths, tool.outputRunes, tool.matcher, tool.positions)
+}
+
+func matchingTool(ctx context.Context, r *row, b *block, calls map[string]*block, words []string, matcher *wordMatcher, budget int, unbounded bool) (Tool, string, bool, error) {
 	if b.Type != "tool_result" || budget <= 0 {
 		return Tool{}, "", false, nil
 	}
@@ -596,7 +711,11 @@ func matchingTool(r *row, b *block, calls map[string]*block, words []string, bud
 	if err != nil {
 		return Tool{}, "", false, err
 	}
-	if !matches(text, words) {
+	matched, err := matcher.containsAny(ctx, text)
+	if err != nil {
+		return Tool{}, "", false, err
+	}
+	if !matched {
 		return Tool{}, "", false, nil
 	}
 	name, input := "tool", ""
@@ -608,8 +727,54 @@ func matchingTool(r *row, b *block, calls map[string]*block, words []string, bud
 	if unbounded {
 		outputLimit = utf8.RuneCountInString(text)
 	}
-	tool := Tool{Time: r.E.Timestamp, Name: name, Input: input, OutputLength: utf8.RuneCountInString(text), Output: mask(excerptWithWords(text, words, outputLimit)), fullInput: input, fullOutput: mask(text), answerWords: words}
+	maskedOutput := mask(text)
+	outputLines, outputWords, outputLengths := []string(nil), [][]string(nil), []int(nil)
+	if !unbounded {
+		outputLines = splitExcerptLines(maskedOutput)
+		outputWords, err = answerLineWords(ctx, outputLines, matcher)
+		if err != nil {
+			return Tool{}, "", false, err
+		}
+		outputLengths = make([]int, len(outputLines))
+		for i, line := range outputLines {
+			outputLengths[i] = utf8.RuneCountInString(line)
+		}
+	}
+	positions := make(map[int]map[string]int)
+	inputPositions := make(map[int]map[string]int)
+	outputRunes := utf8.RuneCountInString(maskedOutput)
+	tool := Tool{Time: r.E.Timestamp, Name: name, Input: input, OutputLength: utf8.RuneCountInString(text), Output: excerptWithWordsIndexed(maskedOutput, words, outputLimit, outputLines, outputWords, outputLengths, outputRunes, matcher, positions), fullInput: input, fullOutput: maskedOutput, answerWords: words, outputLines: outputLines, outputWords: outputWords, outputLengths: outputLengths, outputRunes: outputRunes, matcher: matcher, positions: positions, inputPositions: inputPositions}
 	return tool, tool.Output, true, nil
+}
+
+func indexToolOutput(ctx context.Context, tool *Tool) error {
+	tool.outputLines = splitExcerptLines(tool.fullOutput)
+	indexed, err := answerLineWords(ctx, tool.outputLines, tool.matcher)
+	if err != nil {
+		return err
+	}
+	tool.outputWords = indexed
+	tool.outputLengths = make([]int, len(tool.outputLines))
+	for i, line := range tool.outputLines {
+		tool.outputLengths[i] = utf8.RuneCountInString(line)
+	}
+	tool.outputRunes = utf8.RuneCountInString(tool.fullOutput)
+	return nil
+}
+
+func indexToolInput(ctx context.Context, tool *Tool) error {
+	tool.inputLines = splitExcerptLines(tool.fullInput)
+	indexed, err := answerLineWords(ctx, tool.inputLines, tool.matcher)
+	if err != nil {
+		return err
+	}
+	tool.inputWords = indexed
+	tool.inputLengths = make([]int, len(tool.inputLines))
+	for i, line := range tool.inputLines {
+		tool.inputLengths[i] = utf8.RuneCountInString(line)
+	}
+	tool.inputRunes = utf8.RuneCountInString(tool.fullInput)
+	return nil
 }
 
 func laterTimestamp(a, b string) string {
@@ -870,7 +1035,29 @@ func hasAttachment(r *row) (bool, error) {
 	attachments, err := attachments(r)
 	return len(attachments) > 0, err
 }
-func toolFromCall(r *row, b *block, rows []row, index, end int, words []string, unbounded bool) (Tool, error) {
+
+type toolResultRef struct {
+	row   *row
+	block *block
+}
+
+func indexToolResults(rows []row) map[string]toolResultRef {
+	results := make(map[string]toolResultRef)
+	for i := range rows {
+		for j := range rows[i].Blocks {
+			b := &rows[i].Blocks[j]
+			if b.Type == "tool_result" {
+				if _, exists := results[b.ToolUseID]; !exists {
+					results[b.ToolUseID] = toolResultRef{row: &rows[i], block: b}
+				}
+			}
+		}
+	}
+	return results
+}
+
+func toolFromCall(ctx context.Context, r *row, b *block, rows []row, results map[string]toolResultRef, index, end int, words []string, matcher *wordMatcher, unbounded bool) (Tool, error) {
+	var err error
 	input := string(b.Input)
 	if b.Name == "Bash" {
 		var err error
@@ -883,26 +1070,44 @@ func toolFromCall(r *row, b *block, rows []row, index, end int, words []string, 
 	length := 0
 	var code *int
 	var iserr *bool
-	for j := index + 1; j < len(rows) && rows[j].Line <= end; j++ {
-		for k := range rows[j].Blocks {
-			rb := &rows[j].Blocks[k]
-			if rb.Type == "tool_result" && (rb.ToolUseID == b.ID || b.ID == "") {
-				var err error
-				out, err = plain(rb.Content)
-				if err != nil {
-					return Tool{}, fmt.Errorf("decode %s output: %w", b.Name, err)
+	result, ok := results[b.ID]
+	if b.ID != "" && ok && result.row.Line <= end && result.row.Line > r.Line {
+		out, err = plain(result.block.Content)
+		if err != nil {
+			return Tool{}, fmt.Errorf("decode %s output: %w", b.Name, err)
+		}
+		length = utf8.RuneCountInString(out)
+		e := result.block.IsError || result.row.E.IsError
+		iserr = &e
+		v, ok, err := nestedInt(result.row.E.ToolUseResult, "exit_code")
+		if err != nil {
+			return Tool{}, fmt.Errorf("decode %s exit code: %w", b.Name, err)
+		}
+		if ok {
+			code = &v
+		}
+	} else {
+	findResult:
+		for j := index + 1; j < len(rows) && rows[j].Line <= end; j++ {
+			for k := range rows[j].Blocks {
+				rb := &rows[j].Blocks[k]
+				if rb.Type == "tool_result" && (rb.ToolUseID == b.ID || b.ID == "") {
+					out, err := plain(rb.Content)
+					if err != nil {
+						return Tool{}, fmt.Errorf("decode %s output: %w", b.Name, err)
+					}
+					length = utf8.RuneCountInString(out)
+					e := rb.IsError || rows[j].E.IsError
+					iserr = &e
+					v, ok, err := nestedInt(rows[j].E.ToolUseResult, "exit_code")
+					if err != nil {
+						return Tool{}, fmt.Errorf("decode %s exit code: %w", b.Name, err)
+					}
+					if ok {
+						code = &v
+					}
+					break findResult
 				}
-				length = utf8.RuneCountInString(out)
-				e := rb.IsError || rows[j].E.IsError
-				iserr = &e
-				v, ok, err := nestedInt(rows[j].E.ToolUseResult, "exit_code")
-				if err != nil {
-					return Tool{}, fmt.Errorf("decode %s exit code: %w", b.Name, err)
-				}
-				if ok {
-					code = &v
-				}
-				break
 			}
 		}
 	}
@@ -912,7 +1117,44 @@ func toolFromCall(r *row, b *block, rows []row, index, end int, words []string, 
 	if unbounded {
 		inputLimit, outputLimit = len([]rune(maskedInput)), len([]rune(maskedOutput))
 	}
-	return Tool{Time: r.E.Timestamp, Name: b.Name, Input: excerptWithWords(maskedInput, words, inputLimit), OutputLength: length, Output: excerptWithWords(maskedOutput, words, outputLimit), ExitCode: code, IsError: iserr, relevant: matches(input, words) || matches(out, words), fullInput: maskedInput, fullOutput: maskedOutput, answerWords: words}, nil
+	outputLines := splitExcerptLines(maskedOutput)
+	outputWords, err := answerLineWords(ctx, outputLines, matcher)
+	if err != nil {
+		return Tool{}, err
+	}
+	outputLengths := make([]int, len(outputLines))
+	for i, line := range outputLines {
+		outputLengths[i] = utf8.RuneCountInString(line)
+	}
+	outputRunes := utf8.RuneCountInString(maskedOutput)
+	inputRunes := utf8.RuneCountInString(maskedInput)
+	var inputLines []string
+	var inputWords [][]string
+	var inputLengths []int
+	if !unbounded && inputRunes > inputLimit {
+		inputLines = splitExcerptLines(maskedInput)
+		inputWords, err = answerLineWords(ctx, inputLines, matcher)
+		if err != nil {
+			return Tool{}, err
+		}
+		inputLengths = make([]int, len(inputLines))
+		for i, line := range inputLines {
+			inputLengths[i] = utf8.RuneCountInString(line)
+		}
+	}
+	positions := make(map[int]map[string]int)
+	inputPositions := make(map[int]map[string]int)
+	var inputExcerpt string
+	var cropWords []string
+	if !unbounded {
+		cropWords = words
+	}
+	if inputLines != nil {
+		inputExcerpt = excerptWithWordsIndexed(maskedInput, words, inputLimit, inputLines, inputWords, inputLengths, inputRunes, matcher, inputPositions)
+	} else {
+		inputExcerpt = excerptWithWordsCached(maskedInput, words, inputLimit, matcher, inputPositions)
+	}
+	return Tool{Time: r.E.Timestamp, Name: b.Name, Input: inputExcerpt, OutputLength: length, Output: excerptWithWordsIndexed(maskedOutput, words, outputLimit, outputLines, outputWords, outputLengths, outputRunes, matcher, positions), ExitCode: code, IsError: iserr, relevant: matches(input, words) || hasLineWord(outputWords), fullInput: maskedInput, fullOutput: maskedOutput, answerWords: words, cropWords: cropWords, inputLines: inputLines, inputWords: inputWords, inputLengths: inputLengths, inputRunes: inputRunes, outputLines: outputLines, outputWords: outputWords, outputLengths: outputLengths, outputRunes: outputRunes, matcher: matcher, positions: positions, inputPositions: inputPositions}, nil
 }
 func plain(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
@@ -976,6 +1218,10 @@ func nestedInt(raw json.RawMessage, key string) (int, bool, error) {
 // before the answer always stay, sharing half the budget. Matching calls then
 // spend the remainder in order of how many not-yet-visible answer words they add.
 func boundTools(tools []Tool, answer string, budget int) ([]Tool, error) {
+	return boundToolsContext(context.Background(), tools, answer, budget)
+}
+
+func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget int) ([]Tool, error) {
 	if len(tools) == 0 {
 		return []Tool{}, nil
 	}
@@ -983,9 +1229,26 @@ func boundTools(tools []Tool, answer string, budget int) ([]Tool, error) {
 	bounded := make([]Tool, len(tools))
 	copy(bounded, tools)
 	for i := range bounded {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		t := &bounded[i]
 		t.relevant = t.relevant || matches(t.Input, words) || matches(t.Output, words)
 		t.answerWords = words
+	}
+	fullWords := make([][]string, len(bounded))
+	minimumSizes := make([]int, len(bounded))
+	for i, tool := range bounded {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		fullWords[i] = append(fullWords[i], cachedOutputWords(tool.outputWords)...)
+		fullWords[i] = append(fullWords[i], lineAnswerWords(tool.fullInput, words)...)
+		minimum, err := toolsJSONSize([]Tool{{Name: tool.Name}})
+		if err != nil {
+			return nil, err
+		}
+		minimumSizes[i] = minimum
 	}
 	selected := make([]bool, len(bounded))
 	reserve := budget / 2
@@ -993,13 +1256,13 @@ func boundTools(tools []Tool, answer string, budget int) ([]Tool, error) {
 	if err := keepLastTools(bounded, selected, last, reserve); err != nil {
 		return nil, err
 	}
+	currentSize, err := toolsJSONSize(toolsWithSkipped(bounded, selected))
+	if err != nil {
+		return nil, err
+	}
 	keep := func(i, limit int) error {
 		if selected[i] {
 			return nil
-		}
-		size, err := toolsJSONSize(toolsWithSkipped(bounded, selected))
-		if err != nil {
-			return err
 		}
 		// Keeping a call inside a gap at worst splits one skip marker into two:
 		// the call, one more marker and two commas. Counts only shrink otherwise.
@@ -1007,16 +1270,26 @@ func boundTools(tools []Tool, answer string, budget int) ([]Tool, error) {
 		if err != nil {
 			return err
 		}
-		fit, ok, err := fitTool(bounded[i], limit-size-2-marker)
+		available := limit - currentSize - 2 - marker
+		if available < minimumSizes[i] {
+			return nil
+		}
+		fit, ok, err := fitTool(bounded[i], available)
 		if err != nil || !ok {
 			return err
 		}
 		bounded[i], selected[i] = fit, true
+		currentSize, err = toolsJSONSize(toolsWithSkipped(bounded, selected))
+		if err != nil {
+			return err
+		}
 		return nil
 	}
-	remaining := make(map[string]bool, len(words))
-	for _, word := range words {
-		remaining[word] = true
+	remaining := make(map[string]bool)
+	for _, visible := range fullWords {
+		for _, word := range visible {
+			remaining[word] = true
+		}
 	}
 	for i := range bounded {
 		if selected[i] {
@@ -1038,12 +1311,31 @@ func boundTools(tools []Tool, answer string, budget int) ([]Tool, error) {
 		available := budget - currentSize - 2 - marker
 		best, bestScore, bestSize := -1, 0, 0
 		var bestFit Tool
+		unseen := unseenWords(words, remaining)
 		for i := range bounded {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if selected[i] || attempted[i] || !bounded[i].relevant {
 				continue
 			}
+			canAdd := false
+			for _, word := range fullWords[i] {
+				if remaining[word] {
+					canAdd = true
+					break
+				}
+			}
+			if !canAdd {
+				attempted[i] = true
+				continue
+			}
 			candidate := bounded[i]
-			candidate.answerWords = unseenWords(words, remaining)
+			candidate.answerWords = unseen
+			if available < minimumSizes[i] {
+				attempted[i] = true
+				continue
+			}
 			fit, ok, err := fitTool(candidate, available)
 			if err != nil {
 				return nil, err
@@ -1074,9 +1366,16 @@ func boundTools(tools []Tool, answer string, budget int) ([]Tool, error) {
 			delete(remaining, word)
 		}
 	}
+	currentSize, err = toolsJSONSize(toolsWithSkipped(bounded, selected))
+	if err != nil {
+		return nil, err
+	}
 	// Keep any remaining answer-matching calls while there is room, then fill
 	// with earlier calls. Selection order does not affect transcript order.
 	for i := range bounded {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if bounded[i].relevant {
 			if err := keep(i, budget); err != nil {
 				return nil, err
@@ -1084,6 +1383,9 @@ func boundTools(tools []Tool, answer string, budget int) ([]Tool, error) {
 		}
 	}
 	for i := last - 1; i >= 0; i-- {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := keep(i, budget); err != nil {
 			return nil, err
 		}
@@ -1111,11 +1413,24 @@ func matchingWords(tool Tool, words []string) []string {
 
 func wordsVisibleInTool(tool Tool, words []string) []string {
 	input, output := strings.ToLower(tool.Input), strings.ToLower(tool.Output)
-	var found []string
-	for _, word := range words {
-		if strings.Contains(input, word) || strings.Contains(output, word) {
-			found = append(found, word)
+	seen := make(map[string]struct{})
+	visitWordTokens(input+"\n"+output, func(token string) {
+		if i := sort.SearchStrings(words, token); i < len(words) && words[i] == token {
+			seen[token] = struct{}{}
 		}
+	})
+	if len(seen) == 0 {
+		var found []string
+		for _, word := range words {
+			if strings.Contains(input, word) || strings.Contains(output, word) {
+				found = append(found, word)
+			}
+		}
+		return found
+	}
+	found := make([]string, 0, len(seen))
+	for word := range seen {
+		found = append(found, word)
 	}
 	return found
 }
@@ -1180,10 +1495,20 @@ func skippedMarkerSize(skipped int) (int, error) {
 // fitTool crops the call's input and output from their full texts, cutting the
 // longer allowance by the overflow until the call fits budget characters of JSON.
 func fitTool(tool Tool, budget int) (Tool, bool, error) {
+	if len(tool.cropWords) > 0 && sameWords(tool.answerWords, tool.cropWords) {
+		size, err := toolsJSONSize([]Tool{tool})
+		if err != nil {
+			return Tool{}, false, err
+		}
+		if size <= budget {
+			return tool, true, nil
+		}
+	}
+	tool.cropWords = nil
 	inputLimit, outputLimit := toolInputCharLimit, toolOutputCharLimit
 	for {
-		tool.Input = excerptWithWords(tool.fullInput, tool.answerWords, inputLimit)
-		tool.Output = excerptWithWords(tool.fullOutput, tool.answerWords, outputLimit)
+		tool.Input = toolInputExcerpt(tool, inputLimit)
+		tool.Output = toolOutputExcerpt(tool, outputLimit)
 		size, err := toolsJSONSize([]Tool{tool})
 		if err != nil {
 			return Tool{}, false, err
@@ -1201,6 +1526,18 @@ func fitTool(tool Tool, budget int) (Tool, bool, error) {
 			return Tool{}, false, nil
 		}
 	}
+}
+
+func sameWords(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func toolsWithSkipped(tools []Tool, selected []bool) []Tool {
@@ -1234,18 +1571,23 @@ func boundContext(c *Context, budget int) error {
 		return fmt.Errorf("encode context size: %w", err)
 	}
 	for utf8.RuneCount(encoded) > budget {
+		excess := utf8.RuneCount(encoded) - budget
+		shorten := func(s string) string {
+			r := []rune(s)
+			keep := max(len(r)-excess, 0)
+			if keep == len(r) && keep > 0 {
+				keep--
+			}
+			return string(r[:keep])
+		}
 		if c.PreviousAnswer != "" {
-			r := []rune(c.PreviousAnswer)
-			c.PreviousAnswer = string(r[:len(r)/2])
+			c.PreviousAnswer = shorten(c.PreviousAnswer)
 		} else if n := len(c.MatchingTools); n > 0 && c.MatchingTools[n-1].Output != "" {
-			r := []rune(c.MatchingTools[n-1].Output)
-			c.MatchingTools[n-1].Output = string(r[:len(r)/2])
+			c.MatchingTools[n-1].Output = shorten(c.MatchingTools[n-1].Output)
 		} else if n := len(c.MatchingTools); n > 0 && c.MatchingTools[n-1].Input != "" {
-			r := []rune(c.MatchingTools[n-1].Input)
-			c.MatchingTools[n-1].Input = string(r[:len(r)/2])
+			c.MatchingTools[n-1].Input = shorten(c.MatchingTools[n-1].Input)
 		} else if n := len(c.RecentTools); n > 0 && c.RecentTools[n-1].Input != "" {
-			r := []rune(c.RecentTools[n-1].Input)
-			c.RecentTools[n-1].Input = string(r[:len(r)/2])
+			c.RecentTools[n-1].Input = shorten(c.RecentTools[n-1].Input)
 		} else if n := len(c.MatchingTools); n > 0 {
 			c.MatchingTools = c.MatchingTools[:n-1]
 		} else if n := len(c.RecentTools); n > 0 {
@@ -1274,29 +1616,65 @@ func excerpt(s string, n int) string {
 // neighboring line on either side, then fills the remaining space with edges.
 // Omitted runs are explicit so the judge can tell a crop from absent evidence.
 func excerptWithWords(s string, words []string, limit int) string {
-	lines := strings.Split(s, "\n")
-	// Tool inputs are JSON. Preserve line-aware evidence inside JSON strings
-	// whose newlines are represented by the two literal characters \\ and n.
-	if len(lines) == 1 && strings.Contains(s, `\n`) {
-		lines = strings.Split(s, `\n`)
+	return excerptWithWordsCached(s, words, limit, nil, nil)
+}
+
+func excerptWithWordsCached(s string, words []string, limit int, matcher *wordMatcher, positions map[int]map[string]int) string {
+	return excerptWithWordsIndexed(s, words, limit, nil, nil, nil, -1, matcher, positions)
+}
+
+func excerptWithWordsIndexed(s string, words []string, limit int, cachedLines []string, indexed [][]string, cachedLengths []int, totalRunes int, matcher *wordMatcher, positions map[int]map[string]int) string {
+	lines := cachedLines
+	if lines != nil {
+		lines = append([]string(nil), lines...)
+	} else {
+		lines = splitExcerptLines(s)
 	}
 	if len(lines) <= 1 || limit <= 0 {
-		if len(lines) == 1 && limit > 0 && utf8.RuneCountInString(s) > limit && matches(s, words) {
-			return excerptAroundWords(s, words, limit)
+		if totalRunes < 0 {
+			totalRunes = utf8.RuneCountInString(s)
+		}
+		if len(lines) == 1 && limit > 0 && totalRunes > limit {
+			if matcher == nil {
+				matcher = newWordMatcher(words)
+			}
+			linePositions := positions[0]
+			if linePositions == nil {
+				linePositions = matcher.wordPositions(s)
+				if positions != nil {
+					positions[0] = linePositions
+				}
+			}
+			if len(linePositions) > 0 {
+				return excerptAroundWords(s, words, limit, matcher, positions, 0)
+			}
 		}
 		return excerpt(s, limit)
 	}
-	for i, line := range lines {
-		if utf8.RuneCountInString(line) > limit && matches(line, words) {
-			lines[i] = excerptAroundWords(line, words, max(limit-80, 1))
-		}
+	if totalRunes < 0 {
+		totalRunes = utf8.RuneCountInString(s)
 	}
-	if utf8.RuneCountInString(s) <= limit {
+	if totalRunes <= limit {
 		return s
 	}
-	evidence := make([]bool, len(lines))
+	if matcher == nil {
+		matcher = newWordMatcher(words)
+	}
+	lineWords := make([][]string, len(lines))
 	for i, line := range lines {
-		if matches(line, words) {
+		if i < len(indexed) {
+			lineWords[i] = intersectWords(indexed[i], words)
+		} else {
+			lineWords[i], _ = matcher.wordsInLine(context.Background(), line)
+		}
+		if utf8.RuneCountInString(line) > limit && len(lineWords[i]) > 0 {
+			lines[i] = excerptAroundWords(line, words, max(limit-80, 1), matcher, positions, i)
+			lineWords[i] = lineAnswerWords(lines[i], words)
+		}
+	}
+	evidence := make([]bool, len(lines))
+	for i := range lines {
+		if len(lineWords[i]) > 0 {
 			for j := max(0, i-1); j <= min(len(lines)-1, i+1); j++ {
 				evidence[j] = true
 			}
@@ -1305,6 +1683,15 @@ func excerptWithWords(s string, words []string, limit int) string {
 	selected := make([]bool, len(lines))
 	for i := range evidence {
 		selected[i] = evidence[i]
+	}
+	lineLengths := append([]int(nil), cachedLengths...)
+	if len(lineLengths) != len(lines) {
+		lineLengths = make([]int, len(lines))
+	}
+	for i := range lines {
+		if len(cachedLengths) != len(lines) || i >= len(cachedLines) || lines[i] != cachedLines[i] {
+			lineLengths[i] = utf8.RuneCountInString(lines[i])
+		}
 	}
 	render := func() string {
 		var out []string
@@ -1322,35 +1709,51 @@ func excerptWithWords(s string, words []string, limit int) string {
 		}
 		return strings.Join(out, "\n")
 	}
+	renderLength := func() int {
+		length := 0
+		for i := 0; i < len(lines); {
+			if selected[i] {
+				length += lineLengths[i]
+				i++
+				if i < len(lines) {
+					length++
+				}
+				continue
+			}
+			start := i
+			for i < len(lines) && !selected[i] {
+				i++
+			}
+			count := i - start
+			digits := 1
+			for n := count; n >= 10; n /= 10 {
+				digits++
+			}
+			length += utf8.RuneCountInString("[…  строк …]") + digits
+			if i < len(lines) {
+				length++
+			}
+		}
+		return length
+	}
 	// If evidence alone exceeds the cap, keep the line windows that add the most
 	// not-yet-visible answer words. This avoids spending the whole excerpt on an
 	// early cluster when later lines contain different evidence.
-	if utf8.RuneCountInString(render()) > limit {
+	if renderLength() > limit {
 		for i := range selected {
 			selected[i] = false
 		}
-		remaining := make(map[string]bool, len(words))
-		for _, word := range words {
-			remaining[word] = true
-		}
-		lineWords := make([][]string, len(lines))
-		for i, line := range lines {
-			lower := strings.ToLower(line)
-			for _, word := range words {
-				if strings.Contains(lower, word) {
-					lineWords[i] = append(lineWords[i], word)
-				}
+		remaining := make(map[string]bool)
+		for _, lineWords := range lineWords {
+			for _, word := range lineWords {
+				remaining[word] = true
 			}
 		}
 		windowWords := make([][]string, len(lines))
-		lineLengths := make([]int, len(lines))
 		for i := range lines {
-			lineLengths[i] = utf8.RuneCountInString(lines[i])
-			seen := make(map[string]bool)
 			for j := max(0, i-1); j <= min(len(lines)-1, i+1); j++ {
 				for _, word := range lineWords[j] {
-					if !seen[word] {
-						seen[word] = true
+					if !slices.Contains(windowWords[i], word) {
 						windowWords[i] = append(windowWords[i], word)
 					}
 				}
@@ -1394,23 +1797,22 @@ func excerptWithWords(s string, words []string, limit int) string {
 					added = append(added, j)
 				}
 			}
-			if utf8.RuneCountInString(render()) > limit {
+			if renderLength() > limit {
 				for _, j := range added {
 					selected[j] = false
 				}
 				if !selected[best] {
 					selected[best] = true
-					if utf8.RuneCountInString(render()) > limit {
+					if renderLength() > limit {
 						selected[best] = false
 						continue
 					}
 				}
 			}
-			for word := range remaining {
-				for j := from; j <= to; j++ {
-					if selected[j] && strings.Contains(strings.ToLower(lines[j]), word) {
+			for j := from; j <= to; j++ {
+				if selected[j] {
+					for _, word := range lineWords[j] {
 						delete(remaining, word)
-						break
 					}
 				}
 			}
@@ -1420,7 +1822,7 @@ func excerptWithWords(s string, words []string, limit int) string {
 	for _, i := range []int{0, len(lines) - 1} {
 		if !selected[i] {
 			selected[i] = true
-			if utf8.RuneCountInString(render()) > limit {
+			if renderLength() > limit {
 				selected[i] = false
 			}
 		}
@@ -1433,22 +1835,25 @@ func excerptWithWords(s string, words []string, limit int) string {
 	return excerpt(result, limit)
 }
 
-func excerptAroundWords(s string, words []string, limit int) string {
+func excerptAroundWords(s string, words []string, limit int, matcher *wordMatcher, positionsCache map[int]map[string]int, lineIndex int) string {
+	if matcher == nil {
+		matcher = newWordMatcher(words)
+	}
 	runes := []rune(s)
-	lower := strings.ToLower(s)
+	positions := positionsCache[lineIndex]
+	if positions == nil {
+		positions = matcher.wordPositions(s)
+		if positionsCache != nil {
+			positionsCache[lineIndex] = positions
+		}
+	}
 	type span struct {
 		start, end int
 		words      []string
 	}
 	var spans []span
-	positions := make(map[string]int, len(words))
 	for _, word := range words {
-		if _, exists := positions[word]; exists {
-			continue
-		}
-		if before, _, ok := strings.Cut(lower, word); ok {
-			position := utf8.RuneCountInString(before)
-			positions[word] = position
+		if position, ok := positions[word]; ok {
 			spans = append(spans, span{
 				start: max(0, position-20),
 				end:   min(len(runes), position+utf8.RuneCountInString(word)+20),
@@ -1460,7 +1865,7 @@ func excerptAroundWords(s string, words []string, limit int) string {
 		return excerpt(s, limit)
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
-	render := func(selected []bool, left, right int) string {
+	renderPicked := func(picked []int, left, right int) string {
 		var out strings.Builder
 		cursor := 0
 		writeGap := func(end int) {
@@ -1478,10 +1883,8 @@ func excerptAroundWords(s string, words []string, limit int) string {
 			out.WriteString(string(runes[:left]))
 			cursor = left
 		}
-		for i, item := range spans {
-			if !selected[i] {
-				continue
-			}
+		for _, i := range picked {
+			item := spans[i]
 			start, end := item.start, item.end
 			if start < left {
 				start = left
@@ -1512,12 +1915,25 @@ func excerptAroundWords(s string, words []string, limit int) string {
 		}
 		return out.String()
 	}
+	render := func(selected []bool, left, right int) string {
+		picked := make([]int, 0)
+		for i, keep := range selected {
+			if keep {
+				picked = append(picked, i)
+			}
+		}
+		return renderPicked(picked, left, right)
+	}
 	selected := make([]bool, len(spans))
 	remaining := make(map[string]bool, len(spans))
+	positionWords := make([]string, 0, len(positions))
 	for _, item := range spans {
 		remaining[item.words[0]] = true
+		positionWords = append(positionWords, item.words[0])
 	}
+	sort.Slice(positionWords, func(i, j int) bool { return positions[positionWords[i]] < positions[positionWords[j]] })
 	current := ""
+	picked := make([]int, 0)
 	for {
 		best, bestScore, bestText, bestCost := -1, 0, "", 0
 		currentLen := utf8.RuneCountInString(current)
@@ -1526,7 +1942,9 @@ func excerptAroundWords(s string, words []string, limit int) string {
 				continue
 			}
 			selected[i] = true
-			trial := render(selected, 0, len(runes))
+			trialPicked := append(append([]int(nil), picked...), i)
+			sort.Ints(trialPicked)
+			trial := renderPicked(trialPicked, 0, len(runes))
 			selected[i] = false
 			cost := utf8.RuneCountInString(trial) - currentLen
 			if cost <= 0 {
@@ -1536,8 +1954,9 @@ func excerptAroundWords(s string, words []string, limit int) string {
 				continue
 			}
 			score := 0
-			for word, position := range positions {
-				if remaining[word] && position >= item.start && position < item.end {
+			first := sort.Search(len(positionWords), func(j int) bool { return positions[positionWords[j]] >= item.start })
+			for j := first; j < len(positionWords) && positions[positionWords[j]] < item.end; j++ {
+				if remaining[positionWords[j]] {
 					score++
 				}
 			}
@@ -1549,11 +1968,12 @@ func excerptAroundWords(s string, words []string, limit int) string {
 			break
 		}
 		selected[best] = true
+		picked = append(picked, best)
+		sort.Ints(picked)
 		current = bestText
-		for word, position := range positions {
-			if position >= spans[best].start && position < spans[best].end {
-				delete(remaining, word)
-			}
+		first := sort.Search(len(positionWords), func(j int) bool { return positions[positionWords[j]] >= spans[best].start })
+		for j := first; j < len(positionWords) && positions[positionWords[j]] < spans[best].end; j++ {
+			delete(remaining, positionWords[j])
 		}
 	}
 	// Once evidence snippets have priority, use spare space for the edges.
@@ -1614,15 +2034,285 @@ var wordRE = regexp.MustCompile(`[\pL\pN_./-]{2,}`)
 
 func answerWords(s string) []string {
 	var a []string
+	seen := make(map[string]struct{})
 	for _, w := range wordRE.FindAllString(strings.ToLower(s), -1) {
 		if len([]rune(w)) >= 3 {
+			if _, ok := seen[w]; ok {
+				continue
+			}
+			seen[w] = struct{}{}
 			a = append(a, w)
 		}
 	}
+	sort.Strings(a)
 	return a
 }
+
+// lineAnswerWords uses token lookup for the common exact match case. The
+// fallback retains matches' substring behavior for unusual token boundaries.
+func lineAnswerWords(line string, words []string) []string {
+	lower := strings.ToLower(line)
+	seen := exactLineAnswerWords(lower, words)
+	// Exact token matches dominate ordinary output. Only run the substring
+	// compatibility path when no token matched, avoiding a words×tokens scan
+	// for every line in large answers.
+	if len(seen) == 0 {
+		for _, word := range words {
+			if strings.Contains(lower, word) {
+				seen = append(seen, word)
+			}
+		}
+	}
+	sort.Strings(seen)
+	return seen
+}
+
+func exactLineAnswerWords(line string, words []string) []string {
+	var found []string
+	visitWordTokens(line, func(token string) {
+		if i := sort.SearchStrings(words, token); i < len(words) && words[i] == token {
+			if !slices.Contains(found, token) {
+				found = append(found, token)
+			}
+		}
+	})
+	if len(found) == 0 {
+		return nil
+	}
+	sort.Strings(found)
+	return found
+}
+
+func visitWordTokens(s string, visit func(string)) {
+	start, count := -1, 0
+	for i, r := range s {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_' || r == '.' || r == '/' || r == '-' {
+			if start < 0 {
+				start = i
+			}
+			count++
+			continue
+		}
+		if start >= 0 && count >= 3 {
+			visit(s[start:i])
+		}
+		start, count = -1, 0
+	}
+	if start >= 0 && count >= 3 {
+		visit(s[start:])
+	}
+}
+
+func splitExcerptLines(s string) []string {
+	lines := strings.Split(s, "\n")
+	// JSON tool inputs can encode line breaks as two literal characters.
+	if len(lines) == 1 && strings.Contains(s, `\n`) {
+		lines = strings.Split(s, `\n`)
+	}
+	return lines
+}
+
+func answerLineWords(ctx context.Context, lines []string, matcher *wordMatcher) ([][]string, error) {
+	indexed := make([][]string, len(lines))
+	for i, line := range lines {
+		indexed[i] = exactLineAnswerWords(strings.ToLower(line), matcher.words)
+		if len(indexed[i]) > 0 {
+			continue
+		}
+		var err error
+		indexed[i], err = matcher.wordsInLine(ctx, line)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return indexed, nil
+}
+
+type wordNode struct {
+	next    map[byte]int
+	fail    int
+	outputs []string
+}
+
+type wordMatcher struct {
+	nodes []wordNode
+	words []string
+}
+
+func newWordMatcher(words []string) *wordMatcher {
+	m := &wordMatcher{nodes: []wordNode{{next: make(map[byte]int)}}, words: words}
+	for _, word := range words {
+		state := 0
+		for i := 0; i < len(word); i++ {
+			b := word[i]
+			next, ok := m.nodes[state].next[b]
+			if !ok {
+				next = len(m.nodes)
+				m.nodes[state].next[b] = next
+				m.nodes = append(m.nodes, wordNode{next: make(map[byte]int)})
+			}
+			state = next
+		}
+		m.nodes[state].outputs = append(m.nodes[state].outputs, word)
+	}
+	queue := make([]int, 0, len(m.nodes))
+	for _, child := range m.nodes[0].next {
+		queue = append(queue, child)
+	}
+	for head := 0; head < len(queue); head++ {
+		state := queue[head]
+		for b, child := range m.nodes[state].next {
+			fallback := m.nodes[state].fail
+			for fallback != 0 {
+				if _, ok := m.nodes[fallback].next[b]; ok {
+					break
+				}
+				fallback = m.nodes[fallback].fail
+			}
+			if next, ok := m.nodes[fallback].next[b]; ok && next != child {
+				m.nodes[child].fail = next
+			}
+			m.nodes[child].outputs = append(m.nodes[child].outputs, m.nodes[m.nodes[child].fail].outputs...)
+			queue = append(queue, child)
+		}
+	}
+	return m
+}
+
+func (m *wordMatcher) wordsInLine(ctx context.Context, line string) ([]string, error) {
+	lower := strings.ToLower(line)
+	var found []string
+	var seen map[string]struct{}
+	state := 0
+	for i := 0; i < len(lower); i++ {
+		if i&0xffff == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		b := lower[i]
+		for state != 0 {
+			if _, ok := m.nodes[state].next[b]; ok {
+				break
+			}
+			state = m.nodes[state].fail
+		}
+		if next, ok := m.nodes[state].next[b]; ok {
+			state = next
+		}
+		for _, word := range m.nodes[state].outputs {
+			if seen == nil {
+				seen = make(map[string]struct{})
+			}
+			if _, ok := seen[word]; !ok {
+				seen[word] = struct{}{}
+				found = append(found, word)
+			}
+		}
+	}
+	sort.Strings(found)
+	return found, nil
+}
+
+func (m *wordMatcher) containsAny(ctx context.Context, line string) (bool, error) {
+	lower := strings.ToLower(line)
+	state := 0
+	for i := 0; i < len(lower); i++ {
+		if i&0xffff == 0 {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+		}
+		b := lower[i]
+		for state != 0 {
+			if _, ok := m.nodes[state].next[b]; ok {
+				break
+			}
+			state = m.nodes[state].fail
+		}
+		if next, ok := m.nodes[state].next[b]; ok {
+			state = next
+		}
+		if len(m.nodes[state].outputs) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *wordMatcher) wordPositions(line string) map[string]int {
+	lower := strings.ToLower(line)
+	bytePositions := make(map[string]int)
+	state := 0
+	for i := 0; i < len(lower); i++ {
+		b := lower[i]
+		for state != 0 {
+			if _, ok := m.nodes[state].next[b]; ok {
+				break
+			}
+			state = m.nodes[state].fail
+		}
+		if next, ok := m.nodes[state].next[b]; ok {
+			state = next
+		}
+		for _, word := range m.nodes[state].outputs {
+			start := i + 1 - len(word)
+			if old, ok := bytePositions[word]; !ok || start < old {
+				bytePositions[word] = start
+			}
+		}
+	}
+	positions := make(map[string]int, len(bytePositions))
+	for word, position := range bytePositions {
+		positions[word] = utf8.RuneCountInString(lower[:position])
+	}
+	return positions
+}
+
+func hasLineWord(lines [][]string) bool {
+	for _, line := range lines {
+		if len(line) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func cachedOutputWords(lines [][]string) []string {
+	seen := make(map[string]struct{})
+	for _, line := range lines {
+		for _, word := range line {
+			seen[word] = struct{}{}
+		}
+	}
+	words := make([]string, 0, len(seen))
+	for word := range seen {
+		words = append(words, word)
+	}
+	return words
+}
+
+func intersectWords(lineWords, words []string) []string {
+	var out []string
+	for _, word := range lineWords {
+		if i := sort.SearchStrings(words, word); i < len(words) && words[i] == word {
+			out = append(out, word)
+		}
+	}
+	return out
+}
+
 func matches(s string, words []string) bool {
 	v := strings.ToLower(s)
+	found := false
+	visitWordTokens(v, func(token string) {
+		if i := sort.SearchStrings(words, token); i < len(words) && words[i] == token {
+			found = true
+		}
+	})
+	if found {
+		return true
+	}
 	for _, w := range words {
 		if strings.Contains(v, w) {
 			return true

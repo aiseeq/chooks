@@ -92,6 +92,7 @@ func execute(ctx context.Context, request hookctx.Context) int {
 		newHookCmd(hookWebFetchFallback, "Подменить отказ сайта в ответе WebFetch текстом из webtext (PostToolUse), на упавший WebFetch добавить его контекстом (PostToolUseFailure)", &exitCode),
 		newHookCmd(hookNoPrompt, "Отказать окну, ждущему ввода человека (PermissionRequest, Elicitation)", &exitCode),
 		newHookCmd(hookUnsentCheck, "Не выпустить ответ «текст не отправлен» без reddy history в ходе (Stop)", &exitCode),
+		newHookCmd(hookClaimStop, "Не выпустить ответ с утверждениями без проверки: судья claim-check по ходу, флаги — агенту (Stop)", &exitCode),
 		newNightHintCmd(&exitCode),
 		newNotifyCmd(),
 		newStatusLineCmd(&exitCode),
@@ -180,6 +181,7 @@ const (
 	hookWebFetchFallback = "webfetch-fallback"
 	hookNoPrompt         = "no-prompt"
 	hookUnsentCheck      = "unsent-check"
+	hookClaimStop        = "claim-stop"
 )
 
 // newHookCmd создает команду обработки хука, записывающую exit-код по указателю
@@ -373,6 +375,9 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		return exitAllowed, nil
 	case hookUnsentCheck:
 		runUnsentCheck(parseSessionInputForRequest(logger, hookType, data, &request), logger, request.Stdout)
+		return exitAllowed, nil
+	case hookClaimStop:
+		runClaimStop(ctx, data, config, logger, request.Stdout)
 		return exitAllowed, nil
 	case hookNightHint:
 		defaultNightHint(ctx, data, config, logger, timer.deadline(optionalBudget), request)

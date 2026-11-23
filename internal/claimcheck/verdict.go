@@ -35,6 +35,28 @@ type Verdict struct {
 // отсутствия. Ошибка — от первой открывающей скобки: вложенный объект
 // оборванного ответа разбирается, но причину не объясняет
 func ParseVerdict(answer string) (Verdict, error) {
+	verdict, unknown, err := ParseClaims(answer)
+	if err != nil {
+		return Verdict{}, err
+	}
+	if len(unknown) > 0 {
+		return Verdict{}, fmt.Errorf("claim %d: unknown verdict %q", unknown[0].Index, unknown[0].Verdict)
+	}
+	return verdict, nil
+}
+
+// UnknownClaim — пункт ответа судьи с вердиктом вне четырёх слов и его номер
+// в ответе
+type UnknownClaim struct {
+	Claim
+	Index int `json:"index"`
+}
+
+// ParseClaims — разбор ответа для хука: пункт с неизвестным вердиктом не
+// роняет разбор, а уходит в unknown, верные пункты остаются в Verdict. Хук
+// пишет unknown в журнал как сбой проверки: неизвестный пункт мог быть
+// единственным непроверенным (противник замысла, сценарий 8)
+func ParseClaims(answer string) (Verdict, []UnknownClaim, error) {
 	var claims *[]Claim
 	var firstErr error
 	for i := strings.Index(answer, "{"); i >= 0; {
@@ -66,16 +88,30 @@ func ParseVerdict(answer string) (Verdict, error) {
 		if firstErr == nil {
 			firstErr = fmt.Errorf("judge answer has no JSON object: %q", excerpt(answer, 200))
 		}
-		return Verdict{}, firstErr
+		return Verdict{}, nil, firstErr
 	}
+	known := []Claim{}
+	var unknown []UnknownClaim
 	for i, c := range *claims {
 		switch c.Verdict {
 		case VerdictChecked, VerdictUncheckedMarked, VerdictUnchecked, VerdictWrongTime:
+			known = append(known, c)
 		default:
-			return Verdict{}, fmt.Errorf("claim %d: unknown verdict %q", i, c.Verdict)
+			unknown = append(unknown, UnknownClaim{Claim: c, Index: i})
 		}
 	}
-	return Verdict{Claims: *claims}, nil
+	return Verdict{Claims: known}, unknown, nil
+}
+
+// FlaggedClaims — утверждения, требующие проверки
+func (v Verdict) FlaggedClaims() []Claim {
+	var out []Claim
+	for _, c := range v.Claims {
+		if c.Flags() {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // Flags — утверждение требует проверки: без неё и без пометки или с меткой

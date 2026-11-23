@@ -33,12 +33,15 @@ const (
 
 // ToolInput представляет входные данные от Claude Code
 type ToolInput struct {
-	SessionID      string          `json:"session_id"`
-	ToolName       string          `json:"tool_name"`
-	ToolInput      json.RawMessage `json:"tool_input"`
-	Command        string          `json:"command,omitempty"`
-	CWD            string          `json:"cwd,omitempty"`
-	TranscriptPath string          `json:"transcript_path,omitempty"`
+	SessionID string          `json:"session_id"`
+	ToolName  string          `json:"tool_name"`
+	ToolInput json.RawMessage `json:"tool_input"`
+	// ToolUseID — id вызова в PreToolUse: по нему находится строка вызова в
+	// транскрипте
+	ToolUseID      string `json:"tool_use_id,omitempty"`
+	Command        string `json:"command,omitempty"`
+	CWD            string `json:"cwd,omitempty"`
+	TranscriptPath string `json:"transcript_path,omitempty"`
 
 	// AgentID и AgentType приходят, когда событие случилось в субагенте:
 	// у него свой транскрипт, а форк (agent_type "fork") наследует контекст

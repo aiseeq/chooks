@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Блок ~/.claude/settings.json для хука claim-check (тикет claim-check-hook). Ставит git-admin вместе с graft install ветки claim-check-input: демон chooks ждёт understand-check 90 с и claim-stop 120 с (hookTimeouts в cmd/chooks/serve.go).",
+    "1. hooks.Stop: добавить запись из Stop ниже отдельной строкой после unsent-check (не внутри stop с его 3 с).",
+    "2. hooks.PreToolUse: у записи с matcher SendMessage|Edit|Write|Bash и командой understand-check поставить timeout 90 вместо 40 (судья claim-check письма идёт параллельно судье понимания, срок 75 с).",
+    "Откат: снять строку claim-stop из Stop и вернуть understand-check timeout 40; судить письма claim-check перестанет только с tools.claim_check.enabled: false в ~/.config/chooks/config.yaml (иначе письмо ждёт судью 75 с при таймауте 40 и проходит по таймауту хука).",
+    "Учётки codex судьи: tools.claim_check.codex_homes в config.yaml, по умолчанию [~/.codex, ~/.codex-personal]."
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "SendMessage|Edit|Write|Bash",
+        "hooks": [{ "type": "command", "command": "$HOME/bin/chooks understand-check", "timeout": 90 }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "$HOME/bin/chooks claim-stop", "timeout": 120 }]
+      }
+    ]
+  }
+}

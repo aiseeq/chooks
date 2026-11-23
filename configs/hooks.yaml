@@ -37,6 +37,17 @@ tools:
   understand_check:
     enabled: true
 
+  # Судья claim-check (luna/high, промпт v3) ищет утверждения о фактах без
+  # проверки: ответ в конце хода (Stop, подкоманда claim-stop) и письмо
+  # SendMessage (вместе с understand-check). Флаг — агенту проверить или
+  # ответить, чем проверено; сбой судьи ход не держит. Журнал —
+  # ~/.local/state/chooks/claim-check.jsonl. Без ключа включено
+  claim_check:
+    enabled: true
+    # учётки codex (CODEX_HOME) по порядку: без кредитов — метка на час,
+    # вызов на следующую
+    codex_homes: [~/.codex, ~/.codex-personal]
+
   # На отказ сайта в ответе WebFetch (403, 429, страница проверки) подставляет
   # текст страницы из утилиты akit webtext (PostToolUse, подкоманда
   # webfetch-fallback), на упавший WebFetch добавляет его контекстом

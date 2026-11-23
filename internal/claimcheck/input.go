@@ -25,6 +25,9 @@ type Input struct {
 	Attachments   []string `json:"attachments"`
 	AnswerTime    string   `json:"answerTime"`
 	LastEventTime string   `json:"lastEventTime"`
+	// TurnLine — строка транскрипта, с которой начат ход: ключ хода у хука,
+	// судье не идёт
+	TurnLine int `json:"-"`
 }
 type Prompt struct {
 	Type string `json:"type"`
@@ -146,6 +149,9 @@ func BuildInput(path string, line int, options Options) (*Input, error) {
 		return nil, err
 	}
 	input := newInput(kind, answer, target.E.Timestamp)
+	if start < len(rows) {
+		input.TurnLine = rows[start].Line
+	}
 	words := answerWords(answer)
 	input.AnswerTime = prefixTime(rows, line, input.AnswerTime)
 	turnLimit := turnToolsCharLimit

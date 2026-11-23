@@ -35,8 +35,10 @@ const hookStatusLine = "statusline"
 // hookTimeouts — таймаут хука в settings.json по подкоманде, единственная
 // таблица сроков демона. Значения — из configs/settings-snippet.json;
 // understand-check и night-hint в сниппете нет — их таймауты из
-// ~/.claude/settings.json на 22.11 (40 с и 3 с). У statusLine таймаута в
-// settings нет: 5 с. Подкоманды вне таблицы демон не обслуживает — «в CLI»
+// ~/.claude/settings.json на 22.11 (3 с у night-hint); understand-check (90 с)
+// и claim-stop (120 с) — из configs/claim-check-hooks.json. У statusLine
+// таймаута в settings нет: 5 с. Подкоманды вне таблицы демон не обслуживает —
+// «в CLI»
 var hookTimeouts = map[string]time.Duration{
 	hookPreToolUse:       3 * time.Second,
 	hookNoPrompt:         5 * time.Second,
@@ -47,7 +49,8 @@ var hookTimeouts = map[string]time.Duration{
 	hookStop:             3 * time.Second,
 	hookUnsentCheck:      5 * time.Second,
 	hookStopFailure:      3 * time.Second,
-	hookUnderstandCheck:  40 * time.Second,
+	hookUnderstandCheck:  90 * time.Second,
+	hookClaimStop:        120 * time.Second,
 	hookNightHint:        3 * time.Second,
 	hookStatusLine:       5 * time.Second,
 }

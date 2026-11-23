@@ -47,6 +47,11 @@ type ToolConfig struct {
 	// которые запускает только пользователь: агент не задаёт их ни Agent,
 	// ни клиенту в команде (пользователь 13.11 и 20.11 о Fable)
 	UserOnly []string `yaml:"user_only"`
+
+	// CodexHomes (claim_check) — каталоги учёток codex (CODEX_HOME) по
+	// порядку: учётка без кредитов метится на час, судья идёт на следующую.
+	// Пусто — ~/.codex, затем ~/.codex-personal; ~/ раскрывается по HOME запроса
+	CodexHomes []string `yaml:"codex_homes"`
 }
 
 // LoadConfig загружает конфигурацию из файла.

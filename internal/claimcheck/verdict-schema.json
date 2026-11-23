@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["claims"],
+  "properties": {
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text", "verdict", "basis", "could_check"],
+        "properties": {
+          "text": {"type": "string"},
+          "verdict": {"type": "string", "enum": ["checked", "unchecked-marked", "unchecked", "wrong-time"]},
+          "basis": {"type": "string"},
+          "could_check": {"type": "string"}
+        }
+      }
+    }
+  }
+}

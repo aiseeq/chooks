@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aiseeq/akit/secretmask"
@@ -40,6 +41,19 @@ type CLIJudge struct {
 	Dir string
 	// Prompt — промпт судьи
 	Prompt string
+	// CodexHome — каталог учётки codex (CODEX_HOME) для вызова; пусто —
+	// CODEX_HOME из env запроса или умолчание codex (~/.codex). Каталог берётся
+	// как есть: вход и auth.json судья не трогает
+	CodexHome string
+	// OutputSchema — путь к JSON-схеме ответа для `codex exec --output-schema`;
+	// пусто — без схемы
+	OutputSchema string
+}
+
+// Add — сумма токенов двух вызовов
+func (u Usage) Add(other Usage) Usage {
+	return Usage{InputTokens: u.InputTokens + other.InputTokens, CachedInputTokens: u.CachedInputTokens + other.CachedInputTokens,
+		CacheWriteTokens: u.CacheWriteTokens + other.CacheWriteTokens, OutputTokens: u.OutputTokens + other.OutputTokens}
 }
 
 // Model — имя модели для журнала
@@ -125,30 +139,42 @@ func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, er
 	if err != nil {
 		return "", Usage{}, err
 	}
-	cmd := exec.CommandContext(ctx, path, "exec",
+	args := []string{"exec",
 		"--json", "--skip-git-repo-check", "--ephemeral",
 		"--ignore-user-config", "--ignore-rules",
 		"--sandbox", "read-only",
 		"-m", j.ID,
 		"-c", fmt.Sprintf("model_reasoning_effort=%q", j.Effort),
 		"-c", `web_search="disabled"`,
-		"-c", "project_doc_max_bytes=0",
-		"-")
+		"-c", "project_doc_max_bytes=0"}
+	if j.OutputSchema != "" {
+		args = append(args, "--output-schema", j.OutputSchema)
+	}
+	cmd := exec.CommandContext(ctx, path, append(args, "-")...)
 	cmd.Args[0] = "codex"
-	out, err := runCLI(ctx, cmd, j.Dir, j.Prompt+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input)
+	var env []string
+	if j.CodexHome != "" {
+		env = []string{"CODEX_HOME=" + j.CodexHome}
+	}
+	out, err := runCLIEnv(ctx, cmd, j.Dir, j.Prompt+"\n\nКоманд не запускай и файлов не читай: всё нужное ниже.\n\n"+input, env)
 	if err != nil {
 		return "", Usage{}, err
 	}
-	var message string
+	var message, failed string
 	var usage Usage
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)
 	for scanner.Scan() {
 		var event struct {
-			Type string `json:"type"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+			Error   struct {
+				Message string `json:"message"`
+			} `json:"error"`
 			Item struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
+				Type    string `json:"type"`
+				Text    string `json:"text"`
+				Message string `json:"message"`
 			} `json:"item"`
 			Usage struct {
 				InputTokens       int `json:"input_tokens"`
@@ -162,7 +188,14 @@ func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, er
 		switch {
 		case event.Type == "item.completed" && event.Item.Type == "agent_message":
 			message = event.Item.Text
+		// Отказ хода (кредиты учётки, вход, лимит) codex пишет событием, а не
+		// кодом выхода: без него ответ был бы пустым без причины
+		case event.Type == "turn.failed":
+			failed = event.Error.Message
+		case event.Type == "error" && failed == "":
+			failed = event.Message
 		case event.Type == "turn.completed":
+			failed = ""
 			// Кэш codex входит в input_tokens: некэшированная часть — разность
 			usage.InputTokens += event.Usage.InputTokens - event.Usage.CachedInputTokens
 			usage.CachedInputTokens += event.Usage.CachedInputTokens
@@ -173,10 +206,13 @@ func (j CLIJudge) askCodex(ctx context.Context, input string) (string, Usage, er
 	if err := scanner.Err(); err != nil {
 		return "", usage, fmt.Errorf("read codex output: %w", err)
 	}
+	if failed != "" && message == "" {
+		return "", usage, fmt.Errorf("codex turn failed: %s", Excerpt(failed, 300))
+	}
 	return message, usage, nil
 }
 
-// runCLI запускает вызов с текстом на stdin; ошибка несёт хвост stderr
+// judgeExecutable — путь CLI судьи по PATH запроса
 func judgeExecutable(ctx context.Context, name string) (string, error) {
 	if request, ok := hookctx.Request(ctx); ok {
 		path, err := request.LookPath(name)
@@ -188,15 +224,25 @@ func judgeExecutable(ctx context.Context, name string) (string, error) {
 	return "", fmt.Errorf("hook request is missing")
 }
 
+// runCLI запускает вызов с текстом на stdin; ошибка несёт хвост stderr
 func runCLI(ctx context.Context, cmd *exec.Cmd, dir, stdin string) ([]byte, error) {
+	return runCLIEnv(ctx, cmd, dir, stdin, nil)
+}
+
+// runCLIEnv — runCLI с переменными extra поверх env запроса. CLI идёт своей
+// группой процессов: по отмене контекста группа убивается целиком, и потомки
+// CLI не остаются после хука
+func runCLIEnv(ctx context.Context, cmd *exec.Cmd, dir, stdin string, extra []string) ([]byte, error) {
 	cmd.Dir = dir
 	request, ok := hookctx.Request(ctx)
 	if !ok {
 		return nil, fmt.Errorf("hook request is missing")
 	}
-	cmd.Env = judgeEnv(request.Env)
-	// По таймауту контекст убивает сам CLI, а его потомки держат stdout:
-	// без WaitDelay хук ждал бы их и выходил за свой таймаут
+	cmd.Env = withEnv(judgeEnv(request.Env), extra)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// По таймауту контекст убивает группу CLI, а потомок вне группы мог бы
+	// держать stdout: без WaitDelay хук ждал бы его и выходил за свой таймаут
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdin = strings.NewReader(stdin)
 	var stderr bytes.Buffer
@@ -206,4 +252,25 @@ func runCLI(ctx context.Context, cmd *exec.Cmd, dir, stdin string) ([]byte, erro
 		return nil, fmt.Errorf("%s failed: %w: %s", cmd.Args[0], err, Excerpt(strings.TrimSpace(stderr.String()), 300))
 	}
 	return out, nil
+}
+
+// withEnv заменяет в env переменные из extra («ИМЯ=значение»)
+func withEnv(env, extra []string) []string {
+	if len(extra) == 0 {
+		return env
+	}
+	out := make([]string, 0, len(env)+len(extra))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		replaced := false
+		for _, e := range extra {
+			if n, _, _ := strings.Cut(e, "="); n == name {
+				replaced = true
+			}
+		}
+		if !replaced {
+			out = append(out, kv)
+		}
+	}
+	return append(out, extra...)
 }

@@ -57,6 +57,16 @@ func TestMeasureShellPrefix(t *testing.T) {
 		{"unset CLAUDE_CODE_SHELL_PREFIX", true},
 		{"echo " + bad, true},
 		{"env CLAUDE_CODE_SHELL_PREFIX= bash launch.sh", true},
+		// строка оболочки за обёрткой (ревью круга 4; круги 2-3 ловили)
+		{`setsid -f bash -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`env -i bash -c 'CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh'`, false},
+		{`timeout 5 bash -c "env CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`timeout 5 bash -c "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh"`, false},
+		{`nohup sh -c 'export CLAUDE_CODE_SHELL_PREFIX=timeout; bash launch.sh' &`, false},
+		{`script -qc "env CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		{`script -qc "CLAUDE_CODE_SHELL_PREFIX=timeout bash launch.sh" /dev/null`, false},
+		// -E у обёрнутой команды systemd-run — не присваивание
+		{"systemd-run --user --wait grep -E CLAUDE_CODE_SHELL_PREFIX=timeout /tmp/x", true},
 		// неразобранный хвост не прячет присваивание: bash исполнит начало
 		{"env " + bad + " bash launch.sh <<EOF", false},
 		{"env " + bad + " bash launch.sh; echo $((", false},

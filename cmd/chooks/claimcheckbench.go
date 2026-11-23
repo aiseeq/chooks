@@ -188,7 +188,7 @@ wrong-time; попадание — flag на утверждение, совпа�
 	cmd.Flags().StringVar(&split, "split", "", "разбиение TSV: ref, часть (dev или hold)")
 	cmd.Flags().StringVar(&part, "part", "dev", "какую часть гнать: dev, hold, all")
 	cmd.Flags().StringVar(&model, "model", "luna", "модель судьи из ~/.config/models/approved")
-	cmd.Flags().StringVar(&effort, "effort", "medium", "усилие рассуждения: low, medium, high")
+	cmd.Flags().StringVar(&effort, "effort", "high", "усилие рассуждения: high или xhigh")
 	cmd.Flags().StringVar(&promptPath, "prompt", "", "файл промпта судьи")
 	cmd.Flags().IntVar(&bench.runs, "runs", 1, "сколько прогонов на строку")
 	cmd.Flags().IntVar(&bench.jobs, "jobs", 4, "сколько судей звать одновременно")

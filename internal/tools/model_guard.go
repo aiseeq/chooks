@@ -1413,6 +1413,23 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 			if !ok {
 				return true
 			}
+			for _, redirect := range stmt.Redirs {
+				if redirect.Op.String() != ">>" || redirect.Word == nil {
+					continue
+				}
+				if target, literal := literalValue(redirect.Word); literal && (protectedSettingsTarget.MatchString(target) || explicitSettingsTarget(decoded, target)) {
+					allWritesAreAgentDefinitions = false
+				}
+			}
+			return true
+		})
+	}
+	if file, err := syntax.NewParser().Parse(strings.NewReader(decoded), ""); err == nil {
+		syntax.Walk(file, func(node syntax.Node) bool {
+			stmt, ok := node.(*syntax.Stmt)
+			if !ok {
+				return true
+			}
 			var targets []string
 			var body string
 			for _, redirect := range stmt.Redirs {
@@ -1421,16 +1438,26 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 				}
 				if redirect.Hdoc != nil {
 					body = redirect.Hdoc.Lit()
+					if redirect.Op == syntax.DashHdoc {
+						lines := strings.Split(body, "\n")
+						for i := range lines {
+							lines[i] = strings.TrimLeft(lines[i], "\t")
+						}
+						body = strings.Join(lines, "\n")
+					}
 					continue
 				}
 				target, literal := literalValue(redirect.Word)
-				if literal && (redirect.Op.String() == ">" || redirect.Op.String() == ">>" || redirect.Op.String() == ">|") {
+				if literal && (redirect.Op.String() == ">" || redirect.Op.String() == ">|") {
 					targets = append(targets, strings.Trim(target, `"'`))
 				}
 			}
 			if body != "" {
 				for _, target := range targets {
 					if !writtenAgentTarget.MatchString(target) {
+						continue
+					}
+					if !agentFrontmatterBlock.Match([]byte(body)) {
 						continue
 					}
 					_, model := agentFrontmatter([]byte(body), target)

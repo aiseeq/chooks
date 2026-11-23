@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -121,11 +122,11 @@ type understandResult struct {
 }
 
 func newUnderstandBenchCmd() *cobra.Command {
-	var model, effort string
+	var model, effort, promptPath string
 	var jobs int
 	var limit time.Duration
 	cmd := &cobra.Command{
-		Use:   "understand-bench [--model opus] [--effort high] <случаи.jsonl>",
+		Use:   "understand-bench [--model opus] [--effort high] [--prompt файл] <случаи.jsonl>",
 		Short: "Прогнать судью проверки понимания по случаям understand-cases",
 		Long: `Читает JSONL случаев (understand-cases или размеченные вручную: human, prev,
 kind, action) и спрашивает судью, расходится ли действие с репликой
@@ -137,7 +138,11 @@ kind, action) и спрашивает судью, расходится ли де
 			if err != nil {
 				return err
 			}
-			judge.Prompt = understandcheck.Prompt
+			judge.Prompt, err = understandPrompt(promptPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "understand-bench: prompt sha256 %x\n", sha256.Sum256([]byte(judge.Prompt)))
 			cases, err := readUnderstandCases(args[0])
 			if err != nil {
 				return err
@@ -149,7 +154,23 @@ kind, action) и спрашивает судью, расходится ли де
 	cmd.Flags().StringVar(&effort, "effort", understandEffort, "усилие рассуждения: high или xhigh")
 	cmd.Flags().IntVar(&jobs, "jobs", 2, "сколько судей звать одновременно")
 	cmd.Flags().DurationVar(&limit, "timeout", 3*time.Minute, "предел на один вызов судьи")
+	cmd.Flags().StringVar(&promptPath, "prompt", "", "файл промпта судьи вместо встроенного (подгонка промпта)")
 	return cmd
+}
+
+// understandPrompt — промпт судьи стенда: встроенный хука или из файла
+func understandPrompt(path string) (string, error) {
+	if path == "" {
+		return understandcheck.Prompt, nil
+	}
+	prompt, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read prompt: %w", err)
+	}
+	if len(bytes.TrimSpace(prompt)) == 0 {
+		return "", fmt.Errorf("prompt %s is empty", path)
+	}
+	return string(prompt), nil
 }
 
 func readUnderstandCases(path string) ([]understandcheck.Case, error) {

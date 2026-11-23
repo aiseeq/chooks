@@ -791,9 +791,7 @@ func agentToolCandidates(input *core.ToolInput, agentModels func(string) []model
 			return []modelCandidate{{value: string(raw)}}
 		}
 		if strings.TrimSpace(model) != "" {
-			if !strings.EqualFold(strings.TrimSpace(model), "inherit") {
-				return []modelCandidate{{value: model}}
-			}
+			return []modelCandidate{{value: model}}
 		}
 	}
 	var agentType string
@@ -1312,7 +1310,25 @@ func protectedWriteTargets(command string) []string {
 				return true
 			}
 			name, literal := literalValue(n.Args[0])
-			if !literal || !slices.Contains([]string{"cp", "mv", "install", "tee"}, filepath.Base(name)) {
+			if !literal {
+				return true
+			}
+			base := filepath.Base(name)
+			if base == "sed" {
+				inPlace := false
+				for _, arg := range n.Args[1:] {
+					value, ok := literalValue(arg)
+					if ok && (value == "-i" || strings.HasPrefix(value, "-i")) {
+						inPlace = true
+						continue
+					}
+					if inPlace && ok && !strings.HasPrefix(value, "-") && (protectedSettingsTarget.MatchString(value) || explicitSettingsTarget(command, value)) {
+						addTarget(value)
+					}
+				}
+				return true
+			}
+			if !slices.Contains([]string{"cp", "mv", "install", "tee"}, base) {
 				return true
 			}
 			var positional []string
@@ -1341,7 +1357,7 @@ func protectedWriteTargets(command string) []string {
 			if len(positional) == 0 {
 				return true
 			}
-			if filepath.Base(name) == "tee" {
+			if base == "tee" {
 				for _, target := range positional {
 					addTarget(target)
 				}
@@ -1381,7 +1397,8 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 	decoded := strings.ReplaceAll(command, "\\\"", "\"")
 	decoded = strings.ReplaceAll(decoded, "\\\\n", "\n")
 	var found []modelCandidate
-	recognizedAgentDefinition := false
+	recognizedAgentDefinitions := map[string]bool{}
+	unknownAgentDefinitions := map[string]bool{}
 	for _, match := range writtenModel.FindAllStringSubmatch(decoded, -1) {
 		if match[1] == "model" {
 			found = append(found, modelCandidate{value: match[2]})
@@ -1390,9 +1407,14 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 		}
 	}
 	objects := jsonObjects(decoded)
+	parsedSettingsContents := false
+	parsedSettingsModels := false
 	for _, raw := range objects {
 		if json.Valid(raw) {
-			found = append(found, settingsCandidates(raw, nil)...)
+			parsedSettingsContents = true
+			settings := settingsCandidates(raw, nil)
+			parsedSettingsModels = parsedSettingsModels || len(settings) > 0
+			found = append(found, settings...)
 		} else {
 			found = append(found, writtenOverrideCandidates(raw)...)
 		}
@@ -1400,25 +1422,43 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 	if len(objects) == 0 {
 		found = append(found, writtenOverrideCandidates([]byte(decoded))...)
 	}
-	allWritesAreAgentDefinitions := true
-	for _, target := range protectedWriteTargets(command) {
-		if !writtenAgentTarget.MatchString(strings.Trim(target, `"'`)) {
-			allWritesAreAgentDefinitions = false
-			break
-		}
-	}
 	if file, err := syntax.NewParser().Parse(strings.NewReader(decoded), ""); err == nil {
 		syntax.Walk(file, func(node syntax.Node) bool {
+			if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) > 1 {
+				name, literal := literalValue(call.Args[0])
+				if literal && filepath.Base(name) == "sed" {
+					inPlace := false
+					for _, arg := range call.Args[1:] {
+						value, ok := literalValue(arg)
+						if ok && (value == "-i" || strings.HasPrefix(value, "-i")) {
+							inPlace = true
+							continue
+						}
+						if inPlace && ok && (protectedSettingsTarget.MatchString(value) || explicitSettingsTarget(decoded, value)) {
+							unknownAgentDefinitions[strings.Trim(value, "\"'")] = true
+						}
+					}
+				}
+				return true
+			}
 			stmt, ok := node.(*syntax.Stmt)
 			if !ok {
 				return true
 			}
+			stmtHasHeredoc := false
 			for _, redirect := range stmt.Redirs {
-				if redirect.Op.String() != ">>" || redirect.Word == nil {
+				stmtHasHeredoc = stmtHasHeredoc || redirect.Hdoc != nil
+			}
+			for _, redirect := range stmt.Redirs {
+				if redirect.Word == nil {
 					continue
 				}
-				if target, literal := literalValue(redirect.Word); literal && (protectedSettingsTarget.MatchString(target) || explicitSettingsTarget(decoded, target)) {
-					allWritesAreAgentDefinitions = false
+				target, literal := literalValue(redirect.Word)
+				if !literal || (!protectedSettingsTarget.MatchString(target) && !explicitSettingsTarget(decoded, target)) {
+					continue
+				}
+				if redirect.Op.String() == ">>" || (!stmtHasHeredoc && !parsedSettingsContents && (redirect.Op.String() == ">" || redirect.Op.String() == ">|")) {
+					unknownAgentDefinitions[strings.Trim(target, "\"'")] = true
 				}
 			}
 			return true
@@ -1448,7 +1488,7 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 					continue
 				}
 				target, literal := literalValue(redirect.Word)
-				if literal && (redirect.Op.String() == ">" || redirect.Op.String() == ">|") {
+				if literal && (redirect.Op.String() == ">" || redirect.Op.String() == ">>" || redirect.Op.String() == ">|") {
 					targets = append(targets, strings.Trim(target, `"'`))
 				}
 			}
@@ -1457,11 +1497,11 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 					if !writtenAgentTarget.MatchString(target) {
 						continue
 					}
-					if !agentFrontmatterBlock.Match([]byte(body)) {
+					if !agentFrontmatterBlock.Match([]byte(body)) || strings.ContainsAny(body, "$"+string(rune(96))) {
 						continue
 					}
 					_, model := agentFrontmatter([]byte(body), target)
-					recognizedAgentDefinition = true
+					recognizedAgentDefinitions[target] = true
 					if model != "" && !strings.EqualFold(model, "inherit") {
 						found = append(found, modelCandidate{value: model})
 					}
@@ -1470,8 +1510,13 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 			return true
 		})
 	}
-	if len(found) == 0 && !(recognizedAgentDefinition && allWritesAreAgentDefinitions) {
-		return []modelCandidate{{value: "written settings or agent contents", unknownWrite: true}}
+	for _, target := range protectedWriteTargets(command) {
+		target = strings.Trim(target, "\"'")
+		isAgent := writtenAgentTarget.MatchString(target)
+		isParsedSettings := (protectedSettingsTarget.MatchString(target) || explicitSettingsTarget(command, target)) && parsedSettingsContents && parsedSettingsModels
+		if (!isAgent && !isParsedSettings) || (isAgent && !recognizedAgentDefinitions[target]) || unknownAgentDefinitions[target] {
+			return append(found, modelCandidate{value: "written settings or agent contents", unknownWrite: true})
+		}
 	}
 	return found
 }

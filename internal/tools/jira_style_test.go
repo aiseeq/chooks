@@ -380,8 +380,8 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"функция объявлена, не вызвана", "/", "S=" + good + "; f() { S=" + dir + "; }; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"command f не вызывает функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; command f; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"вызов функции в закрытой подоболочке", "/", "S=" + good + "; f() { S=" + dir + "; }; (f); " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
-		{"функция f() ( … ) не меняет S", "/", "S=" + good + "; f() ( S=" + dir + " ); f; " + auth + "-d @$S/body.json" + url, ""},
-		{"функция меняет S в подоболочке тела", "/", "S=" + good + "; f() { (S=" + dir + "); }; f; " + auth + "-d @$S/body.json" + url, ""},
+		{"функция f() ( … ) не меняет S", "/", "S=" + good + "; f() ( S=" + dir + " ); f; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},          // akit v1.90.19: запись в теле функции — S неизвестна во всём скрипте; akit чинит (лишняя пометка), тогда вернуть ""
+		{"функция меняет S в подоболочке тела", "/", "S=" + good + "; f() { (S=" + dir + "); }; f; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"}, // akit v1.90.19: запись в теле функции — S неизвестна во всём скрипте; akit чинит (лишняя пометка), тогда вернуть ""
 		{"отправка в другой функции после вызова f", "/", "S=" + good + "; f() { S=" + dir + "; }; g() { " + auth + "-d @$S/body.json" + url + "; }; f; g", "jira_comment_payload"},
 		{"alias на функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; alias g=f\ng; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
 		{"trap DEBUG на функцию", "/", "S=" + good + "; f() { S=" + dir + "; }; trap f DEBUG; " + auth + "-d @$S/body.json" + url, "jira_comment_payload"},
@@ -413,11 +413,11 @@ func TestJiraStyleSendForms(t *testing.T) {
 		{"присвоено в ${| ; }", "/", "S=" + good + "; x=${| S=" + dir + "; }; " + auth + "-d @$S/body.json" + url, "jira_comment_style"},
 		// Here-doc звена или coproc: команда после ; на строке с <<EOF
 		// идёт в текущей оболочке, не в звене
-		{"here-doc в первом звене, присвоено после ;", "/", "S=" + good + "; cat <<EOF | cat >/dev/null; S=" + dir + "\nx\nEOF\n" + auth + "-d @$S/body.json" + url, "jira_comment_style"},
-		{"here-doc у coproc, присвоено после ;", "/", "S=" + good + "; coproc cat <<EOF; S=" + dir + "\nx\nEOF\n" + auth + "-d @$S/body.json" + url, "jira_comment_style"},
-		{"here-doc в звене, присвоено после &&", "/", "S=" + good + "; cat <<EOF | cat >/dev/null && S=" + dir + "\nx\nEOF\n" + auth + "-d @$S/body.json" + url, "jira_comment_style"},
-		{"функция присваивает и отправляет, чистый", "/", "f() { S=" + good + "; " + auth + "-d @$S/body.json" + url + "; }; f", ""},
-		{"функция присваивает и отправляет, плохой", "/", "f() { S=" + dir + "; " + auth + "-d @$S/body.json" + url + "; }; f", "jira_comment_style"},
+		{"here-doc в первом звене, присвоено после ;", "/", "S=" + good + "; cat <<EOF | cat >/dev/null; S=" + dir + "\nx\nEOF\n" + auth + "-d @$S/body.json" + url, "jira_comment_payload"}, // akit v1.90.19: S неизвестна — отказ раньше проверки стиля
+		{"here-doc у coproc, присвоено после ;", "/", "S=" + good + "; coproc cat <<EOF; S=" + dir + "\nx\nEOF\n" + auth + "-d @$S/body.json" + url, "jira_comment_payload"},                 // akit v1.90.19: S неизвестна — отказ раньше проверки стиля
+		{"here-doc в звене, присвоено после &&", "/", "S=" + good + "; cat <<EOF | cat >/dev/null && S=" + dir + "\nx\nEOF\n" + auth + "-d @$S/body.json" + url, "jira_comment_payload"},     // akit v1.90.19: S неизвестна — отказ раньше проверки стиля
+		{"функция присваивает и отправляет, чистый", "/", "f() { S=" + good + "; " + auth + "-d @$S/body.json" + url + "; }; f", "jira_comment_payload"},                                     // akit v1.90.19: запись в теле функции — S неизвестна во всём скрипте; akit чинит (лишняя пометка), тогда вернуть ""
+		{"функция присваивает и отправляет, плохой", "/", "f() { S=" + dir + "; " + auth + "-d @$S/body.json" + url + "; }; f", "jira_comment_payload"},                                      // akit v1.90.19: S неизвестна — отказ раньше проверки стиля
 		{"в теле вызов другой функции между присваиванием и отправкой", "/", "f() { S=" + good + "; g; " + auth + "-d @$S/body.json" + url + "; }; g() { S=" + dir + "; }; f", "jira_comment_payload"},
 		{"trap DEBUG на другую функцию, отправка в теле", "/", "f() { S=" + good + "; " + auth + "-d @$S/body.json" + url + "; }; g() { S=" + dir + "; }; trap g DEBUG; f", "jira_comment_payload"},
 		{"присвоено в подоболочке тела, вызов той же функции", "/", "S=" + good + "; f() { (S=" + good + "; :); " + auth + "-d @$S/body.json" + url + "; }; S=" + dir + "; f", "jira_comment_payload"},

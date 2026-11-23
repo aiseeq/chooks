@@ -172,7 +172,10 @@ func letterTranscript(t *testing.T, dir string) string {
 // хуке: понимание 30u, claim-check 75u, таймаут хука 90u. Отказ одного судьи
 // не теряется при сбое или таймауте другого, процессы не остаются
 func TestLetterJudgesCombined(t *testing.T) {
-	const u = 40 * time.Millisecond
+	// u и задержки — с запасом на запуск заглушки под нагрузкой гейта: при
+	// 40 мс и 25u против срока 30u (200 мс запаса) судья понимания падал
+	// по сроку при load average 22
+	const u = 80 * time.Millisecond
 	cases := []struct {
 		name                      string
 		understand, claim         float64 // задержки в u
@@ -183,8 +186,8 @@ func TestLetterJudgesCombined(t *testing.T) {
 		// 35 и 50 из приёмки: понимание выходит за свои 30u — таймаут, отказ
 		// claim-check остаётся
 		{"35/50", 35, 50, false, true, understandcheck.VerdictTimeout, claimcheck.OutcomeDeny},
-		{"25/50 both deny", 25, 50, true, true, understandcheck.VerdictFix, claimcheck.OutcomeDeny},
-		{"claim hangs", 25, 100, true, false, understandcheck.VerdictFix, claimcheck.OutcomeError},
+		{"15/50 both deny", 15, 50, true, true, understandcheck.VerdictFix, claimcheck.OutcomeDeny},
+		{"claim hangs", 15, 100, true, false, understandcheck.VerdictFix, claimcheck.OutcomeError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -43,11 +43,7 @@ func WideSearch(command, cwd, home string) (string, error) {
 			continue
 		}
 		if c.Name == "find" && shallowFind(c.Args) {
-			unknown, err := hasUnknownRecursivePath(calls, home)
-			if err != nil {
-				return "", fmt.Errorf("wide search: %w", err)
-			}
-			if !unknown {
+			if !hasUnknownRecursivePath(calls, home) {
 				continue
 			}
 		}
@@ -140,43 +136,92 @@ func execWalksRecursively(args []string) bool {
 
 // hasUnknownRecursivePath keeps a shallow find wide when another recursive
 // call in the command can consume paths produced at runtime.
-func hasUnknownRecursivePath(calls []shellcmd.Call, home string) (bool, error) {
+func hasUnknownRecursivePath(calls []shellcmd.Call, home string) bool {
 	for i := range calls {
 		c := &calls[i]
 		if slices.Contains(c.Via, "find") {
 			continue
 		}
 		if c.Name == "parallel" {
-			unknown, err := parallelHasUnknownRecursivePath(c, home)
-			if err != nil {
-				return false, err
-			}
-			if unknown {
-				return true, nil
+			if parallelHasUnknownRecursivePath(c, home) {
+				return true
 			}
 			continue
 		}
 		if recursivePathUnknown(c, home, slices.Contains(c.Via, "xargs") || slices.Contains(c.Via, "parallel")) {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
-func parallelHasUnknownRecursivePath(c *shellcmd.Call, home string) (bool, error) {
+func parallelHasUnknownRecursivePath(c *shellcmd.Call, home string) bool {
 	if len(c.Args) == 0 {
-		return false, nil
+		return false
 	}
-	command, err := shellcmd.Calls(literalShellWords(c.Args))
-	if err != nil {
-		return false, err
+	start := parallelCommandStart(c.Args)
+	if start >= len(c.Args) {
+		return false
+	}
+	// GNU parallel accepts a command as either multiple words or one shell
+	// script string, for example: parallel 'du -s {}'.
+	commandText := c.Args[start]
+	if strings.ContainsAny(commandText, " \t\n;&|<>$`()") {
+		commandText = strings.Trim(commandText, "'\"")
+	} else {
+		commandText = literalShellWords(c.Args[start:])
+	}
+	command, parsed := parseParallelShellCommand(commandText)
+	if !parsed {
+		return true
 	}
 	for i := range command {
 		if recursivePathUnknown(&command[i], home, true) {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
+}
+
+// parseParallelShellCommand reports parse failure separately so callers can
+// conservatively treat an unparsed recursive command as having an unknown path.
+func parseParallelShellCommand(script string) ([]shellcmd.Call, bool) {
+	calls, err := shellcmd.Calls(script)
+	return calls, err == nil
+}
+
+// parallelCommandStart skips parallel options before its command. Options
+// with a separate value consume the following argument; attached values (for
+// example -j4 and --jobs=4) stay in the option word.
+func parallelCommandStart(args []string) int {
+	valueOptions := map[string]bool{
+		"-j": true, "--jobs": true, "-n": true, "--max-args": true,
+		"-P": true, "--max-procs": true, "-L": true, "--max-lines": true,
+		"-d": true, "--delimiter": true, "-S": true, "--sshlogin": true,
+		"-a": true, "--arg-file": true, "--sshloginfile": true, "--joblog": true,
+		"--results": true, "--workdir": true, "--env": true, "--block": true,
+		"--recstart": true, "--recend": true, "--regexp": true, "--tagstring": true,
+		"--halt": true, "--timeout": true, "--delay": true, "--memfree": true,
+		"--load": true, "--nice": true, "--filter": true, "--return": true,
+		"--transferfile": true, "--cleanup": true, "--trc": true, "--basefile": true,
+		"--record-env": true, "-C": true, "--colsep": true, "-I": true, "-E": true,
+		"--retries": true, "--tmpdir": true, "--header": true, "--termseq": true,
+		"--sshdelay": true, "--group-by": true, "--compress-program": true,
+		"--limit": true, "--memsuspend": true,
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return i + 1
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			return i
+		}
+		if valueOptions[arg] {
+			i++
+		}
+	}
+	return len(args)
 }
 
 func recursivePathUnknown(c *shellcmd.Call, home string, implicitPath bool) bool {
@@ -184,8 +229,11 @@ func recursivePathUnknown(c *shellcmd.Call, home string, implicitPath bool) bool
 	if !recursive {
 		return false
 	}
+	if implicitPath {
+		return true
+	}
 	if len(paths) == 0 {
-		return implicitPath
+		return false
 	}
 	for _, p := range paths {
 		if p.text == "{}" {

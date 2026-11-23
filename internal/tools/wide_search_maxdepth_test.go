@@ -62,9 +62,18 @@ func TestWideSearchMaxdepth(t *testing.T) {
 		{"for in $(find) du", `for d in $(find ~ -maxdepth 1 -type d); do du -s "$d"; done`, "/tmp", true},
 		{"du $(find)", "du -sh $(find ~ -maxdepth 1 -type d)", "/tmp", true},
 		{"| parallel du", "find ~ -maxdepth 1 | parallel du -s", "/tmp", true},
+		// круг 5, ревью 7881d49: опции parallel, команда parallel строкой, метка xargs -I не {}
+		{"| parallel -j4 du", "find ~ -maxdepth 1 | parallel -j4 du -s", "/tmp", true},
+		{"| parallel --jobs 4 du {}", "find ~ -maxdepth 1 | parallel --jobs 4 du -s {}", "/tmp", true},
+		{"| parallel 'du -s {}'", "find ~ -maxdepth 1 | parallel 'du -s {}'", "/tmp", true},
+		{"| xargs -I% du %", "find ~ -maxdepth 1 | xargs -I% du -s %", "/tmp", true},
+		{"| xargs -I X du X", "find ~ -maxdepth 1 | xargs -I X du -s X", "/tmp", true},
+		{"| xargs -I{} du {}/", "find ~ -maxdepth 1 | xargs -I{} du -s {}/", "/tmp", true},
+		{"| xargs -I{} sh -c du {}/x", "find ~ -maxdepth 1 | xargs -I{} sh -c 'du -s {}/x'", "/tmp", true},
 		// рекурсивная команда со своим известным путём — вывод find она не обходит
-		{"find | head; ls | xargs du /tmp/a", "find ~ -maxdepth 1 | head; xargs du -s /tmp/a < /dev/null", "/tmp", false},
-		{"find | xargs -r du /tmp/a", "find ~ -maxdepth 1 -newer x | xargs -r du -s /tmp/a", "/tmp", false},
+		{"find | head; du /tmp/a", "find ~ -maxdepth 1 | head; du -s /tmp/a", "/tmp", false},
+		// xargs дописывает вывод find к своему пути: широкий (круг 5)
+		{"find | xargs -r du /tmp/a", "find ~ -maxdepth 1 -newer x | xargs -r du -s /tmp/a", "/tmp", true},
 		// tree вне списка, на который пользователь дал «да» (тикет wide-search-hint): подсказки нет
 		{"tree ~", "tree ~", "/tmp", false},
 		{"tree -L 1 ~", "tree -L 1 ~", "/tmp", false},

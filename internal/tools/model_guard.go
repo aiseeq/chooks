@@ -35,16 +35,12 @@ type approvedModel struct{ name, id string }
 type ModelGuardTool struct {
 	*BaseTool
 	path string
-	// userOnly — имена одобренных моделей, которые запускает только
-	// пользователь (core.ToolConfig.UserOnly)
-	userOnly []string
 }
 
 // NewModelGuardTool создаёт проверку выбранной модели.
 func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardTool, error) {
 	return &ModelGuardTool{
 		BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent"}, core.ShellTools...), logger),
-		userOnly: config.UserOnly,
 	}, nil
 }
 
@@ -86,24 +82,10 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 			reasons = append(reasons, "файл --settings не прочитать: модель не проверить")
 			continue
 		}
-		if c.userOnlyCheck {
-			if c.dynamic {
-				reasons = append(reasons, "модель задана переменной, назови её литералом")
-				continue
-			}
-			// Переменная быстрой модели здесь проверяется только на ограничение
-			// user_only, без проверки списка одобренных моделей.
-			if name, ok := t.userOnlyModel(c.value, models); ok {
-				reasons = append(reasons, userOnlyReason(c.value, name))
-			}
-			continue
-		}
 		if c.dynamic {
 			reasons = append(reasons, "модель задана переменной, назови её литералом")
 		} else if !isApproved(c.value, models) {
 			reasons = append(reasons, fmt.Sprintf("модель %q не одобрена", c.value))
-		} else if name, ok := t.userOnlyModel(c.value, models); ok {
-			reasons = append(reasons, userOnlyReason(c.value, name))
 		}
 	}
 	if len(reasons) == 0 {
@@ -173,10 +155,6 @@ func (t *ModelGuardTool) CandidateModels(ctx context.Context, input *core.ToolIn
 	return values
 }
 
-func userOnlyReason(value, name string) string {
-	return fmt.Sprintf("модель %q (%s) запускает только пользователь: агент её не задаёт; в сессии, которую пользователь поднял на ней, поле model не задавай — суб-агент унаследует модель", value, name)
-}
-
 type modelCandidate struct {
 	value           string
 	dynamic         bool
@@ -184,9 +162,6 @@ type modelCandidate struct {
 	unknownWrite    bool
 	unknownAgents   bool
 	unknownSettings bool
-	// userOnlyCheck — переменные модели быстрых запросов проверяются только
-	// на ограничение user_only.
-	userOnlyCheck bool
 }
 
 func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
@@ -1422,7 +1397,7 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 		found = append(found, writtenOverrideCandidates([]byte(decoded))...)
 	}
 	for _, match := range regexp.MustCompile(`(?m)^\s*model:\s*([^\s#]+)`).FindAllStringSubmatch(decoded, -1) {
-		found = append(found, modelCandidate{value: strings.Trim(match[1], `"'`), userOnlyCheck: true})
+		found = append(found, modelCandidate{value: strings.Trim(match[1], `"'`)})
 	}
 	if len(found) == 0 {
 		return []modelCandidate{{value: "written settings or agent contents", unknownWrite: true}}
@@ -1593,11 +1568,11 @@ func modelEnvPattern() string {
 // envCandidate — кандидат из присваивания value переменной name; не
 // переменная модели или пустое значение — нет кандидата
 func envCandidate(name, value string, dynamic bool) (modelCandidate, bool) {
-	full, ok := modelEnvNames[name]
+	_, ok := modelEnvNames[name]
 	if !ok || value == "" {
 		return modelCandidate{}, false
 	}
-	return modelCandidate{value: value, dynamic: dynamic, userOnlyCheck: !full}, true
+	return modelCandidate{value: value, dynamic: dynamic}, true
 }
 
 // envModelCandidates — модели из присваиваний переменных modelEnvNames, что
@@ -2434,29 +2409,6 @@ func readApprovedModels(path string) ([]approvedModel, string) {
 		models = append(models, approvedModel{m.Name, m.ID})
 	}
 	return models, ""
-}
-
-// userOnlyModel — имя модели из userOnly, которой отвечает кандидат: по имени
-// или id её строки в списке одобренных
-func (t *ModelGuardTool) userOnlyModel(candidate string, models []approvedModel) (string, bool) {
-	for _, m := range models {
-		if slices.ContainsFunc(t.userOnly, func(name string) bool { return strings.EqualFold(name, m.name) }) &&
-			isApproved(candidate, []approvedModel{m}) {
-			return m.name, true
-		}
-	}
-	name := normalizeModel(candidate)
-	for _, restricted := range t.userOnly {
-		if strings.EqualFold(name, restricted) {
-			return restricted, true
-		}
-		for _, token := range strings.FieldsFunc(name, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
-			if strings.EqualFold(token, restricted) {
-				return restricted, true
-			}
-		}
-	}
-	return "", false
 }
 
 func isApproved(candidate string, models []approvedModel) bool {

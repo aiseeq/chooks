@@ -476,12 +476,10 @@ func TestModelGuardSettingsTildeForms(t *testing.T) {
 // правила о моделях в ~/.claude/CLAUDE.md (номер строки плавает)
 const wantModelGuardHint = `Правило ~/.claude/CLAUDE.md, раздел «Что разрешает «да»»: «Модели бери только из ~/.config/models/approved» (кому какая — в шапке файла); бойцы GPT — через worker; новая модель — только через бенчмарк llmark и одобрение пользователя`
 
-// TestModelGuardUserOnly — модель из user_only (Fable) агент не задаёт ни
-// Agent, ни клиенту в команде; без поля model суб-агент наследует модель
-// сессии (тикет model-guard-fable-user-only)
-func TestModelGuardUserOnly(t *testing.T) {
+// TestModelGuardApprovedModels checks model candidates against the approved list.
+func TestModelGuardApprovedModels(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "approved")
-	if err := os.WriteFile(path, []byte("opus claude-opus-5-5\nfable claude-fable-5-2\nluna gpt-6-luna\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("opus claude-opus-5-5\nluna gpt-6-luna\nhaiku claude-haiku-5-5\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("MODELS_APPROVED", path)
@@ -489,7 +487,7 @@ func TestModelGuardUserOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true}, logger)
 	cases := []struct {
 		name, tool, raw, command string
 		reject                   bool
@@ -517,6 +515,7 @@ func TestModelGuardUserOnly(t *testing.T) {
 		{"DEFAULT_FABLE_MODEL", "Bash", "", "env ANTHROPIC_DEFAULT_FABLE_MODEL=fable claude -p hi", true},
 		{"HAIKU fable", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-fable-5-2 claude -p hi", true},
 		{"SMALL_FAST fable", "Bash", "", "ANTHROPIC_SMALL_FAST_MODEL=fable claude -p hi", true},
+		{"SMALL_FAST opus", "Bash", "", "ANTHROPIC_SMALL_FAST_MODEL=claude-opus-5-5 claude -p hi", false},
 		{"HAIKU в settings env", "Bash", "", `claude -p --settings '{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"fable"}}' hi`, true},
 		{"HAIKU своя модель", "Bash", "", "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5 claude -p hi", false},
 		{"HAIKU из переменной", "Bash", "", `ANTHROPIC_SMALL_FAST_MODEL="$H" claude -p hi`, true},
@@ -551,40 +550,27 @@ func TestModelGuardUserOnly(t *testing.T) {
 			if c.reject && (strings.Contains(c.name, "нет такого") || strings.Contains(c.name, "неизвестный") || strings.Contains(c.name, "missing-agent")) && !strings.Contains(result.Violations[0].Message, "определение агента") {
 				t.Fatalf("причина неизвестного агента: %+v", result.Violations)
 			}
-			if c.reject && (strings.Contains(c.name, "cd к проекту") || strings.Contains(c.name, "add-dir") || strings.Contains(c.name, "settings")) && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+			if c.reject && (strings.Contains(c.name, "cd к проекту") || strings.Contains(c.name, "add-dir") || strings.Contains(c.name, "settings")) && !strings.Contains(result.Violations[0].Message, "не одобрена") {
 				t.Fatalf("модель агента/settings не распознана: %+v", result.Violations)
 			}
-			if c.reject && c.name == "Agent fable" && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+			if c.reject && c.name == "Agent fable" && !strings.Contains(result.Violations[0].Message, "не одобрена") {
 				t.Fatalf("причина: %s", result.Violations[0].Message)
 			}
 		})
 	}
 }
 
-// TestModelGuardAgentDefinition — модель «только пользователь» в
-// определении агента: Agent без model и claude --agent берут её оттуда
+// TestModelGuardAgentDefinition — модель в определении агента разрешается
+// через общий список одобренных моделей.
 // (приёмка 20.11, тикет model-guard-user-only-agent-files)
 func TestModelGuardSettingsAgentReference(t *testing.T) {
 	called := ""
 	candidates := settingsCandidates([]byte(`{"agent":"fx"}`), func(name string) []modelCandidate {
 		called = name
-		return []modelCandidate{{value: "fable", userOnlyCheck: true}}
+		return []modelCandidate{{value: "fable"}}
 	})
-	if called != "fx" || len(candidates) != 1 || candidates[0].value != "fable" || !candidates[0].userOnlyCheck {
+	if called != "fx" || len(candidates) != 1 || candidates[0].value != "fable" {
 		t.Fatalf("settings agent resolution: name=%q candidates=%+v", called, candidates)
-	}
-}
-
-func TestModelGuardUserOnlyModelRemainsRestrictedWhenRemovedFromApprovedList(t *testing.T) {
-	logger, err := core.NewLogger(core.DefaultLoggerConfig())
-	if err != nil {
-		t.Fatal(err)
-	}
-	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
-	for _, candidate := range []string{"fable", "FABLE", "claude-fable-5-2", "Claude-Fable-5-2[1m]", "anthropic/claude-fable-5-2"} {
-		if name, ok := tool.userOnlyModel(candidate, []approvedModel{{name: "opus", id: "claude-opus-5-5"}}); !ok || name != "fable" {
-			t.Errorf("user-only model %q was not matched: name=%q ok=%v", candidate, name, ok)
-		}
 	}
 }
 
@@ -593,7 +579,7 @@ func TestModelGuardRoundTwo(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	approved := filepath.Join(t.TempDir(), "approved")
-	if err := os.WriteFile(approved, []byte("opus claude-opus-5-5\nfable claude-fable-5-2\n"), 0600); err != nil {
+	if err := os.WriteFile(approved, []byte("opus claude-opus-5-5\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("MODELS_APPROVED", approved)
@@ -604,7 +590,7 @@ func TestModelGuardRoundTwo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true}, logger)
 	write := func(path, contents string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -736,7 +722,7 @@ func TestModelGuardRoundThree(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	approved := filepath.Join(t.TempDir(), "approved")
-	if err := os.WriteFile(approved, []byte("opus claude-opus-5-5\nfable claude-fable-5-2\n"), 0600); err != nil {
+	if err := os.WriteFile(approved, []byte("opus claude-opus-5-5\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("MODELS_APPROVED", approved)
@@ -747,7 +733,7 @@ func TestModelGuardRoundThree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true}, logger)
 	write := func(path, contents string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -818,7 +804,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	t.Setenv("HOME", home)
 	approvedPath := filepath.Join(home, "approved")
 	files := map[string]string{
-		approvedPath: "opus claude-opus-5-5\nfable claude-fable-5-2\n",
+		approvedPath: "opus claude-opus-5-5\n",
 		filepath.Join(home, ".claude/agents/fx.md"):                                        "---\nname: fx\nmodel: fable\n---\nтело\n",
 		filepath.Join(home, ".claude/agents/sub/fy.md"):                                    "---\nname: other-name\nmodel: \"claude-fable-5-2\"\n---\n",
 		filepath.Join(home, ".claude/agents/ok.md"):                                        "---\nname: ok\nmodel: opus\n---\nmodel: fable\n",
@@ -883,7 +869,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true, UserOnly: []string{"fable"}}, logger)
+	tool, _ := NewModelGuardTool(core.ToolConfig{Enabled: true}, logger)
 	cases := []struct {
 		name, tool, raw, command, cwd string
 		reject                        bool
@@ -997,10 +983,10 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 			if c.reject && (strings.Contains(c.name, "нет такого") || strings.Contains(c.name, "неизвестный") || strings.Contains(c.name, "missing-agent")) && !strings.Contains(result.Violations[0].Message, "определение агента") {
 				t.Fatalf("причина неизвестного агента: %+v", result.Violations)
 			}
-			if c.name == "claude dynamic cd falls back to session cwd agent" && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+			if c.name == "claude dynamic cd falls back to session cwd agent" && !strings.Contains(result.Violations[0].Message, "не одобрена") {
 				t.Fatalf("session cwd agent definition was not used: %+v", result.Violations)
 			}
-			if c.reject && (strings.Contains(c.name, "cd к проекту") || strings.Contains(c.name, "add-dir") || strings.Contains(c.name, "project settings")) && !strings.Contains(result.Violations[0].Message, "запускает только пользователь") {
+			if c.reject && (strings.Contains(c.name, "cd к проекту") || strings.Contains(c.name, "add-dir") || strings.Contains(c.name, "project settings")) && !strings.Contains(result.Violations[0].Message, "не одобрена") {
 				t.Fatalf("модель агента/settings не распознана: %+v", result.Violations)
 			}
 		})
@@ -1015,7 +1001,7 @@ func TestModelGuardAgentDefinition(t *testing.T) {
 	if err != nil || managedResult.IsValid {
 		t.Fatalf("managed settings: valid=%v err=%v", managedResult.IsValid, err)
 	}
-	if !strings.Contains(managedResult.Violations[0].Message, "запускает только пользователь") {
+	if !strings.Contains(managedResult.Violations[0].Message, "не одобрена") {
 		t.Fatalf("managed settings reason: %+v", managedResult.Violations)
 	}
 }

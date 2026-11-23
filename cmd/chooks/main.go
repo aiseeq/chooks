@@ -151,7 +151,6 @@ func newModelScanCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
-			// модели «только пользователь» — из конфига; проверка включена всегда
 			guard := config.Tools["model_guard"]
 			guard.Enabled = true
 			validator, err := tools.NewModelGuardTool(guard, logger)

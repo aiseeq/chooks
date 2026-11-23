@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -18,6 +19,7 @@ import (
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
 	"github.com/aiseeq/chooks/internal/hookctx"
+	"github.com/aiseeq/chooks/internal/hookproxy"
 	"github.com/aiseeq/chooks/internal/modellaunch"
 	"github.com/aiseeq/chooks/internal/processor"
 	"github.com/aiseeq/chooks/internal/statusline"
@@ -233,6 +235,10 @@ func commandConfigPath(cmd *cobra.Command) string {
 	return path
 }
 
+// errLostCall — строка статуса не рисуется: связь прокси с демоном оборвалась
+// после 'C' (hookproxy.Lost), строка о том уже в stderr
+var errLostCall = errors.New("hook call lost after commit")
+
 // executeHook runs one hook request without relying on the executor's argv.
 func executeHook(ctx context.Context, request hookctx.Context, hookType string) int {
 	if err := validateHookRequest(ctx, request); err != nil {
@@ -246,6 +252,9 @@ func executeHook(ctx context.Context, request hookctx.Context, hookType string) 
 		err = runStatusLine(ctx, request)
 	} else {
 		code, err = runHook(ctx, hookType)
+	}
+	if errors.Is(err, errLostCall) {
+		return exitError
 	}
 	if err != nil {
 		fmt.Fprintf(request.Stderr, "chooks: %v\n", err)
@@ -299,6 +308,13 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		terminated = call.terminated
 		timer.setExecutor(executorDaemon, "")
 	}
+	// Связь прокси с демоном оборвалась после 'C': вызов исполнял демон, CLI
+	// его не повторяет, а только записывает (ревью 8f10b59, п. 3)
+	lost := false
+	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); cli && hookproxy.Lost(reason) {
+		lost = true
+		timer.setExecutor(executorDaemon, reason)
+	}
 	// Файл лога закрывает владелец запроса. У CLI это процесс: обработчик
 	// SIGTERM подписан до выхода и после возврата runHook ещё пишет строку
 	// «hook killed/cancelled by SIGTERM», поэтому файл, как в базе, закрывает
@@ -307,7 +323,10 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	var logger core.FileLogger
 	defer func() {
 		status := "ok"
-		if err != nil || code == exitError {
+		switch {
+		case lost:
+			status = statusLost
+		case err != nil || code == exitError:
 			status = "error"
 		}
 		// Прокси сообщил о SIGTERM ('T'), и обработчик вернулся по отмене:
@@ -344,6 +363,11 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	timer.setLogger(logger)
 	timer.setDurations(config.Logger)
 	noteCLIFallback(ctx, config, request, hookType, logger)
+	if lost {
+		reason, _ := ctx.Value(fallbackReasonKey{}).(string)
+		_, _ = io.WriteString(request.Stderr, hookproxy.LostMessage(reason))
+		return exitError, nil
+	}
 
 	timer.stage("work")
 	switch hookType {
@@ -984,6 +1008,12 @@ func runStatusLine(ctx context.Context, request hookctx.Context) error {
 	}
 	defer closeRequestLogger(logger)
 	noteCLIFallback(ctx, config, request, hookStatusLine, logger)
+	// Обрыв после 'C': строку уже рисовал демон, второй раз её не рисуют
+	// (ротация учёток из строки статуса не запускается дважды)
+	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); hookproxy.Lost(reason) {
+		_, _ = io.WriteString(request.Stderr, hookproxy.LostMessage(reason))
+		return errLostCall
+	}
 	line, err := statusline.Render(ctx, request.Stdin, logger)
 	if err != nil {
 		return err

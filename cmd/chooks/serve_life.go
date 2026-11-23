@@ -20,6 +20,7 @@ import (
 	"github.com/aiseeq/chooks/internal/desktop"
 	"github.com/aiseeq/chooks/internal/fallbackwatch"
 	"github.com/aiseeq/chooks/internal/hookctx"
+	"github.com/aiseeq/chooks/internal/hookproxy"
 	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
 
@@ -255,13 +256,18 @@ func selfFDs() (int, error) {
 // сценарий 7): строка в chooks.log, вызов в счёт fallbackwatch и, когда
 // уходов в CLI за час больше порога daemon.fallback_alert, одно уведомление
 // на рабочий стол не чаще раза в час. Счёт не зависит от демона: при
-// остановленном, убитом или зависшем демоне считает CLI
+// остановленном, убитом или зависшем демоне считает CLI. В счёт идёт только
+// недоступность демона (hookproxy.Unavailable): обновление и уходы по
+// замыслу пишутся в лог, но не зовут человека (ревью 8f10b59, п. 2)
 func noteCLIFallback(ctx context.Context, config *core.Config, request hookctx.Context, hookType string, logger core.Logger) {
 	reason, _ := ctx.Value(fallbackReasonKey{}).(string)
 	if reason == "" {
 		return
 	}
 	logCLIFallback(config, request, hookType, reason)
+	if !hookproxy.Unavailable(reason) {
+		return
+	}
 	dir, err := request.StateDir()
 	if err != nil {
 		logger.Warn("hook fallback not counted", "hook", hookType, "error", err)

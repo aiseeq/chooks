@@ -109,6 +109,8 @@ type server struct {
 	started                   time.Time
 	// Счётчики для строки stats
 	served, refused, stuck atomic.Int64
+	// handling — обработчиков handle идёт сейчас (без отказов «upgrade»)
+	handling atomic.Int64
 }
 
 func newServer(logger core.Logger) *server {
@@ -135,8 +137,10 @@ func newServeCmd() *cobra.Command {
 подкоманда), отдаётся прокси «в CLI» до «принято».
 
 На каждом accept демон сверяет inode и mtime своего исполняемого файла:
-сменился (graft install) — перестаёт принимать, дообслуживает принятые и
-выходит; следующее соединение systemd отдаёт новому процессу. SIGTERM и
+сменился (graft install) — выходит с кодом 0, а следующее соединение
+systemd отдаёт новому процессу. Если идут принятые вызовы, демон их
+дообслуживает и до их конца отвечает новым соединениям «в CLI: upgrade».
+Обрыв связи после «принято» CLI не повторяет, а записывает. SIGTERM и
 SIGINT: перестать принимать, дообслужить идущие вызовы. Раз в час — строка
 stats в лог: RSS, живая куча после GC, горутины, fd.`,
 		Args: cobra.NoArgs,
@@ -217,57 +221,105 @@ func listenSocket(path string) (*net.UnixListener, error) {
 // serve принимает соединения до отмены ctx или до смены своего исполняемого
 // файла, затем ждёт идущие запросы. Запросы ctx сервера не наследуют:
 // остановка демона их не обрывает. Зависшие обработчики (serveStuckGrace) не
-// ждутся: их прокси уже получил ответ
+// ждутся: их прокси уже получил ответ.
+//
+// Смена файла без идущих запросов — выход сразу: соединение остаётся в
+// очереди сокета, и systemd отдаёт его новому процессу. С идущими запросами
+// демон дообслуживает их и до их конца принимает новые соединения, отвечая
+// «в CLI: upgrade»: без accept прокси ждал бы «принято» до своего окна и
+// уходил бы в CLI по «ack: timed out», который идёт в счёт уведомления
+// (ревью 8f10b59, п. 2)
 func (s *server) serve(ctx context.Context, listener *net.UnixListener) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// drained — смена файла застала идущие запросы, и они дообслужены:
+	// приём кончается
+	drained, drain := context.WithCancel(context.Background())
+	defer drain()
+	upgrading := false
+	var handlers sync.WaitGroup
+	// upgrade — файл сменился: true — выйти сразу (запросов нет), иначе
+	// приём до конца идущих
+	upgrade := func() bool {
+		if s.handling.Load() == 0 {
+			return true
+		}
+		upgrading = true
+		go func() {
+			handlers.Wait()
+			drain()
+		}()
+		return false
+	}
 	waiter, err := newAcceptWaiter(listener)
 	if err != nil {
 		_ = listener.Close()
 		return err
 	}
 	defer waiter.close()
-	stop := context.AfterFunc(ctx, func() {
+	closeListener := func() {
 		_ = listener.Close()
 		waiter.close()
-	})
+	}
+	stop := context.AfterFunc(ctx, closeListener)
 	defer stop()
+	stopDrained := context.AfterFunc(drained, closeListener)
+	defer stopDrained()
 	go s.reportStats(ctx)
 	for {
 		if waitErr := waiter.wait(); waitErr != nil {
-			if ctx.Err() == nil {
+			if ctx.Err() == nil && drained.Err() == nil {
 				err = waitErr
 			}
 			break
 		}
-		// Сверка до accept: соединение остаётся в очереди сокета, и при
-		// сокете от systemd его примет новый процесс
-		if s.exeChanged("before accept") {
+		// Сверка до accept: без идущих запросов соединение остаётся в очереди
+		// сокета, и при сокете от systemd его примет новый процесс
+		if !upgrading && s.exeChanged("before accept") && upgrade() {
 			break
 		}
 		conn, acceptErr := listener.AcceptUnix()
 		if acceptErr != nil {
-			if ctx.Err() == nil {
+			if ctx.Err() == nil && drained.Err() == nil {
 				err = acceptErr
 			}
 			break
 		}
-		// Замена между сверкой и accept: принятое соединение — «в CLI»,
-		// старый код его не исполняет
-		if s.exeChanged("after accept") {
-			s.inFlight.Go(func() {
-				defer conn.Close()
-				s.refuse(conn, "", "upgrade")
-			})
-			break
+		// Замена между сверкой и accept или дообслуживание после неё:
+		// принятое соединение — «в CLI», старый код его не исполняет
+		if !upgrading && s.exeChanged("after accept") {
+			s.refuseUpgrade(conn)
+			if upgrade() {
+				break
+			}
+			continue
 		}
+		if upgrading {
+			s.refuseUpgrade(conn)
+			continue
+		}
+		s.handling.Add(1)
+		handlers.Add(1)
 		s.inFlight.Go(func() {
+			defer handlers.Done()
+			defer s.handling.Add(-1)
 			s.handle(conn)
 		})
 	}
 	_ = listener.Close()
 	s.inFlight.Wait()
 	return err
+}
+
+// upgradeReason — причина «в CLI» после замены исполняемого файла демона
+const upgradeReason = "upgrade"
+
+// refuseUpgrade отвечает «в CLI: upgrade» и закрывает соединение
+func (s *server) refuseUpgrade(conn *net.UnixConn) {
+	s.inFlight.Go(func() {
+		defer conn.Close()
+		s.refuse(conn, "", upgradeReason)
+	})
 }
 
 // exeChanged — исполняемый файл демона заменён: строка в лог, приём
@@ -403,7 +455,7 @@ func (s *server) acceptAndCommit(conn *net.UnixConn, wire hookwire.Request) bool
 	var commit [1]byte
 	if _, err := io.ReadFull(conn, commit[:]); err != nil || commit[0] != hookwire.Commit {
 		if errors.Is(err, os.ErrDeadlineExceeded) {
-			s.refuse(conn, wire.Subcommand, "late")
+			s.refuse(conn, wire.Subcommand, hookproxy.LateReason)
 		}
 		s.logger.Info("daemon: request left to CLI by proxy before commit", "hook", wire.Subcommand, "pid", wire.PID, "error", err)
 		return false

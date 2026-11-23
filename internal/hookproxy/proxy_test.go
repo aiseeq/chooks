@@ -247,8 +247,9 @@ func TestRefusalPassesReason(t *testing.T) {
 	}
 }
 
-// Сценарий 1: после «принято» обрыв — до результата или посреди него — код 1
-// и строка в stderr; CLI не вызывается, неполный вывод не отдаётся
+// Сценарий 1: после «принято» обрыв — до результата или посреди него — CLI
+// зовётся один раз с причиной «lost: …» (он хук не повторяет, а записывает
+// вызов: ревью 8f10b59, п. 3), неполный вывод не отдаётся
 func TestDropAfterAcceptDoesNotRetry(t *testing.T) {
 	for name, tail := range map[string][]byte{
 		"before result": nil,
@@ -263,12 +264,16 @@ func TestDropAfterAcceptDoesNotRetry(t *testing.T) {
 				_, _ = conn.Write(tail)
 			})
 			stub := newCLIStub(t)
-			r := runProxy(t, d.path, stub, []byte(`{}`), "webfetch-fallback")
-			if r.code != 1 || r.stdout != "" || !strings.Contains(r.stderr, "после «принято», хук не повторён") {
+			r := runProxy(t, d.path, stub, []byte(`{"x":1}`), "webfetch-fallback")
+			if r.code != 7 || r.stdout != "cli-out\n" {
 				t.Fatalf("code %d stdout %q stderr %q", r.code, r.stdout, r.stderr)
 			}
-			if calls := stub.calls(t); len(calls) != 0 {
-				t.Fatalf("CLI called after accept: %q", calls)
+			calls := stub.calls(t)
+			if len(calls) != 1 || !Lost(calls[0]) || !strings.HasSuffix(calls[0], "|webfetch-fallback") {
+				t.Fatalf("CLI calls %q, want one with the lost reason", calls)
+			}
+			if data, err := os.ReadFile(stub.stdin); err != nil || string(data) != `{"x":1}` {
+				t.Fatalf("CLI stdin %q %v", data, err)
 			}
 		})
 	}
@@ -385,5 +390,67 @@ func TestSIGTERMAfterCommitTellsDaemon(t *testing.T) {
 	}
 	if calls := stub.calls(t); len(calls) != 0 {
 		t.Fatalf("CLI called: %q", calls)
+	}
+}
+
+// Ревью 8f10b59, п. 2: в счёт уведомления — только недоступность демона
+// (connect, ack, обрыв); обновление и уходы по замыслу — нет
+func TestUnavailableReasons(t *testing.T) {
+	for reason, want := range map[string]bool{
+		"connect: no such file or directory": true,
+		"connect: connection refused":        true,
+		"ack: connection timed out":          true,
+		"ack: unexpected byte":               true,
+		"send: broken pipe":                  true,
+		"commit: broken pipe":                true,
+		LostPrefix + "connection reset":      true,
+		commitPrefix + LateReason:            false,
+		"upgrade":                            false,
+		"env: HOME relative":                 false,
+		"subcommand":                         false,
+		"transcript: not a regular file":     false,
+		"size":                               false,
+		"argv":                               false,
+		"stdin too large":                    false,
+		"busy: 2 stuck":                      false,
+	} {
+		if got := Unavailable(reason); got != want {
+			t.Errorf("Unavailable(%q) = %v, want %v", reason, got, want)
+		}
+	}
+}
+
+// Ревью 8f10b59, п. 2: демон ответил «в CLI», не дочитав запрос, и закрыл
+// сокет (отказ «upgrade» на дообслуживании). Запись прокси кончается EPIPE,
+// но причина — та, что прислал демон, а не «send: broken pipe»
+func TestRefusalBeforeRequestRead(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "d.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+			_, _ = conn.Write(hookwire.EncodeFallback("upgrade"))
+			_ = conn.Close()
+		}
+	}()
+	stub := newCLIStub(t)
+	r := runProxy(t, path, stub, bigInput, "stop")
+	if calls := stub.calls(t); r.code != 7 || len(calls) != 1 || calls[0] != "upgrade|stop" {
+		t.Fatalf("code %d calls %q stderr %q", r.code, calls, r.stderr)
+	}
+	if data, _ := os.ReadFile(stub.stdin); !bytes.Equal(data, bigInput) {
+		t.Fatalf("CLI stdin %d bytes, want %d", len(data), len(bigInput))
 	}
 }

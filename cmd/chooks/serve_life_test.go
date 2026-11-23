@@ -42,6 +42,10 @@ const (
 	// alertLogEnv — журнал уведомлений: бинарь тестов в роли deliver-alert
 	// пишет сюда свои аргументы
 	alertLogEnv = "CHOOKS_TEST_ALERT_LOG"
+	// alertHoldEnv — файл, до появления которого бинарь тестов в роли
+	// deliver-alert не выходит (не дольше 30 с): живой фоновый процесс
+	// хука. Свой pid он пишет в журнал строкой «pid N»
+	alertHoldEnv = "CHOOKS_TEST_ALERT_HOLD"
 	// versionTrailer — метка версии в хвосте копии бинаря тестов
 	versionTrailer = "\nCHOOKS-TEST-VERSION="
 )
@@ -63,6 +67,16 @@ func appendTestLine(path, line string) {
 
 func recordTestAlert() int {
 	appendTestLine(os.Getenv(alertLogEnv), strings.Join(os.Args[1:], "\x1f"))
+	release := os.Getenv(alertHoldEnv)
+	if release == "" {
+		return 0
+	}
+	appendTestLine(os.Getenv(alertLogEnv), fmt.Sprintf("pid %d", os.Getpid()))
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(release); err == nil {
+			break
+		}
+	}
 	return 0
 }
 
@@ -140,7 +154,7 @@ func installVersion(t *testing.T, path, version string) time.Time {
 
 // supervised — демон под заглушкой systemd: сокет держит тест и отдаёт
 // каждому запуску как fd 3 с LISTEN_FDS=1 и LISTEN_PID; вышедший демон
-// запускается снова (Restart=always)
+// запускается снова через 50 мс (как Restart=, без запуска по сокету)
 type supervised struct {
 	socket, log, starts string
 	cmd                 *exec.Cmd
@@ -224,8 +238,10 @@ func servedBy(text, hook string) []string {
 
 // Сценарий 5, обновление после install: v1 исполняет долгий A, исполняемый
 // файл заменён на v2, сразу за этим приходит B, и v2 заменён на v3 во время
-// своего старта. A исполнен ровно раз (v1), B v1 и v2 не исполняют, сокет
-// всё время доступен (ни одного «connect:»), следующий запрос исполняет v3
+// своего старта. A исполнен ровно раз (v1), B v1 и v2 не исполняют: v1,
+// дообслуживая A, отвечает B «в CLI: upgrade» (ревью 8f10b59, п. 2). Сокет
+// всё время доступен (ни одного «connect:»), следующий запрос v2 оставляет в
+// очереди сокета, и его исполняет v3
 func TestServeUpdateAfterInstall(t *testing.T) {
 	home, work := webFetchHome(t, "2.5")
 	exe := filepath.Join(home, "bin", "chooks")
@@ -268,8 +284,11 @@ func TestServeUpdateAfterInstall(t *testing.T) {
 	if b.code != exitAllowed {
 		t.Errorf("B: code %d stderr %q", b.code, b.stderr)
 	}
-	if !sv.waitLog(t, 20*time.Second, `msg="daemon: serving"`, "version=v3") {
-		t.Fatalf("v3 not serving; starts:\n%s\nlog:\n%s", readFile(t, sv.starts), readFile(t, sv.log))
+	if reasons := lines(readFile(t, runs)); !slices.Equal(reasons, []string{"upgrade"}) {
+		t.Errorf("fallbacks %q, want B left to CLI by v1 with \"upgrade\"", reasons)
+	}
+	if !sv.waitLog(t, 20*time.Second, `msg="daemon: serving"`, "version=v2") {
+		t.Fatalf("v2 not serving; starts:\n%s\nlog:\n%s", readFile(t, sv.starts), readFile(t, sv.log))
 	}
 	var c proxyRun
 	for attempt := 1; ; attempt++ {
@@ -284,6 +303,9 @@ func TestServeUpdateAfterInstall(t *testing.T) {
 	}
 	if c.code != exitAllowed {
 		t.Errorf("C: code %d stderr %q", c.code, c.stderr)
+	}
+	if !sv.waitLog(t, 20*time.Second, `msg="daemon: serving"`, "version=v3") {
+		t.Fatalf("v3 not serving; starts:\n%s\nlog:\n%s", readFile(t, sv.starts), readFile(t, sv.log))
 	}
 	log := readFile(t, sv.log)
 	if got := servedBy(log, hookPreToolUse); !slices.Equal(got[len(got)-1:], []string{"v3"}) || slices.Contains(got, "v1") || slices.Contains(got, "v2") {
@@ -925,22 +947,72 @@ func systemdUser(t *testing.T) []string {
 	return env
 }
 
+// unitProperties — «ключ=значение» секции section unit-файла
+// configs/systemd/name, кроме ключей skip: тест поднимает unit с теми же
+// свойствами, что ставит graft install
+func unitProperties(t *testing.T, name, section string, skip ...string) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "configs", "systemd", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var props []string
+	current := ""
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "" || strings.HasPrefix(line, "#"):
+		case strings.HasPrefix(line, "["):
+			current = strings.Trim(line, "[]")
+		case current == section:
+			key, _, ok := strings.Cut(line, "=")
+			if !ok {
+				t.Fatalf("%s: line %q is not key=value", name, line)
+			}
+			if !slices.Contains(skip, key) {
+				props = append(props, line)
+			}
+		}
+	}
+	return props
+}
+
+// processAlive — процесс pid жив и это не зомби
+func processAlive(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	_, rest, ok := strings.Cut(string(data), ") ")
+	return ok && !strings.HasPrefix(rest, "Z")
+}
+
 // Unit systemd на деле: временный сокет-юнит со своим именем и сокетом в
-// каталоге теста (systemd-run --socket-property), сервис — копия бинаря
+// каталоге теста (systemd-run --socket-property), свойства — из
+// configs/systemd/chooks.service и chooks.socket, сервис — копия бинаря
 // тестов. Первый запрос исполняет v1; после замены файла v1 выходит, systemd
 // поднимает v2 на том же сокете, следующий запрос исполняет v2, «connect:»
-// не бывает. Настоящий chooks.service не трогается
+// и «ack:» не бывает. Наблюдатель уведомления, запущенный обработчиком v1 через
+// desktop.StartDetached, переживает выход v1 (ревью 8f10b59, п. 1:
+// KillMode=control-group убил бы его вместе с демоном). Настоящий
+// chooks.service не трогается
 func TestSystemdSocketUnit(t *testing.T) {
 	env := systemdUser(t)
 	home := t.TempDir()
-	writeFiles(t, home, map[string]string{".config/chooks/config.yaml": serveConfig})
+	writeFiles(t, home, map[string]string{".config/chooks/config.yaml": strings.Replace(serveConfig,
+		"notifier: {enabled: false}", "notifier: {enabled: true, desktop: true, sound: false}", 1)})
 	exe := filepath.Join(home, "bin", "chooks")
 	installVersion(t, exe, "v1")
 	socket := filepath.Join(socketDir(t), "chooks.sock")
 	unit := fmt.Sprintf("chooks-test-%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000)
-	args := []string{"--user", "--unit=" + unit, "--quiet", "--collect",
-		"--socket-property=ListenStream=" + socket, "--socket-property=SocketMode=0600",
-		"-p", "Restart=always", "-p", "RestartSec=100ms", "-p", "StartLimitIntervalSec=60", "-p", "StartLimitBurst=30"}
+	args := []string{"--user", "--unit=" + unit, "--quiet", "--collect", "--socket-property=ListenStream=" + socket}
+	for _, prop := range unitProperties(t, "chooks.socket", "Socket", "ListenStream") {
+		args = append(args, "--socket-property="+prop)
+	}
+	for _, prop := range append(unitProperties(t, "chooks.service", "Unit", "Description", "Requires", "After"),
+		unitProperties(t, "chooks.service", "Service", "ExecStart")...) {
+		args = append(args, "-p", prop)
+	}
 	for _, kv := range append(absoluteEnv(home), daemonHelper+"=1", daemonStartsEnv+"="+filepath.Join(home, "starts")) {
 		args = append(args, "--setenv="+kv)
 	}
@@ -950,7 +1022,9 @@ func TestSystemdSocketUnit(t *testing.T) {
 	if out, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("systemd-run --user: %v: %s", err, out)
 	}
+	alerts, release := filepath.Join(home, "alerts"), filepath.Join(home, "release")
 	t.Cleanup(func() {
+		writeFiles(t, home, map[string]string{"release": ""})
 		stop := exec.Command("systemctl", "--user", "stop", unit+".socket", unit+".service")
 		stop.Env = env
 		if out, err := stop.CombinedOutput(); err != nil {
@@ -965,7 +1039,7 @@ func TestSystemdSocketUnit(t *testing.T) {
 	}
 	log := filepath.Join(home, ".claude", "logs", "chooks.log")
 	runs := filepath.Join(home, "cli-runs")
-	proxy := proxyEnv(t, absoluteEnv(home), socket, runs)
+	proxy := append(proxyEnv(t, absoluteEnv(home), socket, runs), alertLogEnv+"="+alerts, alertHoldEnv+"="+release)
 	serveAs := func(version string) {
 		t.Helper()
 		ok := waitFor(t, 20*time.Second, func() bool {
@@ -981,15 +1055,69 @@ func TestSystemdSocketUnit(t *testing.T) {
 		}
 	}
 	serveAs("v1")
+	// Уведомление от v1: его наблюдатель — фоновый процесс хука
+	notify := runBinary(t, proxyHelper, []string{hookNotification}, proxy, home,
+		[]byte(`{"session_id":"n1","hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission"}`))
+	if got := servedBy(readFile(t, log), hookNotification); notify.code != exitAllowed || !slices.Equal(got, []string{"v1"}) {
+		t.Fatalf("notification code %d stderr %q served by %v", notify.code, notify.stderr, got)
+	}
+	watcher := 0
+	if !waitFor(t, 10*time.Second, func() bool {
+		for _, line := range lines(readFile(t, alerts)) {
+			if pid, ok := strings.CutPrefix(line, "pid "); ok {
+				watcher, _ = strconv.Atoi(pid)
+			}
+		}
+		return watcher > 0
+	}) {
+		t.Fatalf("notification watcher not started; alerts %q; log:\n%s", lines(readFile(t, alerts)), readFile(t, log))
+	}
+	v1 := servedPID(t, filepath.Join(home, "starts"), "v1")
 	installVersion(t, exe, "v2")
 	serveAs("v2")
+	if !waitFor(t, 10*time.Second, func() bool { return !processAlive(v1) }) {
+		t.Fatalf("v1 (pid %d) still alive after v2 served", v1)
+	}
+	if !processAlive(watcher) {
+		t.Fatalf("notification watcher %d died with v1 (pid %d)", watcher, v1)
+	}
 	if got := servedBy(readFile(t, log), hookPreToolUse); slices.Contains(got[slices.Index(got, "v2"):], "v1") {
 		t.Errorf("v1 served after v2 started: %v", got)
 	}
+	var unavailable []string
 	for _, reason := range lines(readFile(t, runs)) {
 		if strings.HasPrefix(reason, "connect:") {
 			t.Errorf("socket unavailable during the update: %q", reason)
 		}
+		if hookproxy.Unavailable(reason) {
+			unavailable = append(unavailable, reason)
+		}
 	}
-	t.Logf("starts:\n%s\nfallbacks: %q", readFile(t, filepath.Join(home, "starts")), lines(readFile(t, runs)))
+	// Выход v1 с кодом 0 — без паузы RestartSec: v2 поднимает сокет на
+	// соединении из очереди, и ни один вызов не уходит в CLI по «ack:»
+	if len(unavailable) > 0 {
+		t.Errorf("calls left to CLI as daemon unavailable during the update: %q", unavailable)
+	}
+	writeFiles(t, home, map[string]string{"release": ""})
+	if !waitFor(t, 10*time.Second, func() bool { return !processAlive(watcher) }) {
+		t.Errorf("notification watcher %d did not exit after release", watcher)
+	}
+	t.Logf("starts:\n%s\nfallbacks: %q; counted as daemon unavailable: %d", readFile(t, filepath.Join(home, "starts")), lines(readFile(t, runs)), len(unavailable))
+}
+
+// servedPID — pid запуска version из журнала стартов
+func servedPID(t *testing.T, starts, version string) int {
+	t.Helper()
+	for _, line := range lines(readFile(t, starts)) {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "start" && fields[1] == version {
+			pid, err := strconv.Atoi(fields[2])
+			if err != nil {
+				t.Fatal(err)
+			}
+			return pid
+		}
+	}
+	t.Fatalf("no start of %s in %q", version, readFile(t, starts))
+	return 0
 }

@@ -29,6 +29,47 @@ const (
 	EnvFallback = "CHOOKS_FALLBACK"
 )
 
+// LostPrefix — начало причины, с которой прокси зовёт CLI после обрыва
+// связи с демоном после 'C': эффект хука мог уже случиться, и CLI хук не
+// исполняет, а только записывает вызов в счёт и в файл длительностей и
+// отвечает кодом 1 (ревью 8f10b59, п. 3)
+const LostPrefix = "lost: "
+
+// Lost — reason несёт обрыв после 'C': CLI хук не повторяет
+func Lost(reason string) bool {
+	return strings.HasPrefix(reason, LostPrefix)
+}
+
+// LateReason — причина 'F' от демона вместо результата: 'C' пришёл после
+// срока демона, запрос не исполнялся
+const LateReason = "late"
+
+// Unavailable — reason значит, что демон недоступен: не принял соединение,
+// не ответил «принято» в срок, связь оборвалась до или после 'C'. Только
+// такие уходы в CLI идут в счёт уведомления; обновление демона («upgrade»)
+// и уходы по замыслу (env, subcommand, transcript, size, argv, stdin) — нет
+// (ревью 8f10b59, п. 2)
+func Unavailable(reason string) bool {
+	if reason == commitPrefix+LateReason {
+		return false
+	}
+	for _, prefix := range []string{connectPrefix, ackPrefix, sendPrefix, commitPrefix, LostPrefix} {
+		if strings.HasPrefix(reason, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// Начала причин, которые ставит сам прокси: шаг протокола, на котором
+// связь с демоном не сложилась
+const (
+	connectPrefix = "connect: "
+	sendPrefix    = "send: "
+	ackPrefix     = "ack: "
+	commitPrefix  = "commit: "
+)
+
 // AckWindow — срок от отправки запроса до «принято». Не пришло — CLI:
 // пользователь ждёт демона не дольше этого
 const AckWindow = 100 * time.Millisecond
@@ -85,12 +126,12 @@ func (p *proxy) run() int {
 	p.watchTerm()
 	path := socketPath()
 	if path == "" {
-		return p.fallback(nil, false, "connect: no socket path")
+		return p.fallback(nil, false, connectPrefix+"no socket path")
 	}
 	fd, err := dial(path, time.Now().Add(AckWindow))
 	if err != nil {
 		// Демона нет: stdin не тронут, CLI читает его сам
-		return p.fallback(nil, false, "connect: "+err.Error())
+		return p.fallback(nil, false, connectPrefix+err.Error())
 	}
 	p.fd = fd
 	p.term.mu.Lock()
@@ -113,13 +154,20 @@ func (p *proxy) run() int {
 	}
 	deadline := time.Now().Add(AckWindow + time.Duration(len(stdin)>>20)*ackPerMiB)
 	if err := writeAll(p.fd, hookwire.EncodeRequest(request), deadline); err != nil {
+		reason := sendPrefix + err.Error()
+		refusal, refusalErr := p.earlyRefusal(deadline)
+		if refusalErr != nil {
+			reason += " (no refusal: " + refusalErr.Error() + ")"
+		} else {
+			reason = refusal
+		}
 		p.close()
-		return p.fallback(stdin, true, "send: "+err.Error())
+		return p.fallback(stdin, true, reason)
 	}
 	var b [1]byte
 	if err := readFull(p.fd, b[:], deadline); err != nil {
 		p.close()
-		return p.fallback(stdin, true, "ack: "+err.Error())
+		return p.fallback(stdin, true, ackPrefix+err.Error())
 	}
 	switch b[0] {
 	case hookwire.Accepted:
@@ -127,18 +175,18 @@ func (p *proxy) run() int {
 		reason, err := hookwire.ReadReason(deadlineReader{fd: p.fd, deadline: deadline})
 		p.close()
 		if err != nil {
-			return p.fallback(stdin, true, "ack: "+err.Error())
+			return p.fallback(stdin, true, ackPrefix+err.Error())
 		}
 		return p.fallback(stdin, true, reason)
 	default:
 		p.close()
-		return p.fallback(stdin, true, "ack: unexpected byte")
+		return p.fallback(stdin, true, ackPrefix+"unexpected byte")
 	}
 	// «Принято» пришло в срок: 'C' отдаёт исполнение демону. Не ушло — демон
 	// запрос не исполнит, CLI его исполнит один раз
 	if err := writeAll(p.fd, []byte{hookwire.Commit}, deadline); err != nil {
 		p.close()
-		return p.fallback(stdin, true, "commit: "+err.Error())
+		return p.fallback(stdin, true, commitPrefix+err.Error())
 	}
 	p.term.mu.Lock()
 	p.term.committed = true
@@ -146,37 +194,56 @@ func (p *proxy) run() int {
 	return p.await(stdin)
 }
 
+// earlyRefusal — причина 'F', которую демон прислал, не дочитав запрос, и
+// закрыл сокет: запись прокси тогда кончается EPIPE, а ответ ждёт в сокете.
+// Без этого отказ «upgrade» на дообслуживании выглядел бы обрывом «send:»
+// и шёл бы в счёт уведомления. Ошибка — отказа в сокете нет
+func (p *proxy) earlyRefusal(deadline time.Time) (string, error) {
+	var b [1]byte
+	if err := readFull(p.fd, b[:], deadline); err != nil {
+		return "", err
+	}
+	if b[0] != hookwire.Fallback {
+		return "", errNoRefusal
+	}
+	return hookwire.ReadReason(deadlineReader{fd: p.fd, deadline: deadline})
+}
+
+// errNoRefusal — после сбоя записи в сокете не 'F'
+var errNoRefusal = syscall.EPROTO
+
 // lateReasonWait — срок чтения причины 'F' после 'C': демон пишет её одним
 // кадром
 const lateReasonWait = time.Second
 
 // await ждёт результат без срока: срок хука держит Claude Code, а демон
-// отменяет запрос по своему сроку и по обрыву. Обрыв — код 1 без повтора:
-// эффект хука мог уже случиться. 'F' вместо результата — демон 'C' не
-// дождался и запрос не исполнял: CLI исполнит его один раз (ревью 2б-1, п. 8)
+// отменяет запрос по своему сроку и по обрыву. Обрыв — CLI без повтора хука
+// (lost): эффект хука мог уже случиться. 'F' вместо результата — демон 'C'
+// не дождался и запрос не исполнял: CLI исполнит его один раз (ревью 2б-1,
+// п. 8)
 func (p *proxy) await(stdin []byte) int {
 	r := deadlineReader{fd: p.fd}
 	if err := setTimeout(p.fd, syscall.SO_RCVTIMEO, 0); err != nil {
-		return p.lost(err)
+		return p.lost(stdin, err)
 	}
 	var b [1]byte
 	if err := readFull(p.fd, b[:], time.Time{}); err != nil {
-		return p.lost(err)
+		return p.lost(stdin, err)
 	}
 	if b[0] == hookwire.Fallback {
 		reason, err := hookwire.ReadReason(deadlineReader{fd: p.fd, deadline: time.Now().Add(lateReasonWait)})
 		if err != nil {
-			return p.lost(err)
+			return p.lost(stdin, err)
 		}
 		p.close()
-		return p.fallback(stdin, true, "commit: "+reason)
+		return p.fallback(stdin, true, commitPrefix+reason)
 	}
 	if b[0] != hookwire.Result {
-		return p.lost(syscall.EPROTO)
+		return p.lost(stdin, syscall.EPROTO)
 	}
 	code, stdout, stderr, err := hookwire.ReadResult(r)
 	if err != nil {
-		return p.lost(err)
+		return p.lost(stdin, err)
 	}
 	p.close()
 	if len(stdout) > 0 {
@@ -188,10 +255,18 @@ func (p *proxy) await(stdin []byte) int {
 	return code
 }
 
-func (p *proxy) lost(err error) int {
+// lost — связь оборвалась после 'C' (демон упал или вышел посреди запроса):
+// execve CLI с причиной LostPrefix. CLI хук не повторяет, а пишет вызов в
+// счёт уходов и в файл длительностей и выходит с кодом 1 и строкой в stderr
+// (LostMessage). CLI не запустился — та же строка от прокси, код 1
+func (p *proxy) lost(stdin []byte, err error) int {
 	p.close()
-	_, _ = os.Stderr.WriteString("chooks-hook: связь с демоном оборвалась после «принято», хук не повторён: " + err.Error() + "\n")
-	return 1
+	return p.fallback(stdin, true, LostPrefix+err.Error())
+}
+
+// LostMessage — строка stderr вызова, оборванного после 'C'
+func LostMessage(reason string) string {
+	return "chooks-hook: связь с демоном оборвалась после «принято», хук не повторён: " + strings.TrimPrefix(reason, LostPrefix) + "\n"
 }
 
 func (p *proxy) close() {
@@ -217,6 +292,9 @@ func (p *proxy) fallback(stdin []byte, consumed bool, reason string) int {
 	argv := append([]string{cli}, p.args[min(1, len(p.args)):]...)
 	env := withEnv(os.Environ(), EnvFallback, strings.ReplaceAll(reason, "\n", " "))
 	err := syscall.Exec(cli, argv, env)
+	if Lost(reason) {
+		_, _ = os.Stderr.WriteString(LostMessage(reason))
+	}
 	_, _ = os.Stderr.WriteString("chooks-hook: запасной путь " + cli + ": " + err.Error() + "\n")
 	return 1
 }

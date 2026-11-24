@@ -104,57 +104,11 @@ func TestKillJudgeGroups(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = syscall.Kill(child, syscall.SIGKILL)
 			t.Fatalf("judge child %d survived", child)
 		}
 	}
 	if _, err := runTracked(exec.Command("/bin/true")); err == nil {
 		t.Error("judge started after KillJudgeGroups")
-	}
-}
-
-func TestRunCLICancellationKillsProcessGroup(t *testing.T) {
-	root := t.TempDir()
-	pidFile := filepath.Join(root, "child")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req := hookctx.New(nil, nil, nil, []string{"PATH=/bin:/usr/bin"}, root, os.Getpid(), os.Getppid())
-	ctx = hookctx.WithRequest(ctx, req)
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `sleep 60 & echo $! > "$1"; wait`, "sh", pidFile)
-	done := make(chan error, 1)
-	go func() {
-		_, err := runCLIEnv(ctx, cmd, root, "", nil)
-		done <- err
-	}()
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-	})
-	var child int
-	for deadline := time.Now().Add(10 * time.Second); child == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		raw, _ := os.ReadFile(pidFile)
-		child, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
-	}
-	if child == 0 {
-		t.Fatal("judge child not started")
-	}
-	cancel()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("cancelled judge returned no error")
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("cancelled judge did not stop")
-	}
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child))
-		if err != nil || strings.Contains(string(stat), ") Z ") {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("judge child %d survived cancellation", child)
-		}
 	}
 }

@@ -35,6 +35,23 @@ func Silent(t testing.TB) []string {
 		errorsMu.Unlock()
 	}
 	var listeners []net.Listener
+	t.Cleanup(func() {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+		acceptWG.Wait()
+		connectionsMu.Lock()
+		for conn := range connections {
+			_ = conn.Close()
+		}
+		connectionsMu.Unlock()
+		connectionWG.Wait()
+		errorsMu.Lock()
+		defer errorsMu.Unlock()
+		for _, err := range failures {
+			t.Errorf("test bus: %v", err)
+		}
+	})
 	for _, addr := range []string{sock, "@" + name} {
 		l, err := net.Listen("unix", addr)
 		if err != nil {
@@ -72,23 +89,6 @@ func Silent(t testing.TB) []string {
 			}
 		})
 	}
-	t.Cleanup(func() {
-		for _, listener := range listeners {
-			_ = listener.Close()
-		}
-		acceptWG.Wait()
-		connectionsMu.Lock()
-		for conn := range connections {
-			_ = conn.Close()
-		}
-		connectionsMu.Unlock()
-		connectionWG.Wait()
-		errorsMu.Lock()
-		defer errorsMu.Unlock()
-		for _, err := range failures {
-			t.Errorf("test bus: %v", err)
-		}
-	})
 	return []string{"unix:path=" + sock, "unix:path=@" + name, "unix:abstract=" + name}
 }
 

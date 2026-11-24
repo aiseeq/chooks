@@ -374,3 +374,18 @@ func cleanupStale(dir string, now time.Time) error {
 	}
 	return errors.Join(errs...)
 }
+
+// CleanupStale удаляет давние записи и тексты с указанным временем отсчёта.
+func CleanupStale(stateDir, textsDir string, now time.Time) error {
+	return errors.Join(
+		wrapCleanupError("state", cleanupStale(stateDir, now)),
+		wrapCleanupError("texts", cleanupStale(textsDir, now)),
+	)
+}
+
+func wrapCleanupError(kind string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("cleanup %s: %w", kind, err)
+}

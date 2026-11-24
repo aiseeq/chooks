@@ -53,7 +53,10 @@ type Checker struct {
 	Location *time.Location
 	// Substage сообщает текущую подстадию для журнала таймаутов хука.
 	Substage func(string)
-	store    textStore
+	// StartCleanup запускает суточную чистку вне процесса хука.
+	// nil добавляет предупреждение: внутренний пакет не запускает процессы.
+	StartCleanup func(stateDir, textsDir string, now time.Time) error
+	store        textStore
 }
 
 // ErrNoTime — срок проверки наступил до её начала или до сохранения напоминания
@@ -167,16 +170,16 @@ func (c Checker) expired() bool {
 // записи и тексты и засевает форк текстами родителя
 func (c Checker) prepareFresh(event Event, state *sessionState) []error {
 	var errs []error
-	due, err := cleanupDue(c.StateDir, c.now())
+	cleanupNow := c.now()
+	due, err := cleanupDue(c.StateDir, cleanupNow)
 	if err != nil {
 		errs = append(errs, err)
 	}
 	if due {
-		if err := cleanupStale(c.StateDir, c.now()); err != nil {
-			errs = append(errs, err)
-		}
-		if err := cleanupStale(newDirStore(c.StateDir).dir, c.now()); err != nil {
-			errs = append(errs, err)
+		if c.StartCleanup == nil {
+			errs = append(errs, errors.New("skill reload cleanup launcher is not set"))
+		} else if err := c.StartCleanup(c.StateDir, newDirStore(c.StateDir).dir, cleanupNow); err != nil {
+			errs = append(errs, fmt.Errorf("cannot start stale skill reload cleanup: %w", err))
 		}
 	}
 	if event.AgentID == "" || event.AgentType != forkAgentType {

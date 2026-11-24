@@ -145,6 +145,31 @@ func TestAwaitSkillCheckAbandonsAtHardDeadlineWithSubstage(t *testing.T) {
 	}
 }
 
+func TestPostToolBatchCleanupLaunchRefusedInTestBinary(t *testing.T) {
+	timer, _, logger := newTestTimer(t, eventPostToolBatch, upsSettings)
+	timer.start = time.Now()
+	timer.now = time.Now
+	root := t.TempDir()
+	stateHome := filepath.Join(root, "state")
+	transcript := filepath.Join(root, "transcript.jsonl")
+	if err := os.MkdirAll(stateHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := hookctx.Context{
+		Env: []string{"HOME=" + root, "XDG_STATE_HOME=" + stateHome},
+		Cwd: root, Stdout: io.Discard, Stderr: io.Discard,
+	}
+	input := &core.ToolInput{SessionID: "fresh", TranscriptPath: transcript}
+	remindStaleSkills(context.Background(), eventPostToolBatch, input, &core.Config{}, logger,
+		timer.deadline(skillHardBudget), timer, request)
+	if len(logger.warns) != 1 || !strings.Contains(logger.warns[0], "cleanup launch refused in test binary") {
+		t.Fatalf("cleanup refusal warning missing: %q", logger.warns)
+	}
+}
+
 func TestAwaitSlowSkillCheckerReturnsBeforeHardDeadline(t *testing.T) {
 	timer, _, logger := newTestTimer(t, hookUserPromptSubmit, upsSettings)
 	timer.start = time.Now().Add(-1950 * time.Millisecond)

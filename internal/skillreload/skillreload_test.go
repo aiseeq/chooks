@@ -1095,12 +1095,25 @@ func TestCleanupRunsWhenMarkUnwritable(t *testing.T) {
 	f.checker.Now = func() time.Time { return now }
 	old := filepath.Join(f.checker.StateDir, "old.json")
 	f.writeFile(old, "{}", now.Add(-stateTTL-time.Hour))
+	started := make(chan struct{}, 1)
+	f.checker.StartCleanup = func(stateDir, textsDir string, at time.Time) error {
+		started <- struct{}{}
+		if stateDir != f.checker.StateDir || textsDir != newDirStore(stateDir).dir || !at.Equal(now) {
+			t.Errorf("аргументы запуска: %q %q %v", stateDir, textsDir, at)
+		}
+		return nil
+	}
 	errs := f.checker.prepareFresh(Event{SessionID: "s"}, &sessionState{})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("запуск чистки не состоялся")
+	}
 	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "cleanup mark") {
 		t.Errorf("сбой метки: %v", errs)
 	}
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Errorf("чистка не прошла: %v", err)
+	if _, err := os.Stat(old); err != nil {
+		t.Errorf("подставленный запуск не должен удалять файлы: %v", err)
 	}
 }
 
@@ -1117,6 +1130,28 @@ func TestCleanupAtMostDaily(t *testing.T) {
 		path := filepath.Join(f.checker.StateDir, name)
 		f.writeFile(path, "{}", now.Add(-stateTTL-time.Hour))
 		return path
+	}
+	type cleanupCall struct {
+		stateDir, textsDir string
+		now                time.Time
+	}
+	calls := make(chan cleanupCall, 4)
+	f.checker.StartCleanup = func(stateDir, textsDir string, at time.Time) error {
+		calls <- cleanupCall{stateDir, textsDir, at}
+		return nil
+	}
+	starts := 0
+	checkCall := func(expected time.Time) {
+		t.Helper()
+		select {
+		case call := <-calls:
+			starts++
+			if call.stateDir != f.checker.StateDir || call.textsDir != newDirStore(call.stateDir).dir || !call.now.Equal(expected) {
+				t.Errorf("аргументы запуска: %q %q %v", call.stateDir, call.textsDir, call.now)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("не дождались запуска чистки")
+		}
 	}
 	fresh := func() {
 		t.Helper()
@@ -1141,8 +1176,9 @@ func TestCleanupAtMostDaily(t *testing.T) {
 	}
 	text := staleText("first.txt")
 	fresh()
-	if !gone(first) || !gone(text) {
-		t.Error("без метки чистка не прошла")
+	checkCall(now)
+	if gone(first) || gone(text) || starts != 1 {
+		t.Error("первый запуск чистки не передан")
 	}
 	text = staleText("second.txt")
 
@@ -1152,14 +1188,15 @@ func TestCleanupAtMostDaily(t *testing.T) {
 	fresh()
 	f.writeFile(text, "текст", now.Add(-stateTTL-time.Hour))
 	fresh()
-	if gone(second) || gone(text) {
-		t.Error("чистка раньше суток")
+	if gone(second) || gone(text) || starts != 1 {
+		t.Error("повторный запуск раньше суток")
 	}
 
 	now = now.Add(2 * time.Minute)
 	fresh()
-	if !gone(second) || !gone(text) {
-		t.Error("через сутки чистка не прошла")
+	checkCall(now)
+	if gone(second) || gone(text) || starts != 2 {
+		t.Error("через сутки чистка не запущена")
 	}
 
 	third := stale("third.json")
@@ -1168,11 +1205,113 @@ func TestCleanupAtMostDaily(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh()
-	if !gone(third) {
-		t.Error("метка из будущего задержала чистку")
+	checkCall(now)
+	if gone(third) || starts != 3 {
+		t.Error("метка из будущего задержала запуск чистки")
 	}
 	if info, err := os.Stat(mark); err != nil || !info.ModTime().Equal(now) {
 		t.Errorf("метка не поправлена: %v %v", info, err)
+	}
+}
+
+func TestCheckStartsCleanupWithoutWalkingDirectories(t *testing.T) {
+	f := newFixture(t)
+	now := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	f.checker.Now = func() time.Time { return now }
+	if err := os.MkdirAll(f.checker.StateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	textsDir := newDirStore(f.checker.StateDir).dir
+	if err := os.MkdirAll(textsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleState := filepath.Join(f.checker.StateDir, "stale.json")
+	staleText := filepath.Join(textsDir, "stale.txt")
+	f.writeFile(staleState, "{}", now.Add(-stateTTL-time.Hour))
+	f.writeFile(staleText, "old text", now.Add(-stateTTL-time.Hour))
+	type cleanupCall struct {
+		stateDir, textsDir string
+		now                time.Time
+	}
+	var calls []cleanupCall
+	f.checker.StartCleanup = func(stateDir, textsDir string, at time.Time) error {
+		calls = append(calls, cleanupCall{stateDir, textsDir, at})
+		return nil
+	}
+	if _, err := f.checker.Check(Event{SessionID: "new-session", TranscriptPath: f.transcript}); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(calls) != 1 || calls[0].stateDir != f.checker.StateDir || calls[0].textsDir != textsDir || !calls[0].now.Equal(now) {
+		t.Fatalf("аргументы запуска: %#v", calls)
+	}
+	for _, path := range []string{staleState, staleText} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("устаревший файл удалён в пути Check: %s: %v", path, err)
+		}
+	}
+}
+
+func TestCleanupStartsOnceForTwoFreshChecks(t *testing.T) {
+	f := newFixture(t)
+	now := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	f.checker.Now = func() time.Time { return now }
+	calls := 0
+	f.checker.StartCleanup = func(string, string, time.Time) error {
+		calls++
+		return nil
+	}
+	for _, session := range []string{"session-a", "session-b"} {
+		if _, err := f.checker.Check(Event{SessionID: session, TranscriptPath: f.transcript}); err != nil {
+			t.Fatalf("Check %s: %v", session, err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("запусков чистки: %d, want 1", calls)
+	}
+}
+
+func TestCleanupStaleRemovesOldFilesAndKeepsFresh(t *testing.T) {
+	root := t.TempDir()
+	stateDir, textsDir := filepath.Join(root, "state"), filepath.Join(root, "texts")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(textsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	for _, item := range []struct {
+		dir, name string
+		at        time.Time
+	}{
+		{stateDir, "old.json", now.Add(-stateTTL - time.Second)},
+		{stateDir, "fresh.json", now.Add(-stateTTL + time.Second)},
+		{textsDir, "old.txt", now.Add(-stateTTL - time.Second)},
+		{textsDir, "fresh.txt", now.Add(-stateTTL + time.Second)},
+	} {
+		path := filepath.Join(item.dir, item.name)
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, item.at, item.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := CleanupStale(stateDir, textsDir, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(stateDir, "old.json"), filepath.Join(textsDir, "old.txt")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("устаревший файл остался %s: %v", path, err)
+		}
+	}
+	for _, path := range []string{filepath.Join(stateDir, "fresh.json"), filepath.Join(textsDir, "fresh.txt")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("свежий файл удалён %s: %v", path, err)
+		}
 	}
 }
 

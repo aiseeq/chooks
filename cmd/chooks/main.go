@@ -22,6 +22,7 @@ import (
 	"github.com/aiseeq/chooks/internal/hookproxy"
 	"github.com/aiseeq/chooks/internal/modellaunch"
 	"github.com/aiseeq/chooks/internal/processor"
+	"github.com/aiseeq/chooks/internal/skillreload"
 	"github.com/aiseeq/chooks/internal/statusline"
 	"github.com/aiseeq/chooks/internal/textstyle"
 	"github.com/aiseeq/chooks/internal/tools"
@@ -113,6 +114,7 @@ func execute(ctx context.Context, request hookctx.Context) int {
 		newUnderstandBenchCmd(),
 		newCorpusSweepCmd(),
 		newDeliverAlertCmd(),
+		newSkillReloadCleanupCmd(),
 		newServeCmd(),
 		newShadowReportCmd(&exitCode),
 	)
@@ -125,6 +127,46 @@ func execute(ctx context.Context, request hookctx.Context) int {
 	}
 
 	return exitCode
+}
+
+func newSkillReloadCleanupCmd() *cobra.Command {
+	var stateDir, textsDir, nowArg string
+	cmd := &cobra.Command{
+		Use:    "skill-reload-cleanup",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if stateDir == "" || textsDir == "" || nowArg == "" {
+				return errors.New("state-dir, texts-dir and now are required")
+			}
+			now, err := time.Parse(time.RFC3339Nano, nowArg)
+			if err != nil {
+				return fmt.Errorf("invalid cleanup time: %w", err)
+			}
+			request, err := commandRequest(cmd)
+			if err != nil {
+				return err
+			}
+			config, err := core.LoadConfigForRequest(commandConfigPath(cmd), request)
+			if err != nil {
+				return err
+			}
+			logger, err := core.NewLoggerIn(config.Logger, request.Stderr, request.Location())
+			if err != nil {
+				return err
+			}
+			defer closeRequestLogger(logger)
+			if err := skillreload.CleanupStale(stateDir, textsDir, now); err != nil {
+				logger.Error("skill reload cleanup failed", "error", err)
+			}
+			return nil
+		},
+	}
+	flags := cmd.Flags()
+	flags.StringVar(&stateDir, "state-dir", "", "каталог записей skill-reload")
+	flags.StringVar(&textsDir, "texts-dir", "", "каталог текстов skill-reload")
+	flags.StringVar(&nowArg, "now", "", "время чистки в RFC3339Nano")
+	return cmd
 }
 
 func newModelScanCmd() *cobra.Command {

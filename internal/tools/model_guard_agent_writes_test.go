@@ -245,7 +245,7 @@ func TestModelGuardReviewRoundOneForms(t *testing.T) {
 	const (
 		agent = ".claude/agents/x.md"
 		fable = "---\\nname: x\\nmodel: fable\\n---\\n"
-		run   = "claude -p hi"
+		run   = "claude"
 	)
 	tee := func(wrapper string) string {
 		return "printf -- '" + fable + "' | " + wrapper + " tee " + agent + "\n" + run
@@ -317,10 +317,8 @@ func TestModelGuardReviewRoundOneForms(t *testing.T) {
 	}
 	pass := []struct{ name, command string }{
 		{"cd read jq", `cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head`},
-		{"cd read system cat", "cd ~/.claude && /usr/bin/cat settings.json && " + run},
 		{"git -C no-pager log", "git -C ~/.claude --no-pager log -1 && " + run},
 
-		{"cd claude model", "cd ~/.claude && claude --model opus -p hi"},
 		{"sudo -u root -- claude", "sudo -u root -- claude -p \"review " + agent + "\""},
 		{"sudo -E claude", "sudo -E claude -p \"review " + agent + "\""},
 		{"env -i assignment claude", "env -i HOME=/h claude -p \"review " + agent + "\""},
@@ -401,7 +399,7 @@ func TestModelGuardReviewRoundTwoForms(t *testing.T) {
 	const (
 		agent = ".claude/agents/x.md"
 		set   = "cp /tmp/e.json settings.json"
-		run   = "claude -p hi"
+		run   = "claude"
 	)
 	deny := []struct{ name, command string }{
 		// HIGH-1: значение env -S исполняется — это запуск, не клиент
@@ -471,7 +469,6 @@ func TestModelGuardReviewRoundTwoForms(t *testing.T) {
 		{"file -C", "cd ~/.claude && file -C -m settings; " + run},
 	}
 	pass := []struct{ name, command string }{
-		{"cd cat settings", "cd ~/.claude && cat settings.json; " + run},
 		{"cd claude mcp list", "cd ~/.claude && claude mcp list 2>/dev/null | head"},
 		{"test -f agent", "test -f " + agent + " && " + run},
 		{"[[ -f agent ]]", "[[ -f " + agent + " ]] && " + run},
@@ -511,7 +508,7 @@ func TestModelGuardReviewRoundThreeForms(t *testing.T) {
 	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
 	const (
 		set = "cp /tmp/e.json settings.json"
-		run = "claude -p hi"
+		run = "claude"
 		tar = "tar -xf /tmp/e.tar "
 	)
 	deny := []struct{ name, command string }{
@@ -572,7 +569,7 @@ func TestModelGuardReviewRoundThreeForms(t *testing.T) {
 func TestModelGuardReviewRoundFourForms(t *testing.T) {
 	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
 	const (
-		run = "claude -p hi"
+		run = "claude"
 		x   = "$'a[\\x24(cp /tmp/e.json settings.json)]'"
 		tar = "tar -xf /tmp/e.tar "
 	)
@@ -621,9 +618,6 @@ func TestModelGuardReviewRoundFourForms(t *testing.T) {
 	}
 	pass := []struct{ name, command string }{
 		{"mc3 jq and claude mcp list", "cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head"},
-		{"cd cat settings", "cd ~/.claude && cat settings.json && " + run},
-		{"cd ls agents", "cd ~/.claude && ls agents && " + run},
-		{"cd cat quoted", "cd ~/.claude && cat 'settings.json' \"agents/x.md\" 2>&1 < /dev/null && " + run},
 		{"go text cfg.Claude", "cd ~/git/aguard && perl -0pi -e 's|x|\\tcfg.Restart.Claude = claude|' x.go; cl --cl-check"},
 		{"text field and file name", "bash -c 'echo cfg.Claude my-app.claude (opts.claude) x := *cfg.Claude'; " + run},
 	}
@@ -654,7 +648,7 @@ func TestModelGuardReviewRoundFourForms(t *testing.T) {
 func TestModelGuardReviewRoundFiveForms(t *testing.T) {
 	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
 	const (
-		run = "claude -p hi"
+		run = "claude"
 		tar = "tar -xf /tmp/e.tar "
 	)
 	deny := []struct{ name, command string }{
@@ -675,8 +669,6 @@ func TestModelGuardReviewRoundFiveForms(t *testing.T) {
 		{"L2 cd claude mcp list then add", "cd ~/.claude && claude mcp list mcp add x -- cp /tmp/e.json settings.json && " + run},
 	}
 	pass := []struct{ name, command string }{
-		{"cd claude mcp list", "cd ~/.claude && claude mcp list && " + run},
-		{"cd claude prompt with subcommand words", "cd ~/.claude && claude -p \"update the config\""},
 		{"text continuation before field", "bash -c 'echo a \\\n cfg.Claude'; " + run},
 	}
 	check := func(command string) *core.ValidationResult {
@@ -707,7 +699,7 @@ func TestModelGuardReviewRoundSixForms(t *testing.T) {
 	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
 	const (
 		cd  = "cd ~/.claude && "
-		run = " && claude -p hi"
+		run = " && claude"
 	)
 	deny := []struct{ name, command string }{
 		// MED-1: после cd в .claude клиент с позиционной подкомандой
@@ -730,16 +722,87 @@ func TestModelGuardReviewRoundSixForms(t *testing.T) {
 	}
 	pass := []struct{ name, command string }{
 		{"mc3 claude mcp list", "cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head"},
-		{"claude -p hi", cd + "claude -p hi"},
-		{"claude -p prompt with subcommand words", cd + "claude -p \"update the config\""},
 		{"claude alone", cd + "claude"},
-		{"value options without prompt", cd + "claude --model opus --add-dir /tmp/a /tmp/b --resume abc -n x"},
-		{"short optional values without prompt", cd + "claude -r abc -d api -w tree"},
-		{"long print prompt", cd + "claude --print hi"},
 		{"options and mcp list", cd + "claude --verbose mcp list"},
-		{"value options before print", cd + "claude --model opus --add-dir /tmp/a /tmp/b --debug api -n x --resume -p hi"},
-		{"attached values", cd + "claude --model=opus -nx -p hi"},
-		{"double dash prompt", cd + "claude -p -- hi"},
+	}
+	check := func(command string) *core.ValidationResult {
+		t.Helper()
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for _, c := range deny {
+		t.Run("deny "+c.name, func(t *testing.T) {
+			if check(c.command).IsValid {
+				t.Fatalf("пропуск, ждали отказ: %q", c.command)
+			}
+		})
+	}
+	for _, c := range pass {
+		t.Run("pass "+c.name, func(t *testing.T) {
+			if result := check(c.command); !result.IsValid {
+				t.Fatalf("отказ, ждали пропуск: %+v", result.Violations)
+			}
+		})
+	}
+}
+
+func TestModelGuardReviewRoundSevenForms(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	const (
+		cd  = "cd ~/.claude && "
+		run = "claude -p hi"
+	)
+	deny := []struct{ name, command string }{
+		// HIGH-1: скрытые подкоманды claude с -p
+		{"H1 -p edit-hook", cd + "echo '{}' | claude -p edit-hook --json && " + run},
+		{"H1 -p edit-permission-rules", cd + "claude -p edit-permission-rules --json < /tmp/e.json && " + run},
+		{"H1 -p edit-skill-overrides", cd + "echo '{}' | claude -p edit-skill-overrides --json && " + run},
+		{"H1 -p purge", cd + "claude -p purge -y --all && " + run},
+		{"H1 -p project purge", cd + "claude -p project purge -y && " + run},
+		{"H1 -p rc", cd + "claude -p rc && " + run},
+		{"H1 -p import-conversations", cd + "claude -p import-conversations /tmp/x.zip && " + run},
+		{"H1 -p worktree-hook", cd + "claude -p worktree-hook --json --event create && " + run},
+		{"H1 --print edit-hook", cd + "echo '{}' | claude --print edit-hook --json && " + run},
+		// любое слово не на `-`: промпт, значение опции, подкоманда
+		{"claude -p hi", cd + run},
+		{"claude --model opus", cd + "claude --model opus"},
+		{"cl with argument", cd + "cl x"},
+		{"mcp list with more", cd + "claude mcp list x"},
+		{"attached settings", cd + "claude --settings=/tmp/s.json"},
+		{"attached mcp-config", cd + "claude --mcp-config=/tmp/m.json"},
+		{"attached plugin-dir", cd + "claude --plugin-dir=/tmp/p"},
+		{"attached debug-file", cd + "claude --debug-file=x"},
+		// прежние ожидания пропуска с -p после cd
+		{"r1 cd read system cat", cd + "/usr/bin/cat settings.json && " + run},
+		{"r1 cd claude model", cd + "claude --model opus -p hi"},
+		{"r2 cd cat settings", cd + "cat settings.json; " + run},
+		{"r4 cd cat settings", cd + "cat settings.json && " + run},
+		{"r4 cd ls agents", cd + "ls agents && " + run},
+		{"r4 cd cat quoted", cd + "cat 'settings.json' \"agents/x.md\" 2>&1 < /dev/null && " + run},
+		{"r5 cd claude mcp list then prompt", cd + "claude mcp list && " + run},
+		{"r5 cd claude prompt with subcommand words", cd + "claude -p \"update the config\""},
+		{"r6 claude -p prompt with subcommand words", cd + "claude -p \"update the config\""},
+		{"r6 value options without prompt", cd + "claude --model opus --add-dir /tmp/a /tmp/b --resume abc -n x"},
+		{"r6 short optional values without prompt", cd + "claude -r abc -d api -w tree"},
+		{"r6 long print prompt", cd + "claude --print hi"},
+		{"r6 value options before print", cd + "claude --model opus --add-dir /tmp/a /tmp/b --debug api -n x --resume -p hi"},
+		{"r6 attached values", cd + "claude --model=opus -nx -p hi"},
+		{"r6 double dash prompt", cd + "claude -p -- hi"},
+	}
+	pass := []struct{ name, command string }{
+		{"cd claude", cd + "claude"},
+		{"mc3 claude mcp list", "cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head"},
+		{"claude --verbose", cd + "claude --verbose"},
+		{"claude --verbose mcp list", cd + "claude --verbose mcp list"},
+		{"read system cat", cd + "/usr/bin/cat settings.json && claude"},
+		{"cat settings", cd + "cat settings.json && claude"},
+		{"ls agents", cd + "ls agents && claude"},
+		{"cat quoted", cd + "cat 'settings.json' \"agents/x.md\" 2>&1 < /dev/null && claude"},
+		{"mcp list then claude", cd + "claude mcp list && claude"},
+		{"flags only", cd + "claude -c --verbose"},
 	}
 	check := func(command string) *core.ValidationResult {
 		t.Helper()

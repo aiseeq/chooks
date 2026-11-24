@@ -128,10 +128,10 @@ func TestModelGuardAgentWriteWhitelist(t *testing.T) {
 // TestWrittenAgentDefinitionsUnparsed: команду, которую разбор не взял,
 // с путём агентов не проверить
 func TestWrittenAgentDefinitionsUnparsed(t *testing.T) {
-	if _, unknown := writtenAgentDefinitionCandidates("cp /tmp/evil.md .claude/agents/x.md; ("); !unknown {
+	if _, unknown := writtenAgentDefinitionCandidates("cp /tmp/evil.md .claude/agents/x.md; (", testLogger(t)); !unknown {
 		t.Fatal("неразобранная запись в agents признана известной")
 	}
-	if _, unknown := writtenAgentDefinitionCandidates("echo hi; ("); unknown {
+	if _, unknown := writtenAgentDefinitionCandidates("echo hi; (", testLogger(t)); unknown {
 		t.Fatal("неразобранная команда без пути агентов признана записью")
 	}
 }

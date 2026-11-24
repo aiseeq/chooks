@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -57,8 +58,13 @@ func depthSignal(c shellcmd.Call) (name string, ok bool) {
 	return c.Name, false
 }
 func (s *killScan) depthReason(c shellcmd.Call, calls []shellcmd.Call) string {
-	if c.Offset < 0 && dynamicCommandNameRe.MatchString(c.Raw) && visibleDynamicSignal(c) {
-		return "имя команды вычисляется при запуске, а в тексте видна команда сигнала: такую форму хук не разбирает"
+	if c.Offset < 0 && dynamicCommandNameRe.MatchString(c.Raw) {
+		visible, err := visibleDynamicSignal(c)
+		if err != nil {
+			s.tool.Logger().Warn("kill_guard: динамическая команда не разобрана", "call", c.Name, "error", err)
+		} else if visible {
+			return "имя команды вычисляется при запуске, а в тексте видна команда сигнала: такую форму хук не разбирает"
+		}
 	}
 	if wrapperLevels(c.Via) < 2 || slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
 		return ""
@@ -174,13 +180,29 @@ func signalWords(text string) (string, bool) {
 	}
 	return "", false
 }
-func visibleDynamicSignal(c shellcmd.Call) bool {
-	calls, _ := shellcmd.Calls(literalShellWords(c.Args))
+func visibleDynamicSignal(c shellcmd.Call) (bool, error) {
+	calls, err := shellcmd.Calls(literalShellWords(c.Args))
+	if err != nil {
+		return false, fmt.Errorf("разобрать аргументы динамической команды: %w", err)
+	}
+	var parseErr error
 	for _, r := range c.Redirs {
-		more, _ := shellcmd.Calls(r.Target + "\n" + r.Body)
+		more, err := shellcmd.Calls(r.Target + "\n" + r.Body)
+		if err != nil {
+			parseErr = errors.Join(parseErr, err)
+			continue
+		}
 		calls = append(calls, more...)
 	}
-	return slices.ContainsFunc(calls, func(c shellcmd.Call) bool { _, ok := depthSignal(c); return ok && !harmlessDepthSignal(c) })
+	for i := range calls {
+		if _, ok := depthSignal(calls[i]); ok && !harmlessDepthSignal(calls[i]) {
+			return true, nil
+		}
+	}
+	if parseErr != nil {
+		return false, fmt.Errorf("разобрать перенаправления динамической команды: %w", parseErr)
+	}
+	return false, nil
 }
 func (s *killScan) feedCall(c shellcmd.Call, calls []shellcmd.Call) error {
 	if !slices.Contains(feeders, c.Name) || slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
@@ -210,10 +232,12 @@ func (s *killScan) feedCall(c shellcmd.Call, calls []shellcmd.Call) error {
 				s.addToolReason(via+": видимая команда "+name+" из ввода feeder не разобрана", depthHint, false)
 			}
 		} else {
-			sourceSignals := slices.DeleteFunc(source, func(c shellcmd.Call) bool {
-				_, ok := depthSignal(c)
-				return !ok || harmlessDepthSignal(c)
-			})
+			sourceSignals := source[:0]
+			for i := range source {
+				if _, ok := depthSignal(source[i]); ok && !harmlessDepthSignal(source[i]) {
+					sourceSignals = append(sourceSignals, source[i])
+				}
+			}
 			if err := s.callFeedSignals(c, calls, sourceSignals); err != nil {
 				return err
 			}

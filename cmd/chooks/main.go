@@ -659,6 +659,9 @@ func announceSessionEventWith(eventName string, input *core.ToolInput, config *c
 	if decision.State != "" {
 		saveStateIn(logger, request.RuntimeDir(), input.SessionID, decision.State)
 	}
+	if capture != nil {
+		capture.snapshotAfter(*request)
+	}
 
 	toolConfig, exists := config.Tools["notifier"]
 	if !exists || !toolConfig.Enabled {

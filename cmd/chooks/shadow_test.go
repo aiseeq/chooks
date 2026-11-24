@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/aiseeq/chooks/internal/hookproxy"
 	"github.com/aiseeq/chooks/internal/hookwire"
 	"github.com/aiseeq/chooks/internal/nighthint"
+	"github.com/aiseeq/chooks/internal/procfs"
 	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
 
@@ -93,12 +95,19 @@ type shadowCall struct {
 // процесса) со временем запроса shadowAt и env с сокетом демона socket
 func runShadowCLI(t *testing.T, home, hook, stdin, socket string, extra ...string) shadowCall {
 	t.Helper()
+	return runShadowCLIWith(t, home, hook, stdin, socket, nil, extra...)
+}
+
+// runShadowCLIWith — runShadowCLI с /proc запроса proc; nil — /proc машины
+func runShadowCLIWith(t *testing.T, home, hook, stdin, socket string, proc procfs.FS, extra ...string) shadowCall {
+	t.Helper()
 	env := append(absoluteEnv(home), hookproxy.EnvSocket+"="+socket, alertLogEnv+"="+filepath.Join(home, "alerts"),
 		"CLAUDE_PID="+strconv.Itoa(os.Getpid()), "TZ=Europe/Berlin")
 	env = append(env, extra...)
 	var stdout, stderr bytes.Buffer
 	request := hookctx.New(strings.NewReader(stdin), &stdout, &stderr, env, filepath.Join(home, "work"), os.Getpid(), os.Getppid())
 	request.Time = shadowAt
+	request.Proc = proc
 	ctx := context.WithValue(context.Background(), cliTerminationKey{}, (func(int))(func(int) {}))
 	start := time.Now()
 	code, err := runHook(hookctx.WithRequest(ctx, request), hook)
@@ -674,5 +683,203 @@ func TestShadowNightMark(t *testing.T) {
 	}
 	if status, detail := compareShadow(rec, out); status != shadowMismatch || !strings.Contains(detail, "stdout") {
 		t.Errorf("daemon at 00:00:00.001: %s %q, want a stdout mismatch", status, detail)
+	}
+}
+
+// countKonsoleTitles подменяет заголовок вкладки Konsole (D-Bus) под тенью
+// счётчиком без D-Bus. Вызов синхронен: после возврата хука и теневого
+// исполнения счёт окончателен
+func countKonsoleTitles(t *testing.T) func() int64 {
+	t.Helper()
+	var n atomic.Int64
+	orig := realNotifierEffects
+	realNotifierEffects = func() notifier.Effects {
+		effects := orig()
+		effects.KonsoleTitle = func(service, session, title string, request hookctx.Context) error {
+			n.Add(1)
+			return nil
+		}
+		return effects
+	}
+	t.Cleanup(func() { realNotifierEffects = orig })
+	return n.Load
+}
+
+// konsoleTestPID — pid вкладки Konsole в konsoleProc
+const konsoleTestPID = 7777
+
+// konsoleProc — /proc машины, где родитель процесса pid — konsole: вкладка
+// принадлежит хуку, и заголовок ставится через D-Bus
+type konsoleProc struct{ pid int }
+
+func (k konsoleProc) ReadFile(name string) ([]byte, error) {
+	switch name {
+	case fmt.Sprintf("/proc/%d/stat", k.pid):
+		return fmt.Appendf(nil, "%d (chooks) S %d %s", k.pid, konsoleTestPID, strings.Repeat("0 ", 48)), nil
+	case fmt.Sprintf("/proc/%d/comm", k.pid):
+		return []byte("chooks\n"), nil
+	case fmt.Sprintf("/proc/%d/stat", konsoleTestPID):
+		return fmt.Appendf(nil, "%d (konsole) S 1 %s", konsoleTestPID, strings.Repeat("0 ", 48)), nil
+	case fmt.Sprintf("/proc/%d/comm", konsoleTestPID):
+		return []byte("konsole\n"), nil
+	}
+	return procfs.OS{}.ReadFile(name)
+}
+
+func (konsoleProc) ReadDir(name string) ([]string, error) { return procfs.OS{}.ReadDir(name) }
+
+// Мера 4, заголовок Konsole: CLI ставит его через D-Bus, тень только
+// записывает эффект, и записи CLI и демона совпадают
+func TestShadowNoKonsoleTitle(t *testing.T) {
+	socket, frames := captureFrames(t)
+	titles := countKonsoleTitles(t)
+	home := shadowHome(t, true)
+	runShadowCLIWith(t, home, hookNotification, shadowInputs(home)[hookNotification], socket, konsoleProc{pid: os.Getpid()},
+		"KONSOLE_DBUS_SERVICE=org.kde.konsole-7777", "KONSOLE_DBUS_SESSION=/Sessions/1")
+	if n := titles(); n != 1 {
+		t.Fatalf("%d Konsole titles by CLI, want 1", n)
+	}
+	wire, rec := onlyFrame(t, frames)
+	if !slices.ContainsFunc(rec.Effects, func(e string) bool { return strings.HasPrefix(e, "konsole title ") }) {
+		t.Fatalf("CLI record lacks the Konsole title: %q", rec.Effects)
+	}
+	out, err := executeShadow(wire, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := titles(); n != 1 {
+		t.Errorf("%d Konsole titles, want 1 (CLI only): the shadow set one over D-Bus", n)
+	}
+	if status, detail := compareShadow(rec, out); status != shadowMatch {
+		t.Errorf("%s %q, want match", status, detail)
+	}
+}
+
+// Путь снимка из записи вне корня — ошибка, файл не трогается
+func TestShadowPathOutsideRoot(t *testing.T) {
+	request := hookctx.New(nil, nil, nil, absoluteEnv(t.TempDir()), "/", 0, 0)
+	for _, p := range []shadowPath{
+		{Root: shadowRootRuntime, Rel: "../escaped"},
+		{Root: shadowRootState, Rel: "night-hint/../../escaped"},
+		{Root: shadowRootRuntime, Rel: "/tmp/escaped"},
+	} {
+		if path, err := p.abs(request); err == nil {
+			t.Errorf("%s:%s resolved to %s, want an error", p.Root, p.Rel, path)
+		}
+	}
+}
+
+// Кадр CHS1 от процесса того же uid с путём «до» вне каталога тени: демон
+// ничего не пишет вне него, исход — «не сравнимо»
+func TestShadowBeforeEscapes(t *testing.T) {
+	sv, journal := shadowJournal(t)
+	home := shadowHome(t, true)
+	target := filepath.Join(t.TempDir(), "escaped.txt")
+	rel := strings.Repeat("../", 30) + strings.TrimPrefix(target, "/")
+	rec := shadowRecord{Session: "s6", Before: []shadowFile{{shadowPath: shadowPath{Root: shadowRootRuntime, Rel: rel}, Exists: true, Data: []byte("written by shadow\n")}}}
+	blob, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := hookwire.Request{Subcommand: hookStop, Env: absoluteEnv(home), Cwd: home, PID: 1, Stdin: []byte(shadowInputs(home)[hookStop])}
+	if err := hookproxy.SendShadow(sv.path, 10*time.Second, func() ([]byte, error) { return hookwire.EncodeShadow(wire, blob), nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(t, 20*time.Second, func() bool { return len(journalRows(t, journal)) == 1 }) {
+		t.Fatalf("no shadow line; daemon log:\n%s", readFile(t, sv.log))
+	}
+	if row := journalRows(t, journal)[0]; len(row) != 5 || row[3] != shadowIncomparable || !strings.Contains(row[4], "вне охвата") {
+		t.Errorf("shadow line %q, want incomparable: path out of scope", row)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("file outside the shadow dir: stat %v", err)
+	}
+}
+
+// Путь записи внутри корня, но не из вычисленных демоном для подкоманды и
+// сессии, — «не сравнимо»: демон берёт из записи только содержимое своих путей
+func TestShadowForeignStatePath(t *testing.T) {
+	socket, frames := captureFrames(t)
+	home := shadowHome(t, true)
+	runShadowCLI(t, home, hookStop, shadowInputs(home)[hookStop], socket)
+	wire, rec := onlyFrame(t, frames)
+	foreign := shadowFile{shadowPath: shadowPath{Root: shadowRootRuntime, Rel: "sessions/other"}, Exists: true, Data: []byte("idle")}
+	for name, edit := range map[string]func(r *shadowRecord){
+		"before extra": func(r *shadowRecord) { r.Before = append(slices.Clone(r.Before), foreign) },
+		"after extra":  func(r *shadowRecord) { r.After = append(slices.Clone(r.After), foreign) },
+		"before swapped": func(r *shadowRecord) {
+			r.Before = slices.Clone(r.Before)
+			r.Before[0] = foreign
+		},
+	} {
+		r := rec
+		edit(&r)
+		if _, err := executeShadow(wire, r); err == nil || !strings.Contains(err.Error(), "вне охвата") {
+			t.Errorf("%s: err %v, want path out of scope", name, err)
+		}
+	}
+	if _, err := executeShadow(wire, rec); err != nil {
+		t.Errorf("unchanged record: %v", err)
+	}
+}
+
+// Ротация: строки ротированных .1 журнала тени и файла длительностей входят
+// в счёт; файл длительностей начинается позже периода — период с его начала
+func TestShadowReportRotated(t *testing.T) {
+	dir := t.TempDir()
+	at := func(d time.Duration) string { return shadowAt.Add(d).Format(shadowTimeLayout) }
+	writeFiles(t, dir, map[string]string{
+		shadowJournalFile + ".1": at(-20*time.Hour) + "\tpre-tool-use\ts\tmatch\t\n",
+		shadowJournalFile:        at(-time.Hour) + "\tpre-tool-use\ts\tmismatch\tstderr\n",
+		durationsFile + ".1": at(-20*time.Hour) + "\tpre-tool-use\ts\t10\t5\tok\n" +
+			at(-19*time.Hour) + "\tpre-tool-use\ts\t10\t5\tok\n",
+		durationsFile: at(-time.Hour) + "\tpre-tool-use\ts\t10\t5\tok\n",
+	})
+	report, err := buildShadowReport(filepath.Join(dir, shadowJournalFile), filepath.Join(dir, durationsFile), shadowAt.Add(-24*time.Hour), shadowAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	report.write(&out, time.UTC)
+	for _, want := range []string{
+		"pre-tool-use: вызовов CLI 3, сравнено 2 (совпало 1, расхождений 1), не сравнимо 0, пропущено 1",
+		"период не покрыт файлом длительностей до " + shadowAt.Add(-20*time.Hour).UTC().Format("2006-01-02 15:04:05"),
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("report lacks %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// Снимок «после» — сразу за записью состояния CLI: запись соседа (строка
+// статуса) во время уведомления в сравнение не попадает
+func TestShadowAfterSnapshotBeforeNeighbor(t *testing.T) {
+	socket, frames := captureFrames(t)
+	home := shadowHome(t, true)
+	state := filepath.Join(home, "run/chooks/sessions/s6")
+	orig := realNotifierEffects
+	realNotifierEffects = func() notifier.Effects {
+		effects := orig()
+		deliver := effects.Deliver
+		effects.Deliver = func(executable string, alert desktop.Alert, request hookctx.Context) error {
+			if err := os.WriteFile(state, []byte("idle"), 0o600); err != nil {
+				return err
+			}
+			return deliver(executable, alert, request)
+		}
+		return effects
+	}
+	t.Cleanup(func() { realNotifierEffects = orig })
+	runShadowCLI(t, home, hookNotification, shadowInputs(home)[hookNotification], socket)
+	if got := readFile(t, state); got != "idle" {
+		t.Fatalf("session state %q: the neighbour did not write during the notification", got)
+	}
+	wire, rec := onlyFrame(t, frames)
+	out, err := executeShadow(wire, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, detail := compareShadow(rec, out); status != shadowMatch {
+		t.Errorf("%s %q, want match: the neighbour's write got into the CLI snapshot", status, detail)
 	}
 }

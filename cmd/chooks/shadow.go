@@ -102,7 +102,12 @@ type shadowFile struct {
 	Err    string `json:"err,omitempty"`
 }
 
+// abs — путь файла под корнем запроса. Rel, выходящий из корня («..»,
+// абсолютный), — ошибка: путь приходит и из записи CLI
 func (p shadowPath) abs(request hookctx.Context) (string, error) {
+	if !filepath.IsLocal(p.Rel) {
+		return "", fmt.Errorf("путь %q вне корня %s", p.Rel, p.Root)
+	}
 	switch p.Root {
 	case shadowRootRuntime:
 		return filepath.Join(request.RuntimeDir(), p.Rel), nil
@@ -221,6 +226,34 @@ type shadowCapture struct {
 	// оповещение); dry — демон: только запись, без исполнения
 	effects []string
 	dry     bool
+	// paths — файлы состояния вызова; after — их снимок сразу за записью
+	// состояния события сессии, до уведомления; afterTaken false — снимка
+	// не было, «после» читается по окончании работы
+	paths      []shadowPath
+	after      []shadowFile
+	afterTaken bool
+}
+
+// snapshotAfter снимает «после» сразу за записью состояния события сессии:
+// до уведомления и до записей соседей (строка статуса, другой хук той же
+// сессии), которые иначе попали бы в сравнение как запись CLI
+func (c *shadowCapture) snapshotAfter(request hookctx.Context) {
+	files := readShadowFiles(request, c.paths)
+	c.mu.Lock()
+	c.after, c.afterTaken = files, true
+	c.mu.Unlock()
+}
+
+// afterFiles — снимок «после»: сделанный за записью состояния, иначе
+// чтение сейчас
+func (c *shadowCapture) afterFiles(request hookctx.Context) []shadowFile {
+	c.mu.Lock()
+	after, taken := c.after, c.afterTaken
+	c.mu.Unlock()
+	if taken {
+		return after
+	}
+	return readShadowFiles(request, c.paths)
 }
 
 // notifierEffects — эффекты уведомления под тенью: у CLI исполняются и
@@ -365,6 +398,7 @@ func beginShadow(ctx context.Context, hook shadowHook, hookType string, data []b
 	if hook.state != nil {
 		s.paths = hook.state(session)
 	}
+	s.capture.paths = s.paths
 	configPath := request.ConfigPath
 	if configPath != "" && !filepath.IsAbs(configPath) {
 		configPath = filepath.Join(request.Cwd, configPath)
@@ -418,7 +452,7 @@ func (s *shadowSession) frame(code int, err error) ([]byte, error) {
 	s.capture.mu.Unlock()
 	rec.Verdict = verdictOf(s.hookType, code, rec.Stdout, s.capture)
 	rec.Proc = s.proc.Reads()
-	rec.After = readShadowFiles(s.request, s.paths)
+	rec.After = s.capture.afterFiles(s.request)
 	blob, err := json.Marshal(rec)
 	if err != nil {
 		return nil, fmt.Errorf("запись тени: %w", err)
@@ -615,11 +649,25 @@ const shadowExecGrace = time.Second
 // время запроса, лог — в никуда, уведомления выключены. Ошибка — исполнение
 // не состоялось (не сравнимо)
 func executeShadow(wire hookwire.Request, rec shadowRecord) (shadowOutcome, error) {
-	if _, covered := shadowHooks[wire.Subcommand]; !covered {
+	hook, covered := shadowHooks[wire.Subcommand]
+	if !covered {
 		return shadowOutcome{}, fmt.Errorf("подкоманда вне тени")
 	}
 	if !filepath.IsAbs(wire.Cwd) {
 		return shadowOutcome{}, fmt.Errorf("cwd не абсолютный")
+	}
+	// Пути состояния демон вычисляет сам по подкоманде и сессии; из записи
+	// берётся только содержимое этих путей
+	var paths []shadowPath
+	if hook.state != nil {
+		paths = hook.state(rec.Session)
+	}
+	before, err := shadowSnapshot(paths, rec.Before)
+	if err != nil {
+		return shadowOutcome{}, fmt.Errorf("снимок «до»: %w", err)
+	}
+	if _, err := shadowSnapshot(paths, rec.After); err != nil {
+		return shadowOutcome{}, fmt.Errorf("снимок «после»: %w", err)
 	}
 	tmp, err := os.MkdirTemp("", "chooks-shadow-")
 	if err != nil {
@@ -636,10 +684,10 @@ func executeShadow(wire hookwire.Request, rec shadowRecord) (shadowOutcome, erro
 		return shadowOutcome{}, errors.Join(err, os.RemoveAll(tmp))
 	}
 	out := shadowOutcome{roots: roots}
-	if err := writeShadowFiles(request, rec.Before); err != nil {
+	if err := writeShadowFiles(request, before); err != nil {
 		return shadowOutcome{}, errors.Join(fmt.Errorf("снимок состояния: %w", err), os.RemoveAll(tmp))
 	}
-	capture := &shadowCapture{replay: &nightAnswers{}, dry: true}
+	capture := &shadowCapture{replay: &nightAnswers{}, dry: true, paths: paths}
 	if rec.Night != nil {
 		capture.replay = rec.Night
 	}
@@ -674,8 +722,33 @@ func executeShadow(wire hookwire.Request, rec shadowRecord) (shadowOutcome, erro
 	out.Missing = append(capture.missing, replay.Missing()...)
 	capture.mu.Unlock()
 	out.Verdict = verdictOf(wire.Subcommand, out.Code, out.Stdout, capture)
-	out.After = readShadowFiles(request, pathsOf(rec.After))
+	out.After = capture.afterFiles(request)
 	return out, nil
+}
+
+// shadowSnapshot — файлы записи CLI ровно по путям paths, вычисленным
+// демоном, в их порядке. Файл записи вне paths, повтор или путь без файла —
+// ошибка: запись не от CLI этой подкоманды и сессии
+func shadowSnapshot(paths []shadowPath, files []shadowFile) ([]shadowFile, error) {
+	byPath := make(map[shadowPath]shadowFile, len(files))
+	for _, f := range files {
+		if !slices.Contains(paths, f.shadowPath) {
+			return nil, fmt.Errorf("путь вне охвата %s:%q", f.Root, f.Rel)
+		}
+		if _, twice := byPath[f.shadowPath]; twice {
+			return nil, fmt.Errorf("путь дважды %s:%q", f.Root, f.Rel)
+		}
+		byPath[f.shadowPath] = f
+	}
+	snapshot := make([]shadowFile, 0, len(paths))
+	for _, p := range paths {
+		f, ok := byPath[p]
+		if !ok {
+			return nil, fmt.Errorf("нет файла %s:%s", p.Root, p.Rel)
+		}
+		snapshot = append(snapshot, f)
+	}
+	return snapshot, nil
 }
 
 // shadowDispatch — работа подкоманды в демоне: конфиг запроса без
@@ -706,14 +779,6 @@ func shadowDispatch(request hookctx.Context, hookType string, data []byte, captu
 		return code, err.Error()
 	}
 	return code, ""
-}
-
-func pathsOf(files []shadowFile) []shadowPath {
-	paths := make([]shadowPath, 0, len(files))
-	for _, f := range files {
-		paths = append(paths, f.shadowPath)
-	}
-	return paths
 }
 
 // shadowRoots — пары «каталог демона → каталог CLI» для нормализации путей.

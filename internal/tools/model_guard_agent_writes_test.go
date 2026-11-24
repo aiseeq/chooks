@@ -723,7 +723,6 @@ func TestModelGuardReviewRoundSixForms(t *testing.T) {
 	pass := []struct{ name, command string }{
 		{"mc3 claude mcp list", "cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head"},
 		{"claude alone", cd + "claude"},
-		{"options and mcp list", cd + "claude --verbose mcp list"},
 	}
 	check := func(command string) *core.ValidationResult {
 		t.Helper()
@@ -795,14 +794,87 @@ func TestModelGuardReviewRoundSevenForms(t *testing.T) {
 	pass := []struct{ name, command string }{
 		{"cd claude", cd + "claude"},
 		{"mc3 claude mcp list", "cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head"},
-		{"claude --verbose", cd + "claude --verbose"},
-		{"claude --verbose mcp list", cd + "claude --verbose mcp list"},
 		{"read system cat", cd + "/usr/bin/cat settings.json && claude"},
 		{"cat settings", cd + "cat settings.json && claude"},
 		{"ls agents", cd + "ls agents && claude"},
 		{"cat quoted", cd + "cat 'settings.json' \"agents/x.md\" 2>&1 < /dev/null && claude"},
 		{"mcp list then claude", cd + "claude mcp list && claude"},
-		{"flags only", cd + "claude -c --verbose"},
+	}
+	check := func(command string) *core.ValidationResult {
+		t.Helper()
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for _, c := range deny {
+		t.Run("deny "+c.name, func(t *testing.T) {
+			if check(c.command).IsValid {
+				t.Fatalf("пропуск, ждали отказ: %q", c.command)
+			}
+		})
+	}
+	for _, c := range pass {
+		t.Run("pass "+c.name, func(t *testing.T) {
+			if result := check(c.command); !result.IsValid {
+				t.Fatalf("отказ, ждали пропуск: %+v", result.Violations)
+			}
+		})
+	}
+}
+
+func TestModelGuardReviewRoundEightForms(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	const cd = "cd ~/.claude && "
+	deny := []struct{ name, command string }{
+		// HIGH-1: кластер `-p-x=v` claude раскрывает в `-p --x=v`
+		{"K1 -p-settings=", cd + "echo hi | claude -p-settings=/tmp/evil.json"},
+		{"K2 -p-debug-file=", cd + "claude -p-debug-file=settings.json < /dev/null"},
+		{"K3 -c-mcp-config=", cd + "echo hi | claude -p -c-mcp-config=/tmp/m.json"},
+		{"K4 -p-plugin-dir=", cd + "echo hi | claude -p-plugin-dir=/tmp/p"},
+		{"K5 --init-only -p-settings=", cd + "claude --init-only -p-settings=/tmp/evil.json"},
+		// HIGH-2: опции пишут, исполняют или снимают хуки; промпт через stdin
+		{"bare", cd + "echo 'write agents/x.md' | claude -p --bare --dangerously-skip-permissions"},
+		{"setting-sources", cd + "echo hi | claude -p --setting-sources=project"},
+		{"V1 --plugin-dir-no-mcp=", cd + "echo hi | claude -p --plugin-dir-no-mcp=/tmp/p"},
+		{"V2 --plugin-url=", cd + "echo hi | claude -p --plugin-url=https://example.invalid/p.zip"},
+		{"V3 --managed-settings=", cd + "echo hi | claude -p '--managed-settings={\"hooks\":{}}'"},
+		{"V4 --agents=", cd + "echo hi | claude -p --agents=/tmp/a.json"},
+		{"V5 --worktree=", cd + "echo hi | claude -p --worktree=x"},
+		{"V6 -w", cd + "echo hi | claude -p -w"},
+		{"V7 --rewind-files=", cd + "claude -p --resume=abc --rewind-files=def"},
+		{"V8 --file=", cd + "echo hi | claude -p --file=file_abc:settings.json"},
+		{"V9 --init-only", cd + "claude --init-only"},
+		{"V10 --add-dir=/", cd + "echo hi | claude -p --add-dir=/ --dangerously-skip-permissions"},
+		{"V11 --system-prompt=", cd + "echo hi | claude -p '--system-prompt=edit settings.json'"},
+		{"S1 echo | claude -p", cd + "echo 'edit settings.json' | claude -p"},
+		{"S2 claude -p < file", cd + "claude -p < /tmp/prompt.txt"},
+		{"S5 --permission-mode=", cd + "cat /tmp/prompt.txt | claude -p --permission-mode=bypassPermissions"},
+		{"echo hi | claude -p", cd + "echo hi | claude -p"},
+		{"cl -p", cd + "echo hi | cl -p"},
+		{"claude --verbose", cd + "claude --verbose"},
+		{"claude --version", cd + "claude --version"},
+		// LOW-1: `mcp list` с лишними словами
+		{"M2 mcp list --debug", cd + "claude mcp list --debug"},
+		{"M3 -p-mcp-config= mcp list", cd + "claude -p-mcp-config=/tmp/m.json mcp list"},
+		{"M4 -p-settings= mcp list", cd + "claude -p-settings=/tmp/evil.json mcp list"},
+		{"M5 mcp -s list", cd + "claude mcp -s list"},
+		{"M8 --model= mcp list", cd + "claude --model=opus mcp list"},
+		{"M9 mcp --scope= list", cd + "claude mcp --scope=user list"},
+		{"mcp alone", cd + "claude mcp"},
+		{"mcp serve", cd + "claude mcp serve"},
+		{"mcp other subcommand", cd + "claude mcp add x"},
+		// прежние ожидания пропуска с опциями после cd
+		{"r6 options and mcp list", cd + "claude --verbose mcp list"},
+		{"r7 claude --verbose mcp list", cd + "claude --verbose mcp list"},
+		{"r7 flags only", cd + "claude -c --verbose"},
+	}
+	pass := []struct{ name, command string }{
+		{"cd claude", cd + "claude"},
+		{"cl alone", cd + "cl"},
+		{"claude mcp list", cd + "claude mcp list"},
+		{"mc3 claude mcp list", "cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head"},
 	}
 	check := func(command string) *core.ValidationResult {
 		t.Helper()

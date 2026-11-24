@@ -156,6 +156,25 @@ func TestKillGuardGaps3Blocks(t *testing.T) {
 	}
 }
 
+func TestKillGuardHintsUsePstop(t *testing.T) {
+	for name, hint := range map[string]string{
+		"PID":     killGuardHint,
+		"группа":  killGroupHint,
+		"cgroup":  cgroupHint,
+		"глубина": depthHint,
+	} {
+		if strings.Contains(hint, "kill ") {
+			t.Errorf("подсказка %s советует kill: %q", name, hint)
+		}
+		if !strings.Contains(hint, "pstop") {
+			t.Errorf("подсказка %s не называет pstop: %q", name, hint)
+		}
+	}
+	if !strings.Contains(killGuardHint, "--own-unit") {
+		t.Errorf("подсказка PID не объясняет pstop для процесса из прошлого вызова Bash: %q", killGuardHint)
+	}
+}
+
 // Соседи пропусков: узкая цель — литеральный PID чужого процесса, точное
 // имя не из сессии, юнит, порт, сессия tmux по имени; справка и сигнал 0
 func TestKillGuardGaps3Allows(t *testing.T) {

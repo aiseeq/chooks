@@ -324,26 +324,29 @@ func claudeDirectoryCallReads(call *syntax.CallExpr) bool {
 	return readsOnly(call, agentReaders, agentReaderGitSubcommands)
 }
 
-// clientSubcommands — подкоманды claude, которые меняют настройки, MCP,
-// плагины или установку, а не задают промпт
-var clientSubcommands = []string{
-	"config", "mcp", "plugin", "plugins", "install", "update", "upgrade", "migrate-installer",
-	"setup-token", "doctor",
-}
-
 // clientReads — клиент модели в каталоге .claude только читает: без
-// --debug-file, --settings, --mcp-config, --plugin-dir и без подкоманды из
-// clientSubcommands в любом слове, кроме `mcp list`
+// --debug-file, --settings, --mcp-config, --plugin-dir и без позиционной
+// подкоманды. Commander сверяет с подкомандами первое позиционное слово, и
+// без -p/--print любое такое слово, кроме ровно `mcp list`, — подкоманда. С
+// -p позиционные слова — промпт, но и тогда commander уходит в подкоманду,
+// если первое слово — её имя, поэтому ни одно из них не должно быть именем из
+// clientSubcommands
 func clientReads(name string, args []*syntax.Word) bool {
-	for i, arg := range args {
+	for _, arg := range args {
 		value := wordOwnText(arg)
 		if clientOptionWrites(name, value) || clientOptionRuns(value) {
 			return false
 		}
-		if !slices.Contains(clientSubcommands, value) {
-			continue
-		}
-		if value != "mcp" || i+1 >= len(args) || wordOwnText(args[i+1]) != "list" {
+	}
+	operands, printing := clientOperands(args)
+	switch {
+	case len(operands) == 0 || slices.Equal(operands, []string{"mcp", "list"}):
+		return true
+	case !printing:
+		return false
+	}
+	for _, operand := range operands {
+		if slices.Contains(clientSubcommands, operand) {
 			return false
 		}
 	}

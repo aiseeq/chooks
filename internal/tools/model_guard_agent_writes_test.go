@@ -702,3 +702,65 @@ func TestModelGuardReviewRoundFiveForms(t *testing.T) {
 		})
 	}
 }
+
+func TestModelGuardReviewRoundSixForms(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	const (
+		cd  = "cd ~/.claude && "
+		run = " && claude -p hi"
+	)
+	deny := []struct{ name, command string }{
+		// MED-1: после cd в .claude клиент с позиционной подкомандой
+		{"M1 import", cd + "claude import codex --yes" + run},
+		{"M1 auto-mode reset", cd + "claude auto-mode reset -y" + run},
+		{"M1 agents", cd + "claude agents" + run},
+		{"M1 auth login", cd + "claude auth login" + run},
+		{"M1 ultrareview", cd + "claude ultrareview" + run},
+		{"M1 gateway", cd + "claude gateway" + run},
+		{"M1 remote-control", cd + "claude remote-control" + run},
+		{"unknown subcommand", cd + "claude some-new-command" + run},
+		{"subcommand after value option", cd + "claude --model opus import codex" + run},
+		{"subcommand after optional value", cd + "claude --resume --verbose agents" + run},
+		{"subcommand after short cluster", cd + "claude -cn x import codex" + run},
+		{"print with subcommand name", cd + "claude -p import codex --yes" + run},
+		{"long print with subcommand name", cd + "claude --print agents" + run},
+		{"double dash operand", cd + "claude -- -x" + run},
+		{"print after subcommand", cd + "cl agents -p" + run},
+		{"print with value option and subcommand", cd + "claude -p --model opus auth login" + run},
+	}
+	pass := []struct{ name, command string }{
+		{"mc3 claude mcp list", "cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head"},
+		{"claude -p hi", cd + "claude -p hi"},
+		{"claude -p prompt with subcommand words", cd + "claude -p \"update the config\""},
+		{"claude alone", cd + "claude"},
+		{"value options without prompt", cd + "claude --model opus --add-dir /tmp/a /tmp/b --resume abc -n x"},
+		{"short optional values without prompt", cd + "claude -r abc -d api -w tree"},
+		{"long print prompt", cd + "claude --print hi"},
+		{"options and mcp list", cd + "claude --verbose mcp list"},
+		{"value options before print", cd + "claude --model opus --add-dir /tmp/a /tmp/b --debug api -n x --resume -p hi"},
+		{"attached values", cd + "claude --model=opus -nx -p hi"},
+		{"double dash prompt", cd + "claude -p -- hi"},
+	}
+	check := func(command string) *core.ValidationResult {
+		t.Helper()
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for _, c := range deny {
+		t.Run("deny "+c.name, func(t *testing.T) {
+			if check(c.command).IsValid {
+				t.Fatalf("пропуск, ждали отказ: %q", c.command)
+			}
+		})
+	}
+	for _, c := range pass {
+		t.Run("pass "+c.name, func(t *testing.T) {
+			if result := check(c.command); !result.IsValid {
+				t.Fatalf("отказ, ждали пропуск: %+v", result.Violations)
+			}
+		})
+	}
+}

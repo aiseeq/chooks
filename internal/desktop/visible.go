@@ -101,7 +101,7 @@ func discoverRequestBus(ctx context.Context, request hookctx.Context) (string, e
 	cmd.Dir = request.ChildDir()
 	data, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("dbus-launch: %w", err)
+		return "", err
 	}
 	line, _, _ := strings.Cut(string(data), "\n")
 	_, address, ok := strings.Cut(line, "=")

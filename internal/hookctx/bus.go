@@ -110,7 +110,7 @@ func parseBusTarget(entry string) (busTarget, bool, error) {
 		}
 		value, err := dbus.UnescapeBusAddressValue(value)
 		if err != nil {
-			return busTarget{}, false, fmt.Errorf("decode D-Bus address value: %w", err)
+			return busTarget{}, false, err
 		}
 		values[key] = value
 	}
@@ -151,7 +151,7 @@ func tcpBusTarget(values map[string]string) (busTarget, bool, error) {
 func (c Context) connectBusTarget(ctx context.Context, target busTarget) (*dbus.Conn, bool, error) {
 	raw, err := (&net.Dialer{}).DialContext(ctx, target.network, target.address)
 	if err != nil {
-		return nil, true, fmt.Errorf("dial D-Bus %s: %w", target.network, err)
+		return nil, true, err
 	}
 	if target.transport == "unix" {
 		if _, ok := raw.(*net.UnixConn); !ok {

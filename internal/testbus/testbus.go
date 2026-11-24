@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -23,37 +24,71 @@ func Silent(t testing.TB) []string {
 	sock := filepath.Join(dir, "bus")
 	// Абстрактное имя общее на машину: pid отделяет параллельные пакеты
 	name := "chooks-silent-" + strconv.Itoa(os.Getpid()) + "-" + filepath.Base(dir)
+	var acceptWG, connectionWG sync.WaitGroup
+	var connectionsMu sync.Mutex
+	connections := map[net.Conn]struct{}{}
+	var errorsMu sync.Mutex
+	var failures []error
+	noteFailure := func(err error) {
+		errorsMu.Lock()
+		failures = append(failures, err)
+		errorsMu.Unlock()
+	}
+	var listeners []net.Listener
 	for _, addr := range []string{sock, "@" + name} {
 		l, err := net.Listen("unix", addr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = l.Close() })
-		go func() {
+		listeners = append(listeners, l)
+		acceptWG.Go(func() {
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					t.Errorf("test bus accept loop panicked: %v", recovered)
+					noteFailure(fmt.Errorf("test bus accept loop panicked: %v", recovered))
 				}
 			}()
 			for {
 				c, err := l.Accept()
 				if err != nil {
 					if !errors.Is(err, net.ErrClosed) {
-						t.Errorf("test bus accept: %v", err)
+						noteFailure(fmt.Errorf("test bus accept: %w", err))
 					}
 					return
 				}
-				go func() {
+				connectionsMu.Lock()
+				connections[c] = struct{}{}
+				connectionsMu.Unlock()
+				connectionWG.Go(func() {
 					if _, err := io.Copy(io.Discard, c); err != nil && !errors.Is(err, net.ErrClosed) {
-						t.Errorf("test bus drain: %v", err)
+						noteFailure(fmt.Errorf("test bus drain: %w", err))
 					}
 					if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-						t.Errorf("test bus close: %v", err)
+						noteFailure(fmt.Errorf("test bus close: %w", err))
 					}
-				}()
+					connectionsMu.Lock()
+					delete(connections, c)
+					connectionsMu.Unlock()
+				})
 			}
-		}()
+		})
 	}
+	t.Cleanup(func() {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+		acceptWG.Wait()
+		connectionsMu.Lock()
+		for conn := range connections {
+			_ = conn.Close()
+		}
+		connectionsMu.Unlock()
+		connectionWG.Wait()
+		errorsMu.Lock()
+		defer errorsMu.Unlock()
+		for _, err := range failures {
+			t.Errorf("test bus: %v", err)
+		}
+	})
 	return []string{"unix:path=" + sock, "unix:path=@" + name, "unix:abstract=" + name}
 }
 

@@ -172,7 +172,7 @@ func TestExternalJournalInvalidBounds(t *testing.T) {
 			if mode == "unknown-upper" {
 				mtime = time.Time{}
 			}
-			if err := f.r.recordExternal(s, personal.uuid, personal.email, f.now, mtime); err != nil {
+			if err := f.r.recordExternal(s, &Account{UUID: personal.uuid, Email: personal.email}, f.now, mtime); err != nil {
 				t.Fatal(err)
 			}
 			journal := readJournal(t, f)

@@ -12,14 +12,6 @@ import (
 	"time"
 )
 
-func closeLogFileOnReturn(logFile *os.File, retErr *error) func() {
-	return func() {
-		if closeErr := logFile.Close(); closeErr != nil && *retErr == nil {
-			*retErr = fmt.Errorf("close daemon log: %w", closeErr)
-		}
-	}
-}
-
 // runTiming — N последовательных pre-tool-use `git status`: сначала CLI,
 // потом прокси к демону; каждый ответ сверяется с первым ответом CLI.
 // Старт прокси меряется отдельно: без сокета он сразу исполняет CLI, здесь
@@ -77,7 +69,7 @@ func runTiming(argv []string) (code int, retErr error) {
 	if err != nil {
 		return 2, fmt.Errorf("daemon log: %w", err)
 	}
-	defer closeLogFileOnReturn(logFile, &retErr)()
+	defer logFile.Close()
 	d, err := startDaemon(bin.cli, logFile, "")
 	if err != nil {
 		return 2, err

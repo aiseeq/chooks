@@ -361,3 +361,23 @@ func TestCallsOnlyCropsToOneRuneWhenBudgetIsTight(t *testing.T) {
 		t.Fatalf("budget did not retain one input rune with a crop marker: %q", fit.Input)
 	}
 }
+
+// Предел 1 не влезает (число в маркере теряет разряд при пределе 0), а один
+// маркер влезает: вызов остаётся с маркером обрезки, а не выпадает
+func TestCallsOnlyKeepsMarkerWhenOneRuneDoesNotFit(t *testing.T) {
+	for _, n := range []int{1200, 1500} {
+		markerOnly := Tool{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("x", n)}
+		markerOnly.Input = toolInputExcerpt(markerOnly, 0)
+		budget, err := toolsJSONSize([]Tool{markerOnly})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fit, kept, err := fitTool(Tool{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("x", n)}, budget)
+		if err != nil || !kept {
+			t.Fatalf("n=%d budget=%d: kept=%v err=%v, want the call kept with a crop marker", n, budget, kept, err)
+		}
+		if fit.Input != markerOnly.Input || !strings.Contains(fit.Input, "[обрезано:") {
+			t.Fatalf("n=%d: input %q, want marker only %q", n, fit.Input, markerOnly.Input)
+		}
+	}
+}

@@ -123,7 +123,7 @@ func TestTurnBoundaryDeliveries(t *testing.T) {
 		{"notification", []any{ev("user", "t", "вопрос"), call("before"), duration, notification, call("after"), final}, "вопрос", []string{"before", "after"}},
 		{"notification attachment", []any{ev("user", "t", "вопрос"), call("before"), notificationAttachment, call("after"), final}, "вопрос", []string{"before", "after"}},
 		{"peer attachment during turn", []any{ev("user", "t", "вопрос"), call("before"), peerAttachment, call("after"), final}, "вопрос", []string{"before", "after"}},
-		{"peer attachment after human reply during turn", []any{duration, ev("user", "t", "человеческая реплика"), peerAttachment, call("after"), final}, "человеческая реплика", []string{"after"}},
+		{"peer attachment after human reply during turn", []any{duration, ev("user", "t", "человеческая реплика"), call("before"), peerAttachment, call("after"), final}, "человеческая реплика", []string{"before", "after"}},
 		{"peer attachment after turn", []any{ev("user", "t", "вопрос"), duration, peerAttachment, call("after"), final}, "письмо", []string{"after"}},
 		{"peer attachment after peer user", []any{ev("user", "t", "вопрос"), duration, map[string]any{"type": "user", "origin": map[string]any{"kind": "peer"}, "message": map[string]any{"content": "первое письмо"}}, peerAttachment, call("after"), final}, "письмо", []string{"after"}},
 		{"multiple queued human", []any{ev("user", "t", "вопрос"), call("before"), humanAttachment, call("middle"), map[string]any{"type": "attachment", "attachment": map[string]any{"type": "queued_command", "origin": map[string]any{"kind": "human"}, "prompt": "последний вопрос"}}, call("after"), final}, "последний вопрос", []string{"middle", "after"}},
@@ -167,6 +167,24 @@ func TestQueuedPromptDoesNotCrossTurnEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if in.UserPrompt == nil || in.UserPrompt.Text != "новый ход" || len(in.TurnTools) != 1 || !strings.Contains(in.TurnTools[0].Input, "new-turn-call") {
+		t.Fatalf("prompt=%+v calls=%+v", in.UserPrompt, in.TurnTools)
+	}
+}
+
+func TestQueuedPromptResetsWhenUserRecordOpensTurn(t *testing.T) {
+	queued := func(prompt string) any {
+		return map[string]any{"type": "attachment", "attachment": map[string]any{"type": "queued_command", "origin": map[string]any{"kind": "human"}, "prompt": prompt}}
+	}
+	call := func(id string) any {
+		return ev("assistant", "t", []any{map[string]any{"type": "tool_use", "id": id, "name": "Bash", "input": map[string]any{"command": id}}})
+	}
+	final := ev("assistant", "t", []any{map[string]any{"type": "text", "text": "ответ"}})
+	events := []any{queued("устаревший prompt"), ev("user", "t", "реплика-запись"), call("before-new-prompt"), queued("новый prompt"), call("after-new-prompt"), final}
+	in, err := BuildInput(fixture(t, events...), len(events), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.UserPrompt == nil || in.UserPrompt.Text != "новый prompt" || len(in.TurnTools) != 1 || !strings.Contains(in.TurnTools[0].Input, "after-new-prompt") {
 		t.Fatalf("prompt=%+v calls=%+v", in.UserPrompt, in.TurnTools)
 	}
 }
@@ -231,19 +249,12 @@ func TestCallsOnlyCropsLongInputAndKeepsLaterCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cropped *Tool
 	var lastSeen bool
 	for i := range in.TurnTools {
 		call := &in.TurnTools[i]
-		if strings.Contains(call.Input, "call-05") {
-			cropped = call
-		}
 		if strings.Contains(call.Input, "call-23") {
 			lastSeen = true
 		}
-	}
-	if cropped == nil || !strings.Contains(cropped.Input, "[обрезано:") || len([]rune(cropped.Input)) <= toolInputCharLimit || len([]rune(cropped.Input)) >= callsOnlyInputCharLimit {
-		t.Fatalf("call input was not cropped to fit the calls-only budget: %+v", cropped)
 	}
 	if !lastSeen {
 		t.Fatalf("last call was lost after cropping an earlier call: %+v", in.TurnTools)
@@ -260,8 +271,93 @@ func TestCallsOnlyCropsLongInputAndKeepsLaterCalls(t *testing.T) {
 		t.Fatalf("budget dropped a later call: %+v", bounded)
 	}
 	for i, call := range bounded {
-		if !strings.Contains(call.Input, "[обрезано:") || len([]rune(call.Input)) <= toolInputCharLimit+100 || len([]rune(call.Input)) >= callsOnlyInputCharLimit {
+		if !strings.Contains(call.Input, "[обрезано:") || len([]rune(call.Input)) <= toolInputCharLimit+100 || len([]rune(call.Input)) >= 1000+100 {
 			t.Fatalf("call %d was not cropped within the calls-only limit: %+v", i, call)
 		}
+	}
+}
+
+func TestCallsOnlyInputLimitEvenWithAvailableBudget(t *testing.T) {
+	command := strings.Repeat("x", 5000)
+	events := []any{
+		ev("user", "t", "проверь вызов"),
+		ev("assistant", "t", []any{map[string]any{"type": "tool_use", "id": "long-call", "name": "Bash", "input": map[string]any{"command": command}}}),
+		ev("assistant", "t", []any{map[string]any{"type": "text", "text": "готово"}}),
+	}
+	in, err := BuildInput(fixture(t, events...), len(events), Options{CallsOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.TurnTools) != 1 {
+		t.Fatalf("calls=%+v", in.TurnTools)
+	}
+	input := in.TurnTools[0].Input
+	marker := strings.Index(input, "[обрезано:")
+	if marker < 0 {
+		t.Fatalf("long calls-only input has no crop marker: %q", input)
+	}
+	var omitted, total int
+	if _, err := fmt.Sscanf(input[marker:], "[обрезано: %d знаков из %d]", &omitted, &total); err != nil {
+		t.Fatalf("cannot parse crop marker in %q: %v", input, err)
+	}
+	if total-omitted != 1000 {
+		t.Fatalf("calls-only input retained %d source characters, want 1000: %q", total-omitted, input)
+	}
+
+	fitted, kept, err := fitTool(Tool{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("x", 5000)}, 10000)
+	if err != nil || !kept {
+		t.Fatalf("fit long calls-only input with available budget: kept=%v err=%v", kept, err)
+	}
+	marker = strings.Index(fitted.Input, "[обрезано:")
+	if marker < 0 {
+		t.Fatalf("fitTool did not enforce the 1000 rune calls-only limit: %q", fitted.Input)
+	}
+	if _, err := fmt.Sscanf(fitted.Input[marker:], "[обрезано: %d знаков из %d]", &omitted, &total); err != nil {
+		t.Fatalf("cannot parse fitTool crop marker in %q: %v", fitted.Input, err)
+	}
+	if total-omitted != 1000 {
+		t.Fatalf("fitTool retained %d source characters, want 1000: %q", total-omitted, fitted.Input)
+	}
+
+	buildCall := func(command string) Tool {
+		events := []any{
+			ev("user", "t", "проверь точную границу"),
+			ev("assistant", "t", []any{map[string]any{"type": "tool_use", "id": "boundary-call", "name": "Bash", "input": map[string]any{"command": command}}}),
+			ev("assistant", "t", []any{map[string]any{"type": "text", "text": "готово"}}),
+		}
+		input, err := BuildInput(fixture(t, events...), len(events), Options{CallsOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(input.TurnTools) != 1 {
+			t.Fatalf("boundary call missing: %+v", input.TurnTools)
+		}
+		return input.TurnTools[0]
+	}
+
+	exact := buildCall(strings.Repeat("x", 1000))
+	if exact.Input != strings.Repeat("x", 1000) || strings.Contains(exact.Input, "[обрезано:") || exact.inputLines != nil {
+		t.Fatalf("input at the 1000 rune limit was cropped or prepared for cropping: %+v", exact)
+	}
+
+	over := buildCall(strings.Repeat("x", 1001))
+	if !strings.Contains(over.Input, "[обрезано:") || len([]rune(over.Input)) <= 1000 || over.inputLines == nil {
+		t.Fatalf("input at 1001 runes was not prepared and cropped: %+v", over)
+	}
+}
+
+func TestCallsOnlyCropsToOneRuneWhenBudgetIsTight(t *testing.T) {
+	tool := Tool{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("x", 2000)}
+	tool.Input = toolInputExcerpt(tool, 1)
+	budget, err := toolsJSONSize([]Tool{tool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fit, kept, err := fitTool(Tool{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("x", 2000)}, budget)
+	if err != nil || !kept {
+		t.Fatalf("fit one-rune calls-only input: kept=%v err=%v", kept, err)
+	}
+	if fit.Input != tool.Input || !strings.Contains(fit.Input, "[обрезано: 1999 знаков из 2000]") || !strings.HasSuffix(fit.Input, "x") {
+		t.Fatalf("budget did not retain one input rune with a crop marker: %q", fit.Input)
 	}
 }

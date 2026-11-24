@@ -21,8 +21,16 @@ func runTiming(argv []string) (int, error) {
 	var bin binaries
 	bin.register(fsFlags)
 	n := fsFlags.Int("n", 200, "число вызовов каждой стороны")
+	mode := fsFlags.String("mode", "proxy", "proxy — CLI против прокси+демона; shadow — CLI с тенью и без неё")
 	if err := fsFlags.Parse(argv); err != nil {
 		return 2, fmt.Errorf("flags: %w", err)
+	}
+	switch *mode {
+	case "proxy":
+	case "shadow":
+		return runShadowTiming(bin, *n)
+	default:
+		return 2, fmt.Errorf("unknown --mode %q", *mode)
 	}
 	if err := bin.resolve(); err != nil {
 		return 2, err
@@ -62,7 +70,7 @@ func runTiming(argv []string) (int, error) {
 		return 2, fmt.Errorf("daemon log: %w", err)
 	}
 	defer logFile.Close()
-	d, err := startDaemon(bin.cli, logFile)
+	d, err := startDaemon(bin.cli, logFile, "")
 	if err != nil {
 		return 2, err
 	}

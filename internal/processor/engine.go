@@ -76,7 +76,7 @@ func (e *Engine) initToolsForRequest(config *core.Config, request hookctx.Contex
 		case "rm_guard":
 			tool, err = tools.NewRmGuardToolForRequest(toolConfig, e.logger, request)
 		case "kill_guard":
-			tool, err = tools.NewKillGuardToolForPID(toolConfig, e.logger, request.PID)
+			tool, err = tools.NewKillGuardToolForRequest(toolConfig, e.logger, request)
 		case "rsync_guard":
 			tool, err = tools.NewRsyncGuardTool(toolConfig, e.logger)
 		case "jira_style":

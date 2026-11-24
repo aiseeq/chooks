@@ -2,9 +2,10 @@ package desktop
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
+
+	"github.com/aiseeq/chooks/internal/procfs"
 )
 
 // maxAncestors ограничивает подъём по дереву процессов: цепочка от хука
@@ -20,6 +21,12 @@ var procDir = "/proc"
 // Если цепочка оборвалась на нечитаемом процессе, возвращается собранная часть
 // вместе с ошибкой: окно может принадлежать и ей
 func ProcessAncestors(pid int) ([]int, error) {
+	return ProcessAncestorsIn(procfs.OS{}, pid)
+}
+
+// ProcessAncestorsIn — ProcessAncestors по /proc из proc: запрос хука
+// читает его через hookctx.Context.ProcFS (тень демона — ответы записи CLI)
+func ProcessAncestorsIn(proc procfs.FS, pid int) ([]int, error) {
 	ancestors := make([]int, 0, maxAncestors)
 	seen := make(map[int]bool, maxAncestors)
 
@@ -27,7 +34,7 @@ func ProcessAncestors(pid int) ([]int, error) {
 		seen[pid] = true
 		ancestors = append(ancestors, pid)
 
-		parent, err := parentPID(pid)
+		parent, err := parentPID(proc, pid)
 		if err != nil {
 			return ancestors, err
 		}
@@ -38,15 +45,15 @@ func ProcessAncestors(pid int) ([]int, error) {
 }
 
 // processNames возвращает имена процесса и его предков, начиная с самого процесса
-func processNames(pid int) ([]string, error) {
-	ancestors, err := ProcessAncestors(pid)
+func processNames(proc procfs.FS, pid int) ([]string, error) {
+	ancestors, err := ProcessAncestorsIn(proc, pid)
 	if err != nil {
 		return nil, err
 	}
 	names := make([]string, 0, len(ancestors))
 	for _, ancestor := range ancestors {
 		commPath := procDir + "/" + strconv.Itoa(ancestor) + "/comm"
-		data, err := os.ReadFile(commPath)
+		data, err := proc.ReadFile(commPath)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read %s: %w", commPath, err)
 		}
@@ -56,9 +63,9 @@ func processNames(pid int) ([]string, error) {
 }
 
 // parentPID читает PPid процесса из /proc/<pid>/stat
-func parentPID(pid int) (int, error) {
+func parentPID(proc procfs.FS, pid int) (int, error) {
 	statPath := procDir + "/" + strconv.Itoa(pid) + "/stat"
-	data, err := os.ReadFile(statPath)
+	data, err := proc.ReadFile(statPath)
 	if err != nil {
 		return 0, fmt.Errorf("cannot read %s: %w", statPath, err)
 	}

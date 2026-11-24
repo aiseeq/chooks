@@ -2,7 +2,6 @@ package tools
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -661,7 +660,7 @@ func (t *KillGuardTool) eachSessionCgroup(procs []procInfo, spare string, fn fun
 		if why == "" || p.pid <= 1 || p.comm == spare && !ancestors[p.pid] {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(t.procRoot, fmt.Sprint(p.pid), "cgroup"))
+		data, err := t.procFS().ReadFile(filepath.Join(t.procRoot, fmt.Sprint(p.pid), "cgroup"))
 		if err != nil {
 			t.Logger().Debug("cgroup не читается", "pid", p.pid, "error", err)
 			continue

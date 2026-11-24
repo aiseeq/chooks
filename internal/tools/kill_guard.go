@@ -13,6 +13,8 @@ import (
 
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
+	"github.com/aiseeq/chooks/internal/procfs"
 )
 
 // protectedComms процессы, без которых падает сессия пользователя целиком:
@@ -30,10 +32,23 @@ var protectedComms = map[string]bool{
 // предков хука (claude, терминал), оболочку, исполняющую команду
 type KillGuardTool struct {
 	*BaseTool
-	procRoot    string
+	procRoot string
+	// proc — чтение /proc запроса (hookctx.Context.ProcFS); nil — /proc машины
+	proc        procfs.FS
 	selfPID     int
 	resolvePath func(string) (string, error)
 	lstatPath   func(string) (fs.FileInfo, error)
+}
+
+// NewKillGuardToolForRequest — проверка с деревом процессов запроса: pid и
+// чтение /proc из запроса
+func NewKillGuardToolForRequest(config core.ToolConfig, logger core.Logger, request hookctx.Context) (*KillGuardTool, error) {
+	tool, err := NewKillGuardToolForPID(config, logger, request.PID)
+	if err != nil {
+		return nil, err
+	}
+	tool.proc = request.ProcFS()
+	return tool, nil
 }
 
 // NewKillGuardToolForPID protects the process tree of this hook request.
@@ -1043,21 +1058,21 @@ type procInfo struct {
 // listProcs читает все процессы из procRoot. Процесс, завершившийся между
 // ReadDir и чтением его файлов, пропускается
 func (t *KillGuardTool) listProcs() ([]procInfo, error) {
-	entries, err := os.ReadDir(t.procRoot)
+	names, err := t.procFS().ReadDir(t.procRoot)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", t.procRoot, err)
 	}
-	procs := make([]procInfo, 0, len(entries))
-	for _, e := range entries {
-		if name := e.Name(); name[0] < '0' || name[0] > '9' {
+	procs := make([]procInfo, 0, len(names))
+	for _, name := range names {
+		if name == "" || name[0] < '0' || name[0] > '9' {
 			continue // не процесс: self, sys, meminfo
 		}
-		pid, err := strconv.Atoi(e.Name())
+		pid, err := strconv.Atoi(name)
 		if err != nil {
-			t.Logger().Debug("proc entry skipped", "name", e.Name(), "error", err)
+			t.Logger().Debug("proc entry skipped", "name", name, "error", err)
 			continue
 		}
-		p, err := readProc(filepath.Join(t.procRoot, e.Name()), pid)
+		p, err := readProc(t.procFS(), filepath.Join(t.procRoot, name), pid)
 		if err != nil {
 			t.Logger().Debug("process skipped", "pid", pid, "error", err)
 			continue
@@ -1067,9 +1082,17 @@ func (t *KillGuardTool) listProcs() ([]procInfo, error) {
 	return procs, nil
 }
 
+// procFS — чтение /proc запроса; без него — /proc машины
+func (t *KillGuardTool) procFS() procfs.FS {
+	if t.proc == nil {
+		return procfs.OS{}
+	}
+	return t.proc
+}
+
 // readProc читает stat и cmdline одного процесса
-func readProc(dir string, pid int) (procInfo, error) {
-	stat, err := os.ReadFile(filepath.Join(dir, "stat"))
+func readProc(proc procfs.FS, dir string, pid int) (procInfo, error) {
+	stat, err := proc.ReadFile(filepath.Join(dir, "stat"))
 	if err != nil {
 		return procInfo{}, fmt.Errorf("read stat: %w", err)
 	}
@@ -1087,7 +1110,7 @@ func readProc(dir string, pid int) (procInfo, error) {
 	if err != nil {
 		return procInfo{}, fmt.Errorf("ppid: %w", err)
 	}
-	cmdline, err := os.ReadFile(filepath.Join(dir, "cmdline"))
+	cmdline, err := proc.ReadFile(filepath.Join(dir, "cmdline"))
 	if err != nil {
 		return procInfo{}, fmt.Errorf("read cmdline: %w", err)
 	}

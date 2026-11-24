@@ -114,3 +114,37 @@ func TestReadRequestAllocatesByData(t *testing.T) {
 		t.Fatalf("no body: %v", err)
 	}
 }
+
+// Теневой кадр (этап 2б-3а): запрос и запись CLI читаются ReadFrame, а
+// ReadRequest его не принимает — демон старой версии не исполнит тень как
+// обычный запрос
+func TestShadowFrame(t *testing.T) {
+	req := Request{Subcommand: "stop", Args: []string{}, Env: []string{"HOME=/h"}, Cwd: "/w", PID: 7, PPID: 1, Stdin: []byte(`{"session_id":"s"}`)}
+	record := bytes.Repeat([]byte("r"), 70000)
+	frame, err := ReadFrame(bytes.NewReader(EncodeShadow(req, record)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !frame.Shadow || !reflect.DeepEqual(frame.Request, req) || !bytes.Equal(frame.Record, record) {
+		t.Fatalf("got shadow %v request %+v record %d B", frame.Shadow, frame.Request, len(frame.Record))
+	}
+	plain, err := ReadFrame(bytes.NewReader(EncodeRequest(req)))
+	if err != nil || plain.Shadow || plain.Record != nil || !reflect.DeepEqual(plain.Request, req) {
+		t.Fatalf("plain frame: %+v %v", plain, err)
+	}
+	if _, err := ReadRequest(bytes.NewReader(EncodeShadow(req, record))); !errors.Is(err, ErrMagic) {
+		t.Fatalf("ReadRequest of a shadow frame: %v, want ErrMagic", err)
+	}
+	full := EncodeShadow(req, record)
+	if _, err := ReadFrame(bytes.NewReader(full[:len(full)-1])); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated shadow: %v", err)
+	}
+	// Длина тела обрезана вместе с записью: тело кончается до записи
+	cut := EncodeShadow(req, nil)
+	cut = cut[:len(cut)-4]
+	body := uint32(len(cut) - 8)
+	cut[4], cut[5], cut[6], cut[7] = byte(body>>24), byte(body>>16), byte(body>>8), byte(body)
+	if _, err := ReadFrame(bytes.NewReader(cut)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("shadow without record length: %v, want ErrMalformed", err)
+	}
+}

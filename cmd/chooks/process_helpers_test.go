@@ -38,7 +38,7 @@ func writeAllowedOutput(input *core.ToolInput, config *core.Config, logger core.
 
 func runSessionEvent(eventName string, data []byte, config *core.Config, logger core.Logger) {
 	request, _ := hookctx.FromProcess()
-	runSessionEventForRequest(eventName, data, config, logger, &request)
+	runSessionEventForRequest(eventName, data, config, logger, &request, nil)
 }
 
 func nightHintDeps(config *core.Config, deadline time.Time) (nighthint.Deps, error) {

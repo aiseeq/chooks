@@ -76,3 +76,19 @@ func TestDiffObserved(t *testing.T) {
 		}
 	}
 }
+
+// Последняя строка журнала с пустой подробностью тоже считается
+func TestJournalOutcomes(t *testing.T) {
+	path := t.TempDir() + "/j.tsv"
+	body := "t\tstop\ts\tmismatch\tstderr\nt\tstop\ts\tincomparable\tbusy\nt\tstop\ts\tmatch\t\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	counts, details, err := journalOutcomes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["stop"] != [3]int{1, 1, 1} || len(details) != 2 {
+		t.Fatalf("counts %v details %q", counts, details)
+	}
+}

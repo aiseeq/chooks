@@ -43,7 +43,13 @@ type RmGuardTool struct {
 
 // NewRmGuardToolForRequest uses only the hook's environment.
 func NewRmGuardToolForRequest(config core.ToolConfig, logger core.Logger, request hookctx.Context) (*RmGuardTool, error) {
-	return newRmGuardTool(config, logger, request.LookupEnv)
+	tool, err := newRmGuardTool(config, logger, request.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	proc := request.ProcFS()
+	tool.addDirs = func(pid string) ([]string, error) { return core.SessionAddDirsIn(proc, pid) }
+	return tool, nil
 }
 
 func newRmGuardTool(config core.ToolConfig, logger core.Logger, lookupEnv func(string) (string, bool)) (*RmGuardTool, error) {

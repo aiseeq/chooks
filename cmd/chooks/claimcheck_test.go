@@ -105,6 +105,11 @@ func alive(pid int) bool {
 	return len(fields) > 0 && fields[0] != "Z"
 }
 
+func processExited(pid int) bool {
+	stat, err := proc.ReadStat("/proc", pid)
+	return proc.Gone(err) || stat.State == "Z" || stat.State == "X"
+}
+
 func (e claimEnv) assertNoProcesses(t *testing.T) {
 	t.Helper()
 	entries, _ := os.ReadDir(e.pids)
@@ -443,26 +448,36 @@ func TestClaimStopSIGTERMKillsJudge(t *testing.T) {
 			t.Fatalf("codex process %d not alive before the signal", pid)
 		}
 	}
-	if _, err := proc.StopChild(cmd.Process.Pid, 2*time.Second, func() error { return cmd.Process.Signal(syscall.SIGTERM) }); err != nil {
+	if err := proc.SignalChild(cmd.Process.Pid, syscall.SIGTERM); err != nil {
 		t.Fatal(err)
+	}
+	if !waitFor(t, 2*time.Second, func() bool { return processExited(cmd.Process.Pid) }) {
+		t.Errorf("hook did not exit after SIGTERM")
+		if _, err := proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() }); err != nil {
+			t.Errorf("cleanup hook after SIGTERM timeout: %v", err)
+		}
 	}
 	err := cmd.Wait()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != killedExitCode {
 		t.Errorf("hook exit %v, want %d", err, killedExitCode)
 	}
-	left := 0
+	var leftovers []int
 	for _, pid := range pids {
 		deadline := time.Now().Add(2 * time.Second)
 		for alive(pid) && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		if alive(pid) {
-			left++
-			_, _ = proc.StopChild(pid, 0, func() error { return syscall.Kill(pid, syscall.SIGKILL) })
+			leftovers = append(leftovers, pid)
 		}
 	}
-	if left > 0 {
-		t.Fatalf("%d codex processes left after hook SIGTERM", left)
+	if len(leftovers) > 0 {
+		t.Errorf("%d codex processes left after hook SIGTERM: %v", len(leftovers), leftovers)
+		for _, pid := range leftovers {
+			if _, err := proc.StopChild(pid, 0, func() error { return syscall.Kill(pid, syscall.SIGKILL) }); err != nil {
+				t.Errorf("cleanup codex process %d: %v", pid, err)
+			}
+		}
 	}
 }

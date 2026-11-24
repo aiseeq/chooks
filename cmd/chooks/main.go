@@ -51,12 +51,7 @@ func main() {
 func runCLI() int {
 	// Некоторые команды не используют cwd и работают даже после удаления
 	// текущего каталога, поэтому ошибка Getwd не мешает запуску CLI.
-	request, err := hookctx.FromProcess()
-	if err != nil {
-		// Getwd returns an empty cwd when the process directory was removed;
-		// standalone CLI commands that do not need cwd still work in that case.
-		request.Cwd = ""
-	}
+	request, _ := hookctx.FromProcess()
 	ctx := context.WithValue(context.Background(), cliTerminationKey{}, (func(int))(os.Exit))
 	ctx = context.WithValue(ctx, fallbackReasonKey{}, takeFallbackReason(&request))
 	return execute(ctx, request)
@@ -387,9 +382,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	noteCLIFallback(ctx, config, request, hookType, logger)
 	if lost {
 		reason, _ := ctx.Value(fallbackReasonKey{}).(string)
-		if _, writeErr := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); writeErr != nil {
-			return exitError, errors.Join(errLostCall, writeErr)
-		}
+		_, _ = io.WriteString(request.Stderr, hookproxy.LostMessage(reason))
 		return exitError, nil
 	}
 
@@ -1078,9 +1071,7 @@ func runStatusLine(ctx context.Context, request hookctx.Context) error {
 	// Обрыв после 'C': строку уже рисовал демон, второй раз её не рисуют
 	// (ротация учёток из строки статуса не запускается дважды)
 	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); hookproxy.Lost(reason) {
-		if _, writeErr := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); writeErr != nil {
-			return errors.Join(errLostCall, writeErr)
-		}
+		_, _ = io.WriteString(request.Stderr, hookproxy.LostMessage(reason))
 		return errLostCall
 	}
 	line, err := statusline.Render(ctx, request.Stdin, logger)

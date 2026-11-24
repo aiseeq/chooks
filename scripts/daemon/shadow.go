@@ -21,13 +21,19 @@ const (
 	badDaemonInput = 1 << 20 // команда в 1 МиБ: запись больше буфера сокета
 )
 
-// shadowInput — вход сравниваемой подкоманды
+// shadowInput — вход сравниваемой подкоманды; reset — перед каждым вызовом
+// возвращает состояние, от которого зависит ответ (nil — не нужно)
 type shadowInput struct {
 	hook  string
 	stdin []byte
+	reset func() error
 }
 
-func shadowInputs(project, transcript string) ([]shadowInput, error) {
+// shadowInputs — входы подкоманд песочницы. Ночная подсказка выдаётся раз
+// за ночь на сессию: без сброса её записи ночью ответ первого вызова
+// отличался бы от остальных независимо от тени
+func shadowInputs(box shadowSandbox) ([]shadowInput, error) {
+	project, transcript := box.project, box.transcript
 	specs := []struct {
 		hook string
 		in   obj
@@ -47,7 +53,11 @@ func shadowInputs(project, transcript string) ([]shadowInput, error) {
 		if err != nil {
 			return nil, err
 		}
-		inputs = append(inputs, shadowInput{hook: s.hook, stdin: stdin})
+		in := shadowInput{hook: s.hook, stdin: stdin}
+		if s.hook == "night-hint" {
+			in.reset = box.resetNightHint
+		}
+		inputs = append(inputs, in)
 	}
 	return inputs, nil
 }
@@ -94,6 +104,15 @@ func newShadowSandbox(work string) (shadowSandbox, error) {
 	return s, nil
 }
 
+// resetNightHint убирает записи ночной подсказки песочницы ($HOME без
+// XDG_STATE_HOME): следующий вызов снова первый за ночь
+func (s shadowSandbox) resetNightHint() error {
+	if err := os.RemoveAll(filepath.Join(s.home, ".local", "state", "chooks", "night-hint")); err != nil {
+		return fmt.Errorf("reset night hint: %w", err)
+	}
+	return nil
+}
+
 // env — окружение CLI без тени и с тенью на сокете демона socket
 func (s shadowSandbox) env(socket string) (off, on []string) {
 	env := []string{"HOME=" + s.home, "XDG_RUNTIME_DIR=" + s.run, "PATH=/usr/bin:/bin", "LANG=C.UTF-8", "CHOOKS_HOOK_SOCKET=" + socket}
@@ -109,7 +128,7 @@ func runShadowTiming(bin binaries, n int) (code int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	inputs, err := shadowInputs(box.project, box.transcript)
+	inputs, err := shadowInputs(box)
 	if err != nil {
 		return 2, err
 	}
@@ -225,7 +244,7 @@ func printJournal(inputs []shadowInput, byHook map[string][3]int, details []stri
 // interleave — n вызовов без тени и n с тенью попеременно; ответы сверяются
 // с первым ответом без тени
 func interleave(cli string, in shadowInput, envOff, envOn []string, dir string, n int) (without, with []time.Duration, differ int, err error) {
-	first, err := runOne(cli, []string{in.hook}, envOff, dir, in.stdin)
+	first, err := runReset(cli, in, envOff, dir)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -234,7 +253,7 @@ func interleave(cli string, in shadowInput, envOff, envOn []string, dir string, 
 			env  []string
 			into *[]time.Duration
 		}{{envOff, &without}, {envOn, &with}} {
-			o, err := runOne(cli, []string{in.hook}, side.env, dir, in.stdin)
+			o, err := runReset(cli, in, side.env, dir)
 			if err != nil {
 				return nil, nil, 0, err
 			}
@@ -245,6 +264,16 @@ func interleave(cli string, in shadowInput, envOff, envOn []string, dir string, 
 		}
 	}
 	return without, with, differ, nil
+}
+
+// runReset — вызов подкоманды после сброса её состояния; сброс вне замера
+func runReset(cli string, in shadowInput, env []string, dir string) (outcome, error) {
+	if in.reset != nil {
+		if err := in.reset(); err != nil {
+			return outcome{}, err
+		}
+	}
+	return runOne(cli, []string{in.hook}, env, dir, in.stdin)
 }
 
 // deafDaemon — сокет, который принимает соединения и не читает их

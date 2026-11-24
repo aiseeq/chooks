@@ -82,6 +82,10 @@ type shadowReport struct {
 	incomparableWhy  map[string]int
 	journalMissing   bool
 	durationsMissing bool
+	// coveredFrom — первая строка файла длительностей (с ротированным .1)
+	// позже начала периода: вызовы CLI до неё не видны, и период считается
+	// с неё; нулевое — период покрыт
+	coveredFrom time.Time
 }
 
 func (r *shadowReport) count(hook string) *shadowCount {
@@ -109,20 +113,56 @@ func (r *shadowReport) mismatches() int {
 	return n
 }
 
+// shadowCLICall — прямой вызов CLI сравниваемой подкоманды из файла
+// длительностей
+type shadowCLICall struct {
+	hook string
+	at   time.Time
+}
+
 // buildShadowReport считает журнал тени и вызовы CLI из файла длительностей
-// за [from, to]. Нет файла — ноль строк, отмечено в сводке
+// за [from, to]; оба файла читаются с ротированным .1. Нет файла — ноль
+// строк, отмечено в сводке. Файл длительностей начинается позже from —
+// период сужается до его начала, чтобы ротация не прятала пропуски
 func buildShadowReport(journal, durations string, from, to time.Time) (*shadowReport, error) {
 	r := &shadowReport{from: from, to: to, journal: journal, counts: map[string]*shadowCount{},
 		mismatchDetails: map[string]int{}, incomparableWhy: map[string]int{}}
 	for _, hook := range shadowCovered() {
 		r.count(hook)
 	}
-	inPeriod := func(text string) bool {
-		at, err := time.Parse(shadowTimeLayout, text)
-		return err == nil && !at.Before(from) && !at.After(to)
+	// Вызов CLI напрямую — строка из шести столбцов (recordDuration);
+	// строки прокси (восемь столбцов) тень не шлют, но начало файла
+	// показывают
+	var calls []shadowCLICall
+	var first time.Time
+	missing, err := scanRotated(durations, func(fields []string) {
+		at, ok := shadowLineTime(fields)
+		if !ok {
+			return
+		}
+		if first.IsZero() || at.Before(first) {
+			first = at
+		}
+		if _, covered := shadowHooks[fields[1]]; covered && len(fields) == 6 {
+			calls = append(calls, shadowCLICall{hook: fields[1], at: at})
+		}
+	})
+	if err != nil {
+		return nil, err
 	}
-	missing, err := scanTSV(journal, func(fields []string) {
-		if len(fields) < 5 || !inPeriod(fields[0]) {
+	r.durationsMissing = missing
+	if first.After(from) {
+		r.coveredFrom, from = first, first
+	}
+	inPeriod := func(at time.Time) bool { return !at.Before(from) && !at.After(to) }
+	for _, c := range calls {
+		if inPeriod(c.at) {
+			r.count(c.hook).calls++
+		}
+	}
+	missing, err = scanRotated(journal, func(fields []string) {
+		at, ok := shadowLineTime(fields)
+		if !ok || len(fields) < 5 || !inPeriod(at) {
 			return
 		}
 		hook := fields[1]
@@ -142,21 +182,31 @@ func buildShadowReport(journal, durations string, from, to time.Time) (*shadowRe
 		return nil, err
 	}
 	r.journalMissing = missing
-	// Вызов CLI напрямую — строка из шести столбцов (recordDuration);
-	// строки прокси (восемь столбцов) тень не шлют
-	missing, err = scanTSV(durations, func(fields []string) {
-		if len(fields) != 6 || !inPeriod(fields[0]) {
-			return
-		}
-		if _, covered := shadowHooks[fields[1]]; covered {
-			r.count(fields[1]).calls++
-		}
-	})
-	if err != nil {
-		return nil, err
-	}
-	r.durationsMissing = missing
 	return r, nil
+}
+
+// shadowLineTime — время строки журнала (первый столбец); false — строка
+// короче двух столбцов или время не разобрано
+func shadowLineTime(fields []string) (time.Time, bool) {
+	if len(fields) < 2 {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(shadowTimeLayout, fields[0])
+	return at, err == nil
+}
+
+// scanRotated — scanTSV по ротированному path.1, затем по path; true —
+// нет ни того, ни другого
+func scanRotated(path string, row func(fields []string)) (bool, error) {
+	oldMissing, err := scanTSV(path+".1", row)
+	if err != nil {
+		return false, err
+	}
+	missing, err := scanTSV(path, row)
+	if err != nil {
+		return false, err
+	}
+	return oldMissing && missing, nil
 }
 
 // scanTSV зовёт row на каждую строку файла; true — файла нет
@@ -187,6 +237,9 @@ func (r *shadowReport) write(w io.Writer, loc *time.Location) {
 	}
 	if r.durationsMissing {
 		fmt.Fprintln(w, "файла длительностей нет: вызовы CLI не посчитаны")
+	}
+	if !r.coveredFrom.IsZero() {
+		fmt.Fprintf(w, "период не покрыт файлом длительностей до %s: счёт с этого момента\n", r.coveredFrom.In(loc).Format("2006-01-02 15:04:05"))
 	}
 	var total shadowCount
 	missed := 0

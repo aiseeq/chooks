@@ -203,8 +203,6 @@ func (s Store) Sweep(now time.Time) error {
 	return errors.Join(errs...)
 }
 
-// path — файл записи сессии. Имя сессии приходит извне и в путь попадать не
-// должно
 // RecordName — имя файла записи сессии в Dir; ошибка — негодный
 // идентификатор
 func RecordName(sessionID string) (string, error) {
@@ -215,6 +213,8 @@ func RecordName(sessionID string) (string, error) {
 	return filepath.Base(path), nil
 }
 
+// path — файл записи сессии. Имя сессии приходит извне и в путь попадать не
+// должно
 func (s Store) path(sessionID string) (string, error) {
 	// Base пустой строки — «.», пустого имени после неё не бывает
 	name := filepath.Base(strings.TrimSpace(sessionID))

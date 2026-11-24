@@ -21,19 +21,21 @@ import (
 // (`{`, `,` — фигурные скобки bash, `=`/`:` — значение опции, кластер
 // короткой опции `-C.claude`, `-tagents` — слитное значение опции). Слева
 // от .claude — любой символ, кроме буквы, цифры и `_` (`\.claude`,
-// `${X}.claude`, `$(…).claude`), кластер опции (`\-C.claude`, `-""C`) или
-// переменная `$X.claude`: граница, которую не определить по литералу, —
+// `${X}.claude`, `$(…).claude`), кластер опции (`\-C.claude`, `-""C`, в том
+// числе после подстановки: `"$Y"-C.claude`, `${Y}-C.claude`, `$(…)-C.claude`)
+// или переменная `$X.claude`: граница, которую не определить по литералу, —
 // путь
-var agentsPathToken = regexp.MustCompile(`(?i)(?:^|[/=:{,]|^-[a-z]+)agents(?:/|$|[,}])|(?:^|[^a-z0-9_]|^\\?-[a-z"'\\]+|\$\w+)\.claude/?(?:$|[,}])`)
+var agentsPathToken = regexp.MustCompile(`(?i)(?:^|[/=:{,]|^-[a-z]+)agents(?:/|$|[,}])|(?:^|[^a-z0-9_]|(?:^\\?|\$\w*)-[a-z"'\\]+|\$\w+)\.claude/?(?:$|[,}])`)
 
 // agentsPathInText — путь agents/ или каталог .claude внутри текста с
 // пробелами (строка скрипта, тело heredoc): слово agents без косой рядом —
 // проза, не путь. Слева от .claude — что угодно, кроме идентификатора
 // перед точкой (`cfg.Restart.Claude` в коде): символ не из
 // `[A-Za-z0-9_]`, кластер короткой опции со слитным значением
-// (`tar -C.claude`, `\-C`, `-""C`, `TAR_OPTIONS=-C.claude`) или
-// переменная `$X.claude`
-var agentsPathInText = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_.-])agents/|/agents(?:$|[^a-z0-9_.-])|(?:^|[\s"'])-[a-z]+agents(?:/|$|[^a-z0-9_.-])|(?:^|[^a-z0-9_]|(?:^|[\s"'=\\])-[a-z"'\\]+|\$\w+)\.claude/?(?:$|[\s"'),;|&>}])`)
+// (`tar -C.claude`, `\-C`, `-""C`, `TAR_OPTIONS=-C.claude`; перед кластером
+// то же, что перед .claude: `${Y}-C.claude`, `$Y-C.claude`, “ `:`-C “,
+// `$(:)-C`) или переменная `$X.claude`
+var agentsPathInText = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_.-])agents/|/agents(?:$|[^a-z0-9_.-])|(?:^|[\s"'])-[a-z]+agents(?:/|$|[^a-z0-9_.-])|(?:^|[^a-z0-9_]|(?:^|[^a-z0-9_]|\$\w+)-[a-z"'\\]+|\$\w+)\.claude/?(?:$|[\s"'),;|&>}])`)
 
 func mentionsAgentsPath(text string) bool {
 	if strings.ContainsAny(text, " \t\n") {
@@ -278,7 +280,8 @@ func readsOnly(call *syntax.CallExpr, commands, gitSubcommands []string) bool {
 // readerOptionWrites — опция читателя пишет файл или запускает программу:
 // --output у git и прочих, tree -o (и в кластере -fo) и -R, rg --pre,
 // less -o/-O, --log-file, -k и --lesskey* (секция #env задаёт LESSOPEN),
-// file -C/--compile, `$(` в аргументе test/[ (test -v 'a[$(…)]')
+// file -C/--compile; у test/[ — операнд -v (test -v 'a[$(…)]' исполняет
+// индекс, а `$(` можно спрятать в $'\x24(' или '$'\() и `$(` в аргументе
 func readerOptionWrites(name, value string) bool {
 	if strings.HasPrefix(value, "--output") {
 		return true
@@ -301,7 +304,7 @@ func readerOptionWrites(name, value string) bool {
 	case "file":
 		return short && strings.Contains(value, "C") || strings.HasPrefix(value, "--") && len(long) >= 3 && longOptionIs(long, "compile")
 	case "test", "[":
-		return textSubstitutes(value)
+		return value == "-v" || textSubstitutes(value)
 	}
 	return false
 }
@@ -563,7 +566,9 @@ func (s *agentWriteScan) wordAccounted(word *syntax.Word) bool {
 		}
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		return ok && (s.modelClient(call) || s.safeReader(call) && s.harmless(call))
-	case *syntax.TestClause, *syntax.BinaryTest, *syntax.UnaryTest, *syntax.ParenTest:
+	case *syntax.UnaryTest:
+		return owner.Op != syntax.TsVarSet && !textSubstitutes(wordOwnText(word))
+	case *syntax.TestClause, *syntax.BinaryTest, *syntax.ParenTest:
 		return !textSubstitutes(wordOwnText(word))
 	}
 	return false

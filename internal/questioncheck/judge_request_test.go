@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
@@ -67,6 +68,9 @@ exit 1
 // KillJudgeGroups убивает всю группу идущего судьи, и потомка тоже, и не
 // даёт запустить нового (ревью Terra 5ec62fa, п. 1)
 func TestKillJudgeGroups(t *testing.T) {
+	if err := proc.BecomeChildSubreaper(); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		judgeGroups.Lock()
 		judgeGroups.terminating = false
@@ -95,6 +99,14 @@ func TestKillJudgeGroups(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
+		// При мутанте shell и sleep остаются нашими потомками. Сначала
+		// останавливаем sleep по проверенному владению, затем сам cmd.
+		_ = proc.SignalDescendant(child, syscall.SIGKILL)
+		_ = proc.SignalCmd(cmd, syscall.SIGKILL)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
 		t.Fatal("judge not killed")
 	}
 	// Потомок без wait родителя остаётся зомби до init: смотрим состояние
@@ -104,7 +116,7 @@ func TestKillJudgeGroups(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			_ = syscall.Kill(child, syscall.SIGKILL)
+			_ = proc.SignalDescendant(child, syscall.SIGKILL)
 			t.Fatalf("judge child %d survived", child)
 		}
 	}

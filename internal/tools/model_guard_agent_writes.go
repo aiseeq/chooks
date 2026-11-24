@@ -27,34 +27,78 @@ import (
 // путь
 var agentsPathToken = regexp.MustCompile(`(?i)(?:^|[/=:{,]|^-[a-z]+)agents(?:/|$|[,}])|(?:^|[^a-z0-9_]|(?:^\\?|\$\w*)-[a-z"'\\]+|\$\w+)\.claude/?(?:$|[,}])`)
 
-// agentsPathInText — путь agents/ или каталог .claude внутри текста с
-// пробелами (строка скрипта, тело heredoc): слово agents без косой рядом —
-// проза, не путь. Слева от .claude — что угодно, кроме идентификатора
-// перед точкой (`cfg.Restart.Claude` в коде): символ не из
-// `[A-Za-z0-9_]`, кластер короткой опции со слитным значением
-// (`tar -C.claude`, `\-C`, `-""C`, `TAR_OPTIONS=-C.claude`; перед кластером
-// то же, что перед .claude: `${Y}-C.claude`, `$Y-C.claude`, “ `:`-C “,
-// `$(:)-C`) или переменная `$X.claude`
-var agentsPathInText = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_.-])agents/|/agents(?:$|[^a-z0-9_.-])|(?:^|[\s"'])-[a-z]+agents(?:/|$|[^a-z0-9_.-])|(?:^|[^a-z0-9_]|(?:^|[^a-z0-9_]|\$\w+)-[a-z"'\\]+|\$\w+)\.claude/?(?:$|[\s"'),;|&>}])`)
+// agentsPathInText — путь agents/ внутри текста с пробелами (строка
+// скрипта, тело heredoc): слово agents без косой рядом — проза, не путь.
+// Каталог .claude в тексте ищет claudeDirectoryInText
+var agentsPathInText = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_.-])agents/|/agents(?:$|[^a-z0-9_.-])|(?:^|[\s"'])-[a-z]+agents(?:/|$|[^a-z0-9_.-])`)
+
+// claudeDirectoryWord — .claude с правой границей слова в тексте
+var claudeDirectoryWord = regexp.MustCompile(`(?i)\.claude/?(?:$|[\s"'),;|&>}])`)
 
 func mentionsAgentsPath(text string) bool {
 	if strings.ContainsAny(text, " \t\n") {
-		return agentsPathInText.MatchString(text)
+		return pathInText(text)
 	}
 	return agentsPathToken.MatchString(text)
 }
 
-// agentReaders только читают названные пути (опции, которые пишут файл или
-// запускают программу, отсекает readerOptionWrites)
-var agentReaders = []string{
-	"cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "diff", "cmp", "stat", "file",
-	"test", "[", "realpath", "readlink", "basename", "dirname", "sha256sum", "sha1sum", "md5sum",
-	"du", "tree", "echo", "ls", "less", "more", "jq", "cut", "pwd",
+func pathInText(text string) bool {
+	return agentsPathInText.MatchString(text) || claudeDirectoryInText(text)
 }
 
-// agentSafeCommands — читатели и команды, которые создают каталог или
-// удаляют файл: содержимого определения агента они не задают
-var agentSafeCommands = append(slices.Clone(agentReaders), "mkdir", "rm", "rmdir", "touch")
+// claudeDirectoryInText — в тексте есть каталог .claude: .claude в начале
+// слова или после символа не из [A-Za-z0-9_]. Не путь только поле или имя
+// файла: .claude сразу после идентификатора (cfg.Claude, my-app.claude)
+func claudeDirectoryInText(text string) bool {
+	for _, match := range claudeDirectoryWord.FindAllStringIndex(text, -1) {
+		if claudeDirectoryAfter(text[:match[0]]) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeDirectoryAfter — .claude после before — путь. Цепочка
+// [A-Za-z0-9_.-] перед .claude делает его идентификатором, только если
+// начинается буквой, цифрой или `_` и стоит не сразу за подстановкой (`$`,
+// обратная кавычка, `}`, `)`): bash подставит туда что угодно, и `-` кластера
+// опции (`-${E}C.claude`, `${D}C.claude`) по литералу не виден. Обратная косая
+// и кавычки в bash исчезают и цепочку не рвут: `\-C.claude`, `-""C.claude`
+func claudeDirectoryAfter(before string) bool {
+	i := len(before)
+	var first byte
+	for i > 0 {
+		c := before[i-1]
+		switch {
+		case c == '\\' || c == '"' || c == '\'':
+		case c == '.' || c == '-' || identifierByte(c):
+			first = c
+		default:
+			return !identifierByte(first) || strings.IndexByte("$`})", c) >= 0
+		}
+		i--
+	}
+	return !identifierByte(first)
+}
+
+func identifierByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+// agentReaders — короткий список программ, которые только читают названные
+// пути (опции, которые пишут файл, отсекает readerOptionWrites); только им
+// можно работать в каталоге .claude после перехода в него
+var agentReaders = []string{
+	"cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "diff", "cmp", "stat", "realpath",
+	"readlink", "basename", "dirname", "sha256sum", "sha1sum", "md5sum", "du", "echo", "ls", "jq",
+	"cut", "pwd",
+}
+
+// agentSafeCommands — читатели, проверки и команды, которые создают каталог
+// или удаляют файл: содержимого определения агента по названному пути они не
+// задают (пишущие и запускающие опции отсекает readerOptionWrites)
+var agentSafeCommands = append(slices.Clone(agentReaders),
+	"rg", "file", "tree", "less", "more", "test", "[", "mkdir", "rm", "rmdir", "touch")
 
 var agentReaderGitSubcommands = []string{"diff", "log", "show", "status", "ls-files", "blame"}
 
@@ -151,40 +195,101 @@ func unparsedAgentReason(command string) string {
 	return ""
 }
 
-// Для перехода в .claude неизвестные команды считаются пишущими: их
-// относительные пути и побочные эффекты невозможно установить по словам.
-// Заведомо только читают переход (cd, pushd), клиент модели без
-// --debug-file, --settings, --mcp-config, --plugin-dir и читатель из
-// agentReaders без пишущих и запускающих опций. Пишущими делают команду:
-// окружение перед командой и export/declare/readonly/local
-// (GIT_EXTERNAL_DIFF, GIT_CONFIG_*, GIT_PAGER, PAGER); подстановка команды;
-// арифметика и проверки ([[ ]], let, $(( )), индекс ${a[…]}), которые
-// исполняют `$(…)` из индекса даже в строке в одинарных кавычках; слово с
-// `$(` или обратной кавычкой в тексте
+// После перехода в .claude (cd, pushd, git -C) команда пропускается, только
+// если в ней нет ничего, что bash раскрывает или исполняет помимо читателей:
+// каждое слово — чистый литерал (literalWord), конструкции — простые вызовы,
+// &&, `|` и `;`, перенаправления — чтение файла, дубль дескриптора и запись в
+// /dev/null. Вызов — переход (cd, pushd), клиент модели без --debug-file,
+// --settings, --mcp-config, --plugin-dir или читатель из agentReaders (git —
+// с подкомандой из agentReaderGitSubcommands) без пишущих опций и без
+// окружения перед командой. Всё прочее (export/declare, [[ ]], test, let,
+// (( )), функции, подоболочки, { }, ||, &, heredoc) — как и любая неизвестная
+// команда: её относительные пути и побочные эффекты по словам не установить
 func readOnlyClaudeDirectory(file *syntax.File) bool {
 	safe := true
 	syntax.Walk(file, func(node syntax.Node) bool {
-		safe = safe && claudeDirectoryNodeReads(node)
-		return true
+		if safe && node != nil {
+			safe = claudeDirectoryNodeReads(node)
+		}
+		return safe
 	})
 	return safe
 }
 
 func claudeDirectoryNodeReads(node syntax.Node) bool {
 	switch n := node.(type) {
+	case *syntax.File, *syntax.Comment, *syntax.Lit, *syntax.SglQuoted, *syntax.DblQuoted:
+		return true
+	case *syntax.Stmt:
+		return !n.Negated && !n.Background && !n.Coprocess
+	case *syntax.BinaryCmd:
+		return n.Op == syntax.AndStmt || n.Op == syntax.Pipe
 	case *syntax.Redirect:
-		if writingRedirect(n) {
-			v, ok := literalValue(n.Word)
-			return ok && v == "/dev/null"
-		}
-	case *syntax.DeclClause, *syntax.CmdSubst, *syntax.TestClause, *syntax.LetClause, *syntax.ArithmCmd, *syntax.ArithmExp:
-		return false
-	case *syntax.ParamExp:
-		return n.Index == nil && n.Slice == nil
+		return claudeDirectoryRedirectReads(n)
 	case *syntax.Word:
-		return !textSubstitutes(wordOwnText(n))
+		return literalWord(n)
 	case *syntax.CallExpr:
 		return claudeDirectoryCallReads(n)
+	}
+	return false
+}
+
+// claudeDirectoryRedirectReads — перенаправление читает литеральный файл,
+// дублирует дескриптор (2>&1) или пишет в /dev/null; heredoc и here-string —
+// нет: их тело — ещё один текст для разбора
+func claudeDirectoryRedirectReads(redirect *syntax.Redirect) bool {
+	switch redirect.Op {
+	case syntax.RdrIn:
+		return true
+	case syntax.DplIn, syntax.DplOut:
+		value, literal := literalValue(redirect.Word)
+		if literal && value != "" && strings.Trim(value, "0123456789-") == "" {
+			return true
+		}
+	}
+	if writingRedirect(redirect) {
+		value, literal := literalValue(redirect.Word)
+		return literal && value == "/dev/null"
+	}
+	return false
+}
+
+// literalWord — слово bash передаёт программе как есть: только литерал без
+// `$`, обратной кавычки, `\`, глобов и фигурных скобок, одинарные кавычки без
+// `$` и обратной кавычки внутри, двойные кавычки с таким же литералом. Тильда
+// допустима только в начале слова и перед `/` (`~/.claude`)
+func literalWord(word *syntax.Word) bool {
+	for i, part := range word.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			value := p.Value
+			if i == 0 && (value == "~" || strings.HasPrefix(value, "~/")) {
+				value = value[1:]
+			}
+			if strings.ContainsAny(value, "$`\\*?[{}") || strings.HasPrefix(value, "~") {
+				return false
+			}
+		case *syntax.SglQuoted:
+			if p.Dollar || strings.ContainsAny(p.Value, "$`") {
+				return false
+			}
+		case *syntax.DblQuoted:
+			if p.Dollar || !quotedLiteral(p.Parts) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func quotedLiteral(parts []syntax.WordPart) bool {
+	for _, part := range parts {
+		lit, ok := part.(*syntax.Lit)
+		if !ok || strings.ContainsAny(lit.Value, "$`\\") {
+			return false
+		}
 	}
 	return true
 }
@@ -923,7 +1028,7 @@ func reasonExcerpt(text string) string {
 	excerpt := text
 	if strings.ContainsAny(text, " \t\n") {
 		for field := range strings.FieldsSeq(text) {
-			if agentsPathToken.MatchString(field) || agentsPathInText.MatchString(field) {
+			if agentsPathToken.MatchString(field) || pathInText(field) {
 				excerpt = field
 				break
 			}

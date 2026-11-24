@@ -345,6 +345,16 @@ func TestCallsOnlyInputLimitEvenWithAvailableBudget(t *testing.T) {
 	if !strings.Contains(over.Input, "[обрезано:") || len([]rune(over.Input)) <= 1000 || over.inputLines == nil {
 		t.Fatalf("input at 1001 runes was not prepared and cropped: %+v", over)
 	}
+
+	unicodeExactInput := strings.Repeat("я", 1000)
+	unicodeExact := buildCall(unicodeExactInput)
+	if unicodeExact.Input != unicodeExactInput || retainedInputRunes(unicodeExact.Input) != 1000 {
+		t.Fatalf("1000 Cyrillic runes were cropped: retained=%d input=%q", retainedInputRunes(unicodeExact.Input), unicodeExact.Input)
+	}
+	unicodeOver := buildCall(strings.Repeat("я", 1001))
+	if !strings.Contains(unicodeOver.Input, "[обрезано:") || retainedInputRunes(unicodeOver.Input) != 1000 {
+		t.Fatalf("1001 Cyrillic runes retained %d, want 1000: %q", retainedInputRunes(unicodeOver.Input), unicodeOver.Input)
+	}
 }
 
 func TestCallsOnlyCropsToOneRuneWhenBudgetIsTight(t *testing.T) {
@@ -476,35 +486,99 @@ func TestCallsOnlyBoundToolsPrioritizesRelevantExcerptAndKeepsShortInputWhole(t 
 }
 
 func TestCallsOnlyBoundToolsExpandsSelectedLongInput(t *testing.T) {
-	answerWords := []string{"needle"}
-	tools := []Tool{{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("x", 2000), fullOutput: "needle", answerWords: answerWords}}
-	for range 5 {
-		tools = append(tools, Tool{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("s", 20), answerWords: answerWords})
+	tools := make([]Tool, 6)
+	for i := range tools {
+		tools[i] = Tool{Name: "Bash", callsOnly: true, fullInput: strings.Repeat(string(rune('a'+i)), 2000)}
 	}
-	bounded, err := boundTools(tools, "needle", 5000)
+	bounded, err := boundTools(tools, "ответ", 8000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker := strings.Index(bounded[0].Input, "[обрезано:")
-	if marker < 0 {
-		t.Fatalf("long input was not cropped: %q", bounded[0].Input)
+	expanded := false
+	for i := 1; i < len(bounded); i++ {
+		if retainedInputRunes(bounded[i].Input) > 800 {
+			expanded = true
+		}
 	}
-	var omitted, total int
-	if _, err := fmt.Sscanf(bounded[0].Input[marker:], "[обрезано: %d знаков из %d]", &omitted, &total); err != nil {
-		t.Fatalf("cannot parse crop marker in %q: %v", bounded[0].Input, err)
+	if !expanded {
+		t.Fatalf("no selected call grew beyond the initial reserve share: %+v", bounded[1:])
 	}
-	if total-omitted != callsOnlyInputCharLimit {
-		t.Fatalf("expanded input retained %d source characters, want %d: %q", total-omitted, callsOnlyInputCharLimit, bounded[0].Input)
+}
+
+func TestCallsOnlyPrioritizesRelevantLongCallOverManyShortCalls(t *testing.T) {
+	tools := []Tool{{Name: "Bash", callsOnly: true, fullInput: "verify needle " + strings.Repeat("x", 1185)}}
+	for i := range 80 {
+		tools = append(tools, Tool{Name: "Bash", callsOnly: true, fullInput: "echo " + strings.Repeat("z", 270) + fmt.Sprint(i)})
+	}
+	bounded, err := boundTools(tools, "needle найден", turnToolsCharLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(bounded[0].Input, "verify needle") || retainedInputRunes(bounded[0].Input) < callsOnlyInputCharLimit {
+		t.Fatalf("relevant source missing or shorter than main's 1000 runes: retained=%d input=%q", retainedInputRunes(bounded[0].Input), bounded[0].Input)
+	}
+}
+
+func TestCallsOnlyCountsOutputMatchesBeforeClearingOutput(t *testing.T) {
+	blocks := make([]any, 0, 2)
+	results := make([]any, 0, 2)
+	for i := range 2 {
+		id := fmt.Sprintf("call-%02d", i)
+		blocks = append(blocks, map[string]any{
+			"type": "tool_use", "id": id, "name": "Bash",
+			"input": map[string]any{"command": id + " " + strings.Repeat("x", 1200)},
+		})
+		output := "needle"
+		if i == 0 {
+			output = strings.Repeat("needle ", 20)
+		}
+		results = append(results, map[string]any{"type": "tool_result", "tool_use_id": id, "content": output})
+	}
+	p := fixture(t,
+		ev("user", "t1", "проверь needle"),
+		ev("assistant", "t2", blocks),
+		map[string]any{"type": "user", "message": map[string]any{"content": results}},
+		ev("assistant", "t4", []any{map[string]any{"type": "text", "text": "needle подтверждён"}}),
+	)
+	in, err := BuildInput(p, 4, Options{CallsOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := -1, -1
+	for i := range in.TurnTools {
+		call := &in.TurnTools[i]
+		if strings.Contains(call.Input, "call-00") {
+			first = i
+			if !call.evidenceScored || call.evidenceScore < 20 || call.fullOutput != "" {
+				t.Fatalf("output score was not retained before clearing output: %+v", call)
+			}
+		}
+		if strings.Contains(call.Input, "call-01") {
+			second = i
+		}
+	}
+	if first < 0 || second < 0 {
+		t.Fatalf("priority calls missing: first=%d second=%d", first, second)
+	}
+	order := callsOnlyPriorityOrder(in.TurnTools)
+	firstRank, secondRank := -1, -1
+	for rank, index := range order {
+		if index == first {
+			firstRank = rank
+		}
+		if index == second {
+			secondRank = rank
+		}
+	}
+	if firstRank < 0 || secondRank < 0 || firstRank >= secondRank {
+		t.Fatalf("call with more answer matches ranked after its peer: order=%v first=%d second=%d", order, firstRank, secondRank)
 	}
 }
 
 func TestCallsOnlyExpansionKeepsLargerExcerptWhenFitIsSmaller(t *testing.T) {
-	current := Tool{Name: "Bash", Input: strings.Repeat("x", 200)}
-	fit := Tool{Name: "Bash", Input: "short"}
-	got, replaced, err := keepLargerToolFit(current, fit)
-	if err != nil {
-		t.Fatal(err)
-	}
+	current := Tool{Name: "Bash", Input: strings.Repeat("x", 120)}
+	fit := Tool{Name: "Bash", Input: strings.Repeat("я", 100)}
+	got, replaced := keepLargerToolFit(current, fit)
 	if replaced || got.Input != current.Input {
 		t.Fatalf("smaller fit replaced the existing excerpt: replaced=%v input=%q", replaced, got.Input)
 	}

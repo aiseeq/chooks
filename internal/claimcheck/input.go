@@ -54,6 +54,7 @@ type Tool struct {
 	fullOutput     string
 	answerWords    []string
 	evidenceScore  int
+	evidenceScored bool
 	cropWords      []string
 	outputLines    []string
 	outputWords    [][]string
@@ -590,6 +591,10 @@ func appendCallTools(ctx context.Context, out *Input, r *row, rows []row, result
 		}
 		if out.CallsOnly {
 			t.callsOnly = true
+			if t.relevant {
+				t.evidenceScore = answerWordOccurrences(t, words)
+			}
+			t.evidenceScored = true
 			t.Output, t.fullOutput = "", ""
 			t.outputWords = nil
 			t.OutputLength, t.ExitCode, t.IsError = 0, nil, nil
@@ -1380,11 +1385,15 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 	}
 	if bounded[0].callsOnly {
 		for i := range bounded {
-			bounded[i].evidenceScore = 0
-			if !bounded[i].relevant {
-				continue
+			if !bounded[i].evidenceScored {
+				if bounded[i].relevant {
+					bounded[i].evidenceScore = answerWordOccurrences(bounded[i], words)
+				}
+				bounded[i].evidenceScored = true
 			}
-			bounded[i].evidenceScore = answerWordOccurrences(bounded[i], words)
+			if !bounded[i].relevant {
+				bounded[i].evidenceScore = 0
+			}
 		}
 	}
 	fullWords := make([][]string, len(bounded))
@@ -1430,7 +1439,7 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 		if candidate.callsOnly {
 			inputLimit = callsOnlyInputCharLimit
 			fullInputLength := utf8.RuneCountInString(candidate.fullInput)
-			if fullInputLength > callsOnlyInputCharLimit {
+			if fullInputLength > callsOnlyInputCharLimit && !candidate.relevant {
 				inputLimit = callsOnlyBaselineCharLimit
 			} else if fullInputLength > toolInputCharLimit && !candidate.relevant {
 				inputLimit = callsOnlyMediumCharLimit
@@ -1592,10 +1601,7 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 			if !ok {
 				continue
 			}
-			largerFit, keepFit, err := keepLargerToolFit(bounded[i], fit)
-			if err != nil {
-				return nil, err
-			}
+			largerFit, keepFit := keepLargerToolFit(bounded[i], fit)
 			if keepFit {
 				bounded[i] = largerFit
 			}
@@ -1629,29 +1635,42 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 	return toolsWithSkipped(bounded, selected), nil
 }
 
-// callsOnlyPriorityOrder keeps short inputs whole, then prefers source-sized
-// calls with more answer-word matches and later calls within each size group.
+// callsOnlyPriorityOrder puts calls tied to the answer before length classes,
+// then prefers more answer-word matches and later calls within each class.
 func callsOnlyPriorityOrder(tools []Tool) []int {
-	order := make([]int, len(tools))
-	for i := range tools {
-		order[i] = i
+	type priority struct {
+		index     int
+		inputSize int
+		score     int
+		relevant  bool
 	}
-	sort.SliceStable(order, func(a, b int) bool {
-		i, j := order[a], order[b]
-		iLen := utf8.RuneCountInString(tools[i].fullInput)
-		jLen := utf8.RuneCountInString(tools[j].fullInput)
-		iGroup, jGroup := callsOnlyPriorityGroup(iLen), callsOnlyPriorityGroup(jLen)
+	items := make([]priority, len(tools))
+	for i := range tools {
+		items[i] = priority{
+			index:     i,
+			inputSize: utf8.RuneCountInString(tools[i].fullInput),
+			score:     tools[i].evidenceScore,
+			relevant:  tools[i].relevant,
+		}
+	}
+	sort.SliceStable(items, func(a, b int) bool {
+		i, j := items[a], items[b]
+		if i.relevant != j.relevant {
+			return i.relevant
+		}
+		iGroup, jGroup := callsOnlyPriorityGroup(i.inputSize), callsOnlyPriorityGroup(j.inputSize)
 		if iGroup != jGroup {
 			return iGroup < jGroup
 		}
-		if tools[i].evidenceScore != tools[j].evidenceScore {
-			return tools[i].evidenceScore > tools[j].evidenceScore
+		if i.score != j.score {
+			return i.score > j.score
 		}
-		if tools[i].relevant != tools[j].relevant {
-			return tools[i].relevant
-		}
-		return i > j
+		return i.index > j.index
 	})
+	order := make([]int, len(items))
+	for i := range items {
+		order[i] = items[i].index
+	}
 	return order
 }
 
@@ -1665,32 +1684,38 @@ func callsOnlyPriorityGroup(inputLength int) int {
 	return 2
 }
 
-func keepLargerToolFit(current, fit Tool) (Tool, bool, error) {
-	currentSize, err := toolsJSONSize([]Tool{current})
-	if err != nil {
-		return Tool{}, false, err
+func keepLargerToolFit(current, fit Tool) (Tool, bool) {
+	if retainedInputRunes(fit.Input) > retainedInputRunes(current.Input) {
+		return fit, true
 	}
-	fitSize, err := toolsJSONSize([]Tool{fit})
-	if err != nil {
-		return Tool{}, false, err
+	return current, false
+}
+
+func retainedInputRunes(input string) int {
+	if marker := strings.Index(input, "[обрезано:"); marker >= 0 {
+		var omitted, total int
+		if n, _ := fmt.Sscanf(input[marker:], "[обрезано: %d знаков из %d]", &omitted, &total); n == 2 {
+			return total - omitted
+		}
 	}
-	if fitSize > currentSize {
-		return fit, true, nil
-	}
-	return current, false, nil
+	return utf8.RuneCountInString(input)
 }
 
 func answerWordOccurrences(tool Tool, words []string) int {
 	wanted := make(map[string]struct{}, len(words))
 	for _, word := range words {
-		wanted[word] = struct{}{}
+		wanted[strings.ToLower(word)] = struct{}{}
 	}
 	count := 0
-	visitWordTokens(strings.ToLower(tool.fullInput)+"\n"+strings.ToLower(tool.fullOutput), func(token string) {
-		if _, ok := wanted[token]; ok {
-			count++
-		}
-	})
+	visit := func(text string) {
+		visitWordTokens(text, func(token string) {
+			if _, ok := wanted[strings.ToLower(token)]; ok {
+				count++
+			}
+		})
+	}
+	visit(tool.fullInput)
+	visit(tool.fullOutput)
 	return count
 }
 

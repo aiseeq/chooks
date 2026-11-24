@@ -265,6 +265,9 @@ func (r *Rotator) syncUnknown(ctx context.Context, s *Store, raw json.RawMessage
 
 // Время внешнего перехода неизвестно: at — только момент обнаружения.
 func (r *Rotator) recordExternal(s *Store, destination *Account, now, mtime time.Time) error {
+	if destination == nil && s.Active == "" {
+		return nil
+	}
 	if destination != nil && s.Active == destination.UUID {
 		return nil
 	}

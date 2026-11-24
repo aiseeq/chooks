@@ -123,6 +123,27 @@ func TestExternalLogoutJournal(t *testing.T) {
 	}
 }
 
+func TestExternalLogoutWithoutActiveAccountDoesNotWriteJournal(t *testing.T) {
+	f := newFixture(t)
+	f.writeCreds(nil)
+	s := f.store()
+	if s.Active != "" {
+		t.Fatalf("fixture has active account %q", s.Active)
+	}
+	ctx := context.Background()
+	for range 2 {
+		if err := f.r.sync(ctx, s, true); err != nil {
+			t.Fatal(err)
+		}
+		if s.Active != "" || s.SyncedMtime.IsZero() {
+			t.Fatalf("logout sync state: active=%q synced=%v", s.Active, s.SyncedMtime)
+		}
+		if _, err := os.Stat(f.p.Journal()); !os.IsNotExist(err) {
+			t.Fatalf("logout without active account wrote journal: %v", err)
+		}
+	}
+}
+
 func TestSwitchAfterLogout(t *testing.T) {
 	f := newFixture(t)
 	f.save("work")

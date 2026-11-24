@@ -391,7 +391,7 @@ func TestCallsOnlyInputExcerptBudgetDependsOnRelevance(t *testing.T) {
 		limit    int
 	}{
 		{name: "relevant", input: strings.Repeat("x", 500) + " needle " + strings.Repeat("y", 500), relevant: true, limit: 1000},
-		{name: "irrelevant", input: strings.Repeat("x", 1000), limit: 300},
+		{name: "irrelevant", input: strings.Repeat("x", 1000), limit: 1000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tool := Tool{
@@ -427,12 +427,85 @@ func TestCallsOnlyPreservesGitActionCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(in.TurnTools) != 1 || !in.TurnTools[0].relevant {
-		t.Fatalf("git action call was not marked relevant: %+v", in.TurnTools)
+	if len(in.TurnTools) != 1 || !strings.Contains(in.TurnTools[0].Input, "git commit -q") || !strings.Contains(in.TurnTools[0].Input, "git push") {
+		t.Fatalf("short git action call was not preserved: %+v", in.TurnTools)
 	}
-	for _, word := range []string{"commit -q", "--amend", "push"} {
-		if !strings.Contains(in.TurnTools[0].Input, word) {
-			t.Fatalf("call input lost %q: %q", word, in.TurnTools[0].Input)
-		}
+}
+
+func TestCallsOnlyBoundToolsPrioritizesRelevantExcerptAndKeepsShortInputWhole(t *testing.T) {
+	answerWords := []string{"needle", "result"}
+	longInput := strings.Repeat("x", 288) + strings.Repeat("y", 312)
+	shortInput := strings.Repeat("short", 58)
+	tools := []Tool{
+		{Name: "Bash", callsOnly: true, fullInput: longInput, fullOutput: "needle result", answerWords: answerWords},
+		{Name: "Bash", callsOnly: true, fullInput: shortInput, fullOutput: "result", answerWords: answerWords},
+		{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("z", 2000), answerWords: answerWords},
+		{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("a", 2000), answerWords: answerWords},
+		{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("b", 2000), answerWords: answerWords},
+		{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("c", 2000), answerWords: answerWords},
+		{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("d", 2000), answerWords: answerWords},
+	}
+	longFit, _, err := fitTool(tools[0], 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortFit, _, err := fitTool(tools[1], 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimumTail, err := toolsJSONSize([]Tool{{Name: "Bash"}, {Name: "Bash"}, {Name: "Bash"}, {Name: "Bash"}, {Name: "Bash"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	longSize, _ := toolsJSONSize([]Tool{longFit})
+	shortSize, _ := toolsJSONSize([]Tool{shortFit})
+	budget := longSize + shortSize + minimumTail + 700
+	bounded, err := boundTools(tools, "needle result", budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bounded[0].Input != longInput {
+		t.Fatalf("relevant call was cropped under tight budget: %q", bounded[0].Input)
+	}
+	if !bounded[0].relevant {
+		t.Fatal("call relevant through its output lost its relevant flag")
+	}
+	if bounded[1].Input != shortInput || strings.Contains(bounded[1].Input, "[обрезано:") {
+		t.Fatalf("short call was cropped: %q", bounded[1].Input)
+	}
+}
+
+func TestCallsOnlyBoundToolsExpandsSelectedLongInput(t *testing.T) {
+	answerWords := []string{"needle"}
+	tools := []Tool{{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("x", 2000), fullOutput: "needle", answerWords: answerWords}}
+	for range 5 {
+		tools = append(tools, Tool{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("s", 20), answerWords: answerWords})
+	}
+	bounded, err := boundTools(tools, "needle", 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := strings.Index(bounded[0].Input, "[обрезано:")
+	if marker < 0 {
+		t.Fatalf("long input was not cropped: %q", bounded[0].Input)
+	}
+	var omitted, total int
+	if _, err := fmt.Sscanf(bounded[0].Input[marker:], "[обрезано: %d знаков из %d]", &omitted, &total); err != nil {
+		t.Fatalf("cannot parse crop marker in %q: %v", bounded[0].Input, err)
+	}
+	if total-omitted != callsOnlyInputCharLimit {
+		t.Fatalf("expanded input retained %d source characters, want %d: %q", total-omitted, callsOnlyInputCharLimit, bounded[0].Input)
+	}
+}
+
+func TestCallsOnlyExpansionKeepsLargerExcerptWhenFitIsSmaller(t *testing.T) {
+	current := Tool{Name: "Bash", Input: strings.Repeat("x", 200)}
+	fit := Tool{Name: "Bash", Input: "short"}
+	got, replaced, err := keepLargerToolFit(current, fit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced || got.Input != current.Input {
+		t.Fatalf("smaller fit replaced the existing excerpt: replaced=%v input=%q", replaced, got.Input)
 	}
 }

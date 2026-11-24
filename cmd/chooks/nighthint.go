@@ -40,6 +40,12 @@ type nightHintEvent struct {
 // autonomousSkillCalled)
 const skillStateWait = time.Second
 
+// nightProbes — признаки «спит» от logind; тест тени подменяет их
+// заглушками, чтобы CLI записал ночную метку и вызов заглушки был виден
+var nightProbes = struct {
+	locked, lidClosed func(context.Context) (bool, error)
+}{nighthint.ScreenLocked, nighthint.LidClosed}
+
 // nightHintDeps — живые время, признак блокировки, записи и признак вызова
 // скилла autonomous-work по записи skill-reload; deadline — срок хука для
 // чтения записи
@@ -58,7 +64,7 @@ func nightHintDepsContext(ctx context.Context, config *core.Config, deadline tim
 	}
 	// Срок в поясе запроса: он попадает в текст ошибки и в лог
 	skillCalled := autonomousSkillCalledContext(ctx, config, deadline.In(request.Location()), func() (string, error) { return skillDir, nil })
-	return nighthint.Deps{Now: func() time.Time { return time.Now().In(request.Location()) }, Locked: nighthint.ScreenLocked, LidClosed: nighthint.LidClosed, Store: nighthint.Store{Dir: filepath.Join(state, "night-hint")}, SkillCalled: skillCalled}, nil
+	return nighthint.Deps{Now: func() time.Time { return request.Now().In(request.Location()) }, Locked: nightProbes.locked, LidClosed: nightProbes.lidClosed, Store: nighthint.Store{Dir: filepath.Join(state, "night-hint")}, SkillCalled: skillCalled}, nil
 }
 
 // autonomousSkillCalled — признак вызова скилла autonomous-work в сессии по
@@ -187,7 +193,7 @@ func runNightHint(ctx context.Context, data []byte, config *core.Config, logger 
 		logger.Error("hook request is missing", "hook", hookNightHint)
 		return
 	}
-	printMode, err := core.PrintModeSessionForPID(request.Getenv("CLAUDE_PID"))
+	printMode, err := core.PrintModeSessionIn(request.ProcFS(), request.Getenv("CLAUDE_PID"))
 	if err != nil {
 		logger.Warn("session mode unknown, assuming interactive", "hook", hookNightHint, "error", err)
 	}
@@ -254,6 +260,11 @@ func defaultNightHint(ctx context.Context, data []byte, config *core.Config, log
 	if err != nil {
 		logger.Warn("night hint state dir unavailable", "error", err)
 		return
+	}
+	// Тень: CLI записывает ответы logind и записи skill-reload, демон
+	// отвечает записанными
+	if capture := shadowCaptureFrom(ctx); capture != nil {
+		deps = capture.nightDeps(deps)
 	}
 	runNightHint(ctx, data, config, logger, request.Stdout, deps)
 }

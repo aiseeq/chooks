@@ -114,6 +114,7 @@ func execute(ctx context.Context, request hookctx.Context) int {
 		newCorpusSweepCmd(),
 		newDeliverAlertCmd(),
 		newServeCmd(),
+		newShadowReportCmd(&exitCode),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -296,6 +297,12 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		return exitError, err
 	}
 	timer := newHookTimerForRequest(hookType, request)
+	// Время запроса: сравниваемые тенью хуки решают по нему, а не по часам
+	// своего момента (shadowHooks)
+	if request.Time.IsZero() {
+		request.Time = time.Now()
+	}
+	ctx = hookctx.WithRequest(ctx, request)
 	exit, cli := ctx.Value(cliTerminationKey{}).(func(int))
 	if cli {
 		timer.watchTermination(exit)
@@ -348,7 +355,8 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		return exitError, fmt.Errorf("failed to read input: %w", err)
 	}
 
-	timer.setSession(sessionIDOf(data))
+	session := sessionIDOf(data)
+	timer.setSession(session)
 
 	timer.stage("config")
 	config, err := core.LoadConfigForRequest(request.ConfigPath, request)
@@ -369,7 +377,27 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		return exitError, nil
 	}
 
+	// Тень: CLI, исполняющий хук сам (не запасной путь прокси), шлёт демону
+	// запись для сравнения (этап 2б-3а)
+	var shadow *shadowSession
+	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); cli && reason == "" && config.Daemon.Shadow {
+		if hook, covered := shadowHooks[hookType]; covered {
+			ctx, request, shadow = beginShadow(ctx, hook, hookType, data, session, config, request)
+		}
+	}
+
 	timer.stage("work")
+	code, err = dispatchHook(ctx, hookType, data, config, logger, timer, request)
+	if shadow != nil {
+		timer.stage("shadow")
+		shadow.send(code, err)
+	}
+	return code, err
+}
+
+// dispatchHook — работа подкоманды хука после конфига и лога: её же зовёт
+// теневое исполнение демона (shadowDispatch) для сравниваемых подкоманд
+func dispatchHook(ctx context.Context, hookType string, data []byte, config *core.Config, logger core.Logger, timer *hookTimer, request hookctx.Context) (int, error) {
 	switch hookType {
 	case hookPreToolUse:
 		hookCtx, cancel := context.WithTimeout(ctx, request.Timeout)
@@ -397,14 +425,14 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		timer.stage("skills")
 		remindStaleSkills(ctx, eventPostToolBatch, input, config, logger, timer.deadline(optionalBudget), timer, request)
 		return exitAllowed, nil
-	case hookStop:
-		runSessionEventForRequest(core.EventStop, data, config, logger, &request)
-		return exitAllowed, nil
-	case hookStopFailure:
-		runSessionEventForRequest(core.EventStopFailure, data, config, logger, &request)
-		return exitAllowed, nil
-	case hookNotification:
-		runSessionEventForRequest(core.EventNotification, data, config, logger, &request)
+	case hookStop, hookStopFailure, hookNotification:
+		capture := shadowCaptureFrom(ctx)
+		decision := runSessionEventForRequest(sessionEvents[hookType], data, config, logger, &request, capture)
+		if capture != nil {
+			capture.mu.Lock()
+			capture.decision = &decision
+			capture.mu.Unlock()
+		}
 		return exitAllowed, nil
 
 	case hookUnderstandCheck:
@@ -539,6 +567,9 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 		logger.Error("hook processing failed", "hook_type", hookPreToolUse, "error", err)
 		return exitError, err
 	}
+	if capture := shadowCaptureFrom(ctx); capture != nil {
+		capture.action, capture.message = string(response.Action), response.Message
+	}
 
 	printResponse(logger, input, response, request.Stderr, request.Verbose)
 
@@ -555,20 +586,34 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 // в отдельный процесс, поэтому хук укладывается в миллисекунды. Сбои здесь
 // только логируются: событие сессии нечего блокировать, а ошибка хука
 // показалась бы человеку в интерфейсе на каждой остановке
-func runSessionEventForRequest(eventName string, data []byte, config *core.Config, logger core.Logger, request *hookctx.Context) {
-	announceSessionEvent(eventName, parseSessionInputForRequest(logger, eventName, data, request), config, logger, request)
+// capture — тень (этап 2б-3а), nil — без тени
+func runSessionEventForRequest(eventName string, data []byte, config *core.Config, logger core.Logger, request *hookctx.Context, capture *shadowCapture) notifier.Decision {
+	return announceSessionEventWith(eventName, parseSessionInputForRequest(logger, eventName, data, request), config, logger, request, capture)
+}
+
+// sessionEvents — событие сессии подкоманды
+var sessionEvents = map[string]string{
+	hookStop:         core.EventStop,
+	hookStopFailure:  core.EventStopFailure,
+	hookNotification: core.EventNotification,
 }
 
 // announceSessionEvent решает по событию сессии, запоминает состояние и зовёт
 // человека
 func announceSessionEvent(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, request *hookctx.Context) notifier.Decision {
+	return announceSessionEventWith(eventName, input, config, logger, request, nil)
+}
+
+// announceSessionEventWith — announceSessionEvent под тенью: эффекты
+// уведомления записываются в capture, у демона — без исполнения
+func announceSessionEventWith(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, request *hookctx.Context, capture *shadowCapture) notifier.Decision {
 	// Неинтерактивную сессию человек не ждёт вовсе — ни её остановку, ни её
 	// вопросы: ответить в неё всё равно некому
 	if request == nil {
 		logger.Error("hook request is missing")
 		return notifier.Decision{Reason: "hook request is missing"}
 	}
-	printMode, err := core.PrintModeSessionForPID(request.Getenv("CLAUDE_PID"))
+	printMode, err := core.PrintModeSessionIn(request.ProcFS(), request.Getenv("CLAUDE_PID"))
 	if err != nil {
 		logger.Warn("session mode unknown, assuming interactive", "error", err)
 	}
@@ -599,7 +644,7 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 		}
 		var active []core.BackgroundTask
 		// Время задач пишется со смещением пояса запроса, как у CLI
-		active, err = core.RecordBackgroundIn(request.RuntimeDir(), input.SessionID, *input.BackgroundTasks, crons, time.Now().In(request.Location()))
+		active, err = core.RecordBackgroundIn(request.RuntimeDir(), input.SessionID, *input.BackgroundTasks, crons, request.Now().In(request.Location()))
 		if err != nil {
 			// Failover на список Claude Code: брошенные задачи не отличить от
 			// живых, а про все задачи списка Claude Code сам сказал, что они живы
@@ -621,6 +666,9 @@ func announceSessionEvent(eventName string, input *core.ToolInput, config *core.
 		return decision
 	}
 	tool := notifier.NewForRequest(toolConfig, logger, *request)
+	if capture != nil {
+		tool = tool.WithEffects(capture.notifierEffects(realNotifierEffects()))
+	}
 	if err := tool.Announce(eventName, input, decision); err != nil {
 		logger.Warn("failed to deliver alert", "hook", eventName, "error", err)
 	}

@@ -43,12 +43,12 @@ func startWithArgs(t *testing.T, args ...string) string {
 	return pid
 }
 
-// printMode вызывает printModeCmdline и проваливает тест на ошибке чтения
+// printMode вызывает PrintModeSessionForPID и проваливает тест на ошибке чтения
 func printMode(t *testing.T, pid string) bool {
 	t.Helper()
-	got, err := printModeCmdline(pid)
+	got, err := PrintModeSessionForPID(pid)
 	if err != nil {
-		t.Fatalf("printModeCmdline(%q): %v", pid, err)
+		t.Fatalf("PrintModeSessionForPID(%q): %v", pid, err)
 	}
 	return got
 }
@@ -77,7 +77,7 @@ func TestPrintModeCmdline_NoProcess(t *testing.T) {
 		t.Error("без pid режим определить нельзя")
 	}
 	for _, pid := range []string{"999999999", "../../etc/passwd"} {
-		got, err := printModeCmdline(pid)
+		got, err := PrintModeSessionForPID(pid)
 		if err == nil {
 			t.Errorf("pid %q: нечитаемая командная строка должна давать ошибку", pid)
 		}

@@ -100,12 +100,18 @@ const (
 // на каждый запуск (порядка 100 тыс. в сутки) вытеснила бы остальное
 const durationsFile = "chooks-hooks.tsv"
 
-// newHookTimer начинает отсчёт со старта процесса: запуск бинаря под
-// свопом — тоже часть таймаута
-func newHookTimerForRequest(hook string, request hookctx.Context) *hookTimer {
-	t := &hookTimer{hook: hook, stderr: request.Stderr, now: time.Now, loc: request.Location(), settingsPath: func() (string, error) {
+// requestTimer — таймер запроса без отсчёта: вывод, пояс и путь
+// settings.json берутся из запроса, отсчёт ставит вызывающий
+func requestTimer(hook string, request hookctx.Context) *hookTimer {
+	return &hookTimer{hook: hook, stderr: request.Stderr, now: time.Now, loc: request.Location(), settingsPath: func() (string, error) {
 		return settingsPathFor(request)
 	}}
+}
+
+// newHookTimerForRequest начинает отсчёт со старта процесса: запуск бинаря
+// под свопом — тоже часть таймаута
+func newHookTimerForRequest(hook string, request hookctx.Context) *hookTimer {
+	t := requestTimer(hook, request)
 	t.mark = t.now()
 	start, err := processStartPID(request.PID)
 	if err != nil {
@@ -391,7 +397,7 @@ func toAny(values []string) []any {
 // ядро отдаёт её всегда равной 100
 const clockTicks = 100
 
-// processStart — время старта процесса по /proc: его возраст — время от
+// processStartPID — время старта процесса pid по /proc: его возраст — время от
 // загрузки (/proc/uptime) минус starttime в тиках от загрузки. Оба в одних
 // часах с точностью 10 мс; btime из /proc/stat округлён до секунды и дал бы
 // ошибку до секунды

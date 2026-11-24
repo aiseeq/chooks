@@ -111,11 +111,19 @@ type server struct {
 	served, refused, stuck atomic.Int64
 	// handling — обработчиков handle идёт сейчас (без отказов «upgrade»)
 	handling atomic.Int64
+	// Тень (этап 2б-3а): журнал сравнений, его ротация, слоты теневых
+	// исполнений и исполнитель записи CLI (executeShadow; тест подставляет
+	// свой). Пустой журнал — теневые записи читаются и отбрасываются
+	shadowLog   string
+	shadowMaxMB int
+	shadowSem   chan struct{}
+	shadowRun   func(hookwire.Request, shadowRecord) (shadowOutcome, error)
 }
 
 func newServer(logger core.Logger) *server {
 	s := &server{logger: logger, run: executeHook, sem: make(chan struct{}, serveMaxInFlight), uid: os.Getuid(), start: processStartPID,
-		commitTimeout: serveCommitTimeout, stuckGrace: serveStuckGrace, statsEvery: serveStatsEvery, started: time.Now()}
+		commitTimeout: serveCommitTimeout, stuckGrace: serveStuckGrace, statsEvery: serveStatsEvery, started: time.Now(),
+		shadowSem: make(chan struct{}, shadowSlots), shadowRun: executeShadow}
 	if exe, err := newExeWatch(); err != nil {
 		logger.Warn("daemon: own executable unreadable, update after install not detected", "error", err)
 	} else {
@@ -182,7 +190,11 @@ stats в лог: RSS, живая куча после GC, горутины, fd.`,
 				where = "systemd:" + listener.Addr().String()
 			}
 			logger.Info("daemon: serving", "socket", where, "pid", os.Getpid(), "version", Version)
-			err = newServer(logger).serve(ctx, listener)
+			srv := newServer(logger)
+			if config.Logger.Output == "file" && config.Logger.LogFile != "" {
+				srv.shadowLog, srv.shadowMaxMB = filepath.Join(filepath.Dir(config.Logger.LogFile), shadowJournalFile), config.Logger.MaxSizeMB
+			}
+			err = srv.serve(ctx, listener)
 			logger.Info("daemon: stopped", "socket", where, "version", Version, "error", err)
 			return err
 		},
@@ -350,7 +362,15 @@ func (s *server) handle(conn *net.UnixConn) {
 		return
 	}
 	_ = conn.SetReadDeadline(accepted.Add(serveReadTimeout))
-	wire, err := hookwire.ReadRequest(conn)
+	frame, err := hookwire.ReadFrame(conn)
+	if err == nil && frame.Shadow {
+		// Теневая запись CLI: ответа нет, исполнение — без эффектов, без
+		// проверок живого отправителя (pid, ppid, cwd и время — из записи)
+		_ = conn.Close()
+		s.handleShadow(frame)
+		return
+	}
+	wire := frame.Request
 	if err != nil {
 		reason := "read: " + err.Error()
 		switch {

@@ -2,12 +2,17 @@
 //
 //	go run ./scripts/daemon equal --cli BIN --proxy BIN --inputs DIR --work DIR [--report FILE]
 //	go run ./scripts/daemon timing --cli BIN --proxy BIN --work DIR [-n 200]
+//	go run ./scripts/daemon timing --mode shadow --cli BIN --work DIR [-n 200]
 //
 // equal — равенство на наборе входов этапа 2а (equal.py и equal2.py из
 // hd/s2a/review2/equality): код, stdout, stderr и файлы песочницы у CLI и у
 // прокси к демону `chooks serve` на временном сокете. timing — N
 // последовательных pre-tool-use `git status`: CLI против прокси+демона, p50 и
-// p95 в мс, и цена старта прокси.
+// p95 в мс, и цена старта прокси. timing --mode shadow — CLI с тенью и без
+// неё (этап 2б-3а): по входу на каждую сравниваемую подкоманду, N вызовов
+// каждой стороны вперемешку, p50 и p95, прирост p50 (порог 2 мс), исходы
+// журнала тени демона; затем плохой демон — сокета нет и демон не читает
+// запись больше буфера сокета (порог прироста 100 мс).
 //
 // Код выхода: 0 — расхождений нет, 1 — есть, 2 — сбой прогона.
 package main
@@ -62,19 +67,37 @@ func (b *binaries) register(fs *flag.FlagSet) {
 }
 
 func (b *binaries) resolve() error {
-	if b.cli == "" || b.proxy == "" || b.work == "" {
+	if b.proxy == "" {
 		return errors.New("--cli, --proxy and --work are required")
 	}
-	for _, p := range []*string{&b.cli, &b.proxy, &b.work} {
-		abs, err := filepath.Abs(*p)
-		if err != nil {
-			return fmt.Errorf("abs %s: %w", *p, err)
+	if err := b.resolveCLI(); err != nil {
+		return err
+	}
+	return absPath(&b.proxy)
+}
+
+// resolveCLI — флаги режима без прокси: --cli и --work
+func (b *binaries) resolveCLI() error {
+	if b.cli == "" || b.work == "" {
+		return errors.New("--cli and --work are required")
+	}
+	for _, p := range []*string{&b.cli, &b.work} {
+		if err := absPath(p); err != nil {
+			return err
 		}
-		*p = abs
 	}
 	if err := os.MkdirAll(b.work, 0o700); err != nil {
 		return fmt.Errorf("work dir: %w", err)
 	}
+	return nil
+}
+
+func absPath(p *string) error {
+	abs, err := filepath.Abs(*p)
+	if err != nil {
+		return fmt.Errorf("abs %s: %w", *p, err)
+	}
+	*p = abs
 	return nil
 }
 
@@ -87,7 +110,8 @@ type daemon struct {
 	dir    string
 }
 
-func startDaemon(cli string, logFile *os.File) (*daemon, error) {
+// config — текст конфига демона ("" — без конфига, лог в stderr)
+func startDaemon(cli string, logFile *os.File, config string) (*daemon, error) {
 	base := os.TempDir()
 	if len(base) > 60 {
 		base = "/tmp"
@@ -99,6 +123,14 @@ func startDaemon(cli string, logFile *os.File) (*daemon, error) {
 	home := filepath.Join(dir, "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		return nil, fmt.Errorf("daemon home: %w", err)
+	}
+	if config != "" {
+		if err := os.MkdirAll(filepath.Join(home, ".config", "chooks"), 0o700); err != nil {
+			return nil, fmt.Errorf("daemon config dir: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".config", "chooks", "config.yaml"), []byte(config), 0o600); err != nil {
+			return nil, fmt.Errorf("daemon config: %w", err)
+		}
 	}
 	d := &daemon{socket: filepath.Join(dir, "d.sock"), dir: dir}
 	d.cmd = exec.Command(cli, "serve", "--socket", d.socket)

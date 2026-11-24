@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/aiseeq/chooks/internal/procfs"
 )
 
 func TestSanitizeTitle(t *testing.T) {
@@ -54,7 +56,7 @@ func TestOwnsKonsoleTab(t *testing.T) {
 }
 
 func TestProcessNamesStartsWithItself(t *testing.T) {
-	names, err := processNames(os.Getpid())
+	names, err := processNames(procfs.OS{}, os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}

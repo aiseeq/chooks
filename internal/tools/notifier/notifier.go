@@ -29,6 +29,31 @@ type Notifier struct {
 	desktop         bool
 	activateOnClick bool
 	request         *hookctx.Context
+	effects         Effects
+}
+
+// Effects — действия уведомления вне процесса хука: заголовок вкладки
+// Konsole (D-Bus) и доставка оповещения (фоновый процесс). Тень демона
+// (этап 2б-3а) подставляет запись без исполнения
+type Effects struct {
+	KonsoleTitle desktop.KonsoleTitler
+	Deliver      func(executable string, alert desktop.Alert, request hookctx.Context) error
+}
+
+// RealEffects — эффекты уведомления, которые исполняются
+func RealEffects() Effects {
+	return Effects{
+		KonsoleTitle: desktop.SetKonsoleTitle,
+		Deliver: func(executable string, alert desktop.Alert, request hookctx.Context) error {
+			return desktop.DeliverInBackgroundForRequest(executable, WatchCommand, alert, request)
+		},
+	}
+}
+
+// WithEffects подменяет эффекты уведомления
+func (n *Notifier) WithEffects(effects Effects) *Notifier {
+	n.effects = effects
+	return n
 }
 
 // NewForRequest binds notifications to the originating hook process.
@@ -39,6 +64,7 @@ func NewForRequest(config core.ToolConfig, logger core.Logger, request hookctx.C
 		desktop:         config.Desktop,
 		activateOnClick: config.ActivateOnClick,
 		request:         &request,
+		effects:         RealEffects(),
 	}
 }
 
@@ -63,7 +89,7 @@ func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision De
 	// Значок — по новому состоянию, как в строке статуса: минутное
 	// напоминание без конца хода — это «готово», а не вопрос.
 	// Без заголовка уведомление всё равно уходит
-	titleErr := desktop.SetTerminalTitleForRequest(decision.State.Marker()+" "+projectName, *n.request)
+	titleErr := desktop.SetTerminalTitleWith(decision.State.Marker()+" "+projectName, *n.request, n.effects.KonsoleTitle)
 	if titleErr != nil {
 		n.logger.Warn("terminal title not set", "error", titleErr)
 	}
@@ -76,7 +102,7 @@ func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision De
 	if err != nil {
 		return fmt.Errorf("failed to locate own executable: %w", err)
 	}
-	err = desktop.DeliverInBackgroundForRequest(executable, WatchCommand, alert, *n.request)
+	err = n.effects.Deliver(executable, alert, *n.request)
 	if err != nil {
 		return err
 	}
@@ -107,7 +133,7 @@ func (n *Notifier) buildAlert(eventName string, input *core.ToolInput, projectNa
 		if n.request == nil {
 			return desktop.Alert{}, fmt.Errorf("hook request is missing")
 		}
-		ancestors, err := desktop.ProcessAncestors(n.request.PID)
+		ancestors, err := desktop.ProcessAncestorsIn(n.request.ProcFS(), n.request.PID)
 		if err != nil {
 			// Best effort: собранная часть цепочки — настоящие PID, окно может
 			// быть у них; без окна клик просто ничего не активирует

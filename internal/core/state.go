@@ -244,3 +244,18 @@ func cleanupStaleStates(dir string) error {
 	}
 	return errors.Join(errs...)
 }
+
+// SessionStateFiles — файлы состояния сессии относительно RuntimeDir
+// запроса: запись состояния и учёт фоновых задач. Их пишут Stop,
+// StopFailure и Notification; тень сравнивает их содержимое у CLI и у
+// демона. Пустой или негодный идентификатор — файлов нет
+func SessionStateFiles(sessionID string) []string {
+	if sessionID == "" {
+		return nil
+	}
+	path, err := sessionStatePathIn("sessions", sessionID)
+	if err != nil {
+		return nil
+	}
+	return []string{path, path + tasksFileSuffix}
+}

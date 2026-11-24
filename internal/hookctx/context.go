@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/aiseeq/chooks/internal/procfs"
 )
 
 type contextKey struct{}
@@ -151,9 +153,42 @@ type Context struct {
 	ConfigPath string
 	Verbose    bool
 	Timeout    time.Duration
+	// Time — время запроса: его берут хуки, сравниваемые тенью (Now), чтобы
+	// CLI и демон решали при одном времени. Ноль — time.Now
+	Time time.Time
+	// Proc — чтение /proc запроса; nil — /proc машины (ProcFS)
+	Proc procfs.FS
 	// process marks the request of this very process (FromProcess): its Cwd
 	// is the process cwd, so relative paths need no resolving
 	process bool
+	// runtimeBase и stateBase заменяют $XDG_RUNTIME_DIR и $XDG_STATE_HOME
+	// у RuntimeDir и StateDir: тень демона пишет состояние в свой временный
+	// каталог (WithStateRoots)
+	runtimeBase, stateBase string
+}
+
+// Now — время запроса (Time), без него — time.Now
+func (c Context) Now() time.Time {
+	if c.Time.IsZero() {
+		return time.Now()
+	}
+	return c.Time
+}
+
+// ProcFS — чтение /proc запроса: Proc или /proc машины
+func (c Context) ProcFS() procfs.FS {
+	if c.Proc == nil {
+		return procfs.OS{}
+	}
+	return c.Proc
+}
+
+// WithStateRoots — запрос, у которого RuntimeDir и StateDir лежат под
+// runtimeBase и stateHome вместо $XDG_RUNTIME_DIR и $XDG_STATE_HOME:
+// теневое исполнение в демоне не трогает состояние пользователя
+func (c Context) WithStateRoots(runtimeBase, stateHome string) Context {
+	c.runtimeBase, c.stateBase = runtimeBase, stateHome
+	return c
 }
 
 // New constructs a request context from values supplied by the caller.
@@ -345,6 +380,9 @@ func (c Context) Abs(path string) string {
 
 // RuntimeDir resolves the short-lived state directory from this request.
 func (c Context) RuntimeDir() string {
+	if c.runtimeBase != "" {
+		return filepath.Join(c.runtimeBase, "chooks")
+	}
 	base := c.Path(EnvRuntimeDir)
 	if base == "" {
 		base = c.TempDir()
@@ -363,6 +401,9 @@ func (c Context) TempDir() string {
 
 // StateDir resolves the persistent chooks state directory for the request.
 func (c Context) StateDir() (string, error) {
+	if c.stateBase != "" {
+		return filepath.Join(c.stateBase, "chooks"), nil
+	}
 	base := c.Path(EnvStateHome)
 	if base == "" {
 		home := c.Path(EnvHome)

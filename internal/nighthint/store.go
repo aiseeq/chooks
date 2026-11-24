@@ -205,6 +205,16 @@ func (s Store) Sweep(now time.Time) error {
 
 // path — файл записи сессии. Имя сессии приходит извне и в путь попадать не
 // должно
+// RecordName — имя файла записи сессии в Dir; ошибка — негодный
+// идентификатор
+func RecordName(sessionID string) (string, error) {
+	path, err := Store{}.path(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(path), nil
+}
+
 func (s Store) path(sessionID string) (string, error) {
 	// Base пустой строки — «.», пустого имени после неё не бывает
 	name := filepath.Base(strings.TrimSpace(sessionID))

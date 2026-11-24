@@ -300,14 +300,59 @@ func (p *proxy) fallback(stdin []byte, consumed bool, reason string) int {
 }
 
 func socketPath() string {
-	if path := os.Getenv(EnvSocket); path != "" {
+	return SocketPath(os.Getenv)
+}
+
+// SocketPath — путь сокета демона по env: $CHOOKS_HOOK_SOCKET, иначе
+// $XDG_RUNTIME_DIR/chooks.sock (только абсолютный); "" — пути нет
+func SocketPath(getenv func(string) string) string {
+	if path := getenv(EnvSocket); path != "" {
 		return path
 	}
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); strings.HasPrefix(dir, "/") {
+	if dir := getenv("XDG_RUNTIME_DIR"); strings.HasPrefix(dir, "/") {
 		return dir + "/chooks.sock"
 	}
 	return ""
 }
+
+// SendShadow — теневая запись CLI демону (этап 2б-3а): connect, затем кадр
+// от frame целиком и close. Ответа не ждёт. Connect и запись — каждый не
+// дольше timeout; кадр строится после connect: без демона CLI его не
+// собирает. Демона нет — ошибка dial сразу; очередь приёма полна — dial к
+// сроку; демон не читает (кадр больше буфера сокета) — write к сроку. CLI,
+// уже ответивший сам, молча продолжает. Ошибка — *ShadowError с этапом
+func SendShadow(path string, timeout time.Duration, frame func() ([]byte, error)) error {
+	fd, err := dial(path, time.Now().Add(timeout))
+	if err != nil {
+		return &ShadowError{Stage: ShadowDial, Err: err}
+	}
+	defer syscall.Close(fd)
+	data, err := frame()
+	if err != nil {
+		return &ShadowError{Stage: ShadowFrame, Err: err}
+	}
+	if err := writeAll(fd, data, time.Now().Add(timeout)); err != nil {
+		return &ShadowError{Stage: ShadowWrite, Err: err}
+	}
+	return nil
+}
+
+// Этапы отправки тени
+const (
+	ShadowDial  = "dial"
+	ShadowFrame = "frame"
+	ShadowWrite = "write"
+)
+
+// ShadowError — тень не отправлена: этап и причина (errno)
+type ShadowError struct {
+	Stage string
+	Err   error
+}
+
+func (e *ShadowError) Error() string { return "shadow " + e.Stage + ": " + e.Err.Error() }
+
+func (e *ShadowError) Unwrap() error { return e.Err }
 
 // cliPath — ~/bin/chooks; без абсолютного HOME — chooks рядом с прокси
 func cliPath() string {

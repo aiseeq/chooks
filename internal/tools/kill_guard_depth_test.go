@@ -1,8 +1,12 @@
 package tools
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/aiseeq/akit/shellcmd"
 )
 
 // Правило глубины: команда и одна обёртка над ней проверяются как прямые;
@@ -63,6 +67,24 @@ func TestKillGuardDepthBlocks(t *testing.T) {
 				t.Errorf("нет подсказки правила глубины: %s: %v", command, r.Suggestions)
 			}
 		})
+	}
+}
+
+func TestVisibleDynamicSignalScansPartialNestedCalls(t *testing.T) {
+	args := []string{"bash", "-c", `kill -9 123; fish -c 'and echo unsupported'`}
+	calls, err := shellcmd.Calls(literalShellWords(args))
+	var nested *shellcmd.NestedError
+	if !errors.As(err, &nested) {
+		t.Fatalf("shellcmd.Calls error = %v, want NestedError", err)
+	}
+	if !slices.ContainsFunc(calls, func(call shellcmd.Call) bool {
+		_, ok := depthSignal(call)
+		return ok
+	}) {
+		t.Fatalf("shellcmd.Calls partial result has no signal: %+v", calls)
+	}
+	if !visibleDynamicSignal(shellcmd.Call{Args: args}) {
+		t.Fatal("visibleDynamicSignal ignored the signal in partial calls")
 	}
 }
 

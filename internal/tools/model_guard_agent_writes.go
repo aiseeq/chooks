@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/aiseeq/chooks/internal/core"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -68,10 +67,9 @@ type agentWriteScan struct {
 
 // writtenAgentDefinitionCandidates — модели из распознанных записей в
 // определения агентов и признак записи, содержимое которой не проверить
-func writtenAgentDefinitionCandidates(command string, logger core.Logger) ([]modelCandidate, bool) {
+func writtenAgentDefinitionCandidates(command string) ([]modelCandidate, bool) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		logger.Debug("model_guard: команда записи определения агента не разобрана", "error", err)
 		return nil, mentionsAgentsPath(command)
 	}
 	scan := &agentWriteScan{parent: map[syntax.Node]syntax.Node{}, writers: map[*syntax.Stmt]bool{}}
@@ -439,18 +437,14 @@ func (s *agentWriteScan) modelClient(call *syntax.CallExpr) bool {
 			continue
 		}
 		if base == "npx" {
-			return hasClaudeCodePackage(call.Args)
+			for _, rest := range call.Args {
+				if value, ok := literalValue(rest); ok && value == "@anthropic-ai/claude-code" {
+					return true
+				}
+			}
+			return false
 		}
 		return slices.Contains(modelClients, base)
-	}
-	return false
-}
-
-func hasClaudeCodePackage(args []*syntax.Word) bool {
-	for i := range args {
-		if value, ok := literalValue(args[i]); ok && value == "@anthropic-ai/claude-code" {
-			return true
-		}
 	}
 	return false
 }

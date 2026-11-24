@@ -70,102 +70,126 @@ func (c Context) busKeys(keys, key string) string {
 func (c Context) ConnectBus(ctx context.Context, address string) (*dbus.Conn, error) {
 	var last error
 	for entry := range strings.SplitSeq(c.BusAddress(address), ";") {
-		transport, keys, ok := strings.Cut(entry, ":")
-		if !ok || (transport != "unix" && transport != "tcp") {
-			last = fmt.Errorf("unsupported D-Bus address")
-			continue
-		}
-		values := map[string]string{}
-		invalid := false
-		for pair := range strings.SplitSeq(keys, ",") {
-			key, value, ok := strings.Cut(pair, "=")
-			if !ok {
-				continue
-			}
-			if _, exists := values[key]; exists {
-				continue
-			}
-			value, err := dbus.UnescapeBusAddressValue(value)
-			if err != nil {
-				last = err
-				invalid = true
-				break
-			}
-			values[key] = value
-		}
-		if invalid {
-			continue
-		}
-		network, target := "unix", values["path"]
-		if transport == "unix" {
-			abstract := values["abstract"]
-			if (target == "") == (abstract == "") {
-				last = fmt.Errorf("invalid D-Bus unix address")
-				continue
-			}
-			if abstract != "" {
-				target = "@" + abstract
-			}
-		} else {
-			switch values["family"] {
-			case "":
-				network = "tcp"
-			case "ipv4":
-				network = "tcp4"
-			case "ipv6":
-				network = "tcp6"
-			default:
-				last = fmt.Errorf("invalid D-Bus tcp family")
-				continue
-			}
-			if values["host"] == "" || values["port"] == "" {
-				last = fmt.Errorf("invalid D-Bus tcp address")
-				continue
-			}
-			target = net.JoinHostPort(values["host"], values["port"])
-		}
-		raw, err := (&net.Dialer{}).DialContext(ctx, network, target)
-		if err != nil {
+		target, valid, err := parseBusTarget(entry)
+		if !valid {
 			last = err
 			continue
 		}
-		stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
-		var conn *dbus.Conn
-		if transport == "unix" {
-			unixConn, ok := raw.(*net.UnixConn)
-			if !ok {
-				stop()
-				_ = raw.Close()
-				last = fmt.Errorf("unexpected D-Bus unix connection type")
-				continue
-			}
-			conn, err = dbus.ConnectUnix(unixConn)
-		} else {
-			conn, err = dbus.NewConn(raw)
-			if err == nil {
-				err = conn.Auth(nil)
-			}
-			if err == nil {
-				err = conn.Hello()
-			}
-			if err != nil && conn != nil {
-				_ = conn.Close()
-			}
+		conn, retry, err := c.connectBusTarget(ctx, target)
+		if retry {
+			last = err
+			continue
 		}
-		if !stop() && err == nil {
-			_ = conn.Close()
-			return nil, ctx.Err()
-		}
-		if err == nil {
-			return conn, nil
-		}
-		// Сокет открылся, а auth или Hello не прошли: godbus (getTransport,
-		// затем Auth) к следующему адресу списка тогда не переходит
-		_ = raw.Close()
-		return nil, err
+		return conn, err
 	}
 	if last == nil {
 		last = fmt.Errorf("empty D-Bus address")
 	}
 	return nil, last
+}
+
+type busTarget struct {
+	transport string
+	network   string
+	address   string
+}
+
+func parseBusTarget(entry string) (busTarget, bool, error) {
+	transport, keys, ok := strings.Cut(entry, ":")
+	if !ok || (transport != "unix" && transport != "tcp") {
+		return busTarget{}, false, fmt.Errorf("unsupported D-Bus address")
+	}
+	values := map[string]string{}
+	for pair := range strings.SplitSeq(keys, ",") {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		if _, exists := values[key]; exists {
+			continue
+		}
+		value, err := dbus.UnescapeBusAddressValue(value)
+		if err != nil {
+			return busTarget{}, false, fmt.Errorf("decode D-Bus address value: %w", err)
+		}
+		values[key] = value
+	}
+	if transport == "unix" {
+		return unixBusTarget(values)
+	}
+	return tcpBusTarget(values)
+}
+
+func unixBusTarget(values map[string]string) (busTarget, bool, error) {
+	path, abstract := values["path"], values["abstract"]
+	if (path == "") == (abstract == "") {
+		return busTarget{}, false, fmt.Errorf("invalid D-Bus unix address")
+	}
+	if abstract != "" {
+		path = "@" + abstract
+	}
+	return busTarget{transport: "unix", network: "unix", address: path}, true, nil
+}
+
+func tcpBusTarget(values map[string]string) (busTarget, bool, error) {
+	network := "tcp"
+	switch values["family"] {
+	case "":
+	case "ipv4":
+		network = "tcp4"
+	case "ipv6":
+		network = "tcp6"
+	default:
+		return busTarget{}, false, fmt.Errorf("invalid D-Bus tcp family")
+	}
+	if values["host"] == "" || values["port"] == "" {
+		return busTarget{}, false, fmt.Errorf("invalid D-Bus tcp address")
+	}
+	return busTarget{transport: "tcp", network: network, address: net.JoinHostPort(values["host"], values["port"])}, true, nil
+}
+
+func (c Context) connectBusTarget(ctx context.Context, target busTarget) (*dbus.Conn, bool, error) {
+	raw, err := (&net.Dialer{}).DialContext(ctx, target.network, target.address)
+	if err != nil {
+		return nil, true, fmt.Errorf("dial D-Bus %s: %w", target.network, err)
+	}
+	if target.transport == "unix" {
+		if _, ok := raw.(*net.UnixConn); !ok {
+			_ = raw.Close()
+			return nil, true, fmt.Errorf("unexpected D-Bus unix connection type")
+		}
+	}
+	stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
+	conn, err := busConnection(target.transport, raw)
+	if !stop() && err == nil {
+		_ = conn.Close()
+		return nil, false, ctx.Err()
+	}
+	if err == nil {
+		return conn, false, nil
+	}
+	// Сокет открылся, а auth или Hello не прошли: godbus не идёт к следующему адресу
+	_ = raw.Close()
+	return nil, false, err
+}
+
+func busConnection(transport string, raw net.Conn) (*dbus.Conn, error) {
+	if transport == "unix" {
+		unixConn, ok := raw.(*net.UnixConn)
+		if !ok {
+			return nil, fmt.Errorf("unexpected D-Bus unix connection type")
+		}
+		return dbus.ConnectUnix(unixConn)
+	}
+	conn, err := dbus.NewConn(raw)
+	if err == nil {
+		err = conn.Auth(nil)
+	}
+	if err == nil {
+		err = conn.Hello()
+	}
+	if err != nil && conn != nil {
+		_ = conn.Close()
+	}
+	return conn, err
 }

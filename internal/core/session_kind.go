@@ -8,23 +8,8 @@ import (
 	"github.com/aiseeq/chooks/internal/procfs"
 )
 
-// PrintModeSessionForPID сообщает, что хук вызвала неинтерактивная сессия `claude -p`.
-//
-// Такие сессии порождает автоматика: пост-пасс hedwig гоняет через `claude -p`
-// арбитра расшифровки партиями, и каждая партия — отдельная сессия, которая
-// на выходе дёргает Stop. Человек на неё не смотрит и звонка не ждёт: для него
-// это середина работы, которую он запустил одной командой.
-//
-// Режим определяется по командной строке процесса claude — его pid Claude Code
-// кладёт в CLAUDE_PID запроса. Отсутствие терминала признаком не годится: в IDE его
-// нет и у интерактивной сессии. Ошибка означает, что командную строку прочитать
-// не удалось и режим неизвестен
-func PrintModeSessionForPID(pid string) (bool, error) {
-	return PrintModeSessionIn(procfs.OS{}, pid)
-}
-
-// PrintModeSessionIn — PrintModeSessionForPID по /proc запроса (тень демона
-// отвечает записанным CLI).
+// PrintModeSessionIn сообщает, что хук вызвала неинтерактивная сессия `claude -p`.
+// Режим определяется по командной строке процесса claude из /proc запроса.
 // Пустой pid — сессия без CLAUDE_PID, считается интерактивной
 func PrintModeSessionIn(proc procfs.FS, pid string) (bool, error) {
 	if pid == "" {

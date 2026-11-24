@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -19,6 +20,8 @@ const (
 	// konsoleDisplayedTitle — роль показываемого заголовка, а не имени профиля
 	konsoleDisplayedTitle = int32(1)
 )
+
+var backgroundTitleContext = context.Background()
 
 // SetTerminalTitleForRequest меняет заголовок окна терминала запроса.
 //
@@ -41,7 +44,12 @@ type KonsoleTitler func(service, session, title string, request hookctx.Context)
 
 // SetKonsoleTitle — заголовок вкладки Konsole через шину сессии запроса
 func SetKonsoleTitle(service, session, title string, request hookctx.Context) error {
-	conn, err := requestSessionBus(request)
+	return SetKonsoleTitleContext(backgroundTitleContext, service, session, title, request)
+}
+
+// SetKonsoleTitleContext sets a Konsole tab title while observing ctx cancellation.
+func SetKonsoleTitleContext(ctx context.Context, service, session, title string, request hookctx.Context) error {
+	conn, err := requestSessionBus(ctx, request)
 	if err != nil {
 		return fmt.Errorf("session bus unavailable: %w", err)
 	}

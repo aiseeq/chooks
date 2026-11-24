@@ -260,11 +260,6 @@ func needsUsage(s *Store, usage map[string]Usage, now time.Time) []*Account {
 // weekdays — короткие имена дней недели
 var weekdays = [...]string{"вс", "пн", "вт", "ср", "чт", "пт", "сб"}
 
-// ShortTime пишет время местным: «пн 26.10 11:00»
-func ShortTime(at time.Time) string {
-	return ShortTimeIn(at, time.Local)
-}
-
 // ShortTimeIn — ShortTime в поясе loc: у хука — пояс запроса
 func ShortTimeIn(at time.Time, loc *time.Location) string {
 	at = at.In(loc)

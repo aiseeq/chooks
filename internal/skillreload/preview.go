@@ -1,6 +1,7 @@
 package skillreload
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"maps"
@@ -33,7 +34,7 @@ func PreviewInstall(root string, since time.Time) (*PreviewResult, error) {
 	}
 	defer os.RemoveAll(stateDir)
 
-	checker := Checker{StateDir: stateDir}
+	checker := Checker{Context: context.Background(), StateDir: stateDir}
 	result := &PreviewResult{Since: since, Notices: map[string][]Notice{}}
 	for _, path := range paths {
 		event, ok := eventForTranscript(path)

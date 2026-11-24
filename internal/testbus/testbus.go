@@ -3,6 +3,8 @@
 package testbus
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -28,12 +30,27 @@ func Silent(t testing.TB) []string {
 		}
 		t.Cleanup(func() { _ = l.Close() })
 		go func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Errorf("test bus accept loop panicked: %v", recovered)
+				}
+			}()
 			for {
 				c, err := l.Accept()
 				if err != nil {
+					if !errors.Is(err, net.ErrClosed) {
+						t.Errorf("test bus accept: %v", err)
+					}
 					return
 				}
-				go func() { _, _ = io.Copy(io.Discard, c); _ = c.Close() }()
+				go func() {
+					if _, err := io.Copy(io.Discard, c); err != nil && !errors.Is(err, net.ErrClosed) {
+						t.Errorf("test bus drain: %v", err)
+					}
+					if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+						t.Errorf("test bus close: %v", err)
+					}
+				}()
 			}
 		}()
 	}
@@ -42,7 +59,10 @@ func Silent(t testing.TB) []string {
 
 // Counts — число горутин и открытых fd процесса
 func Counts() (goroutines, fds int) {
-	entries, _ := os.ReadDir("/proc/self/fd")
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		panic(fmt.Errorf("read process fd directory: %w", err))
+	}
 	return runtime.NumGoroutine(), len(entries)
 }
 

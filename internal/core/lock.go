@@ -19,12 +19,7 @@ const lockPoll = 10 * time.Millisecond
 // Хук ограничен таймаутом Claude Code: ожидание без срока за процессом,
 // который держит блокировку (под свопом или остановленным), съело бы весь
 // таймаут, и Claude Code выбросил бы вывод хука
-func LockFile(file *os.File, deadline time.Time) error {
-	return LockFileContext(context.Background(), file, deadline)
-}
-
-// LockFileContext also stops waiting when the request is cancelled.
-func LockFileContext(ctx context.Context, file *os.File, deadline time.Time) error {
+func LockFile(ctx context.Context, file *os.File, deadline time.Time) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err

@@ -155,11 +155,7 @@ type lockedState struct {
 
 // openState открывает запись сессии под исключительной блокировкой,
 // ожидая её не дольше lockDeadline
-func openState(dir, name string, lockDeadline time.Time) (*lockedState, error) {
-	return openStateContext(context.Background(), dir, name, lockDeadline)
-}
-
-func openStateContext(ctx context.Context, dir, name string, lockDeadline time.Time) (*lockedState, error) {
+func openState(ctx context.Context, dir, name string, lockDeadline time.Time) (*lockedState, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create state dir: %w", err)
 	}
@@ -168,7 +164,7 @@ func openStateContext(ctx context.Context, dir, name string, lockDeadline time.T
 	if err != nil {
 		return nil, fmt.Errorf("cannot open state %s: %w", path, err)
 	}
-	if err := core.LockFileContext(ctx, file, lockDeadline); err != nil {
+	if err := core.LockFile(ctx, file, lockDeadline); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("state is locked by another hook: %w", err)
 	}
@@ -274,10 +270,6 @@ var ErrNoState = errors.New("skill reload state not found")
 // save перезаписывает файл на месте (WriteAt), поэтому чтение —
 // под той же блокировкой, ожидая её не дольше deadline. Файл не создаётся:
 // нет записи — ErrNoState
-func SkillCalled(dir, sessionID string, names []string, deadline time.Time) (bool, error) {
-	return SkillCalledContext(context.Background(), dir, sessionID, names, deadline)
-}
-
 func SkillCalledContext(ctx context.Context, dir, sessionID string, names []string, deadline time.Time) (bool, error) {
 	fileName, err := stateFileName(sessionID, "")
 	if err != nil {
@@ -292,7 +284,7 @@ func SkillCalledContext(ctx context.Context, dir, sessionID string, names []stri
 		return false, fmt.Errorf("cannot open state %s: %w", path, err)
 	}
 	defer file.Close()
-	if err := core.LockFileContext(ctx, file, deadline); err != nil {
+	if err := core.LockFile(ctx, file, deadline); err != nil {
 		return false, fmt.Errorf("state is locked by another hook: %w", err)
 	}
 	data, err := io.ReadAll(file)

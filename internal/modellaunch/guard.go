@@ -131,7 +131,10 @@ func (g *Guard) Check(ctx context.Context, hookPID int) (string, error) {
 // и процессы префикса CLAUDE_CODE_SHELL_PREFIX с их потомками: их argv —
 // хвост слов префикса и команда хука последним словом
 func (c *check) findSessionClaude(hookPID int) (int, error) {
-	hookPrefix := c.prefixOf(hookPID)
+	hookPrefix, knownPrefix := c.prefixOf(hookPID)
+	if !knownPrefix {
+		hookPrefix = prefix{}
+	}
 	pid, err := c.proc.Parent(hookPID)
 	if err != nil {
 		return 0, fmt.Errorf("hook parent %d: %w", hookPID, err)
@@ -165,7 +168,8 @@ func (c *check) isLauncher(pid int, hookPrefix prefix) bool {
 	if hookPrefix.launches(argv) {
 		return true
 	}
-	return c.prefixOf(pid).launches(argv)
+	processPrefix, known := c.prefixOf(pid)
+	return known && processPrefix.launches(argv)
 }
 
 // prefix — слова CLAUDE_CODE_SHELL_PREFIX, раскрытые в окружении процесса,
@@ -175,18 +179,18 @@ type prefix struct{ words []string }
 // prefixOf — префикс из environ процесса. Environ не прочитан или префикс
 // не разобран — префикса нет: процесс не узнаётся как процесс префикса и
 // судится как claude сессии
-func (c *check) prefixOf(pid int) prefix {
+func (c *check) prefixOf(pid int) (prefix, bool) {
 	env, err := c.environ(pid)
 	if err != nil {
 		c.logger.Debug("modellaunch: environ не прочитан, префикс не известен", "pid", pid, "error", err)
-		return prefix{}
+		return prefix{}, false
 	}
 	p, err := parsePrefix(env)
 	if err != nil {
 		c.logger.Warn("modellaunch: префикс команд хуков не разобран", "pid", pid, "error", err)
-		return prefix{}
+		return prefix{}, false
 	}
-	return p
+	return p, true
 }
 
 func parsePrefix(env []string) (prefix, error) {
@@ -810,7 +814,7 @@ func (p ProcReader) TTYNr(pid int) (int64, error) {
 func (p ProcReader) statFields(pid int) ([]string, error) {
 	data, err := os.ReadFile(filepath.Join(p.root(), strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read process stat: %w", err)
 	}
 	close := strings.LastIndex(string(data), ")")
 	if close < 0 {
@@ -848,7 +852,7 @@ func (p ProcReader) Cwd(pid int) (string, error) {
 func splitNULFile(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read process file: %w", err)
 	}
 	parts := strings.Split(string(data), "\x00")
 	if len(parts) > 0 && parts[len(parts)-1] == "" {

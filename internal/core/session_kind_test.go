@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/akit/proc"
+	"github.com/aiseeq/chooks/internal/procfs"
 )
 
 // Режим читается из /proc живого процесса, поэтому и проверяется на живом:
@@ -46,7 +47,7 @@ func startWithArgs(t *testing.T, args ...string) string {
 // printMode вызывает PrintModeSessionForPID и проваливает тест на ошибке чтения
 func printMode(t *testing.T, pid string) bool {
 	t.Helper()
-	got, err := PrintModeSessionForPID(pid)
+	got, err := PrintModeSessionIn(procfs.OS{}, pid)
 	if err != nil {
 		t.Fatalf("PrintModeSessionForPID(%q): %v", pid, err)
 	}
@@ -77,7 +78,7 @@ func TestPrintModeCmdline_NoProcess(t *testing.T) {
 		t.Error("без pid режим определить нельзя")
 	}
 	for _, pid := range []string{"999999999", "../../etc/passwd"} {
-		got, err := PrintModeSessionForPID(pid)
+		got, err := PrintModeSessionIn(procfs.OS{}, pid)
 		if err == nil {
 			t.Errorf("pid %q: нечитаемая командная строка должна давать ошибку", pid)
 		}

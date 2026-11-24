@@ -59,8 +59,8 @@ func TabVisible(ctx context.Context) (bool, error) {
 	return active, nil
 }
 
-func requestSessionBus(request hookctx.Context) (*dbus.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), visibleTimeout)
+func requestSessionBus(ctx context.Context, request hookctx.Context) (*dbus.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, visibleTimeout)
 	defer cancel()
 	return requestSessionBusContext(ctx, request)
 }
@@ -101,7 +101,7 @@ func discoverRequestBus(ctx context.Context, request hookctx.Context) (string, e
 	cmd.Dir = request.ChildDir()
 	data, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("dbus-launch: %w", err)
 	}
 	line, _, _ := strings.Cut(string(data), "\n")
 	_, address, ok := strings.Cut(line, "=")

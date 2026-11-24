@@ -35,8 +35,6 @@ const (
 // в несколько КБ
 const lockWait = time.Second
 
-var backgroundRecordContext = context.Background()
-
 // minKept — сколько последних вызовов хранится, если порог меньше: из них
 // собираются причины уведомления
 const minKept = 100
@@ -74,12 +72,7 @@ type Decision struct {
 // Window стало больше threshold, а прошлое уведомление было не позже Window
 // назад. threshold 0 — вызов записывается, уведомления нет. Ошибка — вызов
 // не записан, решения нет
-func Record(dir string, threshold int, ev Event) (decisionResult Decision, retErr error) {
-	return RecordContext(backgroundRecordContext, dir, threshold, ev)
-}
-
-// RecordContext records an event and observes ctx cancellation while waiting for the state lock.
-func RecordContext(ctx context.Context, dir string, threshold int, ev Event) (decisionResult Decision, retErr error) {
+func Record(dir string, threshold int, ev Event) (Decision, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Decision{}, fmt.Errorf("fallback state dir: %w", err)
 	}
@@ -87,12 +80,8 @@ func RecordContext(ctx context.Context, dir string, threshold int, ev Event) (de
 	if err != nil {
 		return Decision{}, fmt.Errorf("fallback lock: %w", err)
 	}
-	defer func() {
-		if closeErr := lock.Close(); closeErr != nil && retErr == nil {
-			retErr = fmt.Errorf("fallback lock close: %w", closeErr)
-		}
-	}()
-	if err := core.LockFile(ctx, lock, time.Now().Add(lockWait)); err != nil {
+	defer lock.Close()
+	if err := core.LockFile(context.Background(), lock, time.Now().Add(lockWait)); err != nil {
 		return Decision{}, fmt.Errorf("fallback lock: %w", err)
 	}
 	path := filepath.Join(dir, FileName)

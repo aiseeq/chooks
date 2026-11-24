@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -20,7 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/secretmask"
 	"github.com/aiseeq/chooks/internal/hookctx"
 )
@@ -253,10 +251,7 @@ func runCLIEnv(ctx context.Context, cmd *exec.Cmd, dir, stdin string, extra []st
 	}
 	cmd.Env = withEnv(judgeEnv(request.Env), extra)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		_, err := proc.StopChildGroup(cmd, 0, syscall.SIGKILL)
-		return err
-	}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	// По таймауту контекст убивает группу CLI, а потомок вне группы мог бы
 	// держать stdout: без WaitDelay хук ждал бы его и выходил за свой таймаут
 	cmd.WaitDelay = 2 * time.Second
@@ -290,7 +285,7 @@ func runTracked(cmd *exec.Cmd) ([]byte, error) {
 	}
 	if err := cmd.Start(); err != nil {
 		judgeGroups.Unlock()
-		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], err)
+		return nil, err
 	}
 	pid := cmd.Process.Pid
 	judgeGroups.pids[pid] = true
@@ -310,9 +305,7 @@ func KillJudgeGroups() int {
 	judgeGroups.terminating = true
 	pids := slices.Sorted(maps.Keys(judgeGroups.pids))
 	for _, pid := range pids {
-		if _, err := proc.StopChild(pid, 0, func() error { return syscall.Kill(-pid, syscall.SIGKILL) }); err != nil {
-			fmt.Fprintf(os.Stderr, "questioncheck: stop judge group %d: %v\n", pid, err)
-		}
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
 	return len(judgeGroups.pids)
 }

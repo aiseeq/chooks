@@ -22,10 +22,6 @@ func StartDetached(cmd *exec.Cmd) error {
 
 	// A long-lived executor must reap the child when it eventually exits.
 	// The wait belongs to the detached child, not to the hook's deadline.
-	go func() {
-		if err := cmd.Wait(); err != nil {
-			return
-		}
-	}()
+	go func() { _ = cmd.Wait() }()
 	return nil
 }

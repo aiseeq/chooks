@@ -589,7 +589,7 @@ func runEqual(argv []string) (code int, retErr error) {
 	if err != nil {
 		return 2, fmt.Errorf("daemon log: %w", err)
 	}
-	defer closeLogFileOnReturn(logFile, &retErr)()
+	defer logFile.Close()
 	d, err := startDaemon(bin.cli, logFile, "")
 	if err != nil {
 		return 2, err

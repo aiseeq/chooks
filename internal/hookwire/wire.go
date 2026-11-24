@@ -33,7 +33,6 @@ package hookwire
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"unicode/utf8"
 )
@@ -179,7 +178,7 @@ type Frame struct {
 func ReadFrame(r io.Reader) (Frame, error) {
 	var head [8]byte
 	if _, err := io.ReadFull(r, head[:]); err != nil {
-		return Frame{}, fmt.Errorf("read frame header: %w", err)
+		return Frame{}, err
 	}
 	shadow := false
 	switch string(head[:4]) {
@@ -351,7 +350,7 @@ func EncodeFallback(reason string) []byte {
 func ReadReason(r io.Reader) (string, error) {
 	var n [4]byte
 	if _, err := io.ReadFull(r, n[:]); err != nil {
-		return "", fmt.Errorf("read reason length: %w", err)
+		return "", err
 	}
 	size := u32(n[:])
 	if size > MaxReason {
@@ -359,7 +358,7 @@ func ReadReason(r io.Reader) (string, error) {
 	}
 	reason := make([]byte, size)
 	if _, err := io.ReadFull(r, reason); err != nil {
-		return "", fmt.Errorf("read reason: %w", err)
+		return "", err
 	}
 	return string(reason), nil
 }
@@ -380,7 +379,7 @@ func EncodeResult(code int, stdout, stderr []byte) []byte {
 func ReadResult(r io.Reader) (code int, stdout, stderr []byte, err error) {
 	var n [4]byte
 	if _, err = io.ReadFull(r, n[:]); err != nil {
-		return 0, nil, nil, fmt.Errorf("read result code: %w", err)
+		return 0, nil, nil, err
 	}
 	code = int(int32(u32(n[:])))
 	if stdout, err = readBlock(r); err != nil {
@@ -395,7 +394,7 @@ func ReadResult(r io.Reader) (code int, stdout, stderr []byte, err error) {
 func readBlock(r io.Reader) ([]byte, error) {
 	var n [4]byte
 	if _, err := io.ReadFull(r, n[:]); err != nil {
-		return nil, fmt.Errorf("read output length: %w", err)
+		return nil, err
 	}
 	size := u32(n[:])
 	if size > MaxOutput {
@@ -403,7 +402,7 @@ func readBlock(r io.Reader) ([]byte, error) {
 	}
 	b := make([]byte, size)
 	if _, err := io.ReadFull(r, b); err != nil {
-		return nil, fmt.Errorf("read output: %w", err)
+		return nil, err
 	}
 	return b, nil
 }

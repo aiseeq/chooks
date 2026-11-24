@@ -185,7 +185,7 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	if len(raw) == 0 {
 		// Выход (/logout): активной учётки нет, хранилище не трогается
 		r.Log.Info("accounts: no login in Claude Code credentials")
-		if err := r.recordLogout(s, now, creds.mtime); err != nil {
+		if err := r.recordExternal(s, nil, now, creds.mtime); err != nil {
 			return err
 		}
 		s.Active, s.SyncedMtime = "", creds.mtime
@@ -200,7 +200,7 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	}
 	known, err := s.byLogin(o)
 	if err == nil {
-		if err := r.recordExternal(s, known.UUID, known.Email, now, creds.mtime); err != nil {
+		if err := r.recordExternal(s, known, now, creds.mtime); err != nil {
 			return err
 		}
 		r.adoptKnown(s, known, raw, now, creds.mtime)
@@ -210,20 +210,6 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 		return err
 	}
 	return r.syncUnknown(ctx, s, raw, o, creds, now, force)
-}
-
-func (r *Rotator) recordLogout(s *Store, now, mtime time.Time) error {
-	if s.Active == "" {
-		return nil
-	}
-	rec := switchRecord{At: now, From: s.ActiveEmail(), Reason: "внешняя смена входа", Source: "external", TimeUncertain: true}
-	if !mtime.IsZero() && !mtime.After(now) {
-		rec.NotAfter = &mtime
-		if !s.SyncedMtime.IsZero() && !s.SyncedMtime.After(mtime) {
-			rec.NotBefore = &s.SyncedMtime
-		}
-	}
-	return appendSwitch(r.Paths, rec)
 }
 
 func (r *Rotator) syncCleared(s *Store, mtime time.Time) error {
@@ -249,7 +235,7 @@ func (r *Rotator) syncUnknown(ctx context.Context, s *Store, raw json.RawMessage
 		s.RetryAt = now.Add(retryDelay)
 		return err
 	}
-	if err := r.recordExternal(s, prof.UUID, prof.Email, now, creds.mtime); err != nil {
+	if err := r.recordExternal(s, &Account{UUID: prof.UUID, Email: prof.Email, OrgUUID: prof.OrgUUID}, now, creds.mtime); err != nil {
 		return err
 	}
 	a := s.byUUID(prof.UUID)
@@ -278,11 +264,14 @@ func (r *Rotator) syncUnknown(ctx context.Context, s *Store, raw json.RawMessage
 }
 
 // Время внешнего перехода неизвестно: at — только момент обнаружения.
-func (r *Rotator) recordExternal(s *Store, uuid, email string, now, mtime time.Time) error {
-	if s.Active == uuid {
+func (r *Rotator) recordExternal(s *Store, destination *Account, now, mtime time.Time) error {
+	if destination != nil && s.Active == destination.UUID {
 		return nil
 	}
-	rec := switchRecord{At: now, From: s.ActiveEmail(), To: email, Reason: "внешняя смена входа", Source: "external", TimeUncertain: true}
+	rec := switchRecord{At: now, From: s.ActiveEmail(), Reason: "внешняя смена входа", Source: "external", TimeUncertain: true}
+	if destination != nil {
+		rec.To = destination.Email
+	}
 	if !mtime.IsZero() && !mtime.After(now) {
 		rec.NotAfter = &mtime
 		if s.Active != "" && !s.SyncedMtime.IsZero() && !s.SyncedMtime.After(mtime) {

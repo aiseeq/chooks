@@ -277,7 +277,7 @@ func settingsForCWD(ctx context.Context, cwd string, homes, configs pathSet, log
 	for _, path := range paths {
 		raw, err := readSettingsFile(path)
 		if err == nil {
-			candidates = append(candidates, settingsCandidates(raw, lookupAgent, logger)...)
+			candidates = append(candidates, settingsCandidates(raw, lookupAgent)...)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			logger.Warn("model_guard: файл настроек не читается, модель не проверена", "path", path, "error", err)
 			candidates = append(candidates, modelCandidate{value: path, dynamic: true})
@@ -1218,13 +1218,13 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 			cwd = nextCWD
 			continue
 		}
-		callFound, isClaude := modelCallCandidates(call, cwd, home, cwdCandidates, homes, configs, files, settingsAt, agentAt, logger)
+		callFound, isClaude := modelCallCandidates(call, cwd, home, cwdCandidates, homes, configs, files, settingsAt, agentAt)
 		found = append(found, callFound...)
 		claude = claude || isClaude
 	}
 	if claude {
 		found = append(found, envModelCandidates(command, calls, logger)...)
-		found = append(found, writtenProtectedFileCandidates(command, logger)...)
+		found = append(found, writtenProtectedFileCandidates(command)...)
 	}
 	if err != nil {
 		// вызовы найдены не все: вложенный скрипт, который akit не разобрал
@@ -1263,7 +1263,7 @@ func modelCallDirectory(call *shellcmd.Call, cwd, home string, logger core.Logge
 	return cwd, false
 }
 
-func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) ([]modelCandidate, bool) {
+func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate) ([]modelCandidate, bool) {
 	isNpxClaude := call.Name == "npx" && npxClaudeCode(call.Args)
 	if !slices.Contains(modelClients, call.Name) && !isNpxClaude {
 		return nil, false
@@ -1272,7 +1272,7 @@ func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []
 	if isNpxClaude {
 		callArgs = npxClaudeArgs(call.Args)
 	}
-	literalArgs := shellCallArgumentLiterals(call.Raw, call.Name, logger)
+	literalArgs := shellCallArgumentLiterals(call.Raw, call.Name)
 	literalOffset := npxClaudeArgumentOffset(call.Args, isNpxClaude)
 	args := modelCallWords(call, callArgs, literalArgs, literalOffset)
 	dialect := clientDialect(call.Name)
@@ -1299,7 +1299,7 @@ func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []
 		callExtraDirs = claudeAddedAgentDirs(args, cwd, home)
 		found = append(found, claudeSettingsCandidates(cwdCandidates, homes, configs, settingsAt)...)
 	}
-	found = append(found, candidatesFromArgs(dialect, args, localFiles, logger)...)
+	found = append(found, candidatesFromArgs(dialect, args, localFiles)...)
 	return found, dialect == "claude"
 }
 
@@ -1345,10 +1345,9 @@ var writtenAgentTarget = regexp.MustCompile(`(?:^|/)agents/.+\.md$`)
 
 // protectedWriteTargetSet — цели записи в settings и агентов; copied — те
 // из них, что пишут sed -i, cp, mv, install и tee: их содержимое не видно
-func protectedWriteTargetSet(command string, logger core.Logger) (targets, copied []string) {
+func protectedWriteTargetSet(command string) (targets, copied []string) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		logger.Debug("model_guard: команда записи защищённых файлов не разобрана", "error", err)
 		return nil, nil
 	}
 	byCommand := false
@@ -1497,16 +1496,16 @@ func explicitSettingsTarget(command, target string) bool {
 // определения агентов в той же команде. Агентов решает белый список
 // (writtenAgentDefinitionCandidates), settings — разбор JSON ниже; разбор
 // settings ответа об агенте не меняет
-func writtenProtectedFileCandidates(command string, logger core.Logger) []modelCandidate {
-	agentModels, unknown := writtenAgentDefinitionCandidates(command, logger)
-	targets, copied := protectedWriteTargetSet(command, logger)
+func writtenProtectedFileCandidates(command string) []modelCandidate {
+	agentModels, unknown := writtenAgentDefinitionCandidates(command)
+	targets, copied := protectedWriteTargetSet(command)
 	if len(targets) == 0 {
 		if unknown {
 			return append(agentModels, modelCandidate{value: "written settings or agent contents", unknownWrite: true})
 		}
 		return agentModels
 	}
-	found, parsedSettingsContents, parsedSettingsModels, unknownSettings := writtenSettingsCandidates(command, copied, logger)
+	found, parsedSettingsContents, parsedSettingsModels, unknownSettings := writtenSettingsCandidates(command, copied)
 	found = append(found, agentModels...)
 	for _, target := range targets {
 		target = strings.Trim(target, "\"'")
@@ -1522,7 +1521,7 @@ func writtenProtectedFileCandidates(command string, logger core.Logger) []modelC
 	return found
 }
 
-func writtenSettingsCandidates(command string, copied []string, logger core.Logger) ([]modelCandidate, bool, bool, map[string]bool) {
+func writtenSettingsCandidates(command string, copied []string) ([]modelCandidate, bool, bool, map[string]bool) {
 	decoded := strings.ReplaceAll(command, "\\\"", "\"")
 	decoded = strings.ReplaceAll(decoded, "\\\\n", "\n")
 	unknownSettings := map[string]bool{}
@@ -1531,11 +1530,9 @@ func writtenSettingsCandidates(command string, copied []string, logger core.Logg
 	}
 	found := writtenInlineModelCandidates(decoded)
 	objects := jsonObjects(decoded)
-	jsonFound, parsedSettingsContents, parsedSettingsModels := writtenJSONCandidates(objects, decoded, logger)
+	jsonFound, parsedSettingsContents, parsedSettingsModels := writtenJSONCandidates(objects, decoded)
 	found = append(found, jsonFound...)
-	if err := scanWrittenSettingsTargets(decoded, parsedSettingsContents, unknownSettings); err != nil {
-		logger.Debug("model_guard: текст записей защищённых файлов не разобран", "error", err)
-	}
+	scanWrittenSettingsTargets(decoded, parsedSettingsContents, unknownSettings)
 	return found, parsedSettingsContents, parsedSettingsModels, unknownSettings
 }
 
@@ -1551,14 +1548,14 @@ func writtenInlineModelCandidates(decoded string) []modelCandidate {
 	return found
 }
 
-func writtenJSONCandidates(objects [][]byte, decoded string, logger core.Logger) ([]modelCandidate, bool, bool) {
+func writtenJSONCandidates(objects [][]byte, decoded string) ([]modelCandidate, bool, bool) {
 	var found []modelCandidate
 	parsedSettingsContents := false
 	parsedSettingsModels := false
 	for _, raw := range objects {
 		if json.Valid(raw) {
 			parsedSettingsContents = true
-			settings := settingsCandidates(raw, nil, logger)
+			settings := settingsCandidates(raw, nil)
 			parsedSettingsModels = parsedSettingsModels || len(settings) > 0
 			found = append(found, settings...)
 		} else {
@@ -1571,16 +1568,13 @@ func writtenJSONCandidates(objects [][]byte, decoded string, logger core.Logger)
 	return found, parsedSettingsContents, parsedSettingsModels
 }
 
-func scanWrittenSettingsTargets(decoded string, parsedSettingsContents bool, unknownSettings map[string]bool) error {
-	file, err := syntax.NewParser().Parse(strings.NewReader(decoded), "")
-	if err != nil {
-		return fmt.Errorf("разобрать записи settings: %w", err)
+func scanWrittenSettingsTargets(decoded string, parsedSettingsContents bool, unknownSettings map[string]bool) {
+	if file, err := syntax.NewParser().Parse(strings.NewReader(decoded), ""); err == nil {
+		syntax.Walk(file, func(node syntax.Node) bool {
+			markWrittenSettingsNode(node, decoded, parsedSettingsContents, unknownSettings)
+			return true
+		})
 	}
-	syntax.Walk(file, func(node syntax.Node) bool {
-		markWrittenSettingsNode(node, decoded, parsedSettingsContents, unknownSettings)
-		return true
-	})
-	return nil
 }
 
 func markWrittenSettingsNode(node syntax.Node, decoded string, parsedSettingsContents bool, unknownSettings map[string]bool) {
@@ -2171,10 +2165,9 @@ func claudeArgIsLiteral(arg word) bool {
 	return arg.literal
 }
 
-func shellCallArgumentLiterals(raw, commandName string, logger core.Logger) []bool {
+func shellCallArgumentLiterals(raw, commandName string) []bool {
 	file, err := syntax.NewParser().Parse(strings.NewReader(raw), "")
 	if err != nil {
-		logger.Debug("model_guard: аргументы вызова не разобраны", "command", commandName, "error", err)
 		return nil
 	}
 	var flags []bool
@@ -2256,7 +2249,7 @@ func modelValueFlag(name, flag string) bool {
 	return false
 }
 
-func candidatesFromArgs(name string, args []word, files modelFiles, logger core.Logger) []modelCandidate {
+func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandidate {
 	if name == "claude" {
 		args = splitValueFlags(args)
 	}
@@ -2266,7 +2259,7 @@ func candidatesFromArgs(name string, args []word, files modelFiles, logger core.
 	}
 	var found []modelCandidate
 	for i := 0; i < len(args); i++ {
-		candidates, consumed := candidatesForArgument(name, args, i, files, agentOverrides, logger)
+		candidates, consumed := candidatesForArgument(name, args, i, files, agentOverrides)
 		found = append(found, candidates...)
 		if consumed {
 			i++
@@ -2275,7 +2268,7 @@ func candidatesFromArgs(name string, args []word, files modelFiles, logger core.
 	return found
 }
 
-func candidatesForArgument(name string, args []word, i int, files modelFiles, agentOverrides map[string]bool, logger core.Logger) ([]modelCandidate, bool) {
+func candidatesForArgument(name string, args []word, i int, files modelFiles, agentOverrides map[string]bool) ([]modelCandidate, bool) {
 	a := args[i]
 	if value, ok := inlineModelCandidate(name, a); ok {
 		return []modelCandidate{value}, false
@@ -2283,7 +2276,7 @@ func candidatesForArgument(name string, args []word, i int, files modelFiles, ag
 	if i+1 >= len(args) {
 		return nil, false
 	}
-	return flaggedModelCandidates(name, args, i, files, agentOverrides, logger), flaggedModelFlagConsumes(name, a.text)
+	return flaggedModelCandidates(name, args, i, files, agentOverrides), flaggedModelFlagConsumes(name, a.text)
 }
 
 func inlineModelCandidate(name string, arg word) (modelCandidate, bool) {
@@ -2312,13 +2305,13 @@ func inlineModelCandidate(name string, arg word) (modelCandidate, bool) {
 	return modelCandidate{}, false
 }
 
-func flaggedModelCandidates(name string, args []word, i int, files modelFiles, agentOverrides map[string]bool, logger core.Logger) []modelCandidate {
+func flaggedModelCandidates(name string, args []word, i int, files modelFiles, agentOverrides map[string]bool) []modelCandidate {
 	a, next := args[i], args[i+1]
 	if modelValueFlag(name, a.text) {
 		return []modelCandidate{{value: next.text, dynamic: !next.literal}}
 	}
 	if name == "claude" && (a.text == "--settings" || a.text == "--agents") {
-		return jsonModelCandidates(a.text, next, files.settings, files.agent, logger)
+		return jsonModelCandidates(a.text, next, files.settings, files.agent)
 	}
 	if name == "claude" && a.text == "--agent" {
 		found := agentOverrideModels(args, next.text, files.settings)
@@ -2479,7 +2472,7 @@ func jsonObjects(text string) [][]byte {
 // или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
 // Файла --settings ещё нет — модели в тексте команды, которая его пишет.
 // Не JSON — моделей нет: такой запуск claude сам не начнётся
-func jsonModelCandidates(flag string, arg word, readSettings func(string, shellcmd.Tilde, string) [][]byte, agent func(string) []modelCandidate, logger core.Logger) []modelCandidate {
+func jsonModelCandidates(flag string, arg word, readSettings func(string, shellcmd.Tilde, string) [][]byte, agent func(string) []modelCandidate) []modelCandidate {
 	if flag == "--agents" {
 		inlineJSON := strings.HasPrefix(strings.TrimSpace(arg.text), "{")
 		if !arg.literal || (!inlineJSON && !claudeArgIsLiteral(arg)) {
@@ -2528,13 +2521,13 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string, shellc
 	}
 	var found []modelCandidate
 	for _, raw := range raws {
-		found = append(found, settingsCandidates(raw, agent, logger)...)
+		found = append(found, settingsCandidates(raw, agent)...)
 	}
 	return found
 }
 
-func settingsCandidates(raw []byte, agent func(string) []modelCandidate, logger core.Logger) []modelCandidate {
-	found := (jsonModels{}).settings(raw, logger)
+func settingsCandidates(raw []byte, agent func(string) []modelCandidate) []modelCandidate {
+	found := (jsonModels{}).settings(raw)
 	if agent != nil {
 		var fields map[string]json.RawMessage
 		var name string
@@ -2565,7 +2558,7 @@ func (found *jsonModels) addField(field, value string) {
 }
 
 // settings — модели настроек --settings: model и переменные модели в env
-func (found jsonModels) settings(raw []byte, logger core.Logger) []modelCandidate {
+func (found jsonModels) settings(raw []byte) []modelCandidate {
 	// Поля разбираются по одному: поле не того типа рядом не прячет модель
 	var settings map[string]json.RawMessage
 	if json.Unmarshal(raw, &settings) != nil {
@@ -2586,7 +2579,6 @@ func (found jsonModels) settings(raw []byte, logger core.Logger) []modelCandidat
 	rawOverrides := settings["modelOverrides"]
 	if len(rawOverrides) != 0 && strings.TrimSpace(string(rawOverrides)) != "null" {
 		if err := json.Unmarshal(rawOverrides, &overrides); err != nil {
-			logger.Debug("model_guard: модельные переопределения в settings не разобраны", "error", err)
 			found = append(found, modelCandidate{value: "modelOverrides", unknownSettings: true})
 		}
 	}

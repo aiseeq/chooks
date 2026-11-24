@@ -130,7 +130,7 @@ func execute(ctx context.Context, request hookctx.Context) int {
 }
 
 func newSkillReloadCleanupCmd() *cobra.Command {
-	var stateDir, textsDir, nowArg string
+	var stateDir, textsDir, nowArg, logFile string
 	cmd := &cobra.Command{
 		Use:    "skill-reload-cleanup",
 		Hidden: true,
@@ -143,21 +143,32 @@ func newSkillReloadCleanupCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid cleanup time: %w", err)
 			}
-			request, err := commandRequest(cmd)
-			if err != nil {
-				return err
+			var loc *time.Location
+			if request, ok := hookctx.Request(cmd.Context()); ok {
+				loc = request.Location()
 			}
-			config, err := core.LoadConfigForRequest(commandConfigPath(cmd), request)
-			if err != nil {
-				return err
+			var logger core.Logger
+			var loggerErr error
+			if logFile != "" {
+				fileLogger, err := core.NewLoggerIn(core.LoggerConfig{Level: "info", Format: "text", Output: "file", LogFile: logFile}, cmd.ErrOrStderr(), loc)
+				if err != nil {
+					loggerErr = fmt.Errorf("cannot open cleanup journal: %w", err)
+				} else {
+					logger = fileLogger
+					defer closeRequestLogger(fileLogger)
+				}
 			}
-			logger, err := core.NewLoggerIn(config.Logger, request.Stderr, request.Location())
-			if err != nil {
-				return err
+			cleanupErr := skillreload.CleanupStale(stateDir, textsDir, now)
+			if cleanupErr != nil {
+				if logger != nil {
+					logger.Error("skill reload cleanup failed", "error", cleanupErr)
+				}
 			}
-			defer closeRequestLogger(logger)
-			if err := skillreload.CleanupStale(stateDir, textsDir, now); err != nil {
-				logger.Error("skill reload cleanup failed", "error", err)
+			if loggerErr != nil {
+				return errors.Join(loggerErr, cleanupErr)
+			}
+			if cleanupErr != nil && logger == nil {
+				return cleanupErr
 			}
 			return nil
 		},
@@ -166,6 +177,7 @@ func newSkillReloadCleanupCmd() *cobra.Command {
 	flags.StringVar(&stateDir, "state-dir", "", "каталог записей skill-reload")
 	flags.StringVar(&textsDir, "texts-dir", "", "каталог текстов skill-reload")
 	flags.StringVar(&nowArg, "now", "", "время чистки в RFC3339Nano")
+	flags.StringVar(&logFile, "log-file", "", "журнал процесса, запустившего чистку")
 	return cmd
 }
 

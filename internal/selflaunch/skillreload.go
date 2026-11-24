@@ -11,7 +11,7 @@ import (
 )
 
 // StartSkillReloadCleanup запускает скрытую подкоманду в отдельном процессе.
-func StartSkillReloadCleanup(stateDir, textsDir string, now time.Time) error {
+func StartSkillReloadCleanup(stateDir, textsDir, logFile string, now time.Time) error {
 	if testing.Testing() {
 		return errors.New("cleanup launch refused in test binary")
 	}
@@ -19,9 +19,9 @@ func StartSkillReloadCleanup(stateDir, textsDir string, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	return desktop.StartDetached(skillReloadCleanupCommand(executable, stateDir, textsDir, now))
+	return desktop.StartDetached(skillReloadCleanupCommand(executable, stateDir, textsDir, logFile, now))
 }
 
-func skillReloadCleanupCommand(executable, stateDir, textsDir string, now time.Time) *exec.Cmd {
-	return exec.Command(executable, "skill-reload-cleanup", "--state-dir", stateDir, "--texts-dir", textsDir, "--now", now.Format(time.RFC3339Nano))
+func skillReloadCleanupCommand(executable, stateDir, textsDir, logFile string, now time.Time) *exec.Cmd {
+	return exec.Command(executable, "skill-reload-cleanup", "--state-dir", stateDir, "--texts-dir", textsDir, "--now", now.Format(time.RFC3339Nano), "--log-file", logFile)
 }

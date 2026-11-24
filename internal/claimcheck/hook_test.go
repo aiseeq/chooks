@@ -30,6 +30,28 @@ type stubJudge struct {
 	accounts []string
 }
 
+type heldJudge struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (*heldJudge) Model() string { return "stub/held" }
+
+func (j *heldJudge) Ask(ctx context.Context, _, _ string) (string, questioncheck.Usage, error) {
+	select {
+	case j.entered <- struct{}{}:
+	case <-ctx.Done():
+		return "", questioncheck.Usage{}, ctx.Err()
+	}
+	select {
+	case <-j.release:
+		answer, _ := answerOf(okClaim)("")
+		return answer, questioncheck.Usage{}, nil
+	case <-ctx.Done():
+		return "", questioncheck.Usage{}, ctx.Err()
+	}
+}
+
 func (s *stubJudge) Model() string { return "stub/high" }
 
 func (s *stubJudge) Ask(ctx context.Context, account, _ string) (string, questioncheck.Usage, error) {
@@ -398,21 +420,52 @@ func TestStopSlotsLimitConcurrency(t *testing.T) {
 		wg.Wait()
 	}
 	run(h)
-	if got := judge.maxSeen.Load(); got != DefaultSlots {
-		t.Fatalf("max concurrent judges %d, want all %d slots in use", got, DefaultSlots)
+	if got := judge.maxSeen.Load(); got > DefaultSlots {
+		t.Fatalf("max concurrent judges %d, want no more than %d slots in use", got, DefaultSlots)
 	}
 	entries := journal(t, h)
-	var waited int
+	var waited int64
+	passes := 0
 	for _, e := range entries {
 		if e.Outcome != OutcomePass {
 			t.Fatalf("entry %+v", e)
 		}
-		if e.SlotWaitMS > 0 {
-			waited++
+		if e.SlotWaitMS > waited {
+			waited = e.SlotWaitMS
+		}
+		passes++
+	}
+	if len(entries) != 16 || passes < 4 || time.Duration(waited)*time.Millisecond < judge.delay {
+		t.Fatalf("journal entries %d, passes %d, max slot wait %dms; want 16 entries, at least 4 passes, and a wait of at least %s", len(entries), passes, waited, judge.delay)
+	}
+
+	// Подтверждаем заполнение каждого слота событием: судьи не возвращаются,
+	// пока тест не снимет заслон.
+	occupied := &heldJudge{entered: make(chan struct{}, DefaultSlots), release: make(chan struct{})}
+	hOccupied := testHook(t, occupied)
+	hOccupied.Budget = 5 * time.Second
+	hOccupied.SlotPoll = time.Millisecond
+	completed := make(chan Outcome, DefaultSlots)
+	occupiedEvent := stopEvent(t)
+	for range DefaultSlots {
+		go func() { completed <- hOccupied.Stop(context.Background(), occupiedEvent) }()
+	}
+	filled := 0
+	for filled < DefaultSlots {
+		select {
+		case <-occupied.entered:
+			filled++
+		case outcome := <-completed:
+			close(occupied.release)
+			for range DefaultSlots - 1 {
+				<-completed
+			}
+			t.Fatalf("judge finished with %q before all %d slots were held", outcome.Result, DefaultSlots)
 		}
 	}
-	if len(entries) != 16 || waited == 0 {
-		t.Fatalf("journal entries %d, judges that waited %d; want 16 entries and observed slot contention", len(entries), waited)
+	close(occupied.release)
+	for range DefaultSlots - filled {
+		<-completed
 	}
 
 	judge2 := &stubJudge{answer: answerOf(okClaim), delay: 2 * time.Second}
@@ -424,10 +477,40 @@ func TestStopSlotsLimitConcurrency(t *testing.T) {
 		counts[e.Outcome]++
 	}
 	if total := counts[OutcomeQueueTimeout] + counts[OutcomePass] + counts[OutcomeError]; total != 16 ||
-		counts[OutcomeQueueTimeout] == 0 || judge2.maxSeen.Load() > DefaultSlots {
+		counts[OutcomePass] < 1 || judge2.maxSeen.Load() > DefaultSlots {
 		t.Fatalf("outcomes %v, max %d", counts, judge2.maxSeen.Load())
 	}
 	t.Logf("budget 3 s: outcomes %v", counts)
+
+	// Пока первый судья держит единственное место, второй Stop неизбежно
+	// исчерпывает свой бюджет в очереди. После освобождения места новый Stop
+	// проходит; исходы не зависят от того, сколько успели стартовать горутины.
+	held := &heldJudge{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	h3 := testHook(t, held)
+	h3.Slots = 1
+	h3.Budget = 5 * time.Second
+	h3.SlotPoll = time.Millisecond
+	firstDone := make(chan struct{})
+	firstEvent := stopEvent(t)
+	go func() {
+		h3.Stop(context.Background(), firstEvent)
+		close(firstDone)
+	}()
+	<-held.entered
+	h3.Budget = 100 * time.Millisecond
+	queued := h3.Stop(context.Background(), stopEvent(t))
+	if queued.Result != OutcomeQueueTimeout {
+		close(held.release)
+		<-firstDone
+		t.Fatalf("Stop waiting behind held slot: got %q, want %q", queued.Result, OutcomeQueueTimeout)
+	}
+	close(held.release)
+	<-firstDone
+	h3.Budget = time.Second
+	afterRelease := h3.Stop(context.Background(), stopEvent(t))
+	if afterRelease.Result != OutcomePass {
+		t.Fatalf("Stop after slot release: got %q, want %q", afterRelease.Result, OutcomePass)
+	}
 }
 
 func sendTranscript(t *testing.T, letters ...string) string {

@@ -507,3 +507,66 @@ func TestModelGuardReviewRoundTwoForms(t *testing.T) {
 		})
 	}
 }
+
+func TestModelGuardReviewRoundThreeForms(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	const (
+		set = "cp /tmp/e.json settings.json"
+		run = "claude -p hi"
+		tar = "tar -xf /tmp/e.tar "
+	)
+	deny := []struct{ name, command string }{
+		// HIGH-1: операнд -v у test/[ после cd в .claude — запись, как бы ни был спрятан `$(`
+		{"H1 cd test -v quoted backslash paren", "cd ~/.claude && test -v 'a[$'\\('" + set + ")]'; " + run},
+		{"H1 cd test -v ansi hex", "cd ~/.claude && test -v $'a[\\x24(" + set + ")]'; " + run},
+		{"H1 cd [ -v ansi octal", "cd ~/.claude && [ -v $'a[\\044(" + set + ")]' ]; " + run},
+		{"H1 cd test -v agent split", "cd ~/.claude && test -v $'a[\\x24(cp /tmp/e.md ag\"\"ents/x.md)]'; " + run},
+		{"H1 pushd test -v", "pushd ~/.claude && test -v $'a[\\x24(" + set + ")]'; " + run},
+		{"H1 test -v tar -C .claude", "test -v $'a[\\x24(" + tar + "-C .claude)]'; " + run},
+		{"H1 [[ -v ]] tar -C .claude", "[[ -v 'a[$'\\('" + tar + "-C .claude)]' ]]; " + run},
+		// HIGH-2: в тексте bash -c и heredoc кластер опции после подстановки
+		{"H2 bash -c ${Y}-C.claude", "bash -c '" + tar + "${Y}-C.claude'; " + run},
+		{"H2 bash -c $Y-C.claude", "bash -c '" + tar + "$Y-C.claude'; " + run},
+		{"H2 bash -c unzip $Y-d.claude", "bash -c 'unzip -o /tmp/e.zip $Y-d.claude'; " + run},
+		{"H2 bash -c backtick-C.claude", "bash -c '" + tar + "`:`-C.claude'; " + run},
+		{"H2 bash -c $(:)-C.claude", "bash -c '" + tar + "$(:)-C.claude'; " + run},
+		{"H2 heredoc ${Y}-C.claude", "bash <<'EOF'\n" + tar + "${Y}-C.claude\nEOF\n" + run},
+		// MED-1: слово-путь с подстановкой перед кластером
+		{"M1 \"$Y\"-C.claude", tar + "\"$Y\"-C.claude; " + run},
+		{"M1 ${Y}-C.claude", tar + "${Y}-C.claude; " + run},
+		{"M1 $Y-C.claude", tar + "$Y-C.claude; " + run},
+		{"M1 backtick-C.claude", tar + "`:`-C.claude; " + run},
+		{"M1 $(:)-C.claude", tar + "$(:)-C.claude; " + run},
+		{"M1 ${Y:-x}-C.claude", tar + "${Y:-x}-C.claude; " + run},
+	}
+	pass := []struct{ name, command string }{
+		{"cd test -f", "cd ~/.claude && test -f settings.json && " + run},
+		{"cd [ -d agents ]", "cd ~/.claude && [ -d agents ] && " + run},
+		{"[[ -f agent ]]", "[[ -f \"$HOME/.claude/agents/x.md\" ]] && " + run},
+		{"test -v plain", "test -v HOME && " + run},
+		{"text identifier before cluster", "bash -c 'echo build-C.claude ok'; " + run},
+		{"word identifier before cluster", "echo build-C.claude; " + run},
+	}
+	check := func(command string) *core.ValidationResult {
+		t.Helper()
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for _, c := range deny {
+		t.Run("deny "+c.name, func(t *testing.T) {
+			if check(c.command).IsValid {
+				t.Fatalf("пропуск, ждали отказ: %q", c.command)
+			}
+		})
+	}
+	for _, c := range pass {
+		t.Run("pass "+c.name, func(t *testing.T) {
+			if result := check(c.command); !result.IsValid {
+				t.Fatalf("отказ, ждали пропуск: %+v", result.Violations)
+			}
+		})
+	}
+}

@@ -1318,7 +1318,7 @@ func protectedWriteTargets(command string) []string {
 				inPlace := false
 				for _, arg := range n.Args[1:] {
 					value, ok := literalValue(arg)
-					if ok && (value == "-i" || strings.HasPrefix(value, "-i")) {
+					if ok && (value == "-i" || strings.HasPrefix(value, "-i") || value == "--in-place" || strings.HasPrefix(value, "--in-place=")) {
 						inPlace = true
 						continue
 					}
@@ -1430,12 +1430,26 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 					inPlace := false
 					for _, arg := range call.Args[1:] {
 						value, ok := literalValue(arg)
-						if ok && (value == "-i" || strings.HasPrefix(value, "-i")) {
+						if ok && (value == "-i" || strings.HasPrefix(value, "-i") || value == "--in-place" || strings.HasPrefix(value, "--in-place=")) {
 							inPlace = true
 							continue
 						}
 						if inPlace && ok && (protectedSettingsTarget.MatchString(value) || explicitSettingsTarget(decoded, value)) {
 							unknownAgentDefinitions[strings.Trim(value, "\"'")] = true
+						}
+					}
+				} else if literal && slices.Contains([]string{"cp", "mv", "install"}, filepath.Base(name)) {
+					var positional []string
+					for _, arg := range call.Args[1:] {
+						value, ok := literalValue(arg)
+						if ok && !strings.HasPrefix(value, "-") {
+							positional = append(positional, value)
+						}
+					}
+					if len(positional) > 0 {
+						target := positional[len(positional)-1]
+						if protectedSettingsTarget.MatchString(target) || explicitSettingsTarget(decoded, target) {
+							unknownAgentDefinitions[strings.Trim(target, "\"'")] = true
 						}
 					}
 				}
@@ -1472,12 +1486,14 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 			}
 			var targets []string
 			var body string
+			bodyQuoted := false
 			for _, redirect := range stmt.Redirs {
 				if redirect.Word == nil {
 					continue
 				}
 				if redirect.Hdoc != nil {
 					body = redirect.Hdoc.Lit()
+					bodyQuoted = heredocDelimiterQuoted(redirect)
 					if redirect.Op == syntax.DashHdoc {
 						lines := strings.Split(body, "\n")
 						for i := range lines {
@@ -1497,7 +1513,7 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 					if !writtenAgentTarget.MatchString(target) {
 						continue
 					}
-					if !agentFrontmatterBlock.Match([]byte(body)) || strings.ContainsAny(body, "$"+string(rune(96))) {
+					if !agentFrontmatterBlock.Match([]byte(body)) || (!bodyQuoted && strings.ContainsAny(body, "$"+string(rune(96)))) {
 						continue
 					}
 					_, model := agentFrontmatter([]byte(body), target)
@@ -1519,6 +1535,19 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 		}
 	}
 	return found
+}
+
+func heredocDelimiterQuoted(redirect *syntax.Redirect) bool {
+	if redirect == nil || redirect.Word == nil {
+		return false
+	}
+	for _, part := range redirect.Word.Parts {
+		switch part.(type) {
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+			return true
+		}
+	}
+	return false
 }
 
 func envChdir(args []string, cwd, home string) (string, bool, bool) {

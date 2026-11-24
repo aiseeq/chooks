@@ -464,7 +464,7 @@ func TestStopSlotsLimitConcurrency(t *testing.T) {
 		}
 	}
 	close(occupied.release)
-	for range DefaultSlots - filled {
+	for range DefaultSlots {
 		<-completed
 	}
 
@@ -488,7 +488,7 @@ func TestStopSlotsLimitConcurrency(t *testing.T) {
 	held := &heldJudge{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	h3 := testHook(t, held)
 	h3.Slots = 1
-	h3.Budget = 5 * time.Second
+	h3.Budget = 10 * time.Second
 	h3.SlotPoll = time.Millisecond
 	firstDone := make(chan struct{})
 	firstEvent := stopEvent(t)
@@ -497,8 +497,11 @@ func TestStopSlotsLimitConcurrency(t *testing.T) {
 		close(firstDone)
 	}()
 	<-held.entered
-	h3.Budget = 100 * time.Millisecond
-	queued := h3.Stop(context.Background(), stopEvent(t))
+	// Бюджет ждущего — на весь Stop, включая чтение транскрипта до очереди:
+	// 2 с хватает на вход под нагрузкой гейта, а место держит канал, не часы
+	waiting := h3
+	waiting.Budget = 2 * time.Second
+	queued := waiting.Stop(context.Background(), stopEvent(t))
 	if queued.Result != OutcomeQueueTimeout {
 		close(held.release)
 		<-firstDone

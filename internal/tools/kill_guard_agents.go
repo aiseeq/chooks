@@ -69,7 +69,7 @@ func agentUnitReason(scope, name string) (reason, hint string) {
 		if u.worker {
 			return u.reason, "Бойца снимает его мастер: worker stop <id> (id — из worker status), worker сам погасит юнит; боец чужого мастера — worker stop --other-master <id> по слову пользователя, затем сообщи его мастеру"
 		}
-		return u.reason, "Чужой юнит гасит его хозяин. Свой процесс в нём убей литералом: посмотри PID (" + scope + " status юнит) и kill 12345 — ядро не даст задеть чужой"
+		return u.reason, "Чужой юнит гасит его хозяин. Свой PID: pstop PID (из прошлого Bash — pstop --own-unit PID); чужой не трогай"
 	}
 	return "", ""
 }
@@ -142,7 +142,7 @@ func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call
 		return "", ""
 	}
 	return "systemd-run запускает " + name + " потомком systemd, а не агента: ядро (agent-signal-guard) его сигналы не сверяет, и он дотянется до процессов других агентов",
-		"Шли сигнал прямо, без systemd-run: найди PID отдельной командой (pgrep -a '[x]yz') и убей литералом: kill 12345; контейнер — podman stop имя"
+		"Без systemd-run: найди PID (pgrep -a '[x]yz'); свой останови pstop PID (из прошлого Bash — pstop --own-unit PID), чужой не трогай. Контейнер — podman stop имя"
 }
 
 // hiddenTail конец причины отказа на невидимую команду под systemd-run

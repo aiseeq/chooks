@@ -171,8 +171,8 @@ func TestKillGuardForeignUnitTexts(t *testing.T) {
 		{`systemctl --user kill agent-y-2.scope`, "systemctl --user kill agent-y-2.scope: юнит другого агента", "Чужой юнит гасит его хозяин"},
 		{`systemctl --user freeze graft-heavy-x.scope`, "тяжёлая команда graft другого агента", "Чужой юнит гасит его хозяин"},
 		{`systemctl --user restart run-x.service`, "юнит systemd-run без имени", "Чужой юнит гасит его хозяин"},
-		{`systemd-run --user kill 1`, "systemd-run запускает kill потомком systemd", "Шли сигнал прямо, без systemd-run"},
-		{`systemd-run --user podman stop x`, "systemd-run запускает podman stop потомком systemd", "Шли сигнал прямо, без systemd-run"},
+		{`systemd-run --user kill 1`, "systemd-run запускает kill потомком systemd", "Без systemd-run: найди PID"},
+		{`systemd-run --user podman stop x`, "systemd-run запускает podman stop потомком systemd", "Без systemd-run: найди PID"},
 	} {
 		r := validateKill(t, tc.command)
 		if r.IsValid || !strings.Contains(strings.Join(r.Suggestions, "\n"), tc.reason) || !slices.ContainsFunc(r.Suggestions, func(h string) bool { return strings.HasPrefix(h, tc.hint) }) {

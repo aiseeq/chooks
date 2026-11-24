@@ -19,14 +19,21 @@ import (
 
 // agentsPathToken — слово-путь с компонентом agents или каталогом .claude
 // (`{`, `,` — фигурные скобки bash, `=`/`:` — значение опции, кластер
-// короткой опции `-C.claude`, `-tagents` — слитное значение опции)
-var agentsPathToken = regexp.MustCompile(`(?i)(?:^|[/=:{,]|^-[a-z]+)agents(?:/|$|[,}])|(?:^|[/=:{,]|^-[a-z]+)\.claude/?(?:$|[,}])`)
+// короткой опции `-C.claude`, `-tagents` — слитное значение опции). Слева
+// от .claude — любой символ, кроме буквы, цифры и `_` (`\.claude`,
+// `${X}.claude`, `$(…).claude`), кластер опции (`\-C.claude`, `-""C`) или
+// переменная `$X.claude`: граница, которую не определить по литералу, —
+// путь
+var agentsPathToken = regexp.MustCompile(`(?i)(?:^|[/=:{,]|^-[a-z]+)agents(?:/|$|[,}])|(?:^|[^a-z0-9_]|^\\?-[a-z"'\\]+|\$\w+)\.claude/?(?:$|[,}])`)
 
 // agentsPathInText — путь agents/ или каталог .claude внутри текста с
 // пробелами (строка скрипта, тело heredoc): слово agents без косой рядом —
-// проза, не путь; слева от .claude — граница пути или кластер короткой
-// опции со слитным значением (`tar -C.claude`)
-var agentsPathInText = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_.-])agents/|/agents(?:$|[^a-z0-9_.-])|(?:^|[\s"'])-[a-z]+agents(?:/|$|[^a-z0-9_.-])|(?:^|[/~=:{,\s"']|(?:^|[\s"'])-[a-z]+)\.claude/?(?:$|[\s"'),;|&>}])`)
+// проза, не путь. Слева от .claude — что угодно, кроме идентификатора
+// перед точкой (`cfg.Restart.Claude` в коде): символ не из
+// `[A-Za-z0-9_]`, кластер короткой опции со слитным значением
+// (`tar -C.claude`, `\-C`, `-""C`, `TAR_OPTIONS=-C.claude`) или
+// переменная `$X.claude`
+var agentsPathInText = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_.-])agents/|/agents(?:$|[^a-z0-9_.-])|(?:^|[\s"'])-[a-z]+agents(?:/|$|[^a-z0-9_.-])|(?:^|[^a-z0-9_]|(?:^|[\s"'=\\])-[a-z"'\\]+|\$\w+)\.claude/?(?:$|[\s"'),;|&>}])`)
 
 func mentionsAgentsPath(text string) bool {
 	if strings.ContainsAny(text, " \t\n") {
@@ -145,29 +152,45 @@ func unparsedAgentReason(command string) string {
 // Для перехода в .claude неизвестные команды считаются пишущими: их
 // относительные пути и побочные эффекты невозможно установить по словам.
 // Заведомо только читают переход (cd, pushd), клиент модели без
-// --debug-file и читатель из agentReaders без пишущих и запускающих
-// опций; окружение перед командой и export/declare/readonly/local
-// (GIT_EXTERNAL_DIFF, GIT_CONFIG_*, GIT_PAGER, PAGER) могут запустить
-// программу из «читателя», поэтому делают команду пишущей
+// --debug-file, --settings, --mcp-config, --plugin-dir и читатель из
+// agentReaders без пишущих и запускающих опций. Пишущими делают команду:
+// окружение перед командой и export/declare/readonly/local
+// (GIT_EXTERNAL_DIFF, GIT_CONFIG_*, GIT_PAGER, PAGER); подстановка команды;
+// арифметика и проверки ([[ ]], let, $(( )), индекс ${a[…]}), которые
+// исполняют `$(…)` из индекса даже в строке в одинарных кавычках; слово с
+// `$(` или обратной кавычкой в тексте
 func readOnlyClaudeDirectory(file *syntax.File) bool {
 	safe := true
 	syntax.Walk(file, func(node syntax.Node) bool {
-		switch n := node.(type) {
-		case *syntax.Redirect:
-			if writingRedirect(n) {
-				v, ok := literalValue(n.Word)
-				if !ok || v != "/dev/null" {
-					safe = false
-				}
-			}
-		case *syntax.DeclClause:
-			safe = false
-		case *syntax.CallExpr:
-			safe = safe && claudeDirectoryCallReads(n)
-		}
+		safe = safe && claudeDirectoryNodeReads(node)
 		return true
 	})
 	return safe
+}
+
+func claudeDirectoryNodeReads(node syntax.Node) bool {
+	switch n := node.(type) {
+	case *syntax.Redirect:
+		if writingRedirect(n) {
+			v, ok := literalValue(n.Word)
+			return ok && v == "/dev/null"
+		}
+	case *syntax.DeclClause, *syntax.CmdSubst, *syntax.TestClause, *syntax.LetClause, *syntax.ArithmCmd, *syntax.ArithmExp:
+		return false
+	case *syntax.ParamExp:
+		return n.Index == nil && n.Slice == nil
+	case *syntax.Word:
+		return !textSubstitutes(wordOwnText(n))
+	case *syntax.CallExpr:
+		return claudeDirectoryCallReads(n)
+	}
+	return true
+}
+
+// textSubstitutes — в тексте есть `$(` или обратная кавычка: в арифметике
+// и при повторном разборе (test -v 'a[$(…)]', env -S) это исполнение
+func textSubstitutes(text string) bool {
+	return strings.Contains(text, "$(") || strings.Contains(text, "`")
 }
 
 func claudeDirectoryCallReads(call *syntax.CallExpr) bool {
@@ -183,7 +206,8 @@ func claudeDirectoryCallReads(call *syntax.CallExpr) bool {
 		return true
 	case "claude", "cl":
 		for _, arg := range call.Args[1:] {
-			if clientOptionWrites(name, wordOwnText(arg)) {
+			value := wordOwnText(arg)
+			if clientOptionWrites(name, value) || clientOptionRuns(value) {
 				return false
 			}
 		}
@@ -253,7 +277,8 @@ func readsOnly(call *syntax.CallExpr, commands, gitSubcommands []string) bool {
 
 // readerOptionWrites — опция читателя пишет файл или запускает программу:
 // --output у git и прочих, tree -o (и в кластере -fo) и -R, rg --pre,
-// less -o/-O и --log-file
+// less -o/-O, --log-file, -k и --lesskey* (секция #env задаёт LESSOPEN),
+// file -C/--compile, `$(` в аргументе test/[ (test -v 'a[$(…)]')
 func readerOptionWrites(name, value string) bool {
 	if strings.HasPrefix(value, "--output") {
 		return true
@@ -270,11 +295,21 @@ func readerOptionWrites(name, value string) bool {
 		return strings.HasPrefix(value, "--pre")
 	case "less":
 		if short {
-			return strings.ContainsAny(value, "oO")
+			return strings.ContainsAny(value, "oOk")
 		}
-		return strings.HasPrefix(value, "--") && len(long) >= 3 && (strings.HasPrefix("log-file", long) || strings.HasPrefix("LOG-FILE", long))
+		return strings.HasPrefix(value, "--") && len(long) >= 3 && (longOptionIs(long, "log-file") || longOptionIs(long, "LOG-FILE") || longOptionIs(long, "lesskey"))
+	case "file":
+		return short && strings.Contains(value, "C") || strings.HasPrefix(value, "--") && len(long) >= 3 && longOptionIs(long, "compile")
+	case "test", "[":
+		return textSubstitutes(value)
 	}
 	return false
+}
+
+// longOptionIs — имя длинной опции (без --) — сама option, её сокращение
+// или более длинное имя того же семейства (--lesskey-src при option lesskey)
+func longOptionIs(name, option string) bool {
+	return strings.HasPrefix(option, name) || strings.HasPrefix(name, option)
 }
 
 func (s *agentWriteScan) visit(node syntax.Node) {
@@ -529,7 +564,7 @@ func (s *agentWriteScan) wordAccounted(word *syntax.Word) bool {
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		return ok && (s.modelClient(call) || s.safeReader(call) && s.harmless(call))
 	case *syntax.TestClause, *syntax.BinaryTest, *syntax.UnaryTest, *syntax.ParenTest:
-		return true
+		return !textSubstitutes(wordOwnText(word))
 	}
 	return false
 }
@@ -546,7 +581,7 @@ func (s *agentWriteScan) callAccountsWord(call *syntax.CallExpr, word *syntax.Wo
 		return true
 	}
 	if s.modelClient(call) {
-		return true
+		return !clientOptionValue(call, word)
 	}
 	if s.safeReader(call) {
 		return s.harmless(call)
@@ -603,12 +638,11 @@ func (s *agentWriteScan) modelClient(call *syntax.CallExpr) bool {
 			continue
 		}
 		if base == "npx" {
-			for _, rest := range call.Args {
-				if value, ok := literalValue(rest); ok && value == "@anthropic-ai/claude-code" {
-					return true
-				}
+			next, ok := npxClaudePackage(call.Args, i+1)
+			if !ok {
+				return false
 			}
-			return false
+			i, base = next, "claude"
 		}
 		for _, rest := range call.Args[i+1:] {
 			if clientOptionWrites(base, wordOwnText(rest)) {
@@ -616,6 +650,62 @@ func (s *agentWriteScan) modelClient(call *syntax.CallExpr) bool {
 			}
 		}
 		return slices.Contains(modelClients, base)
+	}
+	return false
+}
+
+// npxClaudePackage — индекс пакета claude-code в `npx [-y|--yes] [--]
+// @anthropic-ai/claude-code …`; иные опции npx (-p/--package, -c/--call)
+// запускают другую команду — не клиент
+func npxClaudePackage(args []*syntax.Word, start int) (int, bool) {
+	for i := start; i < len(args); i++ {
+		value, literal := literalValue(args[i])
+		switch {
+		case !literal:
+			return 0, false
+		case value == "-y" || value == "--yes" || value == "--":
+		case value == "@anthropic-ai/claude-code":
+			return i, true
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+// clientOptionRuns — опция claude/cl задаёт команды, которые клиент
+// запустит: hooks в --settings, серверы в --mcp-config, плагины в
+// --plugin-dir
+func clientOptionRuns(value string) bool {
+	for _, option := range []string{"--settings", "--mcp-config", "--plugin-dir"} {
+		if value == option || strings.HasPrefix(value, option+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// clientOptionValue — слово — значение опции клиента из clientOptionRuns
+// (у --mcp-config значений несколько: до следующей опции)
+func clientOptionValue(call *syntax.CallExpr, word *syntax.Word) bool {
+	if clientOptionRuns(wordOwnText(word)) {
+		return true
+	}
+	values, variadic := 0, false
+	for _, arg := range call.Args {
+		value := wordOwnText(arg)
+		switch {
+		case clientOptionRuns(value):
+			values, variadic = 1, value == "--mcp-config"
+			continue
+		case strings.HasPrefix(value, "-"):
+			values, variadic = 0, false
+			continue
+		}
+		if arg == word && (values > 0 || variadic) {
+			return true
+		}
+		values--
 	}
 	return false
 }
@@ -633,10 +723,12 @@ func clientOptionWrites(client, value string) bool {
 }
 
 // wrapperOptions — опции обёртки: короткие со значением и без, длинные со
-// значением и без (длинную опцию можно сократить до однозначного начала)
+// значением и без (длинную опцию можно сократить до однозначного начала);
+// refuse — опции, значение которых исполняется или куда пишется вывод
+// (env -S, time -o): за ними команду не установить
 type wrapperOptions struct {
-	shortValue, shortFlags string
-	longValue, longFlags   []string
+	shortValue, shortFlags, shortRefuse string
+	longValue, longFlags, longRefuse    []string
 }
 
 var commandWrapperOptions = map[string]wrapperOptions{
@@ -647,8 +739,8 @@ var commandWrapperOptions = map[string]wrapperOptions{
 	},
 	"exec": {shortValue: "a", shortFlags: "cl"},
 	"env": {
-		shortValue: "aCPSu", shortFlags: "0iv",
-		longValue: []string{"argv0", "chdir", "split-string", "unset"},
+		shortValue: "aCPu", shortFlags: "0iv", shortRefuse: "S",
+		longValue: []string{"argv0", "chdir", "unset"}, longRefuse: []string{"split-string"},
 		longFlags: []string{"block-signal", "debug", "default-signal", "help", "ignore-environment", "ignore-signal", "list-signal-handling", "null", "version"},
 	},
 	"timeout": {
@@ -659,15 +751,16 @@ var commandWrapperOptions = map[string]wrapperOptions{
 	"nice":    {shortValue: "n", longValue: []string{"adjustment"}, longFlags: []string{"help", "version"}},
 	"ionice":  {shortValue: "cnpPu", shortFlags: "thV", longValue: []string{"class", "classdata", "pgid", "pid", "uid"}, longFlags: []string{"help", "ignore", "version"}},
 	"stdbuf":  {shortValue: "eio", longValue: []string{"error", "input", "output"}, longFlags: []string{"help", "version"}},
-	"time":    {shortValue: "fo", shortFlags: "apqvV", longValue: []string{"format", "output"}, longFlags: []string{"append", "help", "portability", "quiet", "verbose", "version"}},
+	"time":    {shortValue: "f", shortFlags: "apqvV", shortRefuse: "o", longValue: []string{"format"}, longFlags: []string{"append", "help", "portability", "quiet", "verbose", "version"}, longRefuse: []string{"output"}},
 	"nohup":   {longFlags: []string{"help", "version"}},
 	"command": {shortFlags: "pvV"},
 	"setsid":  {shortFlags: "cfw", longFlags: []string{"ctty", "fork", "help", "version", "wait"}},
 }
 
 // wrappedCommand — индекс команды, которую запускает обёртка, по словам
-// после неё. Неизвестная опция, нелитерал и time -o (запись в файл) — не
-// установить (false)
+// после неё. Неизвестная опция, опция из refuse и нелитерал — не
+// установить (false). Слово с `=` — присваивание только у env и sudo, у
+// прочих обёрток это программа (`nohup /tmp/a=b/../usr/bin/tee`)
 func wrappedCommand(wrapper string, args []*syntax.Word, start int) (int, bool) {
 	durationSeen := wrapper != "timeout"
 	for i := start; i < len(args); i++ {
@@ -689,7 +782,7 @@ func wrappedCommand(wrapper string, args []*syntax.Word, start int) (int, bool) 
 			}
 			continue
 		}
-		if strings.Contains(value, "=") {
+		if strings.Contains(value, "=") && (wrapper == "env" || wrapper == "sudo") {
 			continue
 		}
 		if !durationSeen {
@@ -712,18 +805,20 @@ func wrapperOption(wrapper, value string) (bool, bool) {
 	case wrapper == "nice" && strings.Trim(value[1:], "0123456789") == "":
 		return false, true
 	case strings.HasPrefix(value, "--"):
-		return longWrapperOption(wrapper, opts, value)
+		return longWrapperOption(opts, value)
 	}
-	return shortWrapperOptions(wrapper, opts, value[1:])
+	return shortWrapperOptions(opts, value[1:])
 }
 
 // longWrapperOption — длинная опция обёртки (в том числе сокращённая):
 // берёт ли она следующее слово значением; неоднозначное сокращение с
 // опцией со значением считается берущим значение
-func longWrapperOption(wrapper string, opts wrapperOptions, value string) (bool, bool) {
+func longWrapperOption(opts wrapperOptions, value string) (bool, bool) {
 	name, _, attached := strings.Cut(strings.TrimPrefix(value, "--"), "=")
-	if wrapper == "time" && name != "" && strings.HasPrefix("output", name) {
-		return false, false
+	for _, option := range opts.longRefuse {
+		if strings.HasPrefix(option, name) {
+			return false, false
+		}
 	}
 	if slices.Contains(opts.longValue, name) {
 		return !attached, true
@@ -746,9 +841,9 @@ func longWrapperOption(wrapper string, opts wrapperOptions, value string) (bool,
 // shortWrapperOptions — кластер коротких опций обёртки (`-Eu`, `-la`):
 // берёт ли последняя буква кластера следующее слово значением; буква со
 // значением в середине кластера забирает его остаток
-func shortWrapperOptions(wrapper string, opts wrapperOptions, cluster string) (bool, bool) {
+func shortWrapperOptions(opts wrapperOptions, cluster string) (bool, bool) {
 	for i, letter := range cluster {
-		if wrapper == "time" && letter == 'o' {
+		if strings.ContainsRune(opts.shortRefuse, letter) {
 			return false, false
 		}
 		if strings.ContainsRune(opts.shortValue, letter) {

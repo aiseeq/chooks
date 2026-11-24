@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/claimcheck"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/hookctx"
@@ -433,7 +434,7 @@ func TestClaimStopSIGTERMKillsJudge(t *testing.T) {
 		}
 	}
 	if len(pids) < 2 {
-		_ = cmd.Process.Kill()
+		_, _ = proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() })
 		_ = cmd.Wait()
 		t.Fatalf("codex stub not started: %v, stderr %s", pids, stderr.String())
 	}
@@ -442,7 +443,7 @@ func TestClaimStopSIGTERMKillsJudge(t *testing.T) {
 			t.Fatalf("codex process %d not alive before the signal", pid)
 		}
 	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if _, err := proc.StopChild(cmd.Process.Pid, 2*time.Second, func() error { return cmd.Process.Signal(syscall.SIGTERM) }); err != nil {
 		t.Fatal(err)
 	}
 	err := cmd.Wait()
@@ -458,7 +459,7 @@ func TestClaimStopSIGTERMKillsJudge(t *testing.T) {
 		}
 		if alive(pid) {
 			left++
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+			_, _ = proc.StopChild(pid, 0, func() error { return syscall.Kill(pid, syscall.SIGKILL) })
 		}
 	}
 	if left > 0 {

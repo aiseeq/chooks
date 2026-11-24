@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/hookctx"
 )
@@ -502,7 +503,10 @@ func TestRequestRelativeDirectoriesParallel(t *testing.T) {
 			t.Fatal(err)
 		}
 		pids[i] = child.Process.Pid
-		t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+		t.Cleanup(func() {
+			_, _ = proc.StopChild(child.Process.Pid, 0, func() error { return child.Process.Kill() })
+			_ = child.Wait()
+		})
 	}
 	const config = "logger:\n  level: error\ntools:\n  jira_style: {enabled: true}\n  wide_search_hint: {enabled: false}\n"
 	for i := range count {

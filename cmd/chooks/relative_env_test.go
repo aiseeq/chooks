@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/hookctx"
 )
@@ -356,7 +357,10 @@ func runRelativeEnvRequestCase(t *testing.T, c relativeEnvCase) relativeEnvOutco
 	if err := hook.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = hook.Process.Kill(); _ = hook.Wait() })
+	t.Cleanup(func() {
+		_, _ = proc.StopChild(hook.Process.Pid, 0, func() error { return hook.Process.Kill() })
+		_ = hook.Wait()
+	})
 	var stdout, stderr bytes.Buffer
 	req := hookctx.New(strings.NewReader(strings.ReplaceAll(c.input, "@CWD@", dir)), &stdout, &stderr, relativeEnvBase(c), dir, hook.Process.Pid, os.Getpid())
 	req.ConfigPath = c.config

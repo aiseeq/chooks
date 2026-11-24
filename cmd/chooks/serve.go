@@ -221,11 +221,11 @@ func listenSocket(path string) (*net.UnixListener, error) {
 	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listen on unix socket: %w", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = listener.Close()
-		return nil, err
+		return nil, fmt.Errorf("set unix socket permissions: %w", err)
 	}
 	return listener, nil
 }
@@ -246,7 +246,7 @@ func (s *server) serve(ctx context.Context, listener *net.UnixListener) error {
 	defer cancel()
 	// drained — смена файла застала идущие запросы, и они дообслужены:
 	// приём кончается
-	drained, drain := context.WithCancel(context.Background())
+	drained, drain := context.WithCancel(context.WithoutCancel(ctx))
 	defer drain()
 	upgrading := false
 	var handlers sync.WaitGroup
@@ -361,7 +361,10 @@ func (s *server) handle(conn *net.UnixConn) {
 		s.refuse(conn, "", "uid")
 		return
 	}
-	_ = conn.SetReadDeadline(accepted.Add(serveReadTimeout))
+	if err := conn.SetReadDeadline(accepted.Add(serveReadTimeout)); err != nil {
+		s.logger.Debug("daemon: request read deadline not set", "error", err)
+		return
+	}
 	frame, err := hookwire.ReadFrame(conn)
 	if err == nil && frame.Shadow {
 		// Теневая запись CLI: ответа нет, исполнение — без эффектов, без
@@ -412,20 +415,31 @@ func (s *server) handle(conn *net.UnixConn) {
 		return
 	}
 
+	s.serveCommitted(conn, accepted, wire, admitted, deadline, release)
+}
+
+func (s *server) serveCommitted(conn *net.UnixConn, accepted time.Time, wire hookwire.Request, admitted admitted, deadline time.Time, release func()) {
 	ctx, cancelCause := context.WithCancelCause(context.Background())
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	_ = conn.SetReadDeadline(time.Time{})
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		s.logger.Debug("daemon: request read deadline not cleared", "error", err)
+	}
 	// После 'C' прокси молчит до 'T' (свой SIGTERM): любое чтение (обрыв,
 	// закрытие, 'T', лишние байты) — прокси больше не ждёт, работа запроса
 	// отменяется
 	terminated, gone := make(chan struct{}), make(chan struct{})
 	go func() {
 		var b [1]byte
-		n, _ := conn.Read(b[:])
+		n, err := conn.Read(b[:])
 		if n == 1 && b[0] == hookwire.Terminate {
 			close(terminated)
 			cancelCause(errProxyTerminated)
+			return
+		}
+		if err != nil {
+			close(gone)
+			cancelCause(errProxyGone)
 			return
 		}
 		close(gone)
@@ -455,7 +469,9 @@ func (s *server) handle(conn *net.UnixConn) {
 	s.served.Add(1)
 	s.logger.Debug("daemon: request done", "hook", wire.Subcommand, "pid", wire.PID, "code", code,
 		"elapsed_ms", time.Since(accepted).Milliseconds(), "version", Version)
-	_ = conn.SetWriteDeadline(time.Now().Add(serveWriteTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(serveWriteTimeout)); err != nil {
+		s.logger.Debug("daemon: result write deadline not set", "error", err)
+	}
 	if _, err := conn.Write(hookwire.EncodeResult(code, stdout.Bytes(), stderr.Bytes())); err != nil {
 		s.logger.Info("daemon: result not delivered", "hook", wire.Subcommand, "pid", wire.PID, "error", err)
 	}
@@ -466,12 +482,16 @@ func (s *server) handle(conn *net.UnixConn) {
 // исполняется. 'C' не пришёл к сроку — 'F' «late»: прокси, приславший его
 // позже, уйдёт в CLI, а не потеряет вызов (ревью 2б-1, п. 8)
 func (s *server) acceptAndCommit(conn *net.UnixConn, wire hookwire.Request) bool {
-	_ = conn.SetWriteDeadline(time.Now().Add(s.commitTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(s.commitTimeout)); err != nil {
+		s.logger.Debug("daemon: accept write deadline not set", "error", err)
+	}
 	if _, err := conn.Write([]byte{hookwire.Accepted}); err != nil {
 		s.logger.Debug("daemon: proxy left before accept", "hook", wire.Subcommand, "error", err)
 		return false
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(s.commitTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(s.commitTimeout)); err != nil {
+		s.logger.Debug("daemon: commit read deadline not set", "error", err)
+	}
 	var commit [1]byte
 	if _, err := io.ReadFull(conn, commit[:]); err != nil || commit[0] != hookwire.Commit {
 		if errors.Is(err, os.ErrDeadlineExceeded) {
@@ -506,7 +526,9 @@ func (s *server) executeWatched(ctx context.Context, request hookctx.Context, wi
 	stuckAt := time.Now()
 	s.logger.Error("daemon: hook handler stuck past its deadline, slot held", "hook", wire.Subcommand, "pid", wire.PID,
 		"stuck", stuck, "slots", cap(s.sem))
-	_, _ = io.WriteString(request.Stderr, stuckMessage)
+	if _, err := io.WriteString(request.Stderr, stuckMessage); err != nil {
+		s.logger.Debug("daemon: stuck message not written", "hook", wire.Subcommand, "error", err)
+	}
 	go func() {
 		code := <-result
 		release()
@@ -539,7 +561,9 @@ func (s *server) execute(ctx context.Context, request hookctx.Context, hookType 
 func (s *server) refuse(conn *net.UnixConn, hookType, reason string) {
 	s.refused.Add(1)
 	s.logger.Info("daemon: request left to CLI", "hook", hookType, "reason", reason)
-	_ = conn.SetWriteDeadline(time.Now().Add(serveCommitTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(serveCommitTimeout)); err != nil {
+		s.logger.Debug("daemon: refusal write deadline not set", "error", err)
+	}
 	if _, err := conn.Write(hookwire.EncodeFallback(reason)); err != nil {
 		s.logger.Debug("daemon: refusal not delivered", "hook", hookType, "reason", reason, "error", err)
 	}
@@ -716,8 +740,8 @@ func unescapeBusValue(value string) string {
 	return out.String()
 }
 
-// cwdRefusal — cwd запроса не тот каталог, где стоит прокси: не абсолютный
-// (удалён — os.Getwd прокси не дал пути), переименован или подменён
+// cwdRefusal — cwd запроса не тот каталог, где стоит прокси: не абсолютный,
+// переименован или подменён
 func cwdRefusal(cwd string, pid int) string {
 	if !filepath.IsAbs(cwd) {
 		return "not absolute"
@@ -769,7 +793,7 @@ func transcriptRefusal(stdin []byte) string {
 func procParent(pid int) (int, error) {
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("read process %d stat: %w", pid, err)
 	}
 	end := bytes.LastIndexByte(data, ')')
 	if end < 0 {
@@ -786,7 +810,7 @@ func procParent(pid int) (int, error) {
 func peerCred(conn *net.UnixConn) (*unix.Ucred, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get unix socket syscall connection: %w", err)
 	}
 	var cred *unix.Ucred
 	var credErr error
@@ -864,8 +888,9 @@ func takeFallbackReason(request *hookctx.Context) string {
 		return ""
 	}
 	request.Env = withoutEnv(request.Env, hookproxy.EnvFallback)
-	//nolint:silent-error-handling // Unsetenv падает только на имени с «=» или NUL; имя — константа
-	_ = os.Unsetenv(hookproxy.EnvFallback)
+	if err := os.Unsetenv(hookproxy.EnvFallback); err != nil {
+		panic(err)
+	}
 	return reason
 }
 

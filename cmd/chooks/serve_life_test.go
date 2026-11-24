@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/fallbackwatch"
 	"github.com/aiseeq/chooks/internal/hookctx"
@@ -193,13 +194,19 @@ func startSupervised(t *testing.T, exe, home string, extraEnv ...string) *superv
 	sv.cmd = cmd
 	t.Cleanup(func() {
 		writeFiles(t, home, map[string]string{"stop": ""})
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		if _, err := proc.StopChild(cmd.Process.Pid, 10*time.Second, func() error {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		}); err != nil {
+			t.Errorf("stop supervised process tree: %v", err)
+		}
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_, _ = proc.StopChild(cmd.Process.Pid, 0, func() error {
+				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			})
 			<-done
 			t.Errorf("supervised daemon did not stop on SIGTERM; output:\n%s", stderr.String())
 		}
@@ -338,7 +345,13 @@ func TestServeUpdateAfterInstall(t *testing.T) {
 		}
 	}
 	writeFiles(t, home, map[string]string{"stop": ""})
-	if pid == 0 || syscall.Kill(pid, syscall.SIGTERM) != nil || !waitFor(t, 10*time.Second, func() bool { return processGone(pid) }) {
+	var stopErr error
+	if pid != 0 {
+		_, stopErr = proc.StopChild(sv.cmd.Process.Pid, 10*time.Second, func() error {
+			return syscall.Kill(-sv.cmd.Process.Pid, syscall.SIGTERM)
+		})
+	}
+	if pid == 0 || stopErr != nil || !waitFor(t, 10*time.Second, func() bool { return processGone(pid) }) {
 		t.Fatalf("v3 pid %d did not stop", pid)
 	}
 	if info, err := os.Lstat(sv.socket); err != nil || info.Mode()&os.ModeSocket == 0 {
@@ -659,11 +672,11 @@ func startKilled(t *testing.T, helper string, args, env []string, home, dir stri
 		t.Fatal(err)
 	}
 	if !waitFor(t, 20*time.Second, func() bool { return readFile(t, filepath.Join(home, "webtext.pid")) != "" }) {
-		_ = cmd.Process.Kill()
+		_, _ = proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() })
 		_ = cmd.Wait()
 		t.Fatal("webtext stub not started")
 	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if _, err := proc.StopChild(cmd.Process.Pid, 2*time.Second, func() error { return cmd.Process.Signal(syscall.SIGTERM) }); err != nil {
 		t.Fatal(err)
 	}
 	err = cmd.Wait()

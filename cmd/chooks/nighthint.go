@@ -46,7 +46,7 @@ var nightProbes = struct {
 	locked, lidClosed func(context.Context) (bool, error)
 }{nighthint.ScreenLocked, nighthint.LidClosed}
 
-// nightHintDeps — живые время, признак блокировки, записи и признак вызова
+// nightHintDepsForRequest — живые время, признак блокировки, записи и признак вызова
 // скилла autonomous-work по записи skill-reload; deadline — срок хука для
 // чтения записи
 func nightHintDepsForRequest(config *core.Config, deadline time.Time, request hookctx.Context) (nighthint.Deps, error) {
@@ -67,7 +67,7 @@ func nightHintDepsContext(ctx context.Context, config *core.Config, deadline tim
 	return nighthint.Deps{Now: func() time.Time { return request.Now().In(request.Location()) }, Locked: nightProbes.locked, LidClosed: nightProbes.lidClosed, Store: nighthint.Store{Dir: filepath.Join(state, "night-hint")}, SkillCalled: skillCalled}, nil
 }
 
-// autonomousSkillCalled — признак вызова скилла autonomous-work в сессии по
+// autonomousSkillCalledIn — признак вызова скилла autonomous-work в сессии по
 // записи хука skill-reload. Записи нет — скилл не вызван: вызов Skill всегда
 // даёт PostToolBatch, а он запись создаёт. Первый ход новой сессии записи ещё
 // не имеет — её создаёт user-prompt-submit параллельно с night-hint на том же

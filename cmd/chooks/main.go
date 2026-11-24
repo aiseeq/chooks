@@ -51,7 +51,12 @@ func main() {
 func runCLI() int {
 	// Некоторые команды не используют cwd и работают даже после удаления
 	// текущего каталога, поэтому ошибка Getwd не мешает запуску CLI.
-	request, _ := hookctx.FromProcess()
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		// Getwd returns an empty cwd when the process directory was removed;
+		// standalone CLI commands that do not need cwd still work in that case.
+		request.Cwd = ""
+	}
 	ctx := context.WithValue(context.Background(), cliTerminationKey{}, (func(int))(os.Exit))
 	ctx = context.WithValue(ctx, fallbackReasonKey{}, takeFallbackReason(&request))
 	return execute(ctx, request)
@@ -205,13 +210,19 @@ func hookCommandContext(cmd *cobra.Command) context.Context {
 	if ok {
 		flags := cmd.Root().PersistentFlags()
 		if flags.Lookup("config") != nil {
-			request.ConfigPath, _ = flags.GetString("config")
+			if value, err := flags.GetString("config"); err == nil {
+				request.ConfigPath = value
+			}
 		}
 		if flags.Lookup("verbose") != nil {
-			request.Verbose, _ = flags.GetBool("verbose")
+			if value, err := flags.GetBool("verbose"); err == nil {
+				request.Verbose = value
+			}
 		}
 		if flags.Lookup("timeout") != nil {
-			request.Timeout, _ = flags.GetDuration("timeout")
+			if value, err := flags.GetDuration("timeout"); err == nil {
+				request.Timeout = value
+			}
 		}
 		return hookctx.WithRequest(ctx, request)
 	}
@@ -231,7 +242,10 @@ func commandConfigPath(cmd *cobra.Command) string {
 	if flags.Lookup("config") == nil {
 		return ""
 	}
-	path, _ := flags.GetString("config")
+	path, err := flags.GetString("config")
+	if err != nil {
+		panic(err)
+	}
 	return path
 }
 
@@ -286,18 +300,8 @@ func closeRequestLogger(logger core.FileLogger) {
 	_ = logger.Close()
 }
 
-// runHook выполняет основную логику хука
-func runHook(ctx context.Context, hookType string) (code int, err error) {
-	request, ok := hookctx.Request(ctx)
-	if !ok {
-		return exitError, fmt.Errorf("hook request is missing")
-	}
-	if err := validateHookRequest(ctx, request); err != nil {
-		return exitError, err
-	}
+func prepareHookRun(ctx context.Context, hookType string, request hookctx.Context) (context.Context, hookctx.Context, *hookTimer, bool, <-chan struct{}, bool) {
 	timer := newHookTimerForRequest(hookType, request)
-	// Время запроса: сравниваемые тенью хуки решают по нему, а не по часам
-	// своего момента (shadowHooks)
 	if request.Time.IsZero() {
 		request.Time = time.Now()
 	}
@@ -314,13 +318,24 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		terminated = call.terminated
 		timer.setExecutor(executorDaemon, "")
 	}
-	// Связь прокси с демоном оборвалась после 'C': вызов исполнял демон, CLI
-	// его не повторяет, а только записывает (ревью 8f10b59, п. 3)
 	lost := false
 	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); cli && hookproxy.Lost(reason) {
 		lost = true
 		timer.setExecutor(executorDaemon, reason)
 	}
+	return ctx, request, timer, cli, terminated, lost
+}
+
+// runHook выполняет основную логику хука
+func runHook(ctx context.Context, hookType string) (code int, err error) {
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return exitError, fmt.Errorf("hook request is missing")
+	}
+	if err := validateHookRequest(ctx, request); err != nil {
+		return exitError, err
+	}
+	ctx, request, timer, cli, terminated, lost := prepareHookRun(ctx, hookType, request)
 	// Файл лога закрывает владелец запроса. У CLI это процесс: обработчик
 	// SIGTERM подписан до выхода и после возврата runHook ещё пишет строку
 	// «hook killed/cancelled by SIGTERM», поэтому файл, как в базе, закрывает
@@ -372,7 +387,9 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	noteCLIFallback(ctx, config, request, hookType, logger)
 	if lost {
 		reason, _ := ctx.Value(fallbackReasonKey{}).(string)
-		_, _ = io.WriteString(request.Stderr, hookproxy.LostMessage(reason))
+		if _, writeErr := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); writeErr != nil {
+			return exitError, errors.Join(errLostCall, writeErr)
+		}
 		return exitError, nil
 	}
 
@@ -580,7 +597,7 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 	return exitBlocked, nil
 }
 
-// runSessionEvent обрабатывает остановку и уведомление Claude Code. Всё
+// runSessionEventForRequest обрабатывает остановку и уведомление Claude Code. Всё
 // нужное приходит в stdin: транскрипт не читается, звук и уведомление уходят
 // в отдельный процесс, поэтому хук укладывается в миллисекунды. Сбои здесь
 // только логируются: событие сессии нечего блокировать, а ошибка хука
@@ -705,7 +722,7 @@ func resolveHookInput(input *core.ToolInput, request hookctx.Context) {
 	}
 }
 
-// saveState запоминает состояние сессии для строки статуса и следующего
+// saveStateIn запоминает состояние сессии для строки статуса и следующего
 // события. Сбой хранилища хук не срывает: код ошибки Claude Code показал бы
 // человеку на каждом событии, а уведомление важнее записи
 func saveStateIn(logger core.Logger, runtimeDir, sessionID string, state core.SessionState) {
@@ -1061,7 +1078,9 @@ func runStatusLine(ctx context.Context, request hookctx.Context) error {
 	// Обрыв после 'C': строку уже рисовал демон, второй раз её не рисуют
 	// (ротация учёток из строки статуса не запускается дважды)
 	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); hookproxy.Lost(reason) {
-		_, _ = io.WriteString(request.Stderr, hookproxy.LostMessage(reason))
+		if _, writeErr := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); writeErr != nil {
+			return errors.Join(errLostCall, writeErr)
+		}
 		return errLostCall
 	}
 	line, err := statusline.Render(ctx, request.Stdin, logger)

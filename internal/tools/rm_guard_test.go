@@ -88,6 +88,40 @@ func TestRmGuard330CdShapeAndVariables(t *testing.T) {
 	t.Run("PreToolUse", testRmGuardSubsequentCdHook)
 }
 
+func TestRmGuardNoglobCdRelativeGlob(t *testing.T) {
+	for _, command := range []string{
+		`noglob cd /tmp && rm -f dir/*`,
+		`zsh -c 'noglob cd /tmp && rm -f dir/*'`,
+		`zsh -c 'cd /tmp && noglob rm -f dir/*'`,
+		`zsh -c 'zsh -c "noglob cd /tmp && rm -f dir/*"'`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			result := validateRmWith(t, newRmGuard(t), command, "/home/u/proj")
+			if result.IsValid {
+				t.Fatalf("ValidateTool разрешил относительный глоб после noglob cd: %q", command)
+			}
+		})
+	}
+}
+
+func TestWrappedCommandWordsPreservesWordsOnShellcmdError(t *testing.T) {
+	parsed := &shScript{}
+	parseShell(`fish -c 'if'`, false, parsed)
+	if len(parsed.cmds) != 1 {
+		t.Fatalf("parseShell commands = %d, want 1", len(parsed.cmds))
+	}
+	words := parsed.cmds[0].words
+	got := wrappedCommandWords(words, 0, false)
+	if len(got) != len(words) {
+		t.Fatalf("wrappedCommandWords length = %d, want original %d", len(got), len(words))
+	}
+	for i := range words {
+		if got[i] != words[i] {
+			t.Errorf("word %d = %#v, want original %#v", i, got[i], words[i])
+		}
+	}
+}
+
 // testRmGuardSubsequentCdHook проверяет выход процесса и текст, который
 // PreToolUse передаёт вызывающей стороне при блокировке.
 func testRmGuardSubsequentCdHook(t *testing.T) {

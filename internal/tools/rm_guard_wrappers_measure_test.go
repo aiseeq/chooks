@@ -17,7 +17,7 @@ func TestMeasureRmGuardWrapperPairs(t *testing.T) {
 		`rm -f build/x.o`,
 	}
 	wrappers := []string{
-		`sudo`, `sudo -u root`, `doas`, `exec`, `command`, `env`, `env -i`, `env -u HOME`,
+		`sudo`, `sudo -u root`, `doas`, `exec`, `command`, `env`, `env -i`, `env -u HOME`, `noglob`,
 		`nice -n 10`, `nohup`, `time`, `timeout 5`, `timeout -s 9 5`, `stdbuf -oL`,
 		`setsid`, `setsid -f`, `ionice -c 3`, `unbuffer`, `unbuffer -p`, `unbuffer -noecho`,
 		`unbuffer -noecho -p`, `stdbuf -oL nohup`, `FOO=1`,

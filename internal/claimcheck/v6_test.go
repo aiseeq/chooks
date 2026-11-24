@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/aiseeq/chooks/internal/questioncheck"
 )
@@ -378,6 +379,60 @@ func TestCallsOnlyKeepsMarkerWhenOneRuneDoesNotFit(t *testing.T) {
 		}
 		if fit.Input != markerOnly.Input || !strings.Contains(fit.Input, "[обрезано:") {
 			t.Fatalf("n=%d: input %q, want marker only %q", n, fit.Input, markerOnly.Input)
+		}
+	}
+}
+
+func TestCallsOnlyInputExcerptBudgetDependsOnRelevance(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		input    string
+		relevant bool
+		limit    int
+	}{
+		{name: "relevant", input: strings.Repeat("x", 500) + " needle " + strings.Repeat("y", 500), relevant: true, limit: 1000},
+		{name: "irrelevant", input: strings.Repeat("x", 1000), limit: 300},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := Tool{
+				Name: "Bash", Input: tc.input, fullInput: tc.input,
+				callsOnly: true, relevant: tc.relevant,
+				answerWords: []string{"needle"}, cropWords: []string{"needle"},
+			}
+			got, ok, err := fitTool(tool, 5000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok {
+				t.Fatal("fitTool rejected call")
+			}
+			n := utf8.RuneCountInString(got.Input)
+			if n > tc.limit {
+				t.Fatalf("input excerpt has %d runes, limit %d", n, tc.limit)
+			}
+			if tc.relevant && (n <= 300 || !strings.Contains(got.Input, "needle")) {
+				t.Fatalf("relevant excerpt lost its larger budget or answer word: %d runes, %q", n, got.Input)
+			}
+		})
+	}
+}
+
+func TestCallsOnlyPreservesGitActionCalls(t *testing.T) {
+	p := fixture(t,
+		ev("user", "t1", "сделай"),
+		ev("assistant", "t2", []any{map[string]any{"type": "tool_use", "id": "a", "name": "Bash", "input": map[string]any{"command": "git commit -q -m done && git commit --amend && git push"}}}),
+		ev("assistant", "t3", []any{map[string]any{"type": "text", "text": "готово"}}),
+	)
+	in, err := BuildInput(p, 3, Options{CallsOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.TurnTools) != 1 || !in.TurnTools[0].relevant {
+		t.Fatalf("git action call was not marked relevant: %+v", in.TurnTools)
+	}
+	for _, word := range []string{"commit -q", "--amend", "push"} {
+		if !strings.Contains(in.TurnTools[0].Input, word) {
+			t.Fatalf("call input lost %q: %q", word, in.TurnTools[0].Input)
 		}
 	}
 }

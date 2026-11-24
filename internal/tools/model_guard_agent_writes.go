@@ -42,7 +42,12 @@ func mentionsAgentsPath(text string) bool {
 	return agentsPathToken.MatchString(text)
 }
 
+// lineContinuation — пара `\` + перевод строки: bash её удаляет и склеивает
+// слово (`-\⏎C.claude` — это `-C.claude`)
+var lineContinuation = strings.NewReplacer("\\\n", "")
+
 func pathInText(text string) bool {
+	text = lineContinuation.Replace(text)
 	return agentsPathInText.MatchString(text) || claudeDirectoryInText(text)
 }
 
@@ -61,9 +66,11 @@ func claudeDirectoryInText(text string) bool {
 // claudeDirectoryAfter — .claude после before — путь. Цепочка
 // [A-Za-z0-9_.-] перед .claude делает его идентификатором, только если
 // начинается буквой, цифрой или `_` и стоит не сразу за подстановкой (`$`,
-// обратная кавычка, `}`, `)`): bash подставит туда что угодно, и `-` кластера
-// опции (`-${E}C.claude`, `${D}C.claude`) по литералу не виден. Обратная косая
-// и кавычки в bash исчезают и цепочку не рвут: `\-C.claude`, `-""C.claude`
+// обратная кавычка, `}`, `)`, `]` арифметики `$[…]`): bash подставит туда что
+// угодно, и `-` кластера опции (`-${E}C.claude`, `${D}C.claude`) по литералу
+// не виден. Обратная косая и кавычки в bash исчезают и цепочку не рвут:
+// `\-C.claude`, `-""C.claude`; пару `\` + перевод строки pathInText удаляет
+// до обхода
 func claudeDirectoryAfter(before string) bool {
 	i := len(before)
 	var first byte
@@ -74,7 +81,7 @@ func claudeDirectoryAfter(before string) bool {
 		case c == '.' || c == '-' || identifierByte(c):
 			first = c
 		default:
-			return !identifierByte(first) || strings.IndexByte("$`})", c) >= 0
+			return !identifierByte(first) || strings.IndexByte("$`})]", c) >= 0
 		}
 		i--
 	}
@@ -312,15 +319,35 @@ func claudeDirectoryCallReads(call *syntax.CallExpr) bool {
 	case "cd", "pushd":
 		return true
 	case "claude", "cl":
-		for _, arg := range call.Args[1:] {
-			value := wordOwnText(arg)
-			if clientOptionWrites(name, value) || clientOptionRuns(value) {
-				return false
-			}
-		}
-		return true
+		return clientReads(name, call.Args[1:])
 	}
 	return readsOnly(call, agentReaders, agentReaderGitSubcommands)
+}
+
+// clientSubcommands — подкоманды claude, которые меняют настройки, MCP,
+// плагины или установку, а не задают промпт
+var clientSubcommands = []string{
+	"config", "mcp", "plugin", "plugins", "install", "update", "upgrade", "migrate-installer",
+	"setup-token", "doctor",
+}
+
+// clientReads — клиент модели в каталоге .claude только читает: без
+// --debug-file, --settings, --mcp-config, --plugin-dir и без подкоманды из
+// clientSubcommands в любом слове, кроме `mcp list`
+func clientReads(name string, args []*syntax.Word) bool {
+	for i, arg := range args {
+		value := wordOwnText(arg)
+		if clientOptionWrites(name, value) || clientOptionRuns(value) {
+			return false
+		}
+		if !slices.Contains(clientSubcommands, value) {
+			continue
+		}
+		if value != "mcp" || i+1 >= len(args) || wordOwnText(args[i+1]) != "list" {
+			return false
+		}
+	}
+	return true
 }
 
 // readerProgram — имя программы простой команды для сверки с белыми

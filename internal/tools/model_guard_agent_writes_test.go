@@ -650,3 +650,55 @@ func TestModelGuardReviewRoundFourForms(t *testing.T) {
 		})
 	}
 }
+
+func TestModelGuardReviewRoundFiveForms(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	const (
+		run = "claude -p hi"
+		tar = "tar -xf /tmp/e.tar "
+	)
+	deny := []struct{ name, command string }{
+		// HIGH-1: `\` + перевод строки внутри кластера опции bash склеивает
+		{"H1 bash -c -\\nC.claude", "bash -c '" + tar + "-\\\nC.claude'; " + run},
+		{"H1 heredoc -\\nC.claude", "bash <<'EOF'\n" + tar + "-\\\nC.claude\nEOF\n" + run},
+		{"H1 bash -c unzip -\\nd.claude", "bash -c 'unzip -o /tmp/e.zip -\\\nd.claude'; " + run},
+		{"H1 sh -c -x\\nC.claude", "sh -c 'tar -x\\\nC.claude -f /tmp/e.tar'; " + run},
+		{"H1 bash -c TAR_OPTIONS=-\\nC.claude", "bash -c 'TAR_OPTIONS=-\\\nC.claude tar -xf /tmp/e.tar'; " + run},
+
+		{"H1 word -\\nC.claude", tar + "-\\\nC.claude; " + run},
+		// LOW-1: `]` старой арифметики $[…] перед цепочкой
+		{"L1 bash -c -$[0]C.claude", "bash -c '" + tar + "-$[0]C.claude'; " + run},
+		// LOW-2: после cd в .claude клиент с подкомандой
+		{"L2 cd claude config set", "cd ~/.claude && claude config set -g model fable && " + run},
+		{"L2 cd claude mcp add", "cd ~/.claude && claude mcp add -s project x -- cp /tmp/e.json settings.json && " + run},
+		{"L2 cd cl plugin install", "cd ~/.claude && cl plugin install x && " + run},
+		{"L2 cd claude mcp list then add", "cd ~/.claude && claude mcp list mcp add x -- cp /tmp/e.json settings.json && " + run},
+	}
+	pass := []struct{ name, command string }{
+		{"cd claude mcp list", "cd ~/.claude && claude mcp list && " + run},
+		{"cd claude prompt with subcommand words", "cd ~/.claude && claude -p \"update the config\""},
+		{"text continuation before field", "bash -c 'echo a \\\n cfg.Claude'; " + run},
+	}
+	check := func(command string) *core.ValidationResult {
+		t.Helper()
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for _, c := range deny {
+		t.Run("deny "+c.name, func(t *testing.T) {
+			if check(c.command).IsValid {
+				t.Fatalf("пропуск, ждали отказ: %q", c.command)
+			}
+		})
+	}
+	for _, c := range pass {
+		t.Run("pass "+c.name, func(t *testing.T) {
+			if result := check(c.command); !result.IsValid {
+				t.Fatalf("отказ, ждали пропуск: %+v", result.Violations)
+			}
+		})
+	}
+}

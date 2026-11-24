@@ -319,8 +319,7 @@ func TestModelGuardReviewRoundOneForms(t *testing.T) {
 		{"cd read jq", `cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head`},
 		{"cd read system cat", "cd ~/.claude && /usr/bin/cat settings.json && " + run},
 		{"git -C no-pager log", "git -C ~/.claude --no-pager log -1 && " + run},
-		{"cd read tree", "cd ~/.claude && tree -L 2 && " + run},
-		{"cd read rg", "cd ~/.claude && rg -n model settings.json && " + run},
+
 		{"cd claude model", "cd ~/.claude && claude --model opus -p hi"},
 		{"sudo -u root -- claude", "sudo -u root -- claude -p \"review " + agent + "\""},
 		{"sudo -E claude", "sudo -E claude -p \"review " + agent + "\""},
@@ -540,12 +539,93 @@ func TestModelGuardReviewRoundThreeForms(t *testing.T) {
 		{"M1 ${Y:-x}-C.claude", tar + "${Y:-x}-C.claude; " + run},
 	}
 	pass := []struct{ name, command string }{
-		{"cd test -f", "cd ~/.claude && test -f settings.json && " + run},
-		{"cd [ -d agents ]", "cd ~/.claude && [ -d agents ] && " + run},
+
 		{"[[ -f agent ]]", "[[ -f \"$HOME/.claude/agents/x.md\" ]] && " + run},
 		{"test -v plain", "test -v HOME && " + run},
 		{"text identifier before cluster", "bash -c 'echo build-C.claude ok'; " + run},
 		{"word identifier before cluster", "echo build-C.claude; " + run},
+	}
+	check := func(command string) *core.ValidationResult {
+		t.Helper()
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for _, c := range deny {
+		t.Run("deny "+c.name, func(t *testing.T) {
+			if check(c.command).IsValid {
+				t.Fatalf("пропуск, ждали отказ: %q", c.command)
+			}
+		})
+	}
+	for _, c := range pass {
+		t.Run("pass "+c.name, func(t *testing.T) {
+			if result := check(c.command); !result.IsValid {
+				t.Fatalf("отказ, ждали пропуск: %+v", result.Violations)
+			}
+		})
+	}
+}
+
+func TestModelGuardReviewRoundFourForms(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	const (
+		run = "claude -p hi"
+		x   = "$'a[\\x24(cp /tmp/e.json settings.json)]'"
+		tar = "tar -xf /tmp/e.tar "
+	)
+	deny := []struct{ name, command string }{
+		// HIGH-1: test/[ после cd в .claude не читатель, как бы ни был записан -v
+		{"H1 test \\-v", "cd ~/.claude && test \\-v " + x + "; " + run},
+		{"H1 test -${E}v", "cd ~/.claude && test -${E}v " + x + "; " + run},
+		{"H1 [ \\-v ]", "cd ~/.claude && [ \\-v $'a[\\044(cp /tmp/e.json settings.json)]' ]; " + run},
+		{"H1 test $'\\x2dv'", "cd ~/.claude && test $'\\x2dv' " + x + "; " + run},
+		{"H1 test -$E''v", "cd ~/.claude && test -$E''v 'a[$'\\('cp /tmp/e.json settings.json)]'; " + run},
+		{"H1 test \\-v agent", "cd ~/.claude && test \\-v $'a[\\x24(cp /tmp/e.md ag\"\"ents/x.md)]'; " + run},
+		// HIGH-2: в тексте bash -c и heredoc подстановка внутри кластера опции
+		{"H2 bash -c -${E}C.claude", "bash -c '" + tar + "-${E}C.claude'; " + run},
+		{"H2 heredoc -${E}C.claude", "bash <<'EOF'\n" + tar + "-${E}C.claude\nEOF\n" + run},
+		{"H2 bash -c -`:`C.claude", "bash -c '" + tar + "-`:`C.claude'; " + run},
+		{"H2 bash -c -$(:)C.claude", "bash -c '" + tar + "-$(:)C.claude'; " + run},
+		{"H2 bash -c ${D}C.claude", "bash -c 'D=-; " + tar + "${D}C.claude'; " + run},
+		{"H2 bash -c unzip -${E}d.claude", "bash -c 'unzip -o /tmp/e.zip -${E}d.claude'; " + run},
+		{"H2 bash -c -\\C.claude", "bash -c '" + tar + "-\\C.claude'; " + run},
+		{"H2 bash -c \"-\"C.claude", "bash -c '" + tar + "\"-\"C.claude'; " + run},
+		{"H2 bash -c $'\\x2d'C.claude", "bash -c '" + tar + "$'\\''\\x2d'\\''C.claude'; " + run},
+		// после cd в .claude: слово не литерал
+		{"cd cat variable", "cd ~/.claude && cat $F && " + run},
+		{"cd cat glob", "cd ~/.claude && cat *.json && " + run},
+		{"cd cat backslash", "cd ~/.claude && \\cat settings.json && " + run},
+		{"cd cat ansi quote", "cd ~/.claude && cat $'settings.json' && " + run},
+		{"cd cat double quote variable", "cd ~/.claude && cat \"$F\" && " + run},
+		{"cd cat double quote backslash", "cd ~/.claude && cat \"settings\\.json\" && " + run},
+		{"cd jq single quote dollar", "cd ~/.claude && jq '$__loc__' settings.json && " + run},
+		{"cd cat brace", "cd ~/.claude && cat {a,b}.json && " + run},
+		{"cd cat ~user", "cd ~/.claude && cat ~root/x && " + run},
+		// после cd в .claude: не простой вызов или не читатель
+		{"cd test -f", "cd ~/.claude && test -f settings.json && " + run},
+		{"cd [ -d agents ]", "cd ~/.claude && [ -d agents ] && " + run},
+		{"cd [[ -f ]]", "cd ~/.claude && [[ -f settings.json ]] && " + run},
+		{"cd tree", "cd ~/.claude && tree -L 2 && " + run},
+		{"cd rg", "cd ~/.claude && rg -n model settings.json && " + run},
+		{"cd subshell", "cd ~/.claude && (cat settings.json) && " + run},
+		{"cd block", "cd ~/.claude && { cat settings.json; } && " + run},
+		{"cd or", "cd ~/.claude && cat settings.json || " + run},
+		{"cd background", "cd ~/.claude && cat settings.json & " + run},
+		{"cd heredoc", "cd ~/.claude && cat <<'EOF' >/dev/null\nx\nEOF\n" + run},
+		{"cd function", "cd ~/.claude && f() { cat x; } && " + run},
+		{"cd negated", "cd ~/.claude && ! cat x && " + run},
+		{"cd write dup", "cd ~/.claude && cat x >&settings.json; " + run},
+	}
+	pass := []struct{ name, command string }{
+		{"mc3 jq and claude mcp list", "cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head"},
+		{"cd cat settings", "cd ~/.claude && cat settings.json && " + run},
+		{"cd ls agents", "cd ~/.claude && ls agents && " + run},
+		{"cd cat quoted", "cd ~/.claude && cat 'settings.json' \"agents/x.md\" 2>&1 < /dev/null && " + run},
+		{"go text cfg.Claude", "cd ~/git/aguard && perl -0pi -e 's|x|\\tcfg.Restart.Claude = claude|' x.go; cl --cl-check"},
+		{"text field and file name", "bash -c 'echo cfg.Claude my-app.claude (opts.claude) x := *cfg.Claude'; " + run},
 	}
 	check := func(command string) *core.ValidationResult {
 		t.Helper()

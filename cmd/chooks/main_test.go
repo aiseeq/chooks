@@ -53,6 +53,7 @@ func silentConfig(t *testing.T) (*core.Config, core.Logger) {
 func TestSkillReloadCleanupCommandUsesProvidedTime(t *testing.T) {
 	root := t.TempDir()
 	stateDir, textsDir := filepath.Join(root, "state"), filepath.Join(root, "texts")
+	logFile := filepath.Join(root, "chooks.log")
 	for _, dir := range []string{stateDir, textsDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -83,7 +84,7 @@ func TestSkillReloadCleanupCommandUsesProvidedTime(t *testing.T) {
 	ctx := hookctx.WithRequest(context.Background(), request)
 	cmd := newSkillReloadCleanupCmd()
 	cmd.SetContext(ctx)
-	cmd.SetArgs([]string{"--state-dir", stateDir, "--texts-dir", textsDir, "--now", now.Format(time.RFC3339Nano)})
+	cmd.SetArgs([]string{"--state-dir", stateDir, "--texts-dir", textsDir, "--now", now.Format(time.RFC3339Nano), "--log-file", logFile})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("cleanup command: %v", err)
 	}
@@ -97,6 +98,74 @@ func TestSkillReloadCleanupCommandUsesProvidedTime(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(textsDir, "fresh.txt")); err != nil {
 		t.Errorf("свежий текст удалён: %v", err)
+	}
+}
+
+func TestSkillReloadCleanupCommandLogsFailureToPassedJournal(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(root, "state-is-a-file")
+	textsDir := filepath.Join(root, "texts")
+	logFile := filepath.Join(root, "journal", "chooks.log")
+	if err := os.WriteFile(statePath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(textsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := newSkillReloadCleanupCmd()
+	cmd.SetContext(hookctx.WithRequest(context.Background(), request))
+	cmd.SetArgs([]string{"--state-dir", statePath, "--texts-dir", textsDir, "--now", time.Now().Format(time.RFC3339Nano), "--log-file", logFile})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cleanup command: %v", err)
+	}
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read journal: %v", err)
+	}
+	if !strings.Contains(string(data), "skill reload cleanup failed") || !strings.Contains(string(data), "cleanup state") {
+		t.Fatalf("cleanup error is missing from passed journal: %s", data)
+	}
+}
+
+func TestSkillReloadCleanupContinuesWhenJournalCannotOpen(t *testing.T) {
+	root := t.TempDir()
+	stateDir, textsDir := filepath.Join(root, "state"), filepath.Join(root, "texts")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(textsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	stale := filepath.Join(stateDir, "stale.json")
+	if err := os.WriteFile(stale, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-31 * 24 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	notDirectory := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(notDirectory, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := newSkillReloadCleanupCmd()
+	cmd.SetContext(hookctx.WithRequest(context.Background(), request))
+	cmd.SetArgs([]string{"--state-dir", stateDir, "--texts-dir", textsDir, "--now", now.Format(time.RFC3339Nano), "--log-file", filepath.Join(notDirectory, "chooks.log")})
+	err = cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "cannot open cleanup journal") {
+		t.Fatalf("expected journal error after cleanup, got: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("logger failure prevented cleanup: %v", err)
 	}
 }
 

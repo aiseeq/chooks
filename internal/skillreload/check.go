@@ -63,10 +63,16 @@ var ErrNoTime = errors.New("skill reload check skipped: hook budget spent")
 // со снимками скиллов: в его транскрипте этих вызовов нет
 const forkAgentType = "fork"
 
+var defaultCheckContext = context.Background()
+
 // Check дочитывает транскрипт, запоминает, какие тексты у агента в
 // контексте, и возвращает правки, которых агент ещё не видел. Событие без
 // транскрипта проверять не по чему — пустой итог
 func (c Checker) Check(event Event) (Result, error) {
+	ctx := c.Context
+	if ctx == nil {
+		ctx = defaultCheckContext
+	}
 	transcript := transcriptFor(event)
 	if transcript == "" {
 		return Result{}, nil
@@ -79,11 +85,7 @@ func (c Checker) Check(event Event) (Result, error) {
 		return Result{}, ErrNoTime
 	}
 	c.substage("lock")
-	ctx := c.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	locked, err := openStateContext(ctx, c.StateDir, name, c.within(c.now().Add(lockWait)))
+	locked, err := openState(ctx, c.StateDir, name, c.within(c.now().Add(lockWait)))
 	if err != nil {
 		return Result{}, err
 	}
@@ -103,7 +105,7 @@ func (c Checker) Check(event Event) (Result, error) {
 	scan, err := c.update(state, transcript)
 	if err != nil {
 		// Прочитанное до сбоя сохраняется: следующее событие продолжит с него
-		expired := c.expired()
+		expired := c.expired(ctx)
 		c.substage("save")
 		err = errors.Join(err, locked.save())
 		if expired {
@@ -141,7 +143,7 @@ func (c Checker) Check(event Event) (Result, error) {
 	// Когда транскрипт ещё не дочитан либо выдачи нет, сохранение смещения
 	// позволяет продолжить чтение следующим событием. Не сохраняем только
 	// состояние с уже вычисленным напоминанием: иначе оно будет потеряно.
-	if len(result.Notices) > 0 && c.expired() {
+	if len(result.Notices) > 0 && c.expired(ctx) {
 		return Result{}, ErrNoTime
 	}
 	c.substage("save")
@@ -159,8 +161,8 @@ func (c Checker) substage(name string) {
 	}
 }
 
-func (c Checker) expired() bool {
-	return (c.Context != nil && c.Context.Err() != nil) || (!c.Deadline.IsZero() && !c.now().Before(c.Deadline))
+func (c Checker) expired(ctx context.Context) bool {
+	return ctx.Err() != nil || (!c.Deadline.IsZero() && !c.now().Before(c.Deadline))
 }
 
 // prepareFresh готовит запись впервые встреченной сессии: убирает давние

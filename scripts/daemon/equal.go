@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/aiseeq/chooks/internal/fallbackwatch"
 )
@@ -58,8 +59,10 @@ tools:
 `
 
 const (
-	homeMark = "@HOME@"
-	workMark = "@WORK@"
+	homeMark        = "@HOME@"
+	workMark        = "@WORK@"
+	outputClipLimit = 600
+	fileClipLimit   = 700
 )
 
 // eqCase — один вход: подкоманда, JSON stdin (или сырой), аргументы, правки env
@@ -401,7 +404,7 @@ type equalRun struct {
 	fallbackLog     string
 }
 
-func (r equalRun) invoke(binary string, c eqCase) (observed, string, error) {
+func (r equalRun) invoke(binary string, c *eqCase) (observed, string, error) {
 	s, err := prepare(r.sandbox, c.suite)
 	if err != nil {
 		return observed{}, "", err
@@ -475,7 +478,14 @@ func clip(s string, n int, tail bool) string {
 		return strconv.Quote(s)
 	}
 	if tail {
-		return strconv.Quote("…" + s[len(s)-n:])
+		start := len(s) - n
+		for start < len(s) && !utf8.RuneStart(s[start]) {
+			start++
+		}
+		return strconv.Quote("…" + s[start:])
+	}
+	for n > 0 && n < len(s) && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return strconv.Quote(s[:n] + "…")
 }
@@ -486,10 +496,10 @@ func diffObserved(a, b observed) []string {
 		out = append(out, fmt.Sprintf("  exit: cli=%d proxy=%d", a.code, b.code))
 	}
 	if a.stdout != b.stdout {
-		out = append(out, fmt.Sprintf("  stdout: cli=%s\n          proxy=%s", clip(a.stdout, 600, false), clip(b.stdout, 600, false)))
+		out = append(out, fmt.Sprintf("  stdout: cli=%s\n          proxy=%s", clip(a.stdout, outputClipLimit, false), clip(b.stdout, outputClipLimit, false)))
 	}
 	if a.stderr != b.stderr {
-		out = append(out, fmt.Sprintf("  stderr: cli=%s\n          proxy=%s", clip(a.stderr, 600, false), clip(b.stderr, 600, false)))
+		out = append(out, fmt.Sprintf("  stderr: cli=%s\n          proxy=%s", clip(a.stderr, outputClipLimit, false), clip(b.stderr, outputClipLimit, false)))
 	}
 	keys := slices.Sorted(maps.Keys(a.files))
 	for k := range b.files {
@@ -501,13 +511,47 @@ func diffObserved(a, b observed) []string {
 		x, okA := a.files[k]
 		y, okB := b.files[k]
 		if x != y || okA != okB {
-			out = append(out, fmt.Sprintf("  file %s:\n    cli=%s\n    proxy=%s", k, clip(x, 700, true), clip(y, 700, true)))
+			out = append(out, fmt.Sprintf("  file %s:\n    cli=%s\n    proxy=%s", k, clip(x, fileClipLimit, true), clip(y, fileClipLimit, true)))
 		}
 	}
 	return out
 }
 
-func runEqual(argv []string) (int, error) {
+func compareCases(r equalRun, cli, proxy string, cases []eqCase) ([]string, int, int, map[string][]string, error) {
+	var lines []string
+	mismatches, served := 0, 0
+	fallbacks := map[string][]string{}
+	for i := range cases {
+		c := &cases[i]
+		want, _, err := r.invoke(cli, c)
+		if err != nil {
+			return nil, mismatches, served, fallbacks, err
+		}
+		got, reason, err := r.invoke(proxy, c)
+		if err != nil {
+			return nil, mismatches, served, fallbacks, err
+		}
+		if reason == "" {
+			served++
+		} else {
+			fallbacks[reason] = append(fallbacks[reason], c.name)
+		}
+		diff := diffObserved(want, got)
+		if len(diff) == 0 {
+			continue
+		}
+		mismatches++
+		path := "daemon"
+		if reason != "" {
+			path = "CLI: " + reason
+		}
+		lines = append(lines, fmt.Sprintf("### %s (path: %s)", c.name, path))
+		lines = append(lines, diff...)
+	}
+	return lines, mismatches, served, fallbacks, nil
+}
+
+func runEqual(argv []string) (code int, retErr error) {
 	fsFlags := flag.NewFlagSet("equal", flag.ContinueOnError)
 	var bin binaries
 	bin.register(fsFlags)
@@ -545,44 +589,13 @@ func runEqual(argv []string) (int, error) {
 	if err != nil {
 		return 2, fmt.Errorf("daemon log: %w", err)
 	}
-	defer logFile.Close()
+	defer closeLogFileOnReturn(logFile, &retErr)()
 	d, err := startDaemon(bin.cli, logFile, "")
 	if err != nil {
 		return 2, err
 	}
 	r.socket = d.socket
-	var lines []string
-	mismatches, served := 0, 0
-	fallbacks := map[string][]string{}
-	var runErr error
-	for _, c := range cases {
-		a, _, err := r.invoke(bin.cli, c)
-		if err != nil {
-			runErr = err
-			break
-		}
-		b, reason, err := r.invoke(bin.proxy, c)
-		if err != nil {
-			runErr = err
-			break
-		}
-		if reason == "" {
-			served++
-		} else {
-			fallbacks[reason] = append(fallbacks[reason], c.name)
-		}
-		diff := diffObserved(a, b)
-		if len(diff) == 0 {
-			continue
-		}
-		mismatches++
-		path := "daemon"
-		if reason != "" {
-			path = "CLI: " + reason
-		}
-		lines = append(lines, fmt.Sprintf("### %s (path: %s)", c.name, path))
-		lines = append(lines, diff...)
-	}
+	lines, mismatches, served, fallbacks, runErr := compareCases(r, bin.cli, bin.proxy, cases)
 	daemonExit := d.stop()
 	if runErr != nil {
 		return 2, runErr

@@ -35,7 +35,7 @@ func newFixture(t *testing.T) *fixture {
 		skillDir:   filepath.Join(root, "skills", "demo"),
 		memory:     filepath.Join(root, "proj", "CLAUDE.md"),
 		transcript: filepath.Join(root, "projects", "p", "sess-1.jsonl"),
-		checker:    Checker{StateDir: filepath.Join(root, "state")},
+		checker:    Checker{Context: context.Background(), StateDir: filepath.Join(root, "state")},
 	}
 	for _, dir := range []string{f.skillDir, filepath.Dir(f.memory), filepath.Dir(f.transcript)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -230,7 +230,7 @@ func TestBaseSurvivesHookRestart(t *testing.T) {
 	f.check(Event{})
 
 	// Новый процесс хука: только каталог записей
-	f.checker = Checker{StateDir: f.checker.StateDir}
+	f.checker = Checker{Context: context.Background(), StateDir: f.checker.StateDir}
 	f.writeSkill("В.", base.Add(3*time.Minute))
 	wantDiff(t, f.check(Event{}), []string{"-Б.", "+В."}, []string{"А."})
 }
@@ -1184,7 +1184,7 @@ func TestSkillCalledFromRecord(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
 
 	// Записи нет — ErrNoState, файл не создаётся
-	if _, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); !errors.Is(err, ErrNoState) {
+	if _, err := SkillCalledContext(context.Background(), dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); !errors.Is(err, ErrNoState) {
 		t.Fatalf("без записи: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sess-1.json")); !errors.Is(err, os.ErrNotExist) {
@@ -1195,7 +1195,7 @@ func TestSkillCalledFromRecord(t *testing.T) {
 	f.writeSkill("Тело.", base)
 	f.appendTranscript(jsonLine(t, map[string]any{"type": "user", "timestamp": stamp(base), "message": map[string]any{"role": "user", "content": "письмо сессии"}}))
 	f.check(Event{})
-	if called, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || called {
+	if called, err := SkillCalledContext(context.Background(), dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || called {
 		t.Fatalf("до вызова: called %t, %v", called, err)
 	}
 
@@ -1211,26 +1211,26 @@ func TestSkillCalledFromRecord(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(dir, "sess-1.a1.json")); err != nil || !strings.Contains(string(data), `"name":"demo"`) {
 		t.Fatalf("в записи субагента нет вызова: %s, %v", data, err)
 	}
-	if called, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || called {
+	if called, err := SkillCalledContext(context.Background(), dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || called {
 		t.Fatalf("вызов субагента засчитан: called %t, %v", called, err)
 	}
 
 	// Вызов главным агентом, затем сжатие
 	f.load("Тело.", base.Add(2*time.Minute))
 	f.check(Event{})
-	if called, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || !called {
+	if called, err := SkillCalledContext(context.Background(), dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || !called {
 		t.Fatalf("после вызова: called %t, %v", called, err)
 	}
-	if called, err := SkillCalled(dir, "sess-1", []string{"other"}, time.Now().Add(time.Second)); err != nil || called {
+	if called, err := SkillCalledContext(context.Background(), dir, "sess-1", []string{"other"}, time.Now().Add(time.Second)); err != nil || called {
 		t.Fatalf("другой скилл: called %t, %v", called, err)
 	}
 	// Любой из списка засчитывается
-	if called, err := SkillCalled(dir, "sess-1", []string{"other", "demo"}, time.Now().Add(time.Second)); err != nil || !called {
+	if called, err := SkillCalledContext(context.Background(), dir, "sess-1", []string{"other", "demo"}, time.Now().Add(time.Second)); err != nil || !called {
 		t.Fatalf("скилл вторым в списке: called %t, %v", called, err)
 	}
 	f.appendTranscript(f.compactLines("", base.Add(3*time.Minute))...)
 	f.check(Event{})
-	if called, err := SkillCalled(dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || !called {
+	if called, err := SkillCalledContext(context.Background(), dir, "sess-1", []string{"demo"}, time.Now().Add(time.Second)); err != nil || !called {
 		t.Fatalf("после сжатия: called %t, %v", called, err)
 	}
 }
@@ -1247,7 +1247,7 @@ func TestSkillCalledBadRecord(t *testing.T) {
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			called, err := SkillCalled(dir, "s1", []string{"demo"}, time.Now().Add(time.Second))
+			called, err := SkillCalledContext(context.Background(), dir, "s1", []string{"demo"}, time.Now().Add(time.Second))
 			if err == nil || called {
 				t.Fatalf("called %t, ошибка %v", called, err)
 			}
@@ -1256,7 +1256,7 @@ func TestSkillCalledBadRecord(t *testing.T) {
 			}
 		})
 	}
-	if _, err := SkillCalled(dir, "../s1", []string{"demo"}, time.Now()); err == nil {
+	if _, err := SkillCalledContext(context.Background(), dir, "../s1", []string{"demo"}, time.Now()); err == nil {
 		t.Error("имя сессии с путём принято")
 	}
 }
@@ -1273,7 +1273,7 @@ func TestSkillCalledLockBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now()
-	_, err = SkillCalled(dir, "s1", []string{"demo"}, started.Add(150*time.Millisecond))
+	_, err = SkillCalledContext(context.Background(), dir, "s1", []string{"demo"}, started.Add(150*time.Millisecond))
 	if !errors.Is(err, core.ErrLockBusy) {
 		t.Fatalf("ожидалась занятая блокировка, получено %v", err)
 	}
@@ -1286,7 +1286,7 @@ func TestSkillCalledLockBounded(t *testing.T) {
 // он стоял секунды) и читается без хвоста прежней
 func TestSaveShorterStateKeepsSizeAndReads(t *testing.T) {
 	dir := t.TempDir()
-	long, err := openState(dir, "s.json", time.Now().Add(time.Second))
+	long, err := openState(context.Background(), dir, "s.json", time.Now().Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1301,7 +1301,7 @@ func TestSaveShorterStateKeepsSizeAndReads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	short, err := openState(dir, "s.json", time.Now().Add(time.Second))
+	short, err := openState(context.Background(), dir, "s.json", time.Now().Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1319,7 +1319,7 @@ func TestSaveShorterStateKeepsSizeAndReads(t *testing.T) {
 		t.Fatalf("размер записи %d, ждали прежний %d", after.Size(), before.Size())
 	}
 
-	again, err := openState(dir, "s.json", time.Now().Add(time.Second))
+	again, err := openState(context.Background(), dir, "s.json", time.Now().Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1330,7 +1330,7 @@ func TestSaveShorterStateKeepsSizeAndReads(t *testing.T) {
 		t.Fatalf("прочитано %q/%d, ждали t/7", again.State.Transcript, again.State.Offset)
 	}
 	again.close()
-	if called, err := SkillCalled(dir, "s", []string{"x"}, time.Now().Add(time.Second)); err != nil || called {
+	if called, err := SkillCalledContext(context.Background(), dir, "s", []string{"x"}, time.Now().Add(time.Second)); err != nil || called {
 		t.Fatalf("SkillCalled по добитой записи: %v, %v", called, err)
 	}
 }

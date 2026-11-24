@@ -467,15 +467,6 @@ func (s *limitsSnapshot) weekOf(account string, now time.Time) (weeklyUsage, boo
 	return weeklyUsage{}, false
 }
 
-// diskLimits читает снимок по пути из LimitsFile
-func diskLimits(request hookctx.Context) (*limitsSnapshot, error) {
-	path, err := LimitsFile(request)
-	if err != nil {
-		return nil, err
-	}
-	return loadLimits(path)
-}
-
 // loadLimits читает снимок. Файла нет — снимок пустой. Снимок прежней формы
 // (без weeks) становится первой неделей: доля в нём уже записана
 func loadLimits(path string) (*limitsSnapshot, error) {

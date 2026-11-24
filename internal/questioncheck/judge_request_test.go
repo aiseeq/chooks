@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/hookctx"
 )
 
@@ -104,7 +105,9 @@ func TestKillJudgeGroups(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			_ = syscall.Kill(child, syscall.SIGKILL)
+			if _, stopErr := proc.StopChild(child, 0, func() error { return syscall.Kill(child, syscall.SIGKILL) }); stopErr != nil {
+				t.Errorf("stop judge child %d: %v", child, stopErr)
+			}
 			t.Fatalf("judge child %d survived", child)
 		}
 	}

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"golang.org/x/sys/unix"
 
 	"github.com/aiseeq/chooks/internal/hookwire"
@@ -315,7 +316,7 @@ func TestUnexpectedAckFallsBack(t *testing.T) {
 func getPeerPID(fd int) (int32, error) {
 	cred, err := unix.GetsockoptUcred(fd, unix.SOL_SOCKET, unix.SO_PEERCRED)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("get peer credentials: %w", err)
 	}
 	return cred.Pid, nil
 }
@@ -374,10 +375,18 @@ func TestSIGTERMAfterCommitTellsDaemon(t *testing.T) {
 	select {
 	case <-committed:
 	case <-time.After(10 * time.Second):
-		_ = cmd.Process.Kill()
+		if _, err := proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() }); err != nil {
+			t.Errorf("stop proxy: %v", err)
+		}
+		if err := cmd.Wait(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Errorf("wait for proxy: %v", err)
+			}
+		}
 		t.Fatal("no commit")
 	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if _, err := proc.StopChild(cmd.Process.Pid, time.Second, func() error { return cmd.Process.Signal(syscall.SIGTERM) }); err != nil {
 		t.Fatal(err)
 	}
 	err = cmd.Wait()

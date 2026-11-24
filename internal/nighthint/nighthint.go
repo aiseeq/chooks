@@ -146,33 +146,11 @@ func HasQuestion(message string) bool {
 // вызова признака блокировки: днём шина не спрашивается
 func Run(ctx context.Context, deps Deps, event Event) (Result, error) {
 	deps.Store.Context = ctx
-	var damaged error
-	switch event.Name {
-	case EventSessionStart:
-	case EventUserPromptSubmit:
-		// Новый ход снимает отметку подсказки на Stop: она держится только
-		// до следующей реплики, чтобы продолжение после подсказки не
-		// получало её по кругу
-		if err := deps.Store.ResetStop(event.SessionID); err != nil {
-			if !errors.Is(err, ErrRecordDamaged) {
-				return Result{}, fmt.Errorf("reset stop mark: %w", err)
-			}
-			damaged = err
-		}
-	case EventPreToolUse:
-		if event.ToolName != askTool {
-			return Result{Skip: "не " + askTool}, nil
-		}
-	case EventStop:
-		if event.StopHookActive {
-			return Result{Skip: "повторный Stop (stop_hook_active)"}, nil
-		}
-		if !HasQuestion(event.LastMessage) {
-			return Result{Skip: "в ответе нет строки с " + questionMark}, nil
-		}
-	default:
-		return Result{}, fmt.Errorf("%w %q", ErrUnsupportedEvent, event.Name)
+	precheck, skip, err := precheckEvent(deps, event)
+	if err != nil || skip {
+		return precheck, err
 	}
+	damaged := precheck.Damaged
 
 	now := deps.Now()
 	if !IsNight(now) {
@@ -202,19 +180,7 @@ func Run(ctx context.Context, deps Deps, event Event) (Result, error) {
 		}
 	}
 
-	fresh := true
-	switch event.Name {
-	case EventSessionStart, EventUserPromptSubmit:
-		// Ночь отмечается всегда: после вызова скилла UserPromptSubmit идёт
-		// по ней — раз за ночь, письма сессий тоже приходят его ходом, и
-		// подсказка на каждое забила бы контекст
-		fresh, err = deps.Store.MarkNight(event.SessionID, NightOf(now))
-		fresh = fresh || event.contextReset()
-	case EventStop:
-		fresh, err = deps.Store.MarkStop(event.SessionID)
-	}
-	// Испорченная запись читается пустой и даёт подсказку: повтора с ней
-	// не бывает
+	fresh, err := markEvent(deps, event, now)
 	if errors.Is(err, ErrRecordDamaged) {
 		damaged, err = err, nil
 	}
@@ -226,6 +192,53 @@ func Run(ctx context.Context, deps Deps, event Event) (Result, error) {
 		return Result{Skip: "подсказка уже дана (раз за ночь, на Stop — раз за ход)", Damaged: damaged, SkillErr: skillErr}, nil
 	}
 	return Result{Context: Text(now), Damaged: damaged, SkillErr: skillErr}, nil
+}
+
+func precheckEvent(deps Deps, event Event) (Result, bool, error) {
+	var damaged error
+	switch event.Name {
+	case EventSessionStart:
+	case EventUserPromptSubmit:
+		// Новый ход снимает отметку подсказки на Stop: она держится только
+		// до следующей реплики, чтобы продолжение после подсказки не
+		// получало её по кругу
+		if err := deps.Store.ResetStop(event.SessionID); err != nil {
+			if !errors.Is(err, ErrRecordDamaged) {
+				return Result{}, false, fmt.Errorf("reset stop mark: %w", err)
+			}
+			damaged = err
+		}
+	case EventPreToolUse:
+		if event.ToolName != askTool {
+			return Result{Skip: "не " + askTool}, true, nil
+		}
+	case EventStop:
+		if event.StopHookActive {
+			return Result{Skip: "повторный Stop (stop_hook_active)"}, true, nil
+		}
+		if !HasQuestion(event.LastMessage) {
+			return Result{Skip: "в ответе нет строки с " + questionMark}, true, nil
+		}
+	default:
+		return Result{}, false, fmt.Errorf("%w %q", ErrUnsupportedEvent, event.Name)
+	}
+	return Result{Damaged: damaged}, false, nil
+}
+
+func markEvent(deps Deps, event Event, now time.Time) (bool, error) {
+	fresh := true
+	var err error
+	switch event.Name {
+	case EventSessionStart, EventUserPromptSubmit:
+		// Ночь отмечается всегда: после вызова скилла UserPromptSubmit идёт
+		// по ней — раз за ночь, письма сессий тоже приходят его ходом, и
+		// подсказка на каждое забила бы контекст
+		fresh, err = deps.Store.MarkNight(event.SessionID, NightOf(now))
+		fresh = fresh || event.contextReset()
+	case EventStop:
+		fresh, err = deps.Store.MarkStop(event.SessionID)
+	}
+	return fresh, err
 }
 
 // repeatUntilSkill — давать ли подсказку на UserPromptSubmit, когда ночь уже

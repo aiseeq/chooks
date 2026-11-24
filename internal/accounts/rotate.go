@@ -185,7 +185,7 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 	if len(raw) == 0 {
 		// Выход (/logout): активной учётки нет, хранилище не трогается
 		r.Log.Info("accounts: no login in Claude Code credentials")
-		if err := r.recordExternal(s, "", "", now, creds.mtime); err != nil {
+		if err := r.recordLogout(s, now, creds.mtime); err != nil {
 			return err
 		}
 		s.Active, s.SyncedMtime = "", creds.mtime
@@ -196,24 +196,46 @@ func (r *Rotator) sync(ctx context.Context, s *Store, force bool) error {
 		return err
 	}
 	if o.cleared() {
-		if a := s.byUUID(s.Active); a != nil && a.Dead == "" {
-			a.Dead = "Claude Code стёр токены: обновление отклонено, нужен /login"
-			r.Log.Warn("accounts: active login is dead", "account", a.Email)
-		}
-		s.SyncedMtime = creds.mtime
-		return nil
+		return r.syncCleared(s, creds.mtime)
 	}
 	known, err := s.byLogin(o)
-	switch {
-	case err == nil:
+	if err == nil {
 		if err := r.recordExternal(s, known.UUID, known.Email, now, creds.mtime); err != nil {
 			return err
 		}
 		r.adoptKnown(s, known, raw, now, creds.mtime)
 		return nil
-	case !errors.Is(err, errUnknownLogin):
+	}
+	if !errors.Is(err, errUnknownLogin) {
 		return err
 	}
+	return r.syncUnknown(ctx, s, raw, o, creds, now, force)
+}
+
+func (r *Rotator) recordLogout(s *Store, now, mtime time.Time) error {
+	if s.Active == "" {
+		return nil
+	}
+	rec := switchRecord{At: now, From: s.ActiveEmail(), Reason: "внешняя смена входа", Source: "external", TimeUncertain: true}
+	if !mtime.IsZero() && !mtime.After(now) {
+		rec.NotAfter = &mtime
+		if !s.SyncedMtime.IsZero() && !s.SyncedMtime.After(mtime) {
+			rec.NotBefore = &s.SyncedMtime
+		}
+	}
+	return appendSwitch(r.Paths, rec)
+}
+
+func (r *Rotator) syncCleared(s *Store, mtime time.Time) error {
+	if a := s.byUUID(s.Active); a != nil && a.Dead == "" {
+		a.Dead = "Claude Code стёр токены: обновление отклонено, нужен /login"
+		r.Log.Warn("accounts: active login is dead", "account", a.Email)
+	}
+	s.SyncedMtime = mtime
+	return nil
+}
+
+func (r *Rotator) syncUnknown(ctx context.Context, s *Store, raw json.RawMessage, o oauth, creds credentialsFile, now time.Time, force bool) error {
 	// Новый вход: чей он, говорит только API
 	if !now.Before(o.expires()) {
 		// Токен истёк, Claude Code обновит его сам — сверка после
@@ -469,43 +491,10 @@ func (r *Rotator) switchTo(ctx context.Context, s *Store, target *Account, reaso
 		release()
 		return err
 	}
-	from := s.byUUID(s.Active)
-	if len(creds.oauthRaw()) == 0 && s.Active != "" {
+	from, err := r.switchSourceAccount(s, creds)
+	if err != nil {
 		release()
-		s.SyncedMtime = time.Time{}
-		return errors.New("credentials login removed, switch postponed until it is synced")
-	}
-	if raw := creds.oauthRaw(); len(raw) > 0 {
-		cur, err := parseOAuth(raw)
-		if err != nil {
-			release()
-			return err
-		}
-		if cur.cleared() {
-			if from != nil && from.Dead == "" {
-				from.Dead = "Claude Code стёр токены: обновление отклонено, нужен /login"
-			}
-		} else {
-			owner, err := s.byLogin(cur)
-			if err != nil && !errors.Is(err, errUnknownLogin) {
-				release()
-				return err
-			}
-			if owner == nil {
-				// В файле вход, которого хранилище не знает (свежий /login):
-				// подмена потеряла бы его — сначала сверка
-				release()
-				s.SyncedMtime = time.Time{}
-				return errors.New("credentials hold an unknown login, switch postponed until it is saved")
-			}
-			if owner.UUID != s.Active {
-				release()
-				s.SyncedMtime = time.Time{}
-				return errors.New("credentials changed account, switch postponed until it is synced")
-			}
-			owner.OAuth, owner.SavedAt = raw, r.Now()
-			from = owner
-		}
+		return err
 	}
 	mtime, err := writeCredentials(r.Paths.Credentials(), creds, target.OAuth)
 	release()
@@ -529,6 +518,43 @@ func (r *Rotator) switchTo(ctx context.Context, s *Store, target *Account, reaso
 	}
 	r.Log.Info("accounts: switched", "from", fromEmail, "to", target.Email, "reason", reason)
 	return nil
+}
+
+func (r *Rotator) switchSourceAccount(s *Store, creds credentialsFile) (*Account, error) {
+	from := s.byUUID(s.Active)
+	if len(creds.oauthRaw()) == 0 && s.Active != "" {
+		s.SyncedMtime = time.Time{}
+		return nil, errors.New("credentials login removed, switch postponed until it is synced")
+	}
+	if raw := creds.oauthRaw(); len(raw) > 0 {
+		cur, err := parseOAuth(raw)
+		if err != nil {
+			return nil, err
+		}
+		if cur.cleared() {
+			if from != nil && from.Dead == "" {
+				from.Dead = "Claude Code стёр токены: обновление отклонено, нужен /login"
+			}
+		} else {
+			owner, err := s.byLogin(cur)
+			if err != nil && !errors.Is(err, errUnknownLogin) {
+				return nil, err
+			}
+			if owner == nil {
+				// В файле вход, которого хранилище не знает (свежий /login):
+				// подмена потеряла бы его — сначала сверка
+				s.SyncedMtime = time.Time{}
+				return nil, errors.New("credentials hold an unknown login, switch postponed until it is saved")
+			}
+			if owner.UUID != s.Active {
+				s.SyncedMtime = time.Time{}
+				return nil, errors.New("credentials changed account, switch postponed until it is synced")
+			}
+			owner.OAuth, owner.SavedAt = raw, r.Now()
+			from = owner
+		}
+	}
+	return from, nil
 }
 
 // switchRecord — строка журнала переключений

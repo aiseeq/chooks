@@ -12,11 +12,19 @@ import (
 	"time"
 )
 
+func closeLogFileOnReturn(logFile *os.File, retErr *error) func() {
+	return func() {
+		if closeErr := logFile.Close(); closeErr != nil && *retErr == nil {
+			*retErr = fmt.Errorf("close daemon log: %w", closeErr)
+		}
+	}
+}
+
 // runTiming — N последовательных pre-tool-use `git status`: сначала CLI,
 // потом прокси к демону; каждый ответ сверяется с первым ответом CLI.
 // Старт прокси меряется отдельно: без сокета он сразу исполняет CLI, здесь
 // /bin/true; разница с прямым /bin/true — цена старта прокси
-func runTiming(argv []string) (int, error) {
+func runTiming(argv []string) (code int, retErr error) {
 	fsFlags := flag.NewFlagSet("timing", flag.ContinueOnError)
 	var bin binaries
 	bin.register(fsFlags)
@@ -69,7 +77,7 @@ func runTiming(argv []string) (int, error) {
 	if err != nil {
 		return 2, fmt.Errorf("daemon log: %w", err)
 	}
-	defer logFile.Close()
+	defer closeLogFileOnReturn(logFile, &retErr)()
 	d, err := startDaemon(bin.cli, logFile, "")
 	if err != nil {
 		return 2, err

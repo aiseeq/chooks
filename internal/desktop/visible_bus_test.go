@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -55,7 +56,7 @@ func TestReviewRelativeDBusAddress(t *testing.T) {
 	hit := busListeners(t, daemon, request)
 	t.Chdir(daemon)
 	req := hookctx.New(nil, nil, nil, []string{"DBUS_SESSION_BUS_ADDRESS=unix:path=bus"}, request, 1, 2)
-	conn, _ := requestSessionBus(req)
+	conn, _ := requestSessionBus(context.Background(), req)
 	if conn != nil {
 		conn.Close()
 	}
@@ -75,7 +76,7 @@ func TestRelativeDBusAddressProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, _ := requestSessionBus(req)
+	conn, _ := requestSessionBus(context.Background(), req)
 	if conn != nil {
 		conn.Close()
 	}

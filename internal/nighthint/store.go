@@ -47,7 +47,7 @@ type Store struct {
 
 // MarkNight отмечает подсказку ночи night; false — она этой ночью уже дана
 func (s Store) MarkNight(sessionID, night string) (bool, error) {
-	return s.update(sessionID, func(rec *record) bool {
+	return s.update(s.context(), sessionID, func(rec *record) bool {
 		if rec.Night == night {
 			return false
 		}
@@ -58,7 +58,7 @@ func (s Store) MarkNight(sessionID, night string) (bool, error) {
 
 // MarkPresenceSkip отмечает первый за ночь пропуск по присутствию.
 func (s Store) MarkPresenceSkip(sessionID, night string) (bool, error) {
-	return s.update(sessionID, func(rec *record) bool {
+	return s.update(s.context(), sessionID, func(rec *record) bool {
 		if rec.PresenceSkipNight == night {
 			return false
 		}
@@ -69,7 +69,7 @@ func (s Store) MarkPresenceSkip(sessionID, night string) (bool, error) {
 
 // MarkStop отмечает подсказку на Stop; false — она в этом ходе уже дана
 func (s Store) MarkStop(sessionID string) (bool, error) {
-	return s.update(sessionID, func(rec *record) bool {
+	return s.update(s.context(), sessionID, func(rec *record) bool {
 		if rec.StopHinted {
 			return false
 		}
@@ -95,7 +95,7 @@ func (s Store) ResetStop(sessionID string) error {
 	if rec, err := parseRecord(data); err == nil && !rec.StopHinted {
 		return nil
 	}
-	_, err = s.update(sessionID, func(rec *record) bool {
+	_, err = s.update(s.context(), sessionID, func(rec *record) bool {
 		if !rec.StopHinted {
 			return false
 		}
@@ -105,10 +105,17 @@ func (s Store) ResetStop(sessionID string) error {
 	return err
 }
 
+func (s Store) context() context.Context {
+	if s.Context != nil {
+		return s.Context
+	}
+	return context.Background()
+}
+
 // update меняет запись сессии под блокировкой; change возвращает, изменил ли
 // он запись. Испорченная запись (оборванная запись) считается пустой и
 // перезаписывается целой, ошибка — ErrRecordDamaged рядом с результатом
-func (s Store) update(sessionID string, change func(*record) bool) (changed bool, err error) {
+func (s Store) update(ctx context.Context, sessionID string, change func(*record) bool) (changed bool, err error) {
 	path, err := s.path(sessionID)
 	if err != nil {
 		return false, err
@@ -125,11 +132,7 @@ func (s Store) update(sessionID string, change func(*record) bool) (changed bool
 			changed, err = false, fmt.Errorf("close record: %w", closeErr)
 		}
 	}()
-	ctx := s.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := core.LockFileContext(ctx, file, time.Now().Add(lockWait)); err != nil {
+	if err := core.LockFile(ctx, file, time.Now().Add(lockWait)); err != nil {
 		return false, err
 	}
 	data, err := io.ReadAll(file)

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -28,7 +29,7 @@ func TestLockFile_BusyUntilDeadline(t *testing.T) {
 	}
 	defer waiter.Close()
 	started := time.Now()
-	err = LockFile(waiter, started.Add(150*time.Millisecond))
+	err = LockFile(context.Background(), waiter, started.Add(150*time.Millisecond))
 	waited := time.Since(started)
 	if !errors.Is(err, ErrLockBusy) {
 		t.Fatalf("ожидалась ErrLockBusy, получено %v", err)
@@ -41,7 +42,7 @@ func TestLockFile_BusyUntilDeadline(t *testing.T) {
 	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_UN); err != nil {
 		t.Fatal(err)
 	}
-	if err := LockFile(waiter, time.Now().Add(time.Second)); err != nil {
+	if err := LockFile(context.Background(), waiter, time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("свободная блокировка: %v", err)
 	}
 }

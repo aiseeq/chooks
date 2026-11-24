@@ -137,7 +137,7 @@ func TestNeedsUsage(t *testing.T) {
 
 func TestShortTime(t *testing.T) {
 	at := time.Date(2026, 10, 26, 11, 0, 0, 0, time.Local)
-	if got := ShortTime(at); got != "пн 26.10 11:00" {
+	if got := ShortTimeIn(at, time.Local); got != "пн 26.10 11:00" {
 		t.Errorf("ShortTime: %q", got)
 	}
 }

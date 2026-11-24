@@ -2,12 +2,14 @@ package desktop
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/testbus"
 )
@@ -27,8 +29,15 @@ func privateSessionBus(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		if _, err := proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() }); err != nil {
+			t.Errorf("stop dbus-daemon: %v", err)
+		}
+		if err := cmd.Wait(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Errorf("wait for dbus-daemon: %v", err)
+			}
+		}
 	})
 	until := time.Now().Add(5 * time.Second)
 	for {
@@ -47,7 +56,7 @@ func privateSessionBus(t *testing.T) string {
 func TestRequestSessionBusConnUsable(t *testing.T) {
 	address := privateSessionBus(t)
 	req := hookctx.New(nil, nil, nil, []string{"DBUS_SESSION_BUS_ADDRESS=" + address}, "/", 1, 2)
-	conn, err := requestSessionBus(req)
+	conn, err := requestSessionBus(context.Background(), req)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

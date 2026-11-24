@@ -3,6 +3,7 @@ package statusline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -143,7 +144,53 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	}
 
 	now := time.Now().In(request.Location())
-	store, paths := loadAccounts(ctx, logger)
+	store, paths, warning, accountErr := loadAccounts(ctx)
+	if warning != "" {
+		if errors.Is(accountErr, errMissingAccountsRequest) {
+			logger.Warn(warning)
+		} else {
+			logger.Warn(warning, "error", accountErr)
+		}
+	}
+	owner, snapshot := currentWeeklyLimit(ctx, &input, store, now, logger)
+	if store != nil {
+		rotate(ctx, paths, store, snapshot, now, logger)
+	}
+	bar := weekBar{label: "нед"}
+	if store != nil && len(store.Accounts) > 1 && owner != "" {
+		// Учёток несколько: полоса подписана учёткой, чья неделя, без «нед»
+		// (пользователь 22.10: достаточно «<учётка> ▓▓▓▓▓▓▓▓▓░ 96%»)
+		bar.label = store.ShortName(owner)
+	}
+	if store != nil && len(store.Accounts) > 0 {
+		bar.pool = poolPace(ctx, store, snapshot, now, logger)
+	}
+	// HOME запроса — через request.Path: у CLI как есть (как UserHomeDir из
+	// пакета os), у демона — от cwd запроса
+	home := request.Path(hookctx.EnvHome)
+	bar.unit = store.PlanUnitForHome(now, home)
+	visible := func() (bool, error) { return desktop.TabVisible(ctx) }
+	if input.Workspace.ProjectDir == "" && input.CWD == "" && input.Workspace.CurrentDir == "" {
+		input.CWD = request.Cwd
+		if input.CWD == "" {
+			input.CWD = "."
+		}
+	}
+	used := contextFill(ctx, input, paths.ClaudeDir, logger)
+	// Имя проекта сравнивает каталог из ввода с $HOME лексически: MatchPath
+	match := request.MatchPath(hookctx.EnvHome)
+	line, title := buildForRuntime(request.RuntimeDir(), &match, input, used, bar, now, visible, logger)
+	titleErr := desktop.SetTerminalTitleForRequest(title, request)
+	if titleErr != nil {
+		logger.Warn("terminal title not set", "error", titleErr)
+	}
+
+	return line, nil
+}
+
+var errMissingAccountsRequest = errors.New("hook request is missing")
+
+func currentWeeklyLimit(ctx context.Context, input *Input, store *accounts.Store, now time.Time, logger core.Logger) (string, *limitsSnapshot) {
 	owner := ""
 	var snapshot *limitsSnapshot
 	limit := input.RateLimits.SevenDay
@@ -190,39 +237,7 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 			owner = active
 		}
 	}
-	if store != nil {
-		rotate(ctx, paths, store, snapshot, now, logger)
-	}
-	bar := weekBar{label: "нед"}
-	if store != nil && len(store.Accounts) > 1 && owner != "" {
-		// Учёток несколько: полоса подписана учёткой, чья неделя, без «нед»
-		// (пользователь 22.10: достаточно «<учётка> ▓▓▓▓▓▓▓▓▓░ 96%»)
-		bar.label = store.ShortName(owner)
-	}
-	if store != nil && len(store.Accounts) > 0 {
-		bar.pool = poolPace(ctx, store, snapshot, now, logger)
-	}
-	// HOME запроса — через request.Path: у CLI как есть (как UserHomeDir из
-	// пакета os), у демона — от cwd запроса
-	home := request.Path(hookctx.EnvHome)
-	bar.unit = store.PlanUnitForHome(now, home)
-	visible := func() (bool, error) { return desktop.TabVisible(ctx) }
-	if input.Workspace.ProjectDir == "" && input.CWD == "" && input.Workspace.CurrentDir == "" {
-		input.CWD = request.Cwd
-		if input.CWD == "" {
-			input.CWD = "."
-		}
-	}
-	used := contextFill(ctx, input, paths.ClaudeDir, logger)
-	// Имя проекта сравнивает каталог из ввода с $HOME лексически: MatchPath
-	match := request.MatchPath(hookctx.EnvHome)
-	line, title := buildForRuntime(request.RuntimeDir(), &match, input, used, bar, now, visible, logger)
-	titleErr := desktop.SetTerminalTitleForRequest(title, request)
-	if titleErr != nil {
-		logger.Warn("terminal title not set", "error", titleErr)
-	}
-
-	return line, nil
+	return owner, snapshot
 }
 
 // build собирает строку статуса и заголовок окна. Сбой чтения состояния
@@ -398,10 +413,7 @@ func reloadState(runtimeDir, sessionID string, logger core.Logger) core.SessionS
 	return state
 }
 
-// terminalTitle собирает заголовок окна: значок состояния и проект.
-// Значок идёт первым — по нему окно находится взглядом в панели задач; ветка
-// есть в строке статуса, во вкладке она вытесняет имя проекта
-// projectBadge рисует имя проекта плашкой, цвет которой показывает состояние:
+// projectBadgeForHome рисует имя проекта плашкой, цвет которой показывает состояние:
 // синяя — работает, в том числе своими агентами после хода, сине-серая — ход
 // кончился и ждёт внешнего: shell, монитор, будильник (что именно — в
 // «фон:»), янтарная — ждёт ответа человека, тёмно-зелёная — новое, что
@@ -607,23 +619,20 @@ func firstDir(candidates ...string) string {
 
 // loadAccounts читает хранилище учёток. Сбой не срывает строку статуса:
 // неделя пишется без учётки, ротации нет
-func loadAccounts(ctx context.Context, logger core.Logger) (*accounts.Store, accounts.Paths) {
+func loadAccounts(ctx context.Context) (*accounts.Store, accounts.Paths, string, error) {
 	request, ok := hookctx.Request(ctx)
 	if !ok {
-		logger.Warn("accounts paths unavailable: hook request is missing")
-		return nil, accounts.Paths{}
+		return nil, accounts.Paths{}, "accounts paths unavailable: hook request is missing", errMissingAccountsRequest
 	}
 	paths, err := accounts.DefaultPaths(request)
 	if err != nil {
-		logger.Warn("accounts paths unavailable, no rotation", "error", err)
-		return nil, paths
+		return nil, paths, "accounts paths unavailable, no rotation", err
 	}
 	store, err := accounts.Load(paths)
 	if err != nil {
-		logger.Warn("accounts store unreadable, no rotation", "error", err)
-		return nil, paths
+		return nil, paths, "accounts store unreadable, no rotation", err
 	}
-	return store, paths
+	return store, paths, "", nil
 }
 
 // rotateArgs — подкоманда фоновой ротации учёток

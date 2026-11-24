@@ -319,31 +319,22 @@ func claudeDirectoryCallReads(call *syntax.CallExpr) bool {
 	case "cd", "pushd":
 		return true
 	case "claude", "cl":
-		return clientReads(name, call.Args[1:])
+		return clientReads(call.Args[1:])
 	}
 	return readsOnly(call, agentReaders, agentReaderGitSubcommands)
 }
 
-// clientReads — клиент модели в каталоге .claude только читает: каждое
-// слово после имени — опция без значения через пробел (`--verbose`), кроме
-// --debug-file, --settings, --mcp-config, --plugin-dir, или аргументы —
-// ровно `mcp list`. Любое другое слово (значение опции, промпт после -p,
-// подкоманда, в том числе скрытая) — отказ: первое позиционное слово claude
-// сверяет со своими командами даже при -p, а их список растёт с версией.
-// `--` тоже отказ: слова после него — операнды, даже если начинаются с `-`
-func clientReads(name string, args []*syntax.Word) bool {
-	var operands []string
-	for _, arg := range args {
-		value := wordOwnText(arg)
-		if value == "--" || !strings.HasPrefix(value, "-") {
-			operands = append(operands, value)
-			continue
-		}
-		if clientOptionWrites(name, value) || clientOptionRuns(value) {
-			return false
-		}
+// clientReads — клиент модели в каталоге .claude только читает без
+// аргументов (голый `claude`) или с аргументами ровно `mcp list`. Любой
+// другой аргумент — отказ: опции пишут файлы и снимают хуки (--bare,
+// --worktree, кластер -p-settings=…), промпт приходит и после -p, и через
+// stdin, а подкоманды, в том числе скрытые, растут с версией claude —
+// списки их не догоняют
+func clientReads(args []*syntax.Word) bool {
+	if len(args) == 0 {
+		return true
 	}
-	return len(operands) == 0 || slices.Equal(operands, []string{"mcp", "list"})
+	return len(args) == 2 && wordOwnText(args[0]) == "mcp" && wordOwnText(args[1]) == "list"
 }
 
 // readerProgram — имя программы простой команды для сверки с белыми

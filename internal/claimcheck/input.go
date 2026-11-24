@@ -117,6 +117,7 @@ const (
 	shortAnswerInputCharLimit  = 24300
 	toolInputCharLimit         = 300
 	callsOnlyInputCharLimit    = 1000
+	callsOnlyMarkerCharReserve = 48
 	toolOutputCharLimit        = 1600
 	lastTurnToolsKept          = 5
 	skippedToolName            = "[пропущено]"
@@ -207,6 +208,11 @@ func BuildInputContext(ctx context.Context, path string, line int, options Optio
 		input.TurnLine = rows[answerStart].Line
 	}
 	words := answerWords(answer)
+	if options.CallsOnly {
+		words = append(words, "amend", "commit", "push")
+		slices.Sort(words)
+		words = slices.Compact(words)
+	}
 	answerWordCount := countAnswerWords(answer)
 	matcher := newWordMatcher(words)
 	results := indexToolResults(rows)
@@ -590,7 +596,7 @@ func appendCallTools(ctx context.Context, out *Input, r *row, rows []row, result
 			t.Output, t.fullOutput = "", ""
 			t.outputWords = nil
 			t.OutputLength, t.ExitCode, t.IsError = 0, nil, nil
-			t.relevant = matches(t.Input, words)
+			t.relevant = matches(t.fullInput, words)
 		}
 		out.TurnTools = append(out.TurnTools, t)
 	}
@@ -1369,7 +1375,12 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 		}
 		t := &bounded[i]
 		t.relevant = t.relevant || matches(t.Input, words) || matches(t.Output, words)
-		t.answerWords = words
+		if t.callsOnly {
+			t.relevant = t.relevant || matches(t.fullInput, words)
+		}
+		if !t.callsOnly || len(t.answerWords) == 0 {
+			t.answerWords = words
+		}
 	}
 	fullWords := make([][]string, len(bounded))
 	minimumSizes := make([]int, len(bounded))
@@ -1409,16 +1420,33 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 		if available < minimumSizes[i] {
 			return nil
 		}
-		fit, ok, err := fitTool(bounded[i], available)
+		candidate := bounded[i]
+		if candidate.callsOnly {
+			candidate.relevant = false
+		}
+		fit, ok, err := fitTool(candidate, available)
 		if err != nil || !ok {
 			return err
 		}
+		fit.relevant = bounded[i].relevant
 		bounded[i], selected[i] = fit, true
 		currentSize, err = toolsJSONSize(toolsWithSkipped(bounded, selected))
 		if err != nil {
 			return err
 		}
 		return nil
+	}
+	if bounded[0].callsOnly {
+		for i := range bounded {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if utf8.RuneCountInString(bounded[i].fullInput) <= toolInputCharLimit {
+				if err := keep(i, budget); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 	remaining := make(map[string]bool)
 	for _, visible := range fullWords {
@@ -1435,6 +1463,9 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 	}
 	attempted := make([]bool, len(bounded))
 	for {
+		if bounded[0].callsOnly {
+			break
+		}
 		currentSize, err := toolsJSONSize(toolsWithSkipped(bounded, selected))
 		if err != nil {
 			return nil, err
@@ -1528,6 +1559,49 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 	for i := range bounded {
 		if err := keep(i, budget); err != nil {
 			return nil, err
+		}
+	}
+	if bounded[0].callsOnly {
+		remaining := 0
+		for i := range bounded {
+			if selected[i] && bounded[i].relevant {
+				remaining++
+			}
+		}
+		for i := range bounded {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if !selected[i] || !bounded[i].relevant || remaining == 0 {
+				continue
+			}
+			remaining--
+			currentSize, err := toolsJSONSize(toolsWithSkipped(bounded, selected))
+			if err != nil {
+				return nil, err
+			}
+			callSize, err := toolsJSONSize([]Tool{bounded[i]})
+			if err != nil {
+				return nil, err
+			}
+			share := (budget - currentSize + callSize) / (remaining + 1)
+			if share <= callSize {
+				continue
+			}
+			fit, ok, err := fitTool(bounded[i], share)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			fitSize, err := toolsJSONSize([]Tool{fit})
+			if err != nil {
+				return nil, err
+			}
+			if fitSize > callSize {
+				bounded[i] = fit
+			}
 		}
 	}
 	return toolsWithSkipped(bounded, selected), nil
@@ -1629,7 +1703,7 @@ func skippedMarkerSize(skipped int) (int, error) {
 // fitTool crops the call's input and output from their full texts, cutting the
 // longer allowance by the overflow until the call fits budget characters of JSON.
 func fitTool(tool Tool, budget int) (Tool, bool, error) {
-	if len(tool.cropWords) > 0 && sameWords(tool.answerWords, tool.cropWords) {
+	if !tool.callsOnly && len(tool.cropWords) > 0 && sameWords(tool.answerWords, tool.cropWords) {
 		size, err := toolsJSONSize([]Tool{tool})
 		if err != nil {
 			return Tool{}, false, err
@@ -1641,7 +1715,10 @@ func fitTool(tool Tool, budget int) (Tool, bool, error) {
 	tool.cropWords = nil
 	inputLimit, outputLimit := toolInputCharLimit, toolOutputCharLimit
 	if tool.callsOnly {
-		inputLimit = callsOnlyInputCharLimit
+		inputLimit = max(toolInputCharLimit-callsOnlyMarkerCharReserve, 0)
+		if tool.relevant {
+			inputLimit = max(callsOnlyInputCharLimit-callsOnlyMarkerCharReserve, 0)
+		}
 	}
 	for {
 		tool.Input = toolInputExcerpt(tool, inputLimit)

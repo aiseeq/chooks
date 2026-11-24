@@ -28,7 +28,7 @@ type preToolUseOutput struct {
 	} `json:"hookSpecificOutput"`
 }
 
-// writeAllowedOutput пишет ответ разрешённого вызова: подмену pgrep и
+// writeAllowedOutputContext пишет ответ разрешённого вызова: подмену pgrep и
 // подсказку о широком обходе одним JSON; нечего сказать — ничего
 func writeAllowedOutputContext(ctx context.Context, input *core.ToolInput, config *core.Config, logger core.Logger, out io.Writer) {
 	updated, err := rewritePgrep(input, config, logger)

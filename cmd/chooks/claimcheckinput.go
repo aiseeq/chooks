@@ -34,6 +34,8 @@ func newClaimCheckInputCmd() *cobra.Command {
 	cmd.Flags().IntVar(&contextLimit, "context-limit", claimcheck.DefaultContextLimit, "maximum context size in characters")
 	cmd.Flags().BoolVar(&unbounded, "unbounded", false, "build full input for visibility measurement")
 	cmd.Flags().BoolVar(&callsOnly, "calls-only", false, "include calls without outputs")
-	_ = cmd.Flags().MarkHidden("unbounded")
+	if err := cmd.Flags().MarkHidden("unbounded"); err != nil {
+		panic(err)
+	}
 	return cmd
 }

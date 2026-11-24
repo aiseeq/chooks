@@ -80,7 +80,7 @@ type claimAsker interface {
 
 type cliAsker struct{ judge questioncheck.CLIJudge }
 
-func (a cliAsker) ask(ctx context.Context, _, input string) (string, questioncheck.Usage, error) {
+func (a cliAsker) ask(ctx context.Context, ref, input string) (string, questioncheck.Usage, error) {
 	return a.judge.Ask(ctx, input)
 }
 func (a cliAsker) model() string { return a.judge.Model() }
@@ -89,7 +89,7 @@ func (a cliAsker) model() string { return a.judge.Model() }
 // мера стенда без модели; модель в TSV — stub
 type recordedAsker struct{ dir string }
 
-func (a recordedAsker) ask(_ context.Context, ref, _ string) (string, questioncheck.Usage, error) {
+func (a recordedAsker) ask(_ context.Context, ref, input string) (string, questioncheck.Usage, error) {
 	data, err := os.ReadFile(filepath.Join(a.dir, ref+".json"))
 	if err != nil {
 		return "", questioncheck.Usage{}, fmt.Errorf("recorded answer: %w", err)

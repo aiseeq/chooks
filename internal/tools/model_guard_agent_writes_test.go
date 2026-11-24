@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // TestModelGuardAgentWriteWhitelist проверяет белый список записи в
@@ -32,7 +33,7 @@ func TestModelGuardAgentWriteWhitelist(t *testing.T) {
 		fableText = "---\nname: w\nmodel: fable\n---\nRun `ls` and keep $HOME literal\n"
 		run       = "claude -p hi"
 		pass      = ""
-		unknown   = "содержимое изменяемого файла настроек не проверить"
+		unknown   = "содержимое изменяемого определения агента не проверить"
 		fable     = `модель "fable" не одобрена`
 	)
 	known := "cat > " + agent + " <<'EOF'\n" + opusText + "EOF\n"
@@ -46,6 +47,7 @@ func TestModelGuardAgentWriteWhitelist(t *testing.T) {
 		{"E1 1>", "cat 1> " + agent + " <<'EOF'\n" + opusText + "EOF\n" + run, pass},
 		{"E1 fable 'EOF' отказ по модели", "cat > " + agent + " <<'EOF'\n" + fableText + "EOF\n" + run, fable},
 		{"E1 fable \"EOF\" отказ по модели", "cat > " + agent + " <<\"EOF\"\n" + fableText + "EOF\n" + run, fable},
+		{"escaped newline before second frontmatter", "cat > " + agent + " <<'EOF'\n---\nname: x # \\\\n---\nmodel: fable\n---\nEOF\n" + run, fable},
 		{"unquoted без $ и обратной косой", "cat > " + agent + " <<EOF\n" + opus + "EOF\n" + run, pass},
 		{"unquoted с экранированным \\$", "cat > " + agent + " <<EOF\n---\nname: \\$W\nmodel: opus\n---\nEOF\n" + run, unknown},
 		// H-A: дозапись и запись не только stdout
@@ -133,5 +135,104 @@ func TestWrittenAgentDefinitionsUnparsed(t *testing.T) {
 	}
 	if _, unknown := writtenAgentDefinitionCandidates("echo hi; ("); unknown {
 		t.Fatal("неразобранная команда без пути агентов признана записью")
+	}
+}
+
+func TestModelGuardUnknownWriteReason(t *testing.T) {
+	for _, tc := range []struct {
+		command, reason string
+		agent           bool
+	}{
+		{"cp /tmp/x .claude/agents/x.md; claude", ".claude/agents/x.md", true},
+		{"echo x > /tmp/.claude/settings.json; claude", "/tmp/.claude/settings.json", false},
+	} {
+		candidates := writtenProtectedFileCandidates(tc.command)
+		found := false
+		for _, c := range candidates {
+			if c.value == tc.reason && ((tc.agent && c.unknownAgentWrite) || (!tc.agent && c.unknownWrite)) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q: missing reason %q in %+v", tc.command, tc.reason, candidates)
+		}
+	}
+}
+
+func TestModelGuardMentionFollowups(t *testing.T) {
+	cases := []struct {
+		name, command string
+		unknown       bool
+	}{
+		{"cd read", `cd /home/aisee/.claude && jq -c '{deniedMcpServers, skillOverrides}' settings.json | cut -c1-600; claude mcp list 2>/dev/null | cut -c1-120 | head`, false},
+		{"git read", `git -C ~/.claude log && claude`, false},
+		{"pushd read", `pushd ~/.claude && claude`, false},
+		{"cd redirect", `cd ~/.claude && jq . settings.json > settings.json.new; claude`, true},
+		{"cd copy", `cd ~/.claude && cp -a x/. .; claude`, true},
+		{"cd move", `cd ~/.claude && mv settings.json.new settings.json; claude`, true},
+		{"cd tar", `cd ~/.claude && tar -xf archive.tar; claude`, true},
+		{"cd pull", `cd ~/.claude && git pull; claude`, true},
+		{"cd heredoc", "cd ~/.claude && cat > settings.json <<'EOF'\n{}\nEOF\nclaude", true},
+		{"go field", `cd ~/git/aguard && perl -0pi -e 's|x|cfg.Restart.Claude = claude|' x.go; cl --cl-check`, false},
+		{"sudo option", `echo x | sudo -u claude tee .claude/agents/x.md; claude`, true},
+		{"exec option", `exec -a claude tee .claude/agents/x.md; claude`, true},
+		{"codex output", `codex exec -o .claude/agents/x.md hi; claude`, true},
+		{"tree output", `tree -o .claude/agents/x.md; claude`, true},
+		{"git diff output", `git diff --output=.claude/agents/x.md; claude`, true},
+		{"git show output", `git show HEAD:x --output=.claude/agents/x.md; claude`, true},
+		{"timeout option", `timeout -s claude tee .claude/agents/x.md; claude`, true},
+		{"env option", `env -u claude tee .claude/agents/x.md; claude`, true},
+		{"nice option", `nice -n claude tee .claude/agents/x.md; claude`, true},
+		{"ionice option", `ionice -c claude tee .claude/agents/x.md; claude`, true},
+		{"stdbuf option", `stdbuf -o claude tee .claude/agents/x.md; claude`, true},
+		{"uppercase agent directory", "bash -c \"cat > .claude/Agents/x.md <<'EOF'\n---\nmodel: fable\n---\nEOF\"; claude", true},
+		{"uppercase agent extension", "bash -c \"cat > .claude/agents/x.MD <<'EOF'\n---\nmodel: fable\n---\nEOF\"; claude", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, got := writtenAgentDefinitionCandidates(c.command)
+			if got != c.unknown {
+				t.Fatalf("unknown = %v, want %v", got, c.unknown)
+			}
+		})
+	}
+}
+
+func TestModelGuardAgentWriteRegression(t *testing.T) {
+	known := "cat > .claude/agents/x.md <<'EOF'\n---\nmodel: opus\n---\nEOF\n"
+	cases := []struct {
+		name, command string
+		unknown       bool
+	}{
+		{"known cat", known + "claude", false},
+		{"hash", "hash -p /tmp/cat cat\n" + known + "claude", true},
+		{"enable", "enable -n cat\n" + known + "claude", true},
+		{"source", "source /tmp/x\n" + known + "claude", true},
+		{"dot", ". /tmp/x\n" + known + "claude", true},
+		{"bash env", "BASH_ENV=/tmp/x\n" + known + "claude", true},
+		{"env", "ENV=/tmp/x\n" + known + "claude", true},
+		{"multiple functions", "function foo cat { echo evil; }\n" + known + "claude", true},
+		{"cp trailing option", "cp /tmp/evil.md .claude/agents/x.md -v; claude -p hi", true},
+		{"append both", "claude -p hi &>> .claude/agents/x.md", true},
+		{"duplicate output", "claude -p hi >&.claude/agents/x.md", true},
+		{"substitution output", `claude -p hi > "$(echo .claude/agents/x.md)"`, true},
+		{"nested shell", "bash -c \"cat > .claude/agents/x.md <<'EOF'\n---\nmodel: fable\n---\nEOF\"; claude", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			models, got := writtenAgentDefinitionCandidates(c.command)
+			if got != c.unknown {
+				t.Fatalf("unknown = %v, want %v", got, c.unknown)
+			}
+			_ = models
+		})
+	}
+}
+
+func TestModelGuardAgentWriteFunctionNames(t *testing.T) {
+	scan := &agentWriteScan{}
+	scan.visit(&syntax.FuncDecl{Names: []*syntax.Lit{{Value: "other"}, {Value: "cat"}}})
+	if !scan.shadow {
+		t.Fatal("cat в списке имён функции не распознан как подмена")
 	}
 }

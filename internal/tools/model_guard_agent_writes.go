@@ -24,7 +24,7 @@ var agentsPathToken = regexp.MustCompile(`(?i)(?:^|[/=:{,])agents(?:/|$|[,}])|(?
 // agentsPathInText — путь agents/ или каталог .claude внутри текста с
 // пробелами (строка скрипта, тело heredoc): слово agents без косой рядом —
 // проза, не путь
-var agentsPathInText = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_.-])agents/|/agents(?:$|[^a-z0-9_.-])|\.claude/?(?:$|[\s"'),;|&>}])`)
+var agentsPathInText = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_.-])agents/|/agents(?:$|[^a-z0-9_.-])|(?:^|[/~=:{,\s"'])\.claude/?(?:$|[\s"'),;|&>}])`)
 
 func mentionsAgentsPath(text string) bool {
 	if strings.ContainsAny(text, " \t\n") {
@@ -58,21 +58,28 @@ type agentWriteEvent struct {
 }
 
 type agentWriteScan struct {
-	parent  map[syntax.Node]syntax.Node
-	events  []agentWriteEvent
-	writers map[*syntax.Stmt]bool
-	shadow  bool
-	unknown bool
+	parent   map[syntax.Node]syntax.Node
+	events   []agentWriteEvent
+	writers  map[*syntax.Stmt]bool
+	shadow   bool
+	unknown  bool
+	reason   string
+	readOnly bool
 }
 
 // writtenAgentDefinitionCandidates — модели из распознанных записей в
 // определения агентов и признак записи, содержимое которой не проверить
 func writtenAgentDefinitionCandidates(command string) ([]modelCandidate, bool) {
+	models, reason := agentWriteCandidates(command)
+	return models, reason != ""
+}
+
+func agentWriteCandidates(command string) ([]modelCandidate, string) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		return nil, mentionsAgentsPath(command)
+		return nil, unparsedAgentReason(command)
 	}
-	scan := &agentWriteScan{parent: map[syntax.Node]syntax.Node{}, writers: map[*syntax.Stmt]bool{}}
+	scan := &agentWriteScan{parent: map[syntax.Node]syntax.Node{}, writers: map[*syntax.Stmt]bool{}, readOnly: readOnlyClaudeDirectory(file)}
 	var stack []syntax.Node
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if node == nil {
@@ -89,6 +96,9 @@ func writtenAgentDefinitionCandidates(command string) ([]modelCandidate, bool) {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if word, ok := node.(*syntax.Word); ok && !scan.wordAccounted(word) {
 			scan.unknown = true
+			if scan.reason == "" {
+				scan.reason = wordOwnText(word)
+			}
 		}
 		return true
 	})
@@ -101,6 +111,9 @@ func writtenAgentDefinitionCandidates(command string) ([]modelCandidate, bool) {
 		body, known := knownAgentWriteBody(event.stmt, event.redir)
 		if !known || scan.shadow || count[event.target] != 1 {
 			scan.unknown = true
+			if scan.reason == "" {
+				scan.reason = event.target
+			}
 			continue
 		}
 		_, model := agentFrontmatter([]byte(body), event.target)
@@ -108,7 +121,65 @@ func writtenAgentDefinitionCandidates(command string) ([]modelCandidate, bool) {
 			found = append(found, modelCandidate{value: model})
 		}
 	}
-	return found, scan.unknown
+	if scan.unknown && scan.reason == "" {
+		scan.reason = command
+	}
+	return found, scan.reason
+}
+
+func unparsedAgentReason(command string) string {
+	if mentionsAgentsPath(command) {
+		return command
+	}
+	return ""
+}
+
+// Для перехода в .claude неизвестные команды считаются пишущими: их
+// относительные пути и побочные эффекты невозможно установить по словам.
+func readOnlyClaudeDirectory(file *syntax.File) bool {
+	safe := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.Redirect:
+			if writingRedirect(n) {
+				v, ok := literalValue(n.Word)
+				if !ok || v != "/dev/null" {
+					safe = false
+				}
+			}
+		case *syntax.CallExpr:
+			if len(n.Args) == 0 {
+				safe = false
+				break
+			}
+			name, ok := literalValue(n.Args[0])
+			if !ok {
+				safe = false
+				break
+			}
+			switch filepath.Base(name) {
+			case "cd", "pushd", "jq", "cut", "head", "tail", "cat", "grep", "rg", "ls", "pwd", "claude", "cl":
+			case "git":
+				i := 1
+				if len(n.Args) > 2 && wordOwnText(n.Args[1]) == "-C" {
+					i = 3
+				}
+				if i >= len(n.Args) || !slices.Contains([]string{"log", "status", "diff", "show", "ls-files", "blame"}, wordOwnText(n.Args[i])) {
+					safe = false
+				}
+			default:
+				safe = false
+			}
+			for _, arg := range n.Args[1:] {
+				v := wordOwnText(arg)
+				if strings.HasPrefix(v, "--output") || v == "-o" || v == "--in-place" || v == "-i" && filepath.Base(name) == "sed" {
+					safe = false
+				}
+			}
+		}
+		return true
+	})
+	return safe
 }
 
 func (s *agentWriteScan) visit(node syntax.Node) {
@@ -155,6 +226,9 @@ func (s *agentWriteScan) visit(node syntax.Node) {
 			}
 			if mentionsAgentsPath(wordOwnText(redirect.Word)) {
 				s.unknown = true
+				if s.reason == "" {
+					s.reason = wordOwnText(redirect.Word)
+				}
 				s.writers[n] = true
 			}
 		}
@@ -335,6 +409,13 @@ func (s *agentWriteScan) wordAccounted(word *syntax.Word) bool {
 }
 
 func (s *agentWriteScan) callAccountsWord(call *syntax.CallExpr, word *syntax.Word) bool {
+	if s.readOnly && len(call.Args) > 1 {
+		name := wordOwnText(call.Args[0])
+		value := wordOwnText(word)
+		if !strings.Contains(strings.ToLower(value), "agents") && (name == "cd" || name == "pushd" || name == "git" && len(call.Args) > 2 && wordOwnText(call.Args[1]) == "-C" && call.Args[2] == word) {
+			return true
+		}
+	}
 	if stmt, ok := s.parent[call].(*syntax.Stmt); ok && s.writers[stmt] {
 		return true
 	}
@@ -382,6 +463,12 @@ func (s *agentWriteScan) safeReader(call *syntax.CallExpr) bool {
 		return false
 	}
 	base := filepath.Base(name)
+	for _, arg := range call.Args[1:] {
+		v := wordOwnText(arg)
+		if base == "tree" && (v == "-o" || strings.HasPrefix(v, "-o")) || base == "git" && strings.HasPrefix(v, "--output") {
+			return false
+		}
+	}
 	if base == "git" && len(call.Args) > 1 {
 		sub, ok := literalValue(call.Args[1])
 		return ok && slices.Contains(agentSafeGitSubcommands, sub)
@@ -392,17 +479,38 @@ func (s *agentWriteScan) safeReader(call *syntax.CallExpr) bool {
 // modelClient — вызов клиента модели, в том числе за env, timeout и т. п.
 func (s *agentWriteScan) modelClient(call *syntax.CallExpr) bool {
 	wrapped := false
-	for _, arg := range call.Args {
+	wrapper := ""
+	skip := false
+	for i, arg := range call.Args {
 		value, literal := literalValue(arg)
 		if !literal {
 			return false
 		}
-		if wrapped && (strings.HasPrefix(value, "-") || strings.Contains(value, "=") || strings.Trim(value, "0123456789.smhd") == "") {
+		if skip {
+			skip = false
+			continue
+		}
+		if wrapped && strings.HasPrefix(value, "-") {
+			if wrapper == "time" && (value == "-o" || strings.HasPrefix(value, "--output") || strings.HasPrefix(value, "-o")) {
+				return false
+			}
+			opts := map[string][]string{
+				"sudo": {"-u", "-g", "-C", "-D", "-R", "-T", "-h", "-p", "-r", "-t", "--user", "--group", "--chdir", "--chroot", "--command-timeout", "--close-from", "--host", "--prompt", "--role", "--type"},
+				"exec": {"-a"}, "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
+				"timeout": {"-s", "-k", "--signal", "--kill-after"}, "nice": {"-n", "--adjustment"},
+				"ionice": {"-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid", "--pgid", "--uid"},
+				"stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"}, "time": {"-f", "-o", "--format", "--output"},
+			}
+			skip = slices.Contains(opts[wrapper], value)
+			continue
+		}
+		if wrapped && (strings.Contains(value, "=") || strings.Trim(value, "0123456789.smhd") == "") {
 			continue
 		}
 		base := filepath.Base(value)
 		if slices.Contains(commandWrappers, base) {
 			wrapped = true
+			wrapper = base
 			continue
 		}
 		if base == "npx" {
@@ -412,6 +520,14 @@ func (s *agentWriteScan) modelClient(call *syntax.CallExpr) bool {
 				}
 			}
 			return false
+		}
+		if base == "codex" {
+			for _, rest := range call.Args[i+1:] {
+				v := wordOwnText(rest)
+				if v == "-o" || strings.HasPrefix(v, "--output-last-message") || strings.HasPrefix(v, "-o") {
+					return false
+				}
+			}
 		}
 		return slices.Contains(modelClients, base)
 	}

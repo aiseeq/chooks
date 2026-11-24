@@ -71,7 +71,11 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 			continue
 		}
 		if c.unknownWrite {
-			reasons = append(reasons, "содержимое изменяемого файла настроек не проверить")
+			reasons = append(reasons, fmt.Sprintf("содержимое изменяемого файла настроек не проверить: %s", c.value))
+			continue
+		}
+		if c.unknownAgentWrite {
+			reasons = append(reasons, fmt.Sprintf("содержимое изменяемого определения агента не проверить: %s", c.value))
 			continue
 		}
 		if c.unknownAgents {
@@ -156,12 +160,13 @@ func (t *ModelGuardTool) CandidateModels(ctx context.Context, input *core.ToolIn
 }
 
 type modelCandidate struct {
-	value           string
-	dynamic         bool
-	unknownAgent    bool
-	unknownWrite    bool
-	unknownAgents   bool
-	unknownSettings bool
+	value             string
+	dynamic           bool
+	unknownAgent      bool
+	unknownWrite      bool
+	unknownAgentWrite bool
+	unknownAgents     bool
+	unknownSettings   bool
 }
 
 func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
@@ -1424,12 +1429,12 @@ func explicitSettingsTarget(command, target string) bool {
 // (writtenAgentDefinitionCandidates), settings — разбор JSON ниже; разбор
 // settings ответа об агенте не меняет
 func writtenProtectedFileCandidates(command string) []modelCandidate {
-	agentModels, unknown := writtenAgentDefinitionCandidates(command)
+	agentModels, agentReason := agentWriteCandidates(command)
+	if agentReason != "" {
+		agentModels = append(agentModels, modelCandidate{value: agentReason, unknownAgentWrite: true})
+	}
 	targets, copied := protectedWriteTargetSet(command)
 	if len(targets) == 0 {
-		if unknown {
-			return append(agentModels, modelCandidate{value: "written settings or agent contents", unknownWrite: true})
-		}
 		return agentModels
 	}
 	decoded := strings.ReplaceAll(command, "\\\"", "\"")
@@ -1505,10 +1510,9 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 			continue
 		}
 		isParsedSettings := (protectedSettingsTarget.MatchString(target) || explicitSettingsTarget(command, target)) && parsedSettingsContents && parsedSettingsModels
-		unknown = unknown || !isParsedSettings || unknownSettings[target]
-	}
-	if unknown {
-		found = append(found, modelCandidate{value: "written settings or agent contents", unknownWrite: true})
+		if !isParsedSettings || unknownSettings[target] {
+			found = append(found, modelCandidate{value: target, unknownWrite: true})
+		}
 	}
 	return found
 }

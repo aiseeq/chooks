@@ -389,3 +389,121 @@ func TestModelGuardUnknownWriteReasonExcerpt(t *testing.T) {
 		t.Fatalf("короткий путь изменён: %q", got)
 	}
 }
+
+// TestModelGuardReviewRoundTwoForms — формы ревью круга 2 (REVIEW-2:
+// HIGH-1…3, MED-1…3) отказываются хуком целиком; соседние чтения и клиенты
+// проходят
+func TestModelGuardReviewRoundTwoForms(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	settingsFile := filepath.Join(t.TempDir(), "s.json")
+	if err := os.WriteFile(settingsFile, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		agent = ".claude/agents/x.md"
+		set   = "cp /tmp/e.json settings.json"
+		run   = "claude -p hi"
+	)
+	deny := []struct{ name, command string }{
+		// HIGH-1: значение env -S исполняется — это запуск, не клиент
+		{"H1 env -S", "env -S 'tee " + agent + "' claude < /tmp/e.md >/dev/null; " + run},
+		{"H1 env --split-string", "env --split-string 'tee " + agent + "' claude < /tmp/e.md; " + run},
+		{"H1 env --s abbreviation", "env --s 'tee " + agent + "' claude < /tmp/e.md; " + run},
+		{"H1 env -iS cluster", "env -iS 'tee " + agent + "' claude < /tmp/e.md; " + run},
+		{"H1 env -S attached", "env -S'tee " + agent + "' claude < /tmp/e.md; " + run},
+		{"H1 env -S ${HOME} heredoc", "env -S 'tee ${HOME}/" + agent + "' claude <<'EOF'\n---\nname: x\nmodel: fable\n---\nEOF\n" + run},
+		{"H1 env -S tar -C .claude", "env -S 'tar -C .claude -xf /tmp/e.tar' claude; " + run},
+		{"H1 sudo env -S", "sudo env -S 'tee " + agent + "' claude < /tmp/e.md; " + run},
+		// HIGH-2: после cd/pushd/git -C в .claude — подстановка, арифметика,
+		// less --lesskey*, claude --settings/--mcp-config
+		{"H2 [[ -v a[$()] ]]", "cd ~/.claude && [[ -v 'a[$(" + set + ")]' ]]; " + run},
+		{"H2 test -v a[$()]", "cd ~/.claude && test -v 'a[$(" + set + ")]'; " + run},
+		{"H2 [ -v a[$()] ]", "cd ~/.claude && [ -v 'a[$(" + set + ")]' ]; " + run},
+		{"H2 [[ -eq a[$()] ]]", "cd ~/.claude && [[ 1 -eq 'a[$(" + set + ")]' ]]; " + run},
+		{"H2 let a[$()]", "cd ~/.claude && let 'a[$(" + set + ")]'; " + run},
+		{"H2 $(( a[$()] ))", "cd ~/.claude && echo $(( 'a[$(" + set + ")]' )); " + run},
+		{"H2 ${a['$()']}", "cd ~/.claude && echo ${a['$(" + set + ")']}; " + run},
+		{"H2 backtick in literal", "cd ~/.claude && test -v 'a[`" + set + "`]'; " + run},
+		{"H2 command substitution", "cd ~/.claude && cat \"$(" + set + ")\"; " + run},
+		{"H2 let over file names", "cd ~/.claude && for x in /tmp/w/*; do let \"a[$x]\"; done; " + run},
+		{"H2 array index over file names", "cd ~/.claude && for x in /tmp/w/*; do echo \"${a[$x]}\"; done; " + run},
+		{"H2 literal $( in any word", "cd ~/.claude && echo '$(" + set + ")'; " + run},
+		{"H2 test -v split agents", "cd ~/.claude && test -v 'a[$(cp /tmp/e.md ag\"\"ents/x.md)]'; " + run},
+		{"H2 project .claude [[ -v ]]", "cd .claude && [[ -v 'a[$(tar -xf /tmp/e.tar)]' ]]; " + run},
+		{"H2 git -C then test -v", "git -C ~/.claude log -1 && cd ~/.claude && test -v 'a[$(" + set + ")]' && " + run},
+		{"H2 pushd [[ -v ]]", "pushd ~/.claude/ && [[ -v 'a[$(" + set + ")]' ]]; " + run},
+		{"H2 less --lesskey-src", "cd ~/.claude && less --lesskey-src=/dev/stdin settings.json <<<$'#env\\nLESSOPEN=|" + set + "; cat %s'; " + run},
+		{"H2 less -k", "cd ~/.claude && less -k /tmp/keys settings.json; " + run},
+		{"H2 claude --settings hooks", "cd ~/.claude && claude --settings '{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"" + set + "\"}]}]}}' -p hi"},
+		{"H2 claude --mcp-config", "cd ~/.claude && claude --mcp-config '{\"mcpServers\":{\"x\":{\"command\":\"cp\",\"args\":[\"/tmp/e.json\",\"settings.json\"]}}}' -p hi"},
+		{"H2 claude --plugin-dir", "cd ~/.claude && claude --plugin-dir=/tmp/p -p hi"},
+		// HIGH-3: левая граница .claude в тексте bash -c и heredoc
+		{"H3 -C \\.claude", "bash -c 'tar -xf /tmp/e.tar -C \\.claude'; " + run},
+		{"H3 -C\\.claude", "bash -c 'tar -xf /tmp/e.tar -C\\.claude'; " + run},
+		{"H3 \\-C.claude", "bash -c 'tar -xf /tmp/e.tar \\-C.claude'; " + run},
+		{"H3 TAR_OPTIONS=-C.claude", "bash -c 'TAR_OPTIONS=-C.claude tar -xf /tmp/e.tar'; " + run},
+		{"H3 ${X}.claude", "bash -c 'tar -xf /tmp/e.tar -C ${X}.claude'; " + run},
+		{"H3 $HOME/\\.claude", "bash -c 'tar -xf /tmp/e.tar -C $HOME/\\.claude'; " + run},
+		{"H3 cd \\.claude", "bash -c 'cd \\.claude && tar -xf /tmp/e.tar'; " + run},
+		{"H3 -\"\"C.claude", "bash -c 'tar -xf /tmp/e.tar -\"\"C.claude'; " + run},
+		{"H3 -C`true`.claude", "bash -c 'tar -xf /tmp/e.tar -C`true`.claude'; " + run},
+		{"H3 heredoc -C \\.claude", "bash <<'EOF'\ntar -xf /tmp/e.tar -C \\.claude\nEOF\n" + run},
+		{"H3 settings cd $HOME/\\.claude", "bash -c 'cd $HOME/\\.claude && " + set + "'; " + run},
+		{"H3 $X.claude", "bash -c 'tar -xf /tmp/e.tar -C $X.claude'; " + run},
+		{"H3 -d$(:).claude", "bash -c 'unzip -o /tmp/e.zip -d$(:).claude'; " + run},
+		// MED-1: слово с = после обёртки, кроме env и sudo, — программа
+		{"M1 nohup a=b path", "mkdir -p /tmp/a=b && nohup /tmp/a=b/../../usr/bin/tee claude " + agent + " < /tmp/e.md; " + run},
+		{"M1 command a=b path", "mkdir -p /tmp/a=b && command /tmp/a=b/../../usr/bin/tee claude " + agent + " < /tmp/e.md; " + run},
+		{"M1 timeout a=b path", "mkdir -p /tmp/a=b && timeout 5 /tmp/a=b/../../usr/bin/tee claude " + agent + " < /tmp/e.md; " + run},
+		// MED-2: npx запускает другую команду
+		{"M2 npx -p -c", "npx -p @anthropic-ai/claude-code -c 'tee " + agent + "' < /tmp/e.md; " + run},
+		{"M2 npx -y -p", "npx -y -p @anthropic-ai/claude-code tee " + agent + " < /tmp/e.md; " + run},
+		// MED-3: слово-путь вне текста
+		{"M3 tar -C \\.claude", "tar -xf /tmp/e.tar -C \\.claude; " + run},
+		{"M3 cd \\.claude", "cd \\.claude && tar -xf /tmp/e.tar && " + run},
+		{"M3 tar -C ${X}.claude", "tar -xf /tmp/e.tar -C ${X}.claude; " + run},
+		{"M3 tar \\-C.claude", "tar -xf /tmp/e.tar \\-C.claude; " + run},
+		{"M3 tar -C\\.claude", "tar -xf /tmp/e.tar -C\\.claude; " + run},
+		// без cd: $( в слове проверки и значения опций клиента
+		{"test -v tar -C .claude", "test -v 'a[$(tar -xf /tmp/e.tar -C .claude)]'; " + run},
+		{"[[ -v ]] tar -C ~/.claude", "[[ -v 'a[$(tar -xf /tmp/e.tar -C ~/.claude)]' ]]; " + run},
+		{"claude --mcp-config agents", "claude --mcp-config '{\"mcpServers\":{\"x\":{\"command\":\"cp\",\"args\":[\"/tmp/e.md\",\"/home/u/.claude/agents/x.md\"]}}}' -p hi"},
+		{"claude --settings= agents", "claude --settings='{\"hooks\":{\"command\":\"cp /tmp/e.md /home/u/.claude/agents/x.md\"}}' -p hi"},
+		{"file -C", "cd ~/.claude && file -C -m settings; " + run},
+	}
+	pass := []struct{ name, command string }{
+		{"cd cat settings", "cd ~/.claude && cat settings.json; " + run},
+		{"cd claude mcp list", "cd ~/.claude && claude mcp list 2>/dev/null | head"},
+		{"test -f agent", "test -f " + agent + " && " + run},
+		{"[[ -f agent ]]", "[[ -f " + agent + " ]] && " + run},
+		{"npx claude-code", "npx @anthropic-ai/claude-code -p \"review " + agent + "\""},
+		{"npx -y claude-code", "npx -y @anthropic-ai/claude-code -p \"review " + agent + "\""},
+		{"env assignment claude", "env FOO=1 claude -p \"review " + agent + "\""},
+		{"sudo assignment claude", "sudo FOO=1 claude -p \"review " + agent + "\""},
+		{"claude --settings prompt", "claude --settings " + settingsFile + " -p \"review " + agent + "\""},
+		{"claude --mcp-config list prompt", "claude --mcp-config /tmp/a.json /tmp/b.json -p \"review " + agent + "\""},
+		{"go field", "cd ~/git/aguard && perl -0pi -e 's|x|cfg.Restart.Claude = claude|' x.go; cl --cl-check"},
+	}
+	check := func(command string) *core.ValidationResult {
+		t.Helper()
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for _, c := range deny {
+		t.Run("deny "+c.name, func(t *testing.T) {
+			if check(c.command).IsValid {
+				t.Fatalf("пропуск, ждали отказ: %q", c.command)
+			}
+		})
+	}
+	for _, c := range pass {
+		t.Run("pass "+c.name, func(t *testing.T) {
+			if result := check(c.command); !result.IsValid {
+				t.Fatalf("отказ, ждали пропуск: %+v", result.Violations)
+			}
+		})
+	}
+}

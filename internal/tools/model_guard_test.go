@@ -631,7 +631,7 @@ func TestModelGuardSettingsAgentReference(t *testing.T) {
 	candidates := settingsCandidates([]byte(`{"agent":"fx"}`), func(name string) []modelCandidate {
 		called = name
 		return []modelCandidate{{value: "fable"}}
-	})
+	}, testLogger(t))
 	if called != "fx" || len(candidates) != 1 || candidates[0].value != "fable" {
 		t.Fatalf("settings agent resolution: name=%q candidates=%+v", called, candidates)
 	}

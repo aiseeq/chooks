@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/aiseeq/chooks/internal/core"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -67,9 +68,10 @@ type agentWriteScan struct {
 
 // writtenAgentDefinitionCandidates — модели из распознанных записей в
 // определения агентов и признак записи, содержимое которой не проверить
-func writtenAgentDefinitionCandidates(command string) ([]modelCandidate, bool) {
+func writtenAgentDefinitionCandidates(command string, logger core.Logger) ([]modelCandidate, bool) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
+		logger.Debug("model_guard: команда записи определения агента не разобрана", "error", err)
 		return nil, mentionsAgentsPath(command)
 	}
 	scan := &agentWriteScan{parent: map[syntax.Node]syntax.Node{}, writers: map[*syntax.Stmt]bool{}}
@@ -114,49 +116,69 @@ func writtenAgentDefinitionCandidates(command string) ([]modelCandidate, bool) {
 func (s *agentWriteScan) visit(node syntax.Node) {
 	switch n := node.(type) {
 	case *syntax.FuncDecl:
-		if n.Name != nil && n.Name.Value == "cat" {
-			s.shadow = true
-		}
-		for _, name := range n.Names {
-			s.shadow = s.shadow || name.Value == "cat"
-		}
+		s.shadow = s.shadow || shadowsCat(n)
 	case *syntax.Assign:
 		if n.Name != nil && slices.Contains(catShadowVariables, n.Name.Value) {
 			s.shadow = true
 		}
 	case *syntax.CallExpr:
-		if len(n.Args) == 0 {
-			return
-		}
-		name, literal := literalValue(n.Args[0])
-		if !literal {
-			return
-		}
-		if slices.Contains(catShadowCommands, filepath.Base(name)) {
-			s.shadow = true
-		}
-		if filepath.Base(name) == "shopt" {
-			for _, arg := range n.Args[1:] {
-				s.shadow = s.shadow || strings.Contains(wordOwnText(arg), "expand_aliases")
-			}
-		}
+		s.shadow = s.shadow || callShadowsCat(n)
 	case *syntax.Stmt:
-		for _, redirect := range n.Redirs {
-			if !writingRedirect(redirect) {
+		s.scanStatementWrites(n)
+	}
+}
+
+func shadowsCat(decl *syntax.FuncDecl) bool {
+	if decl.Name != nil && decl.Name.Value == "cat" {
+		return true
+	}
+	for _, name := range decl.Names {
+		if name.Value == "cat" {
+			return true
+		}
+	}
+	return false
+}
+
+func callShadowsCat(call *syntax.CallExpr) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	name, literal := literalValue(call.Args[0])
+	if !literal {
+		return false
+	}
+	base := filepath.Base(name)
+	if slices.Contains(catShadowCommands, base) {
+		return true
+	}
+	if base != "shopt" {
+		return false
+	}
+	for _, arg := range call.Args[1:] {
+		if strings.Contains(wordOwnText(arg), "expand_aliases") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *agentWriteScan) scanStatementWrites(stmt *syntax.Stmt) {
+	for _, redirect := range stmt.Redirs {
+		if !writingRedirect(redirect) {
+			continue
+		}
+		if target, literal := literalValue(redirect.Word); literal {
+			target = strings.Trim(target, `"'`)
+			if writtenAgentTarget.MatchString(target) {
+				s.events = append(s.events, agentWriteEvent{target: filepath.Clean(target), stmt: stmt, redir: redirect})
+				s.writers[stmt] = true
 				continue
 			}
-			if target, literal := literalValue(redirect.Word); literal {
-				target = strings.Trim(target, `"'`)
-				if writtenAgentTarget.MatchString(target) {
-					s.events = append(s.events, agentWriteEvent{target: filepath.Clean(target), stmt: n, redir: redirect})
-					s.writers[n] = true
-					continue
-				}
-			}
-			if mentionsAgentsPath(wordOwnText(redirect.Word)) {
-				s.unknown = true
-				s.writers[n] = true
-			}
+		}
+		if mentionsAgentsPath(wordOwnText(redirect.Word)) {
+			s.unknown = true
+			s.writers[stmt] = true
 		}
 	}
 }
@@ -167,29 +189,12 @@ func (s *agentWriteScan) visit(node syntax.Node) {
 // и heredoc на fd 0 с кавычками в ограничителе (или без кавычек, но тело
 // без $, ` и \ — bash его не меняет); тело с frontmatter
 func knownAgentWriteBody(stmt *syntax.Stmt, target *syntax.Redirect) (string, bool) {
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Assigns) > 0 || len(call.Args) == 0 || len(call.Args) > 2 {
+	_, ok := knownCatCall(stmt)
+	if !ok || !knownAgentOutput(target) || len(stmt.Redirs) != 2 {
 		return "", false
 	}
-	if name, literal := literalValue(call.Args[0]); !literal || !slices.Contains([]string{"cat", "/bin/cat", "/usr/bin/cat"}, name) {
-		return "", false
-	}
-	if len(call.Args) == 2 {
-		if dash, literal := literalValue(call.Args[1]); !literal || dash != "-" {
-			return "", false
-		}
-	}
-	if target.Op != syntax.RdrOut && target.Op != syntax.RdrClob || target.N != nil && target.N.Value != "1" {
-		return "", false
-	}
-	if len(stmt.Redirs) != 2 {
-		return "", false
-	}
-	heredoc := stmt.Redirs[0]
-	if heredoc == target {
-		heredoc = stmt.Redirs[1]
-	}
-	if heredoc.Hdoc == nil || heredoc.N != nil && heredoc.N.Value != "0" {
+	heredoc := agentHeredoc(stmt, target)
+	if heredoc == nil || heredoc.Hdoc == nil || heredoc.N != nil && heredoc.N.Value != "0" {
 		return "", false
 	}
 	body := heredoc.Hdoc.Lit()
@@ -207,6 +212,34 @@ func knownAgentWriteBody(stmt *syntax.Stmt, target *syntax.Redirect) (string, bo
 		return "", false
 	}
 	return body, true
+}
+
+func knownCatCall(stmt *syntax.Stmt) (*syntax.CallExpr, bool) {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) > 0 || len(call.Args) == 0 || len(call.Args) > 2 {
+		return nil, false
+	}
+	if name, literal := literalValue(call.Args[0]); !literal || !slices.Contains([]string{"cat", "/bin/cat", "/usr/bin/cat"}, name) {
+		return nil, false
+	}
+	if len(call.Args) == 2 {
+		if dash, literal := literalValue(call.Args[1]); !literal || dash != "-" {
+			return nil, false
+		}
+	}
+	return call, true
+}
+
+func knownAgentOutput(target *syntax.Redirect) bool {
+	return (target.Op == syntax.RdrOut || target.Op == syntax.RdrClob) && (target.N == nil || target.N.Value == "1")
+}
+
+func agentHeredoc(stmt *syntax.Stmt, target *syntax.Redirect) *syntax.Redirect {
+	heredoc := stmt.Redirs[0]
+	if heredoc == target {
+		heredoc = stmt.Redirs[1]
+	}
+	return heredoc
 }
 
 func heredocDelimiterQuoted(redirect *syntax.Redirect) bool {
@@ -406,14 +439,18 @@ func (s *agentWriteScan) modelClient(call *syntax.CallExpr) bool {
 			continue
 		}
 		if base == "npx" {
-			for _, rest := range call.Args {
-				if v, ok := literalValue(rest); ok && v == "@anthropic-ai/claude-code" {
-					return true
-				}
-			}
-			return false
+			return hasClaudeCodePackage(call.Args)
 		}
 		return slices.Contains(modelClients, base)
+	}
+	return false
+}
+
+func hasClaudeCodePackage(args []*syntax.Word) bool {
+	for i := range args {
+		if value, ok := literalValue(args[i]); ok && value == "@anthropic-ai/claude-code" {
+			return true
+		}
 	}
 	return false
 }

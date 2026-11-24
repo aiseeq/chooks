@@ -87,6 +87,7 @@ var (
 	lastPathPart   = regexp.MustCompile(`/+[^/]*/*$`)
 	singleQuoted   = regexp.MustCompile(`^'[^']*\$`)
 	positionalNm   = regexp.MustCompile(`\$\{?([0-9]+|[@*!])`)
+	rmHomeGlob     = regexp.MustCompile(`^~/\*+/*$`)
 	dotSlashes     = regexp.MustCompile(`/(?:\./)+`)
 	manySlashes    = regexp.MustCompile(`/{2,}`)
 	dirPrinting    = regexp.MustCompile(`^\s*(?:(cd|pwd|dirname)(?:[^A-Za-z0-9_-]|$)|git\s+(rev-parse)\b)`)
@@ -123,7 +124,7 @@ func (t *RmGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (
 			continue
 		}
 		for k, w := range words[1:] {
-			if !w.redirect && regexp.MustCompile(`^~/\*+/*$`).MatchString(w.raw) {
+			if !w.redirect && rmHomeGlob.MatchString(w.raw) {
 				reasons = append(reasons, rmInvocation(words, k+1, "")+": удаление всего в HOME Claude Code остановит, укажи более узкий литеральный путь")
 			}
 		}
@@ -671,6 +672,26 @@ type hint func(words []shWord, target int) string
 // checkTarget возвращает подсказку, если Claude Code спросит про эту цель
 func (t *RmGuardTool) checkTarget(w shWord, v *rmVars, src inline) hint {
 	raw := w.raw
+	if result := t.checkHomeGlobTarget(w, v); result != nil {
+		return result
+	}
+	if m := unreadVarTarget.FindStringSubmatch(raw); m != nil && m[1] != "HOME" && (!v.bound[m[1]] || v.pipeLostAssignments) {
+		return guardHint(src, []string{m[1]}, "")
+	}
+	if result := derivedTargetHint(raw, v); result != nil {
+		return result
+	}
+	if result := topDirectoryTargetHint(raw, v, src); result != nil {
+		return result
+	}
+	if result := positionalTargetHint(raw, v); result != nil {
+		return result
+	}
+	return namedVariableTargetHint(raw, w.text, v, src)
+}
+
+func (t *RmGuardTool) checkHomeGlobTarget(w shWord, v *rmVars) hint {
+	raw := w.raw
 	if names := varRefs(w.text); len(names) == 1 && names[0] == "HOME" {
 		homeTarget := strings.ReplaceAll(trimQuotes(raw), `"`, "")
 		homeTarget = regexp.MustCompile(`\$\{HOME(?::\?[^}]*)?\}`).ReplaceAllStringFunc(homeTarget, func(string) string { return "$HOME" })
@@ -684,9 +705,10 @@ func (t *RmGuardTool) checkTarget(w shWord, v *rmVars, src inline) hint {
 			}
 		}
 	}
-	if m := unreadVarTarget.FindStringSubmatch(raw); m != nil && m[1] != "HOME" && (!v.bound[m[1]] || v.pipeLostAssignments) {
-		return guardHint(src, []string{m[1]}, "")
-	}
+	return nil
+}
+
+func derivedTargetHint(raw string, v *rmVars) hint {
 	if m := bareVar.FindStringSubmatch(trimGlobTail(raw)); m != nil {
 		if from := v.derived[m[1]+m[2]]; from != "" {
 			name := m[1] + m[2]
@@ -695,6 +717,10 @@ func (t *RmGuardTool) checkTarget(w shWord, v *rmVars, src inline) hint {
 			}
 		}
 	}
+	return nil
+}
+
+func topDirectoryTargetHint(raw string, v *rmVars, src inline) hint {
 	if m := topDirTarget.FindStringSubmatch(normalizeSlashes(raw)); m != nil {
 		names := []string{m[1] + m[3]}
 		if m[2] != "" {
@@ -704,16 +730,24 @@ func (t *RmGuardTool) checkTarget(w shWord, v *rmVars, src inline) hint {
 			return guardHint(src, names, "при пустой $"+names[0]+" удалит /"+m[4]+", ")
 		}
 	}
+	return nil
+}
+
+func positionalTargetHint(raw string, v *rmVars) hint {
 	if positionalTarget.MatchString(raw) && !v.positionalBound {
 		name := positionalNm.FindStringSubmatch(raw)[1]
 		return func([]shWord, int) string {
 			return fmt.Sprintf("$%s в команде Bash пуст, укажи литеральный путь", name)
 		}
 	}
+	return nil
+}
+
+func namedVariableTargetHint(raw, text string, v *rmVars, src inline) hint {
 	if !namedVarTarget.MatchString(raw) {
 		return nil
 	}
-	names := varRefs(w.text)
+	names := varRefs(text)
 	// "$S"/{a,b}: раскрытие скобок Claude Code не подставляет
 	if v.tracked && v.allResolved(names) && !braceExpansion.MatchString(raw) {
 		return nil
@@ -783,15 +817,29 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 		return false
 	}
 	base := path.Clean(cwd)
-	current := base
-	known := true
-	cdCount := 0
+	cdCount := countDirChanges(cmds)
+	if !validCdGlobCommandChain(cmds, rmIndex, cdCount) {
+		return false
+	}
+	current, mode, known, ok := cdGlobPathState(cmds, rmIndex, cdCount, base)
+	if !ok {
+		return false
+	}
+	return cdGlobTargetAllowed(cmds, target, rmIndex, base, current, mode, known, cdCount)
+}
+
+func countDirChanges(cmds []shCommand) int {
+	count := 0
 	for _, c := range cmds {
 		words := cdCommandWords(c.words)
 		if len(words) > 0 && dirChangers[commandName(words[0].raw)] {
-			cdCount++
+			count++
 		}
 	}
+	return count
+}
+
+func validCdGlobCommandChain(cmds []shCommand, rmIndex, cdCount int) bool {
 	if cdCount > 1 {
 		for _, c := range cmds[1:] {
 			if c.sep != "&&" {
@@ -814,61 +862,90 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 			}
 		}
 	}
-	mode := ""
+	return true
+}
+
+func cdGlobPathState(cmds []shCommand, rmIndex, cdCount int, base string) (current, mode string, known, ok bool) {
+	state := cdGlobPath{current: base, known: true}
 	for i := range rmIndex {
 		c := cmds[i]
 		words := cdCommandWords(c.words)
 		if len(words) == 0 || commandName(words[0].raw) != "cd" {
 			continue
 		}
-		cdArg, valid := cdLiteralArgument(c, cdCount > 1)
-		if !valid || cdCount == 1 && i != 0 {
-			return false
+		var valid bool
+		state, valid = advanceCdGlobPath(cmds, i, rmIndex, cdCount, base, state, c)
+		if !valid {
+			return "", "", false, false
 		}
-		cdPath := strings.Trim(unquoteWord(cdArg.text), "\"'")
-		if strings.HasPrefix(cdPath, "/") {
-			if hasParentSegment(cdPath) {
-				known = false
-				mode = ""
-				continue
-			}
-			current = path.Clean(cdPath)
-			if cdCount == 1 && cmds[rmIndex].sep != "&&" && current != base {
-				return false
-			}
-			if !cdRealWithin(base, current) {
-				return false
-			}
-			known = known && pathWithin(base, current)
-			mode = "absolute"
-			continue
-		}
-		if !known || hasParentSegment(cdPath) || strings.ContainsAny(cdPath, "*?[]$`") {
-			known = false
-			mode = ""
-			continue
-		}
-		dotRelative := cdPath == "." || strings.HasPrefix(cdPath, "./")
-		if !dotRelative && (mode == "" || cdCount == 1) {
-			known = false
-			continue
-		}
-		for j := i + 1; j <= rmIndex; j++ {
-			if cmds[j].sep != "&&" {
-				known = false
-				break
-			}
-		}
-		if !known {
-			continue
-		}
-		current = path.Clean(path.Join(current, cdPath))
-		if !cdRealWithin(base, current) {
-			return false
-		}
-		known = pathWithin(base, current)
-		mode = "relative"
 	}
+	if state.mode == "" || !state.known {
+		return "", "", false, false
+	}
+	return state.current, state.mode, state.known, true
+}
+
+type cdGlobPath struct {
+	current string
+	mode    string
+	known   bool
+}
+
+func advanceCdGlobPath(cmds []shCommand, index, rmIndex, cdCount int, base string, state cdGlobPath, command shCommand) (cdGlobPath, bool) {
+	cdArg, valid := cdLiteralArgument(command, cdCount > 1)
+	if !valid || cdCount == 1 && index != 0 {
+		return cdGlobPath{}, false
+	}
+	cdPath := strings.Trim(unquoteWord(cdArg.text), "\"'")
+	if strings.HasPrefix(cdPath, "/") {
+		return absoluteCdGlobPath(cmds, rmIndex, cdCount, base, state, cdPath)
+	}
+	return relativeCdGlobPath(cmds, index, rmIndex, cdCount, base, state, cdPath)
+}
+
+func absoluteCdGlobPath(cmds []shCommand, rmIndex, cdCount int, base string, state cdGlobPath, cdPath string) (cdGlobPath, bool) {
+	if hasParentSegment(cdPath) {
+		state.known, state.mode = false, ""
+		return state, true
+	}
+	state.current = path.Clean(cdPath)
+	if cdCount == 1 && cmds[rmIndex].sep != "&&" && state.current != base || !cdRealWithin(base, state.current) {
+		return cdGlobPath{}, false
+	}
+	state.known = state.known && pathWithin(base, state.current)
+	state.mode = "absolute"
+	return state, true
+}
+
+func relativeCdGlobPath(cmds []shCommand, index, rmIndex, cdCount int, base string, state cdGlobPath, cdPath string) (cdGlobPath, bool) {
+	if !state.known || hasParentSegment(cdPath) || strings.ContainsAny(cdPath, "*?[]$`") {
+		state.known, state.mode = false, ""
+		return state, true
+	}
+	dotRelative := cdPath == "." || strings.HasPrefix(cdPath, "./")
+	if !dotRelative && (state.mode == "" || cdCount == 1) {
+		state.known = false
+		return state, true
+	}
+	for j := index + 1; j <= rmIndex; j++ {
+		if cmds[j].sep != "&&" {
+			state.known = false
+			break
+		}
+	}
+	if !state.known {
+		return state, true
+	}
+	state.current = path.Clean(path.Join(state.current, cdPath))
+	if !cdRealWithin(base, state.current) {
+		return cdGlobPath{}, false
+	}
+	state.known = pathWithin(base, state.current)
+	state.mode = "relative"
+	return state, true
+}
+
+func cdGlobTargetAllowed(cmds []shCommand, target shWord, rmIndex int, base, current, mode string, known bool, cdCount int) bool {
 	if mode == "" || !known {
 		return false
 	}

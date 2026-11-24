@@ -80,27 +80,39 @@ func daemonAddress(argv []string) (string, bool) {
 	}
 	address, count := "", 0
 	for i := 1; i < len(argv); i++ {
-		a := argv[i]
-		switch {
-		case strings.HasPrefix(a, "--address="):
-			address, count = strings.TrimPrefix(a, "--address="), count+1
-		case a == "--address" || a == "--session" || a == "--system" || a == "--print-address" || strings.HasPrefix(a, "--print-address="):
+		next, value, addressed, valid := daemonArgument(argv, i)
+		if !valid {
 			return "", false
-		case a == "--config-file":
-			if i+1 >= len(argv) || argv[i+1] == "" || strings.HasPrefix(argv[i+1], "-") {
-				return "", false
-			}
-			i++
-		case strings.HasPrefix(a, "--config-file="):
-			if strings.TrimPrefix(a, "--config-file=") == "" {
-				return "", false
-			}
-		case a == "--fork" || a == "--nofork" || a == "--nopidfile" || a == "--nosyslog" || a == "--syslog" || a == "--stderr":
-		default:
-			return "", false
+		}
+		i = next
+		if addressed {
+			address, count = value, count+1
 		}
 	}
 	return address, count == 1 && address != ""
+}
+
+func daemonArgument(argv []string, i int) (int, string, bool, bool) {
+	a := argv[i]
+	if value, ok := strings.CutPrefix(a, "--address="); ok {
+		return i, value, true, true
+	}
+	if a == "--address" || a == "--session" || a == "--system" || a == "--print-address" || strings.HasPrefix(a, "--print-address=") {
+		return i, "", false, false
+	}
+	if a == "--config-file" {
+		if i+1 >= len(argv) || argv[i+1] == "" || strings.HasPrefix(argv[i+1], "-") {
+			return i, "", false, false
+		}
+		return i + 1, "", false, true
+	}
+	if value, ok := strings.CutPrefix(a, "--config-file="); ok {
+		return i, "", false, value != ""
+	}
+	if a == "--fork" || a == "--nofork" || a == "--nopidfile" || a == "--nosyslog" || a == "--syslog" || a == "--stderr" {
+		return i, "", false, true
+	}
+	return i, "", false, false
 }
 
 func dbusUnixPath(address string) (string, bool) {

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/chooks/internal/fallbackwatch"
 	"github.com/aiseeq/chooks/internal/hookproxy"
 	"github.com/aiseeq/chooks/internal/hookwire"
@@ -167,12 +166,8 @@ func TestProxyLostAfterCommitIsRecorded(t *testing.T) {
 		t.Fatal("request not started")
 	}
 	// Падение демона: SIGKILL своему дочернему процессу теста
-	if servedPID(t, sv.starts, "v1") == 0 {
-		t.Fatal("v1 has no PID")
-	}
-	if _, err := proc.StopChild(sv.cmd.Process.Pid, 0, func() error {
-		return syscall.Kill(-sv.cmd.Process.Pid, syscall.SIGKILL)
-	}); err != nil {
+	pid := servedPID(t, sv.starts, "v1")
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	r := <-result

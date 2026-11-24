@@ -194,9 +194,7 @@ func startSupervised(t *testing.T, exe, home string, extraEnv ...string) *superv
 	sv.cmd = cmd
 	t.Cleanup(func() {
 		writeFiles(t, home, map[string]string{"stop": ""})
-		if _, err := proc.StopChild(cmd.Process.Pid, 10*time.Second, func() error {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		}); err != nil {
+		if _, err := proc.StopChildGroup(cmd, 10*time.Second, syscall.SIGTERM); err != nil {
 			t.Errorf("stop supervised process tree: %v", err)
 		}
 		done := make(chan struct{})
@@ -204,9 +202,7 @@ func startSupervised(t *testing.T, exe, home string, extraEnv ...string) *superv
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
-			_, _ = proc.StopChild(cmd.Process.Pid, 0, func() error {
-				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			})
+			_, _ = proc.StopChildGroup(cmd, 0, syscall.SIGKILL)
 			<-done
 			t.Errorf("supervised daemon did not stop on SIGTERM; output:\n%s", stderr.String())
 		}
@@ -347,9 +343,7 @@ func TestServeUpdateAfterInstall(t *testing.T) {
 	writeFiles(t, home, map[string]string{"stop": ""})
 	var stopErr error
 	if pid != 0 {
-		_, stopErr = proc.StopChild(sv.cmd.Process.Pid, 10*time.Second, func() error {
-			return syscall.Kill(-sv.cmd.Process.Pid, syscall.SIGTERM)
-		})
+		stopErr = syscall.Kill(pid, syscall.SIGTERM)
 	}
 	if pid == 0 || stopErr != nil || !waitFor(t, 10*time.Second, func() bool { return processGone(pid) }) {
 		t.Fatalf("v3 pid %d did not stop", pid)
@@ -676,8 +670,14 @@ func startKilled(t *testing.T, helper string, args, env []string, home, dir stri
 		_ = cmd.Wait()
 		t.Fatal("webtext stub not started")
 	}
-	if _, err := proc.StopChild(cmd.Process.Pid, 2*time.Second, func() error { return cmd.Process.Signal(syscall.SIGTERM) }); err != nil {
+	if err := proc.SignalChild(cmd.Process.Pid, syscall.SIGTERM); err != nil {
 		t.Fatal(err)
+	}
+	if !waitFor(t, 2*time.Second, func() bool { return processExited(cmd.Process.Pid) }) {
+		t.Errorf("hook did not exit after SIGTERM")
+		if _, err := proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() }); err != nil {
+			t.Errorf("cleanup hook after SIGTERM timeout: %v", err)
+		}
 	}
 	err = cmd.Wait()
 	var exitErr *exec.ExitError

@@ -221,11 +221,11 @@ func listenSocket(path string) (*net.UnixListener, error) {
 	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
-		return nil, fmt.Errorf("listen on unix socket: %w", err)
+		return nil, err
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = listener.Close()
-		return nil, fmt.Errorf("set unix socket permissions: %w", err)
+		return nil, err
 	}
 	return listener, nil
 }
@@ -431,15 +431,10 @@ func (s *server) serveCommitted(conn *net.UnixConn, accepted time.Time, wire hoo
 	terminated, gone := make(chan struct{}), make(chan struct{})
 	go func() {
 		var b [1]byte
-		n, err := conn.Read(b[:])
+		n, _ := conn.Read(b[:])
 		if n == 1 && b[0] == hookwire.Terminate {
 			close(terminated)
 			cancelCause(errProxyTerminated)
-			return
-		}
-		if err != nil {
-			close(gone)
-			cancelCause(errProxyGone)
 			return
 		}
 		close(gone)
@@ -793,7 +788,7 @@ func transcriptRefusal(stdin []byte) string {
 func procParent(pid int) (int, error) {
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return 0, fmt.Errorf("read process %d stat: %w", pid, err)
+		return 0, err
 	}
 	end := bytes.LastIndexByte(data, ')')
 	if end < 0 {
@@ -810,7 +805,7 @@ func procParent(pid int) (int, error) {
 func peerCred(conn *net.UnixConn) (*unix.Ucred, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
-		return nil, fmt.Errorf("get unix socket syscall connection: %w", err)
+		return nil, err
 	}
 	var cred *unix.Ucred
 	var credErr error

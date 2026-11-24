@@ -452,6 +452,10 @@ func TestClaimStopSIGTERMKillsJudge(t *testing.T) {
 	}
 	left := 0
 	for _, pid := range pids {
+		deadline := time.Now().Add(2 * time.Second)
+		for alive(pid) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
 		if alive(pid) {
 			left++
 			_ = syscall.Kill(pid, syscall.SIGKILL)

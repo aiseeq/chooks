@@ -450,9 +450,17 @@ func TestServeStopsOnExecutableChange(t *testing.T) {
 		srv.run, srv.exe = countingRun(&calls), &fakeExe{answers: []bool{false, true}}
 		freshStart(srv)
 		path, done := serveDirect(t, srv)
-		_, ack, reason := sendRequest(t, path, selfRequest(t, hookPreToolUse, absoluteEnv(t.TempDir()), `{}`))
+		conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		_, writeErr := conn.Write(hookwire.EncodeRequest(selfRequest(t, hookPreToolUse, absoluteEnv(t.TempDir()), `{}`)))
+		// Демон может записать fallback и закрыть сокет до того, как клиент
+		// закончит запись; в таком случае ответ всё равно нужно прочитать.
+		ack, reason := readAck(t, conn)
 		if ack != hookwire.Fallback || reason != "upgrade" {
-			t.Fatalf("ack %q reason %q, want «в CLI: upgrade»", ack, reason)
+			t.Fatalf("ack %q reason %q, write error %v; want «в CLI: upgrade»", ack, reason, writeErr)
 		}
 		if err := <-done; err != nil {
 			t.Fatalf("serve: %v", err)

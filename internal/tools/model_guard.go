@@ -1284,19 +1284,30 @@ var protectedSettingsTarget = regexp.MustCompile(`(?i)(?:settings(?:\.local)?\.j
 var writtenAgentTarget = regexp.MustCompile(`(?:^|/)agents/.+\.md$`)
 
 func protectedWriteTargets(command string) []string {
+	targets, _ := protectedWriteTargetSet(command)
+	return targets
+}
+
+// protectedWriteTargetSet — цели записи в settings и агентов; copied — те
+// из них, что пишут sed -i, cp, mv, install и tee: их содержимое не видно
+func protectedWriteTargetSet(command string) (targets, copied []string) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	var targets []string
+	byCommand := false
 	addTarget := func(value string) {
 		if protectedSettingsTarget.MatchString(value) || explicitSettingsTarget(command, value) {
 			targets = append(targets, value)
+			if byCommand {
+				copied = append(copied, value)
+			}
 		}
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch n := node.(type) {
 		case *syntax.Stmt:
+			byCommand = false
 			for _, redirect := range n.Redirs {
 				switch redirect.Op.String() {
 				case ">", ">>", ">|", "&>", "&>>":
@@ -1306,6 +1317,7 @@ func protectedWriteTargets(command string) []string {
 				}
 			}
 		case *syntax.CallExpr:
+			byCommand = true
 			if len(n.Args) < 2 {
 				return true
 			}
@@ -1315,19 +1327,11 @@ func protectedWriteTargets(command string) []string {
 			}
 			base := filepath.Base(name)
 			if base == "sed" {
-				inPlace := false
-				for _, arg := range n.Args[1:] {
-					value, ok := literalValue(arg)
-					if ok && (strings.HasPrefix(value, "-") && strings.Contains(value, "i") && !strings.HasPrefix(value, "--") || value == "--in-place" || strings.HasPrefix(value, "--in-place=")) {
-						inPlace = true
-					}
-				}
+				inPlace := sedInPlace(n.Args[1:])
 				for _, arg := range n.Args[1:] {
 					value, ok := literalValue(arg)
 					if inPlace && ok && !strings.HasPrefix(value, "-") && (protectedSettingsTarget.MatchString(value) || explicitSettingsTarget(command, value)) {
 						addTarget(value)
-					} else if inPlace && strings.Contains(shellWordText(command, arg), ".claude/agents/") {
-						addTarget(shellWordText(command, arg))
 					}
 				}
 				return true
@@ -1340,8 +1344,7 @@ func protectedWriteTargets(command string) []string {
 			for i := 1; i < len(n.Args); i++ {
 				value, isLiteral := literalValue(n.Args[i])
 				if !isLiteral {
-					value = shellWordText(command, n.Args[i])
-					if strings.Contains(value, ".claude/agents/") || protectedSettingsTarget.MatchString(value) {
+					if value = shellWordText(command, n.Args[i]); protectedSettingsTarget.MatchString(value) {
 						positional = append(positional, value)
 					}
 					continue
@@ -1364,15 +1367,9 @@ func protectedWriteTargets(command string) []string {
 				positional = append(positional, value)
 			}
 			if targetDirectory != "" {
-				for _, arg := range n.Args[1:] {
-					value, ok := literalValue(arg)
-					if !ok || strings.HasPrefix(value, "-") || value == targetDirectory {
-						continue
-					}
-					addTarget(filepath.Join(targetDirectory, filepath.Base(value)))
-				}
-				if len(positional) == 0 && (protectedSettingsTarget.MatchString(targetDirectory) || strings.Contains(targetDirectory, ".claude/agents")) {
-					addTarget(filepath.Join(targetDirectory, "unknown.md"))
+				addTarget(targetDirectory)
+				for _, source := range positional {
+					addTarget(filepath.Join(targetDirectory, filepath.Base(source)))
 				}
 			}
 			if len(positional) == 0 {
@@ -1384,12 +1381,6 @@ func protectedWriteTargets(command string) []string {
 				}
 			} else {
 				target := positional[len(positional)-1]
-				if base == "cp" && len(positional) > 1 && strings.Contains(target, ".claude/agents") && !strings.HasSuffix(target, ".md") {
-					for _, source := range positional[:len(positional)-1] {
-						addTarget(filepath.Join(target, filepath.Base(source)))
-					}
-					return true
-				}
 				addTarget(target)
 				if strings.HasSuffix(target, string(os.PathSeparator)) && len(positional) > 1 {
 					addTarget(filepath.Join(target, filepath.Base(positional[len(positional)-2])))
@@ -1398,7 +1389,18 @@ func protectedWriteTargets(command string) []string {
 		}
 		return true
 	})
-	return targets
+	return targets, copied
+}
+
+// sedInPlace — sed правит файлы на месте: -i, -ni, -i.bak, --in-place[=…]
+func sedInPlace(args []*syntax.Word) bool {
+	for _, arg := range args {
+		value, ok := literalValue(arg)
+		if ok && (strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "--") && strings.Contains(value, "i") || value == "--in-place" || strings.HasPrefix(value, "--in-place=")) {
+			return true
+		}
+	}
+	return false
 }
 
 var settingsFileArgument = regexp.MustCompile(`(?:^|\s)--settings(?:=|\s+)("[^"]*"|'[^']*'|[^\s;&|]+)`)
@@ -1417,15 +1419,26 @@ func explicitSettingsTarget(command, target string) bool {
 	return false
 }
 
+// writtenProtectedFileCandidates — модели из записей в settings и
+// определения агентов в той же команде. Агентов решает белый список
+// (writtenAgentDefinitionCandidates), settings — разбор JSON ниже; разбор
+// settings ответа об агенте не меняет
 func writtenProtectedFileCandidates(command string) []modelCandidate {
-	if len(protectedWriteTargets(command)) == 0 {
-		return nil
+	agentModels, unknown := writtenAgentDefinitionCandidates(command)
+	targets, copied := protectedWriteTargetSet(command)
+	if len(targets) == 0 {
+		if unknown {
+			return append(agentModels, modelCandidate{value: "written settings or agent contents", unknownWrite: true})
+		}
+		return agentModels
 	}
 	decoded := strings.ReplaceAll(command, "\\\"", "\"")
 	decoded = strings.ReplaceAll(decoded, "\\\\n", "\n")
 	var found []modelCandidate
-	recognizedAgentDefinitions := map[string]bool{}
-	unknownAgentDefinitions := map[string]bool{}
+	unknownSettings := map[string]bool{}
+	for _, target := range copied {
+		unknownSettings[strings.Trim(target, "\"'")] = true
+	}
 	for _, match := range writtenModel.FindAllStringSubmatch(decoded, -1) {
 		if match[1] == "model" {
 			found = append(found, modelCandidate{value: match[2]})
@@ -1453,67 +1466,10 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 		syntax.Walk(file, func(node syntax.Node) bool {
 			if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) > 1 {
 				name, literal := literalValue(call.Args[0])
-				if literal && filepath.Base(name) == "sed" {
-					inPlace := false
+				if literal && filepath.Base(name) == "sed" && sedInPlace(call.Args[1:]) {
 					for _, arg := range call.Args[1:] {
-						value, ok := literalValue(arg)
-						if ok && (strings.HasPrefix(value, "-") && strings.Contains(value, "i") && !strings.HasPrefix(value, "--") || value == "--in-place" || strings.HasPrefix(value, "--in-place=")) {
-							inPlace = true
-						}
-					}
-					for _, arg := range call.Args[1:] {
-						value, ok := literalValue(arg)
-						raw := shellWordText(decoded, arg)
-						if inPlace && (ok && (protectedSettingsTarget.MatchString(value) || explicitSettingsTarget(decoded, value)) || strings.Contains(raw, ".claude/agents/")) {
-							if !ok {
-								value = raw
-							}
-							unknownAgentDefinitions[strings.Trim(value, "\"'")] = true
-						}
-					}
-				} else if literal && slices.Contains([]string{"cp", "mv", "install", "tee"}, filepath.Base(name)) {
-					base := filepath.Base(name)
-					var positional []string
-					targetDirectory := ""
-					for i := 1; i < len(call.Args); i++ {
-						arg := call.Args[i]
-						value, ok := literalValue(arg)
-						if ok && (value == "-t" || value == "--target-directory") && i+1 < len(call.Args) {
-							targetDirectory, _ = literalValue(call.Args[i+1])
-							i++
-						} else if ok && strings.HasPrefix(value, "--target-directory=") {
-							targetDirectory = strings.TrimPrefix(value, "--target-directory=")
-						} else if ok && !strings.HasPrefix(value, "-") {
-							positional = append(positional, value)
-						} else if strings.Contains(shellWordText(decoded, arg), ".claude/agents/") {
-							positional = append(positional, shellWordText(decoded, arg))
-						}
-					}
-					if targetDirectory != "" {
-						for _, source := range positional {
-							if base == "cp" {
-								unknownAgentDefinitions[filepath.Join(targetDirectory, filepath.Base(source))] = true
-							}
-						}
-						if base == "cp" && len(positional) == 0 {
-							unknownAgentDefinitions[filepath.Join(targetDirectory, "unknown.md")] = true
-						}
-					} else if len(positional) > 0 {
-						targets := positional
-						if base == "cp" {
-							targets = positional[len(positional)-1:]
-							if len(positional) > 1 && (strings.TrimSuffix(positional[len(positional)-1], "/") == ".claude/agents" || strings.HasSuffix(positional[len(positional)-1], "/agents")) {
-								// A directory destination creates a file named after each source.
-								targets = nil
-								for _, source := range positional[:len(positional)-1] {
-									targets = append(targets, filepath.Join(positional[len(positional)-1], filepath.Base(source)))
-								}
-							}
-						}
-						for _, target := range targets {
-							if protectedSettingsTarget.MatchString(target) || explicitSettingsTarget(decoded, target) {
-								unknownAgentDefinitions[strings.Trim(target, "\"'")] = true
-							}
+						if value, ok := literalValue(arg); ok && (protectedSettingsTarget.MatchString(value) || explicitSettingsTarget(decoded, value)) {
+							unknownSettings[strings.Trim(value, "\"'")] = true
 						}
 					}
 				}
@@ -1536,137 +1492,25 @@ func writtenProtectedFileCandidates(command string) []modelCandidate {
 					continue
 				}
 				if redirect.Op.String() == ">>" || (!stmtHasHeredoc && !parsedSettingsContents && (redirect.Op.String() == ">" || redirect.Op.String() == ">|")) {
-					unknownAgentDefinitions[strings.Trim(target, "\"'")] = true
+					unknownSettings[strings.Trim(target, "\"'")] = true
 				}
 			}
 			return true
 		})
 	}
-	// Heredoc body bytes are literal when its delimiter is quoted. Parse the
-	// original command here: decoded normalizes shell escape sequences used by
-	// printf/settings analysis and would corrupt quoted heredoc contents.
-	if file, err := syntax.NewParser().Parse(strings.NewReader(command), ""); err == nil {
-		catFunctionDeclared := false
-		syntax.Walk(file, func(node syntax.Node) bool {
-			if function, ok := node.(*syntax.FuncDecl); ok {
-				if function.Name != nil && function.Name.Value == "cat" {
-					catFunctionDeclared = true
-				}
-				for _, name := range function.Names {
-					catFunctionDeclared = catFunctionDeclared || name.Value == "cat"
-				}
-			}
-			return true
-		})
-		syntax.Walk(file, func(node syntax.Node) bool {
-			stmt, ok := node.(*syntax.Stmt)
-			if !ok {
-				return true
-			}
-			var targets []string
-			var body string
-			bodyQuoted := false
-			var stdinHeredoc *syntax.Redirect
-			stdinRedirected := false
-			hasHeredoc := false
-			for _, redirect := range stmt.Redirs {
-				if redirect.Hdoc != nil {
-					hasHeredoc = true
-					if redirect.N == nil || redirect.N.Value == "0" {
-						stdinHeredoc = redirect
-						stdinRedirected = true
-					}
-					continue
-				}
-				fd0 := redirect.N != nil && redirect.N.Value == "0" || redirect.N == nil && slices.Contains([]string{"<", "<<<", "<&", "<>"}, redirect.Op.String())
-				if fd0 {
-					stdinRedirected = true
-					stdinHeredoc = nil
-				}
-				if redirect.Word == nil {
-					continue
-				}
-				target, literal := literalValue(redirect.Word)
-				if literal && slices.Contains([]string{">", ">>", ">|", "&>", "&>>"}, redirect.Op.String()) {
-					targets = append(targets, strings.Trim(target, `"'`))
-				}
-			}
-			if stdinHeredoc != nil && stdinRedirected {
-				body = stdinHeredoc.Hdoc.Lit()
-				bodyQuoted = heredocDelimiterQuoted(stdinHeredoc)
-				if stdinHeredoc.Op == syntax.DashHdoc {
-					lines := strings.Split(body, "\n")
-					for i := range lines {
-						lines[i] = strings.TrimLeft(lines[i], "\t")
-					}
-					body = strings.Join(lines, "\n")
-				}
-			}
-			consumerIsCat := false
-			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
-				if name, literal := literalValue(call.Args[0]); literal {
-					base := filepath.Base(name)
-					if base == "cat" {
-						consumerIsCat = !catFunctionDeclared && len(call.Args) == 1
-						if len(call.Args) == 2 {
-							consumerIsCat = !catFunctionDeclared && call.Args[1].Lit() == "-"
-						}
-					}
-					if base == "tee" {
-						for _, arg := range call.Args[1:] {
-							if target, literal := literalValue(arg); literal && !strings.HasPrefix(target, "-") {
-								targets = append(targets, strings.Trim(target, `"'`))
-							}
-						}
-						consumerIsCat = true
-					}
-				}
-			}
-			consumerIsCat = consumerIsCat && stdinHeredoc != nil && stdinRedirected
-			if body != "" {
-				for _, target := range targets {
-					if !writtenAgentTarget.MatchString(target) {
-						continue
-					}
-					if !consumerIsCat || !agentFrontmatterBlock.Match([]byte(body)) || (!bodyQuoted && strings.ContainsAny(body, "$"+string(rune(96)))) {
-						continue
-					}
-					_, model := agentFrontmatter([]byte(body), target)
-					recognizedAgentDefinitions[target] = true
-					if model != "" && !strings.EqualFold(model, "inherit") {
-						found = append(found, modelCandidate{value: model})
-					}
-				}
-			}
-			if hasHeredoc && (body == "" || stdinHeredoc == nil || !consumerIsCat || !agentFrontmatterBlock.Match([]byte(body)) || !bodyQuoted && strings.ContainsAny(body, "$"+string(rune(96)))) {
-				for _, target := range targets {
-					if writtenAgentTarget.MatchString(target) {
-						unknownAgentDefinitions[target] = true
-					}
-				}
-			}
-			return true
-		})
-	}
-	for _, target := range protectedWriteTargets(command) {
+	found = append(found, agentModels...)
+	for _, target := range targets {
 		target = strings.Trim(target, "\"'")
-		isAgent := writtenAgentTarget.MatchString(target)
-		isParsedSettings := (protectedSettingsTarget.MatchString(target) || explicitSettingsTarget(command, target)) && parsedSettingsContents && parsedSettingsModels
-		if (!isAgent && !isParsedSettings) || (isAgent && !recognizedAgentDefinitions[target]) || unknownAgentDefinitions[target] {
-			return append(found, modelCandidate{value: "written settings or agent contents", unknownWrite: true})
+		if writtenAgentTarget.MatchString(target) {
+			continue
 		}
+		isParsedSettings := (protectedSettingsTarget.MatchString(target) || explicitSettingsTarget(command, target)) && parsedSettingsContents && parsedSettingsModels
+		unknown = unknown || !isParsedSettings || unknownSettings[target]
+	}
+	if unknown {
+		found = append(found, modelCandidate{value: "written settings or agent contents", unknownWrite: true})
 	}
 	return found
-}
-
-func heredocDelimiterQuoted(redirect *syntax.Redirect) bool {
-	for _, part := range redirect.Word.Parts {
-		switch part.(type) {
-		case *syntax.SglQuoted, *syntax.DblQuoted:
-			return true
-		}
-	}
-	return false
 }
 
 func envChdir(args []string, cwd, home string) (string, bool, bool) {

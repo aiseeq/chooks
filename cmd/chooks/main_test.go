@@ -50,6 +50,61 @@ func silentConfig(t *testing.T) (*core.Config, core.Logger) {
 	return config, logger
 }
 
+func TestSkillReloadCleanupCommandUsesProvidedTime(t *testing.T) {
+	root := t.TempDir()
+	stateDir, textsDir := filepath.Join(root, "state"), filepath.Join(root, "texts")
+	for _, dir := range []string{stateDir, textsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	for _, item := range []struct {
+		dir, name string
+		at        time.Time
+	}{
+		{stateDir, "old.json", now.Add(-31 * 24 * time.Hour)},
+		{stateDir, "fresh.json", now.Add(-20 * 24 * time.Hour)},
+		{textsDir, "old.txt", now.Add(-31 * 24 * time.Hour)},
+		{textsDir, "fresh.txt", now.Add(-20 * 24 * time.Hour)},
+	} {
+		path := filepath.Join(item.dir, item.name)
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, item.at, item.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := hookctx.WithRequest(context.Background(), request)
+	cmd := newSkillReloadCleanupCmd()
+	cmd.SetContext(ctx)
+	cmd.SetArgs([]string{"--state-dir", stateDir, "--texts-dir", textsDir, "--now", now.Format(time.RFC3339Nano)})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cleanup command: %v", err)
+	}
+	oldStateErr := statErr(filepath.Join(stateDir, "old.json"))
+	oldTextErr := statErr(filepath.Join(textsDir, "old.txt"))
+	if !os.IsNotExist(oldStateErr) || !os.IsNotExist(oldTextErr) {
+		t.Fatalf("старые файлы остались: state=%v texts=%v", oldStateErr, oldTextErr)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "fresh.json")); err != nil {
+		t.Errorf("свежая запись удалена: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(textsDir, "fresh.txt")); err != nil {
+		t.Errorf("свежий текст удалён: %v", err)
+	}
+}
+
+func statErr(path string) error {
+	_, err := os.Stat(path)
+	return err
+}
+
 // Stop не открывает транскрипт: путь указывает на FIFO, и любая попытка его
 // прочитать повесила бы хук до таймаута теста
 func TestRunSessionEvent_StopDoesNotReadTranscript(t *testing.T) {

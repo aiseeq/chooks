@@ -23,6 +23,12 @@ import (
 // каталоги состояния, кэша akit и runtime сверяются со снимком до них
 // (newFakeEntries)
 func TestMain(m *testing.M) {
+	for _, arg := range os.Args[1:] {
+		if arg == "skill-reload-cleanup" {
+			fmt.Fprintln(os.Stderr, "chooks test binary refuses skill-reload-cleanup")
+			os.Exit(2)
+		}
+	}
 	// Бинарь тестов как CLI chooks для TestRelativeEnvCLIAndRequest: до
 	// подмены HOME и до m.Run, env и cwd — запуска
 	if os.Getenv(relativeEnvHelper) == "1" {
@@ -32,6 +38,12 @@ func TestMain(m *testing.M) {
 	// CLI, упавший паникой (serve_test.go)
 	if code, ok := runServeHelper(); ok {
 		os.Exit(code)
+	}
+	for _, arg := range os.Args[1:] {
+		if !strings.HasPrefix(arg, "-test.") {
+			fmt.Fprintf(os.Stderr, "chooks test binary refuses positional argument %q\n", arg)
+			os.Exit(2)
+		}
 	}
 	os.Exit(runIsolated(m.Run))
 }

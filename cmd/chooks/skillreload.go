@@ -14,6 +14,7 @@ import (
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/hookctx"
+	"github.com/aiseeq/chooks/internal/selflaunch"
 	"github.com/aiseeq/chooks/internal/skillreload"
 )
 
@@ -65,7 +66,7 @@ func remindStaleSkills(ctx context.Context, eventName string, input *core.ToolIn
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	checker := skillreload.Checker{Context: ctx, StateDir: stateDir, Abs: request.Abs, Location: request.Location(), ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage}
+	checker := skillreload.Checker{Context: ctx, StateDir: stateDir, Abs: request.Abs, Location: request.Location(), ScanBudget: skillScanBudget, Deadline: deadline, Substage: timer.setSubstage, StartCleanup: selflaunch.StartSkillReloadCleanup}
 	var result skillreload.Result
 	if awaitSkillCheck(ctx, timer, logger, eventName, input, func() {
 		result, err = checker.Check(skillreload.Event{

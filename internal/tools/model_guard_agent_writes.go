@@ -228,9 +228,9 @@ func claudeDirectoryNodeReads(node syntax.Node) bool {
 	case *syntax.File, *syntax.Comment, *syntax.Lit, *syntax.SglQuoted, *syntax.DblQuoted:
 		return true
 	case *syntax.Stmt:
-		return !n.Negated && !n.Background && !n.Coprocess
+		return !n.Negated && !n.Background && !n.Coprocess && !clientStdinRedirected(n)
 	case *syntax.BinaryCmd:
-		return n.Op == syntax.AndStmt || n.Op == syntax.Pipe
+		return (n.Op == syntax.AndStmt || n.Op == syntax.Pipe) && !pipeFeedsModelClient(n)
 	case *syntax.Redirect:
 		return claudeDirectoryRedirectReads(n)
 	case *syntax.Word:
@@ -239,6 +239,47 @@ func claudeDirectoryNodeReads(node syntax.Node) bool {
 		return claudeDirectoryCallReads(n)
 	}
 	return false
+}
+
+// clientStdinRedirected — у клиента модели перенаправлен ввод: дескриптор 0
+// явно (0<file, 0>file) или оператором ввода без номера (<, <>, <&, heredoc,
+// <<<). Через ввод приходит промпт; перенаправления stdout и stderr
+// проверяет claudeDirectoryRedirectReads
+func clientStdinRedirected(stmt *syntax.Stmt) bool {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || !modelClientCall(call) {
+		return false
+	}
+	for _, redirect := range stmt.Redirs {
+		if redirect.N != nil {
+			if redirect.N.Value == "0" {
+				return true
+			}
+			continue
+		}
+		switch redirect.Op {
+		case syntax.RdrIn, syntax.RdrInOut, syntax.DplIn, syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc:
+			return true
+		}
+	}
+	return false
+}
+
+// pipeFeedsModelClient — клиент модели справа от pipe: pipe становится его
+// вводом, а с ним приходит промпт
+func pipeFeedsModelClient(binary *syntax.BinaryCmd) bool {
+	if binary.Op != syntax.Pipe {
+		return false
+	}
+	stmt := binary.Y
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	return ok && modelClientCall(call)
+}
+
+// modelClientCall — вызов клиента модели (claude, cl)
+func modelClientCall(call *syntax.CallExpr) bool {
+	name, ok := readerProgram(call)
+	return ok && (name == "claude" || name == "cl")
 }
 
 // claudeDirectoryRedirectReads — перенаправление читает литеральный файл,
@@ -316,7 +357,7 @@ func claudeDirectoryCallReads(call *syntax.CallExpr) bool {
 		return false
 	}
 	switch name {
-	case "cd", "pushd":
+	case "cd", "pushd", "popd":
 		return true
 	case "claude", "cl":
 		return clientReads(call.Args[1:])
@@ -325,11 +366,11 @@ func claudeDirectoryCallReads(call *syntax.CallExpr) bool {
 }
 
 // clientReads — клиент модели в каталоге .claude только читает без
-// аргументов (голый `claude`) или с аргументами ровно `mcp list`. Любой
+// аргументов (голый `claude`) или с аргументами ровно `mcp list`. Ограничения
+// на stdin проверяются по узлам команды и pipe в разобранном AST. Любой
 // другой аргумент — отказ: опции пишут файлы и снимают хуки (--bare,
-// --worktree, кластер -p-settings=…), промпт приходит и после -p, и через
-// stdin, а подкоманды, в том числе скрытые, растут с версией claude —
-// списки их не догоняют
+// --worktree, кластер -p-settings=…), а подкоманды, в том числе скрытые,
+// растут с версией claude — списки их не догоняют
 func clientReads(args []*syntax.Word) bool {
 	if len(args) == 0 {
 		return true

@@ -566,6 +566,23 @@ func wrappedCommandWords(words []shWord, start int, cdRule bool) []shWord {
 	return shellcmdCommandWords(words, skipped, cdRule)
 }
 
+// wrappedCall вызов, который обёртка wrapper оборачивает напрямую: его Via —
+// Via обёртки и её имя; nil — wrapper не обёртка
+func wrappedCall(calls []shellcmd.Call, wrapper *shellcmd.Call) *shellcmd.Call {
+	var found *shellcmd.Call
+	for i := range calls {
+		c := &calls[i]
+		n := len(wrapper.Via)
+		if len(c.Via) != n+1 || c.Via[n] != wrapper.Name || !slices.Equal(c.Via[:n], wrapper.Via) || c.Offset <= wrapper.Offset {
+			continue
+		}
+		if found == nil || c.Offset < found.Offset {
+			found = c
+		}
+	}
+	return found
+}
+
 // wrapperLeft слово, на котором shellcmd остановился, хотя main снимал его
 // как обёртку или её аргумент: time, TIME, \time, «--», длительность
 func wrapperLeft(raw string) bool {
@@ -630,6 +647,11 @@ func shellcmdCommandWords(words []shWord, start int, cdRule bool) []shWord {
 	}
 	if first == nil {
 		return words[start:]
+	}
+	// shellcmd отдаёт и промежуточные обёртки цепочки (`sudo doas rm`: doas с
+	// Via [sudo], rm с Via [sudo doas]) — спускаемся до обёрнутой ими команды
+	for next := wrappedCall(calls, first); next != nil; next = wrappedCall(calls, first) {
+		first = next
 	}
 	wordIndex, ok := offsets[first.Offset]
 	if !ok {

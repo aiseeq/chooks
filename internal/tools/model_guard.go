@@ -52,6 +52,13 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 	if !t.IsEnabled() || input == nil {
 		return &core.ValidationResult{IsValid: true}, nil
 	}
+	unsafe, result := t.validateClaudeClientOptions(input.Command)
+	if result != nil {
+		return result, nil
+	}
+	if unsafe {
+		return t.reject("опции клиента claude не входят в безопасный набор", nil), nil
+	}
 	if result := t.validateShellPrefix(input); result != nil {
 		return result, nil
 	}
@@ -96,6 +103,22 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 	return t.reject(strings.Join(reasons, "; "), models), nil
+}
+
+func (t *ModelGuardTool) validateClaudeClientOptions(command string) (bool, *core.ValidationResult) {
+	unsafe, err := unsafeClaudeClientOptions(command)
+	if err == nil {
+		return unsafe, nil
+	}
+	var parseErr syntax.ParseError
+	if !errors.As(err, &parseErr) {
+		return false, t.reject("не удалось разобрать опции клиента claude: "+err.Error(), nil)
+	}
+	t.Logger().Warn("model_guard: опции клиента claude не разобраны", "error", err)
+	if unparsedClaudeHasUnsafeOption(command) {
+		return false, t.reject("не удалось разобрать опции клиента claude: "+err.Error(), nil)
+	}
+	return false, nil
 }
 
 func (t *ModelGuardTool) validateShellPrefix(input *core.ToolInput) *core.ValidationResult {

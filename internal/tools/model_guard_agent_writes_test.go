@@ -945,3 +945,42 @@ func TestModelGuardReviewRoundEightForms(t *testing.T) {
 		})
 	}
 }
+
+func TestModelGuardShortFlagCluster(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	cases := []struct {
+		name, command string
+		allowed       bool
+	}{
+		{"settings cluster", "claude -p-settings=/tmp/x.json hi", false},
+		{"debug-file cluster", "claude -p-debug-file=settings.json hi", false},
+		{"mcp-config cluster", "claude -c-mcp-config=x.json", false},
+		{"debug-file overwrites settings", "claude -p --debug-file=/home/aisee/.claude/settings.json hi", false},
+		{"bare", "claude --bare -p hi", false},
+		{"setting-sources", "claude --setting-sources=project -p hi", false},
+		{"setting-sources empty", "claude -p --model opus --setting-sources '' hi", false},
+		{"malformed shell with bare option rejected", "claude -p --model opus --bare 'unterminated", false},
+		{"approved model", "claude -p --model opus hi", true},
+		{"approved default", "ANTHROPIC_MODEL=opus claude -p hi", true},
+		{"resume and output format", "claude -p --model opus --resume X --output-format json hi", true},
+		{"tool permissions and verbose", "claude -p --model opus --dangerously-skip-permissions --allowedTools=Grep --verbose hi", true},
+		{"permission mode", "claude -p --model opus --permission-mode bypassPermissions hi", true},
+		{"resume with dirs", "claude --dangerously-skip-permissions --allowedTools=Grep,Glob --add-dir=/home/aisee/.cache/worktrees --add-dir=/home/aisee/.cache/claude-tmp -n probe-resume --resume X -p --model opus --output-format stream-json --verbose hi", true},
+		{"max turns", "claude -p --model opus --max-turns 1 --max-budget-usd 2 hi", true},
+		{"safe prompt and budget options", "claude -p --model opus --append-system-prompt extra --max-budget-usd 2 --effort low --input-format text --output-format json hi", true},
+		{"version utility", "claude --version", true},
+		{"cl check utility", "cl --cl-check", true},
+		{"add-dir outside print mode", "claude --add-dir .claude", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsValid != tc.allowed {
+				t.Fatalf("ValidateTool allowed=%v, want %v; violations=%v", result.IsValid, tc.allowed, result.Violations)
+			}
+		})
+	}
+}

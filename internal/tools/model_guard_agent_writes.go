@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -206,10 +207,10 @@ func unparsedAgentReason(command string) string {
 // если в ней нет ничего, что bash раскрывает или исполняет помимо читателей:
 // каждое слово — чистый литерал (literalWord), конструкции — простые вызовы,
 // &&, `|` и `;`, перенаправления — чтение файла, дубль дескриптора и запись в
-// /dev/null. Вызов — переход (cd, pushd), клиент модели без --debug-file,
-// --settings, --mcp-config, --plugin-dir или читатель из agentReaders (git —
-// с подкомандой из agentReaderGitSubcommands) без пишущих опций и без
-// окружения перед командой. Всё прочее (export/declare, [[ ]], test, let,
+// /dev/null. Вызов — переход (cd, pushd), клиент модели без аргументов или
+// только с `mcp list` либо читатель из agentReaders (git — с подкомандой из
+// agentReaderGitSubcommands) без пишущих опций и без окружения перед
+// командой. Всё прочее (export/declare, [[ ]], test, let,
 // (( )), функции, подоболочки, { }, ||, &, heredoc) — как и любая неизвестная
 // команда: её относительные пути и побочные эффекты по словам не установить
 func readOnlyClaudeDirectory(file *syntax.File) bool {
@@ -365,6 +366,240 @@ func claudeDirectoryCallReads(call *syntax.CallExpr) bool {
 	return readsOnly(call, agentReaders, agentReaderGitSubcommands)
 }
 
+// unsafeClaudeClientOptions — блокирует настройки, не проверяемые прежним
+// анализатором, и их формы в коротких кластерах. В print mode неизвестные
+// флаги закрываются; model_guard сохраняет проверку настроек, агентов и
+// директорий, для которых уже умеет разбирать значения. Полный CLI-парсер не
+// нужен: кластер вроде `-p-settings=…` отклоняется целиком.
+func unsafeClaudeClientOptions(command string) (bool, error) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return false, fmt.Errorf("parse shell command for Claude client options: %w", err)
+	}
+	unsafe := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		name, literal := literalValue(call.Args[0])
+		if !literal || !slices.Contains([]string{"claude", "cl"}, filepath.Base(name)) {
+			return true
+		}
+		if !clientInvocationSafe(call.Args[1:]) {
+			unsafe = true
+			return false
+		}
+		return true
+	})
+	return unsafe, nil
+}
+
+func clientInvocationSafe(args []*syntax.Word) bool {
+	if len(args) == 0 {
+		return true
+	}
+	if len(args) == 2 && wordOwnText(args[0]) == "mcp" && wordOwnText(args[1]) == "list" {
+		return true
+	}
+	if containsUnsafeClaudeOption(args) {
+		return false
+	}
+	if claudeDebugFileTargetsSettings(args) {
+		return false
+	}
+	if clientUtilityInvocation(args) {
+		return true
+	}
+	if hasClaudePrintMode(args) {
+		return clientPrintArgumentsSafe(args)
+	}
+	return true
+}
+
+func hasClaudePrintMode(args []*syntax.Word) bool {
+	for i := range args {
+		if value := wordOwnText(args[i]); value == "-p" || value == "--print" {
+			return true
+		}
+	}
+	return false
+}
+
+func clientPrintArgumentsSafe(args []*syntax.Word) bool {
+	for i := 0; i < len(args); i++ {
+		if !clientPrintArgumentSafe(args, &i) {
+			return false
+		}
+	}
+	return true
+}
+
+func clientPrintArgumentSafe(args []*syntax.Word, index *int) bool {
+	value := wordOwnText(args[*index])
+	switch {
+	case value == "-p" || value == "--print", strings.HasPrefix(value, "--model="):
+		return true
+	case value == "--model":
+		return consumeClaudeOptionValue(args, index, true)
+	case knownValidatedClaudeOption(value):
+		return strings.Contains(value, "=") || consumeClaudeOptionValue(args, index, false)
+	case safeClaudePrintOption(value):
+		return safeClaudePrintOptionValue(args, index, value)
+	case strings.HasPrefix(value, "-"):
+		// Includes short-flag clusters such as -p-settings=… and
+		// -c-mcp-config=…; unknown options fail closed.
+		return false
+	default:
+		return true
+	}
+}
+
+func consumeClaudeOptionValue(args []*syntax.Word, index *int, rejectOptionValue bool) bool {
+	if *index+1 >= len(args) {
+		return false
+	}
+	if rejectOptionValue && strings.HasPrefix(wordOwnText(args[*index+1]), "-") {
+		return false
+	}
+	*index++
+	return true
+}
+
+func safeClaudePrintOptionValue(args []*syntax.Word, index *int, value string) bool {
+	if !claudePrintOptionTakesValue(value) || strings.Contains(value, "=") {
+		return true
+	}
+	if *index+1 >= len(args) || strings.HasPrefix(wordOwnText(args[*index+1]), "-") {
+		return claudePrintOptionHasOptionalValue(value)
+	}
+	*index++
+	return true
+}
+
+func knownValidatedClaudeOption(value string) bool {
+	name, _, _ := strings.Cut(value, "=")
+	return slices.Contains([]string{
+		"--settings", "--agents", "--agent", "--mcp-config", "--plugin-dir",
+		"--add-dir", "--debug-file",
+	}, name)
+}
+
+// safeClaudePrintOption — print-флаги, влияющие на формат/контекст запроса,
+// продолжение сессии, бюджеты, системный prompt и доступные инструменты, но
+// не подменяющие модель, settings, MCP или хуки. Неизвестные флаги остаются
+// запрещены по умолчанию.
+func safeClaudePrintOption(value string) bool {
+	name, _, _ := strings.Cut(value, "=")
+	return slices.Contains([]string{
+		"-c", "--continue", "-r", "--resume", "--fork-session", "--from-pr",
+		"--output-format", "--input-format", "--verbose", "--max-budget-usd", "--max-turns",
+		"--effort", "--permission-mode", "--permission-prompts",
+		"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+		"--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
+		"--tools", "--system-prompt", "--append-system-prompt", "--json-schema",
+		"--autocompact", "--name", "-n", "--session-id", "--no-session-persistence",
+		"--include-hook-events", "--include-partial-messages", "--forward-subagent-text",
+		"--replay-user-messages", "--disable-slash-commands", "--ax-screen-reader",
+		"--exclude-dynamic-system-prompt-sections",
+	}, name)
+}
+
+func claudePrintOptionTakesValue(value string) bool {
+	name, _, _ := strings.Cut(value, "=")
+	return slices.Contains([]string{
+		"-r", "--resume", "--from-pr", "--output-format", "--input-format",
+		"--max-budget-usd", "--max-turns", "--effort", "--permission-mode", "--permission-prompts",
+		"--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
+		"--tools", "--system-prompt", "--append-system-prompt", "--json-schema",
+		"--autocompact", "--name", "-n", "--session-id",
+	}, name)
+}
+
+func claudePrintOptionHasOptionalValue(value string) bool {
+	name, _, _ := strings.Cut(value, "=")
+	return slices.Contains([]string{"-r", "--resume", "--from-pr"}, name)
+}
+
+func claudeDebugFileTargetsSettings(args []*syntax.Word) bool {
+	for i, arg := range args {
+		value := wordOwnText(arg)
+		path := ""
+		if after, ok := strings.CutPrefix(value, "--debug-file="); ok {
+			path = after
+		} else if value == "--debug-file" && i+1 < len(args) {
+			path = wordOwnText(args[i+1])
+		}
+		if filepath.Base(path) == "settings.json" {
+			return true
+		}
+	}
+	return false
+}
+
+func clientUtilityInvocation(args []*syntax.Word) bool {
+	values := make([]string, len(args))
+	for i, arg := range args {
+		values[i] = wordOwnText(arg)
+	}
+	switch {
+	case len(values) == 1 && slices.Contains([]string{"--version", "--help", "-h"}, values[0]):
+		return true
+	case len(values) == 2 && values[0] == "auth" && values[1] == "status":
+		return true
+	case len(values) >= 1 && slices.Contains([]string{"--cl-ls", "--cl-check", "--cl-help"}, values[0]):
+		return true
+	case len(values) == 1 && values[0] == "ls":
+		return true
+	}
+	return false
+}
+
+var unsafeClaudeOptions = []string{
+	"--bare", "--setting-sources", "--plugin-url", "--managed-settings",
+	"--rewind-files", "--file", "--worktree",
+}
+
+var clusteredSensitiveClaudeOptions = []string{
+	"settings", "agents", "agent", "mcp-config", "plugin-dir", "debug-file",
+}
+
+var unparsedUnsafeClaudeOption = regexp.MustCompile(`(?m)(?:^|[\s;&|])--(?:bare|setting-sources|plugin-url|managed-settings|rewind-files|file|worktree|settings|agents|agent|mcp-config|plugin-dir|debug-file)(?:=|[\s]|$)|(?:^|[\s;&|])-[[:alpha:]-]*(?:settings|agents|agent|mcp-config|plugin-dir|debug-file)(?:=|[\s]|$)`)
+
+func unparsedClaudeHasUnsafeOption(command string) bool {
+	return unparsedUnsafeClaudeOption.MatchString(command)
+}
+
+func containsUnsafeClaudeOption(args []*syntax.Word) bool {
+	for _, arg := range args {
+		value := wordOwnText(arg)
+		if !strings.HasPrefix(value, "-") {
+			continue
+		}
+		if strings.HasPrefix(value, "--") {
+			name, _, _ := strings.Cut(value, "=")
+			if slices.Contains(unsafeClaudeOptions, name) {
+				return true
+			}
+		} else {
+			// В коротком кластере остаток может повторно разбираться как
+			// длинная опция: -p-setting-sources, -p-settings и т. п.
+			cluster := value[1:]
+			for _, option := range unsafeClaudeOptions {
+				if strings.Contains(cluster, strings.TrimLeft(option, "-")) {
+					return true
+				}
+			}
+			for _, option := range clusteredSensitiveClaudeOptions {
+				if strings.Contains(cluster, option) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // clientReads — клиент модели в каталоге .claude только читает без
 // аргументов (голый `claude`) или с аргументами ровно `mcp list`. Ограничения
 // на stdin проверяются по узлам команды и pipe в разобранном AST. Любой
@@ -453,20 +688,40 @@ func readerOptionWrites(name, value string) bool {
 	}
 	switch name {
 	case "tree":
-		return short && strings.ContainsAny(value, "oR") || strings.HasPrefix(value, "--o")
+		return treeOptionWrites(value, short)
 	case "rg":
 		return strings.HasPrefix(value, "--pre")
 	case "less":
-		if short {
-			return strings.ContainsAny(value, "oOk")
-		}
-		return strings.HasPrefix(value, "--") && len(long) >= 3 && (longOptionIs(long, "log-file") || longOptionIs(long, "LOG-FILE") || longOptionIs(long, "lesskey"))
+		return lessOptionWrites(value, short, long)
 	case "file":
-		return short && strings.Contains(value, "C") || strings.HasPrefix(value, "--") && len(long) >= 3 && longOptionIs(long, "compile")
+		return fileOptionWrites(value, short, long)
 	case "test", "[":
-		return value == "-v" || textSubstitutes(value)
+		return testOptionWrites(value)
 	}
 	return false
+}
+
+func treeOptionWrites(value string, short bool) bool {
+	return short && strings.ContainsAny(value, "oR") || strings.HasPrefix(value, "--o")
+}
+
+func lessOptionWrites(value string, short bool, long string) bool {
+	if short {
+		return strings.ContainsAny(value, "oOk")
+	}
+	return strings.HasPrefix(value, "--") && len(long) >= 3 && lessLongOptionWrites(long)
+}
+
+func lessLongOptionWrites(long string) bool {
+	return longOptionIs(long, "log-file") || longOptionIs(long, "LOG-FILE") || longOptionIs(long, "lesskey")
+}
+
+func fileOptionWrites(value string, short bool, long string) bool {
+	return short && strings.Contains(value, "C") || strings.HasPrefix(value, "--") && len(long) >= 3 && longOptionIs(long, "compile")
+}
+
+func testOptionWrites(value string) bool {
+	return value == "-v" || textSubstitutes(value)
 }
 
 // longOptionIs — имя длинной опции (без --) — сама option, её сокращение

@@ -183,14 +183,17 @@ func (p *proxy) run() int {
 		return p.fallback(stdin, true, ackPrefix+"unexpected byte")
 	}
 	// «Принято» пришло в срок: 'C' отдаёт исполнение демону. Не ушло — демон
-	// запрос не исполнит, CLI его исполнит один раз
-	if err := writeAll(p.fd, []byte{hookwire.Commit}, deadline); err != nil {
-		p.close()
-		return p.fallback(stdin, true, commitPrefix+err.Error())
-	}
+	// запрос не исполнит, CLI его исполнит один раз. Запись 'C' и флаг — под
+	// одним замком: SIGTERM между ними иначе выходил без 'T', и демон
+	// продолжал исполнять брошенный запрос
 	p.term.mu.Lock()
-	p.term.committed = true
+	commitErr := writeAll(p.fd, []byte{hookwire.Commit}, deadline)
+	p.term.committed = commitErr == nil
 	p.term.mu.Unlock()
+	if commitErr != nil {
+		p.close()
+		return p.fallback(stdin, true, commitPrefix+commitErr.Error())
+	}
 	return p.await(stdin)
 }
 

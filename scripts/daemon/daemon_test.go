@@ -121,3 +121,35 @@ func TestJournalOutcomes(t *testing.T) {
 		t.Fatalf("counts %v details %q", counts, details)
 	}
 }
+
+// Относительная символьная ссылка на бинарь: подготовка кладёт сам бинарь,
+// а не ссылку, цель которой в каталоге стенда не найдётся
+func TestPrepareBinariesRelativeSymlink(t *testing.T) {
+	inputs := t.TempDir()
+	for name, content := range map[string]string{"real-cli": "cli", "real-hook": "proxy"} {
+		if err := os.WriteFile(filepath.Join(inputs, name), []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cli := filepath.Join(inputs, "br-chooks")
+	proxy := filepath.Join(inputs, "br-hook")
+	if err := os.Symlink("real-cli", cli); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real-hook", proxy); err != nil {
+		t.Fatal(err)
+	}
+	gotCLI, gotProxy, err := prepareBinaries(t.TempDir(), cli, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{gotCLI: "cli", gotProxy: "proxy"} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s: got %q, want %q", path, got, want)
+		}
+	}
+}

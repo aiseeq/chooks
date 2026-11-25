@@ -86,6 +86,13 @@ func prepareBinaries(work, cli, proxy string) (string, string, error) {
 	}
 	stage := func(src, name string) (string, error) {
 		dst := filepath.Join(dir, name)
+		// Ссылка на символьную ссылку перенесла бы относительную цель в чужой
+		// каталог: связывается и копируется сам бинарь
+		resolved, err := filepath.EvalSymlinks(src)
+		if err != nil {
+			return "", fmt.Errorf("resolve binary %s: %w", src, err)
+		}
+		src = resolved
 		if err := os.Link(src, dst); err == nil {
 			return dst, nil
 		}

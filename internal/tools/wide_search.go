@@ -52,6 +52,11 @@ func WideSearch(command, cwd, home string) (string, error) {
 			continue
 		}
 		if len(paths) == 0 {
+			// xargs/parallel feed positional paths to the command. Without
+			// an explicit path in its argv, it does not search the cwd.
+			if slices.Contains(c.Via, "xargs") || slices.Contains(c.Via, "parallel") {
+				continue
+			}
 			paths = []walkArg{{text: "."}}
 		}
 		for _, p := range paths {

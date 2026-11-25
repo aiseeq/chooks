@@ -120,6 +120,9 @@ func TestRmGuardWrappedCdDoesNotUseClaude330Exception(t *testing.T) {
 		`CD . && rm -f dir/*`,
 		`time cd . && rm -f dir/*`,
 		`! cd ./build && rm -f cache/*`,
+		`time -- cd . && rm -f dir/*`,
+		`time -p -- cd ./build && rm -f cache/*`,
+		`zsh -c 'time -- cd . && rm -f dir/*'`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if result := validateRmWith(t, newRmGuard(t), command, root); result.IsValid {

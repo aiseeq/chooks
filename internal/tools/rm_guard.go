@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/akit/shellcmd"
@@ -864,12 +865,27 @@ func claude330AllowsCdGlob(cmds []shCommand, target shWord, cwd string, rmIndex 
 func countDirChanges(cmds []shCommand) int {
 	count := 0
 	for _, c := range cmds {
-		words := cdCommandWords(c.words)
-		if len(words) > 0 && dirChangers[commandName(words[0].raw)] {
+		if commandChangesDir(c) {
 			count++
 		}
 	}
 	return count
+}
+
+// commandChangesDir — команда может сменить каталог: после снятия обёрток
+// это cd, pushd или popd, или такое имя стоит в ней любым словом. Второе
+// ловит обёртку, которую shellcmd не снимает (`time -- cd .`): лучше лишний
+// отказ на `echo cd`, чем глоб rm в неизвестном каталоге
+func commandChangesDir(c shCommand) bool {
+	if words := cdCommandWords(c.words); len(words) > 0 && dirChangers[commandName(words[0].raw)] {
+		return true
+	}
+	for _, w := range c.words {
+		if !w.redirect && dirChangers[commandName(unquoteWord(w.raw))] {
+			return true
+		}
+	}
+	return false
 }
 
 func validCdGlobCommandChain(cmds []shCommand, rmIndex, cdCount int) bool {
@@ -1101,12 +1117,7 @@ func withInlineScripts(cmds []shCommand) []shCommand {
 
 // changesDir в команде есть смена каталога
 func changesDir(cmds []shCommand) bool {
-	for _, c := range cmds {
-		if words := cdCommandWords(c.words); words != nil && dirChangers[commandName(words[0].raw)] {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(cmds, commandChangesDir)
 }
 
 // relativeDirGlob цель относительная (не /…, ~…, $…) и, сложенная с рабочей

@@ -118,7 +118,7 @@ func TestKillGuardRareAllows(t *testing.T) {
 // Причина называет форму и что погаснет; подсказка — что делать вместо
 func TestKillGuardRareTexts(t *testing.T) {
 	for _, tc := range []struct{ command, reason, hint string }{
-		{`echo 1 > ` + cgUser + `/agents.slice/agent-x-1.scope/cgroup.kill`, "cgroup.kill убивает все процессы cgroup и вложенных: в ней идёт claude (PID 2100)", "Cgroup сессии"},
+		{`echo 1 > ` + cgUser + `/agents.slice/agent-x-1.scope/cgroup.kill`, "cgroup.kill убивает все процессы cgroup и вложенных: в ней идёт claude (PID 2100)", "Cgroup и срезы сессии"},
 		{`systemd-run --user -p SuccessAction=exit-force true`, "systemd-run --user -p SuccessAction=exit-force: когда служба завершится, менеджер выполнит exit-force — гасит менеджер systemctl --user", systemctlEndHint("systemctl --user", "exit")},
 		{`machinectl shell root@ /usr/bin/systemctl stop sddm.service`, "systemctl stop sddm.service: в юните идёт sddm", "Останавливай юнит"},
 		{`qdbus "$S" /Shutdown logout`, `qdbus logout: получатель "$S" не виден до запуска`, kdeHint},

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -163,15 +164,47 @@ func TestKillGuardHintsUsePstop(t *testing.T) {
 		"cgroup":  cgroupHint,
 		"глубина": depthHint,
 	} {
-		if strings.Contains(hint, "kill ") {
-			t.Errorf("подсказка %s советует kill: %q", name, hint)
-		}
 		if !strings.Contains(hint, "pstop") {
 			t.Errorf("подсказка %s не называет pstop: %q", name, hint)
 		}
 	}
 	if !strings.Contains(killGuardHint, "--own-unit") {
 		t.Errorf("подсказка PID не объясняет pstop для процесса из прошлого вызова Bash: %q", killGuardHint)
+	}
+	if !strings.Contains(killGuardHint, "попробуй") || !strings.Contains(killGuardHint, "оба отказали") {
+		t.Errorf("подсказка PID без условного совета для осиротевшего процесса: %q", killGuardHint)
+	}
+}
+
+func TestKillGuardHintsContainNoBareSignalCommands(t *testing.T) {
+	command := regexp.MustCompile(`(?i)(^|[\s;:])(?:kill|pkill|killall)(?:\s|$)`)
+	hints := []struct{ name, text string }{
+		{"PID", killGuardHint}, {"защищённый процесс", protectedProcessHint},
+		{"группа", killGroupHint}, {"cgroup", cgroupHint}, {"глубина", depthHint},
+		{"tmux", toolHints["tmux"]}, {"fuser", toolHints["fuser"]},
+		{"systemctl без имени", systemctlHint("systemctl --user", false)},
+		{"systemctl с юнитом", systemctlHint("systemctl --user", true)},
+		{"systemd завершение", systemctlEndHint("systemctl --user", "exit")},
+		{"D-Bus", dbusHint}, {"KDE", kdeHint}, {"systemd-run скрытая команда", systemdRunHiddenHint},
+	}
+	for _, name := range []string{"agent-other.scope", "worker-other.service", "graft-heavy-other.scope", "run-other.service"} {
+		_, hint := agentUnitReason("--user", name)
+		hints = append(hints, struct{ name, text string }{"юнит " + name, hint})
+	}
+	for _, commandText := range []string{`systemd-run --user kill 1`} {
+		result := validateKill(t, commandText)
+		for _, hint := range result.Suggestions {
+			if strings.HasPrefix(hint, "Без systemd-run:") {
+				hints = append(hints, struct{ name, text string }{"systemd-run сигнал", hint})
+			}
+		}
+	}
+	fuserRefusal := fuserReason([]word{{text: "-k", literal: true}, {text: "/tmp/app.sock", literal: true}}, "")
+	hints = append(hints, struct{ name, text string }{"отказ fuser", fuserRefusal})
+	for _, hint := range hints {
+		if command.MatchString(hint.text) {
+			t.Errorf("подсказка %s содержит голую команду сигнала: %q", hint.name, hint.text)
+		}
 	}
 }
 

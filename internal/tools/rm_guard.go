@@ -628,13 +628,14 @@ func wrappedCommandWords(words []shWord, start int, cdRule bool) []shWord {
 	return words[wordIndex:]
 }
 
-// skipTimeKeyword пропускает ключевое слово bash `time` с его -p и --.
-// shellcmd разбирает `time -- rm` как вызов `--`, а bash исполняет rm.
-// Регистр не важен, как в прежнем разборе main: `TIME` бывает функцией-обёрткой
+// skipTimeKeyword пропускает `time` с его опциями так же, как прежний разбор
+// main снимал обёртку time: имя через commandName (без \, пути и регистра),
+// затем все слова с «-». shellcmd разбирает `time -- rm` как вызов `--`, а
+// bash исполняет rm; `TIME` и `\TIME` бывают функцией-обёрткой
 func skipTimeKeyword(words []shWord, start int) int {
-	for start < len(words) && strings.EqualFold(words[start].raw, "time") {
+	for start < len(words) && commandName(words[start].raw) == "time" {
 		start++
-		for start < len(words) && (words[start].raw == "-p" || words[start].raw == "--") {
+		for start < len(words) && strings.HasPrefix(words[start].raw, "-") {
 			start++
 		}
 	}

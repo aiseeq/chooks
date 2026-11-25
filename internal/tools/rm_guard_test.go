@@ -661,6 +661,8 @@ func TestRmGuardCdGlobMatchesClaudeCode(t *testing.T) {
 		{`cd /home/u/sb && time -p rm -f cl/*`, true},
 		{`cd /home/u/sb && time time -- rm -f cl/*`, true},
 		{`TIME() { shift; "$@"; }; cd /home/u/sb && TIME -- rm -f cl/*`, true},
+		{`TIME() { shift; "$@"; }; cd /home/u/sb && \TIME -- rm -f cl/*`, true},
+		{`cd /home/u/sb && /usr/bin/time -v -- rm -f cl/*`, true},
 		{`(cd /home/u/sb && time -- rm -f cl/*)`, true},
 		{`bash -c 'cd /home/u/sb && time -- rm -f cl/*'`, true},
 		{`cd /home/u/sb && LC_ALL=C rm -f cl/*`, true},

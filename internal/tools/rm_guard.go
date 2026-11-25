@@ -552,6 +552,7 @@ func (t *RmGuardTool) checkCommand(words []shWord, v *rmVars, src inline) []stri
 // shWord, чтобы проверки целей использовали прежнее представление кавычек и
 // подстановок.
 func wrappedCommandWords(words []shWord, start int, cdRule bool) []shWord {
+	start = skipTimeKeyword(words, start)
 	if start >= len(words) {
 		return nil
 	}
@@ -625,6 +626,18 @@ func wrappedCommandWords(words []shWord, start int, cdRule bool) []shWord {
 		return words[start:]
 	}
 	return words[wordIndex:]
+}
+
+// skipTimeKeyword пропускает ключевое слово bash `time` с его -p и --.
+// shellcmd разбирает `time -- rm` как вызов `--`, а bash исполняет rm
+func skipTimeKeyword(words []shWord, start int) int {
+	for start < len(words) && words[start].raw == "time" {
+		start++
+		for start < len(words) && (words[start].raw == "-p" || words[start].raw == "--") {
+			start++
+		}
+	}
+	return start
 }
 
 // checkInline разбирает строку eval, trap или sh -c как отдельную команду

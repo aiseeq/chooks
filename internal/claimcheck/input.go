@@ -64,9 +64,13 @@ type Tool struct {
 	inputWords     [][]string
 	inputLengths   []int
 	inputRunes     int
-	matcher        *wordMatcher
-	positions      map[int]map[string]int
-	inputPositions map[int]map[string]int
+	// inputRetainedRunes counts the runes of fullInput that Input keeps; it is
+	// set wherever Input is cut, once inputExcerptMeasured.
+	inputRetainedRunes   int
+	inputExcerptMeasured bool
+	matcher              *wordMatcher
+	positions            map[int]map[string]int
+	inputPositions       map[int]map[string]int
 }
 
 func (t Tool) MarshalJSON() ([]byte, error) {
@@ -119,6 +123,7 @@ const (
 	shortAnswerInputCharLimit  = 24300
 	toolInputCharLimit         = 300
 	callsOnlyBaselineCharLimit = 150
+	callsOnlyMinimumCharLimit  = 120
 	callsOnlyMediumCharLimit   = 700
 	callsOnlyInputCharLimit    = 1000
 	toolOutputCharLimit        = 1600
@@ -830,7 +835,16 @@ func fitContextTool(tool Tool, budget int) (Tool, bool, error) {
 	}
 }
 
+// wholeInputPositions keys the answer word positions of a whole input in its
+// positions cache, apart from the positions of its lines.
+const wholeInputPositions = -1
+
 func toolInputExcerpt(tool Tool, limit int) string {
+	// A calls-only minimum window keeps the answer words of the whole input: the
+	// line excerpt spends so small a limit on line markers and loses the words.
+	if tool.callsOnly && limit > 0 && limit <= callsOnlyMinimumCharLimit && utf8.RuneCountInString(tool.fullInput) > limit {
+		return excerptAroundWords(tool.fullInput, tool.answerWords, limit, tool.matcher, tool.inputPositions, wholeInputPositions)
+	}
 	if tool.inputLines == nil {
 		return excerptWithWordsCached(tool.fullInput, tool.answerWords, limit, tool.matcher, tool.inputPositions)
 	}
@@ -1296,7 +1310,7 @@ func toolFromCall(ctx context.Context, r *row, b *block, rows []row, results map
 	} else {
 		inputExcerpt = excerptWithWordsCached(maskedInput, words, inputLimit, matcher, inputPositions)
 	}
-	return Tool{Time: r.E.Timestamp, Name: b.Name, Input: inputExcerpt, OutputLength: length, Output: excerptWithWordsIndexed(maskedOutput, words, outputLimit, outputLines, outputWords, outputLengths, outputRunes, matcher, positions), ExitCode: code, IsError: iserr, relevant: matches(input, words) || hasLineWord(outputWords), fullInput: maskedInput, fullOutput: maskedOutput, answerWords: words, cropWords: cropWords, inputLines: inputLines, inputWords: inputWords, inputLengths: inputLengths, inputRunes: inputRunes, outputLines: outputLines, outputWords: outputWords, outputLengths: outputLengths, outputRunes: outputRunes, matcher: matcher, positions: positions, inputPositions: inputPositions}, nil
+	return Tool{Time: r.E.Timestamp, Name: b.Name, Input: inputExcerpt, OutputLength: length, Output: excerptWithWordsIndexed(maskedOutput, words, outputLimit, outputLines, outputWords, outputLengths, outputRunes, matcher, positions), ExitCode: code, IsError: iserr, relevant: matches(input, words) || hasLineWord(outputWords), fullInput: maskedInput, fullOutput: maskedOutput, answerWords: words, cropWords: cropWords, inputLines: inputLines, inputWords: inputWords, inputLengths: inputLengths, inputRunes: inputRunes, inputRetainedRunes: min(inputLimit, inputRunes), inputExcerptMeasured: true, outputLines: outputLines, outputWords: outputWords, outputLengths: outputLengths, outputRunes: outputRunes, matcher: matcher, positions: positions, inputPositions: inputPositions}, nil
 }
 func plain(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
@@ -1359,6 +1373,8 @@ func nestedInt(raw json.RawMessage, key string) (int, bool, error) {
 // boundTools keeps turnTools within budget characters of JSON. The last calls
 // before the answer always stay, sharing half the budget. Matching calls then
 // spend the remainder in order of how many not-yet-visible answer words they add.
+// In calls-only mode no call with answer words is dropped while another call
+// keeps more input than its minimum window.
 func boundTools(tools []Tool, answer string, budget int) ([]Tool, error) {
 	return boundToolsContext(context.Background(), tools, answer, budget)
 }
@@ -1420,45 +1436,114 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 	if err != nil {
 		return nil, err
 	}
-	keep := func(i, limit int) error {
-		if selected[i] {
-			return nil
-		}
+	// minimumOnly records that a relevant calls-only call could not get even
+	// an empty excerpt: no excerpt grows after that. What is left is less than
+	// that call takes with an empty excerpt, so a later call fits a few runes
+	// at most.
+	minimumOnly := false
+	// fitAt crops call i to inputLimit (0: the limit of its class) inside what
+	// the selected calls leave of limit, without selecting it.
+	fitAt := func(i, limit, inputLimit int) (Tool, bool, error) {
 		// Keeping a call inside a gap at worst splits one skip marker into two:
 		// the call, one more marker and two commas. Counts only shrink otherwise.
 		marker, err := skippedMarkerSize(len(bounded))
 		if err != nil {
-			return err
+			return Tool{}, false, err
 		}
 		available := limit - currentSize - 2 - marker
 		if available < minimumSizes[i] {
-			return nil
+			return Tool{}, false, nil
 		}
 		candidate := bounded[i]
-		inputLimit := toolInputCharLimit
-		if candidate.callsOnly {
-			inputLimit = callsOnlyInputCharLimit
-			fullInputLength := utf8.RuneCountInString(candidate.fullInput)
-			if fullInputLength > callsOnlyInputCharLimit && !candidate.relevant {
-				inputLimit = callsOnlyBaselineCharLimit
-			} else if fullInputLength > toolInputCharLimit && !candidate.relevant {
-				inputLimit = callsOnlyMediumCharLimit
-			}
+		if inputLimit == 0 {
+			inputLimit = callsOnlyClassCharLimit(candidate)
 		}
-		fit, ok, err := fitToolWithInputLimit(candidate, available, inputLimit)
-		if err != nil || !ok {
-			return err
-		}
+		return fitToolWithInputLimit(candidate, available, inputLimit)
+	}
+	commit := func(i int, fit Tool) error {
 		fit.relevant = bounded[i].relevant
 		if !fit.relevant {
 			fit.evidenceScore = 0
 		}
 		bounded[i], selected[i] = fit, true
+		var err error
 		currentSize, err = toolsJSONSize(toolsWithSkipped(bounded, selected))
-		if err != nil {
+		return err
+	}
+	keep := func(i, limit int) error {
+		if selected[i] {
+			return nil
+		}
+		fit, ok, err := fitAt(i, limit, 0)
+		if err != nil || !ok {
 			return err
 		}
-		return nil
+		return commit(i, fit)
+	}
+	// grow refits a selected calls-only call up to inputLimit in the budget the
+	// other calls leave; a refit that would retain less input is dropped.
+	grow := func(i, available, inputLimit int) error {
+		fit, ok, err := fitToolWithInputLimit(bounded[i], available, inputLimit)
+		if err != nil || !ok {
+			return err
+		}
+		if larger, ok := keepLargerToolFit(bounded[i], fit); ok {
+			bounded[i] = larger
+			currentSize, err = toolsJSONSize(toolsWithSkipped(bounded, selected))
+		}
+		return err
+	}
+	// cropToMinimum crops selected call i to its minimum window and reports
+	// whether it kept more input before.
+	cropToMinimum := func(i int) (bool, error) {
+		fit, ok, err := fitToolWithInputLimit(bounded[i], budget, callsOnlyMinimumCharLimit)
+		if err != nil || !ok || retainedInputRunes(fit) >= retainedInputRunes(bounded[i]) {
+			return false, err
+		}
+		bounded[i] = fit
+		currentSize, err = toolsJSONSize(toolsWithSkipped(bounded, selected))
+		return err == nil, err
+	}
+	// shrinkLongest crops the selected call holding the most input beyond its
+	// minimum window down to that window. It reports false when none does.
+	shrinkLongest := func() (bool, error) {
+		longest, longestRunes := -1, 0
+		for j := range bounded {
+			retained := retainedInputRunes(bounded[j])
+			if selected[j] && retained > callsOnlyMinimumRunes(bounded[j]) && retained > longestRunes {
+				longest, longestRunes = j, retained
+			}
+		}
+		if longest < 0 {
+			return false, nil
+		}
+		return cropToMinimum(longest)
+	}
+	// keepMinimum selects call i with its minimum window, cropping longer
+	// excerpts of other calls to their minimum while the window does not fit.
+	keepMinimum := func(i int) (bool, error) {
+		if selected[i] {
+			return true, nil
+		}
+		for {
+			fit, ok, err := fitAt(i, budget, callsOnlyMinimumCharLimit)
+			if err != nil {
+				return false, err
+			}
+			if ok && retainedInputRunes(fit) >= callsOnlyMinimumRunes(bounded[i]) {
+				return true, commit(i, fit)
+			}
+			shrunk, err := shrinkLongest()
+			if err != nil {
+				return false, err
+			}
+			if !shrunk {
+				if !ok {
+					return false, nil
+				}
+				return true, commit(i, fit)
+			}
+		}
 	}
 	remaining := make(map[string]bool)
 	for _, visible := range fullWords {
@@ -1548,62 +1633,92 @@ func boundToolsContext(ctx context.Context, tools []Tool, answer string, budget 
 	if err != nil {
 		return nil, err
 	}
-	// Calls-only selection spends its budget by excerpt class and evidence score.
-	// Other modes keep answer-matching calls before earlier calls.
-	relevantOrder := make([]int, 0, len(bounded))
 	if bounded[0].callsOnly {
-		relevantOrder = callsOnlyPriorityOrder(bounded)
-	} else {
-		for i := range bounded {
-			if bounded[i].relevant {
-				relevantOrder = append(relevantOrder, i)
-			}
-		}
-	}
-	for _, i := range relevantOrder {
-		if err := keep(i, budget); err != nil {
-			return nil, err
-		}
-	}
-	if bounded[0].callsOnly {
+		// Every relevant call first gets only its minimum window, so none is
+		// dropped while another call holds more than its own minimum. The
+		// passes after it spend the rest in priority order: relevant calls up
+		// to their full limit, then the other calls by length class, then an
+		// even share for every excerpt still cropped. A relevant call among
+		// the last ones gives back its reserve share and grows in the same
+		// order as the others.
 		order := callsOnlyPriorityOrder(bounded)
-		remaining := 0
-		for _, i := range order {
-			if selected[i] && utf8.RuneCountInString(bounded[i].Input) < utf8.RuneCountInString(bounded[i].fullInput) && utf8.RuneCountInString(bounded[i].Input) < callsOnlyInputCharLimit {
-				remaining++
+		for i := last; i < len(bounded); i++ {
+			if bounded[i].relevant {
+				if _, err := cropToMinimum(i); err != nil {
+					return nil, err
+				}
 			}
 		}
 		for _, i := range order {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			if !selected[i] || utf8.RuneCountInString(bounded[i].Input) >= utf8.RuneCountInString(bounded[i].fullInput) || utf8.RuneCountInString(bounded[i].Input) >= callsOnlyInputCharLimit {
+			if !bounded[i].relevant {
 				continue
 			}
-			remaining--
-			currentSize, err := toolsJSONSize(toolsWithSkipped(bounded, selected))
+			kept, err := keepMinimum(i)
 			if err != nil {
 				return nil, err
 			}
-			callSize, err := toolsJSONSize([]Tool{bounded[i]})
-			if err != nil {
-				return nil, err
+			minimumOnly = minimumOnly || !kept
+		}
+		if !minimumOnly {
+			for _, i := range order {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				if !bounded[i].relevant || !selected[i] || retainedInputRunes(bounded[i]) >= callsOnlyLimitRunes(bounded[i]) {
+					continue
+				}
+				callSize, err := toolsJSONSize([]Tool{bounded[i]})
+				if err != nil {
+					return nil, err
+				}
+				if err := grow(i, budget-currentSize+callSize, callsOnlyInputCharLimit); err != nil {
+					return nil, err
+				}
 			}
-			available := budget - currentSize + callSize
-			share := available / (remaining + 1)
-			if share <= callSize {
-				continue
+			for _, i := range order {
+				if !bounded[i].relevant {
+					if err := keep(i, budget); err != nil {
+						return nil, err
+					}
+				}
 			}
-			fit, ok, err := fitToolWithInputLimit(bounded[i], share, callsOnlyInputCharLimit)
-			if err != nil {
-				return nil, err
+			cropped := 0
+			for _, i := range order {
+				if selected[i] && retainedInputRunes(bounded[i]) < callsOnlyLimitRunes(bounded[i]) {
+					cropped++
+				}
 			}
-			if !ok {
-				continue
+			for _, i := range order {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				if !selected[i] || retainedInputRunes(bounded[i]) >= callsOnlyLimitRunes(bounded[i]) {
+					continue
+				}
+				cropped--
+				callSize, err := toolsJSONSize([]Tool{bounded[i]})
+				if err != nil {
+					return nil, err
+				}
+				share := (budget - currentSize + callSize) / (cropped + 1)
+				if share <= callSize {
+					continue
+				}
+				if err := grow(i, share, callsOnlyInputCharLimit); err != nil {
+					return nil, err
+				}
 			}
-			largerFit, keepFit := keepLargerToolFit(bounded[i], fit)
-			if keepFit {
-				bounded[i] = largerFit
+		}
+	} else {
+		// Other modes keep answer-matching calls before earlier calls.
+		for i := range bounded {
+			if bounded[i].relevant {
+				if err := keep(i, budget); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -1684,21 +1799,53 @@ func callsOnlyPriorityGroup(inputLength int) int {
 	return 2
 }
 
+// callsOnlyClassCharLimit is the input limit a call gets when it is first
+// selected: relevant and short calls up to the full limit, longer calls
+// without answer words less the longer they are.
+func callsOnlyClassCharLimit(tool Tool) int {
+	if !tool.callsOnly {
+		return toolInputCharLimit
+	}
+	length := utf8.RuneCountInString(tool.fullInput)
+	switch {
+	case tool.relevant || length <= toolInputCharLimit:
+		return callsOnlyInputCharLimit
+	case length > callsOnlyInputCharLimit:
+		return callsOnlyBaselineCharLimit
+	default:
+		return callsOnlyMediumCharLimit
+	}
+}
+
+// callsOnlyMinimumRunes is how much input the minimum window of a call keeps.
+// callsOnlyMinimumCharLimit is the least limit that holds the window of an
+// answer word, 20 runes on each side, between two crop markers of an input
+// under a million runes; see excerptAroundWords.
+func callsOnlyMinimumRunes(tool Tool) int {
+	return min(utf8.RuneCountInString(tool.fullInput), callsOnlyMinimumCharLimit)
+}
+
+// callsOnlyLimitRunes is how much input a call keeps at its full limit.
+func callsOnlyLimitRunes(tool Tool) int {
+	return min(utf8.RuneCountInString(tool.fullInput), callsOnlyInputCharLimit)
+}
+
 func keepLargerToolFit(current, fit Tool) (Tool, bool) {
-	if retainedInputRunes(fit.Input) > retainedInputRunes(current.Input) {
+	if retainedInputRunes(fit) > retainedInputRunes(current) {
 		return fit, true
 	}
 	return current, false
 }
 
-func retainedInputRunes(input string) int {
-	if marker := strings.Index(input, "[обрезано:"); marker >= 0 {
-		var omitted, total int
-		if n, _ := fmt.Sscanf(input[marker:], "[обрезано: %d знаков из %d]", &omitted, &total); n == 2 {
-			return total - omitted
-		}
+// retainedInputRunes is how many runes of fullInput the excerpt keeps. The
+// count is recorded where the excerpt is cut, never parsed from its text: the
+// input itself may contain a literal crop marker. A Tool built without a cut
+// keeps its Input whole.
+func retainedInputRunes(tool Tool) int {
+	if tool.inputExcerptMeasured {
+		return tool.inputRetainedRunes
 	}
-	return utf8.RuneCountInString(input)
+	return utf8.RuneCountInString(tool.Input)
 }
 
 func answerWordOccurrences(tool Tool, words []string) int {
@@ -1783,6 +1930,7 @@ func keepLastTools(tools []Tool, selected []bool, from, reserve int) error {
 		if !ok {
 			fit = tools[i]
 			fit.Input, fit.Output = "", ""
+			fit.inputRetainedRunes, fit.inputExcerptMeasured = 0, true
 		}
 		tools[i], selected[i] = fit, true
 		size, err := toolsJSONSize([]Tool{fit})
@@ -1825,6 +1973,8 @@ func fitToolWithInputLimit(tool Tool, budget, callsOnlyInputLimit int) (Tool, bo
 	}
 	for {
 		tool.Input = toolInputExcerpt(tool, inputLimit)
+		tool.inputRetainedRunes = min(inputLimit, utf8.RuneCountInString(tool.fullInput))
+		tool.inputExcerptMeasured = true
 		tool.Output = toolOutputExcerpt(tool, outputLimit)
 		size, err := toolsJSONSize([]Tool{tool})
 		if err != nil {

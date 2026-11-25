@@ -2554,11 +2554,8 @@ func excerptAroundWords(s string, words []string, limit int, matcher *wordMatche
 
 func answerWordSpans(words []string, positions map[string]int, runeCount int) []wordSpan {
 	var spans []wordSpan
-	for _, word := range words {
-		position, ok := positions[word]
-		if !ok {
-			continue
-		}
+	for _, word := range matchedWordsFromPositions(words, positions) {
+		position := positions[word]
 		spans = append(spans, wordSpan{
 			start: max(0, position-20),
 			end:   min(runeCount, position+utf8.RuneCountInString(word)+20),
@@ -2566,6 +2563,25 @@ func answerWordSpans(words []string, positions map[string]int, runeCount int) []
 		})
 	}
 	return spans
+}
+
+func matchedWordsFromPositions(words []string, positions map[string]int) []string {
+	matched := make([]string, 0, len(positions))
+	for word := range positions {
+		if i := sort.SearchStrings(words, word); i < len(words) && words[i] == word {
+			matched = append(matched, word)
+		}
+	}
+	sort.Strings(matched)
+	return matched
+}
+
+func matchedWordsInLine(line string, words []string, matcher *wordMatcher) []string {
+	positions := matcher.wordPositions(line)
+	if len(positions) == 0 {
+		return nil
+	}
+	return matchedWordsFromPositions(words, positions)
 }
 
 func (r wordExcerptRenderer) renderPicked(picked []int, left, right int) string {
@@ -2613,6 +2629,60 @@ func (r wordExcerptRenderer) renderPicked(picked []int, left, right int) string 
 	return out.String()
 }
 
+// renderPickedRuneCount returns the exact rune count of renderPicked without
+// materializing every candidate string considered by bestWordSpan.
+func (r wordExcerptRenderer) renderPickedRuneCount(picked []int, left, right, markerRunes int) int {
+	count, cursor := 0, 0
+	hasOutput, endsWithNewline := false, false
+	writeGap := func(end int) {
+		if end <= cursor {
+			return
+		}
+		if hasOutput {
+			count++
+		}
+		count += markerRunes + 1
+		hasOutput, endsWithNewline = true, true
+		cursor = end
+	}
+	if left > 0 {
+		count = left
+		hasOutput = true
+		endsWithNewline = r.runes[left-1] == '\n'
+		cursor = left
+	}
+	for _, i := range picked {
+		item := r.spans[i]
+		start, end := max(item.start, left), min(item.end, right)
+		if end <= start || end <= cursor {
+			continue
+		}
+		if start > cursor {
+			writeGap(start)
+		}
+		if cursor > 0 && hasOutput && !endsWithNewline {
+			count++
+		}
+		start = max(start, cursor)
+		if end > start {
+			count += end - start
+			hasOutput = true
+			endsWithNewline = r.runes[end-1] == '\n'
+		}
+		cursor = end
+	}
+	if cursor < right {
+		writeGap(right)
+	}
+	if right < len(r.runes) {
+		if hasOutput {
+			count++
+		}
+		count += len(r.runes) - right
+	}
+	return count
+}
+
 func (r wordExcerptRenderer) render(selected []bool, left, right int) string {
 	picked := make([]int, 0)
 	for i, keep := range selected {
@@ -2656,21 +2726,27 @@ func wordPositionSet(spans []wordSpan, positions map[string]int) (map[string]boo
 func bestWordSpan(renderer wordExcerptRenderer, selected []bool, picked []int, current string, remaining map[string]bool, positionWords []string, positions map[string]int) (int, string) {
 	best, bestScore, bestText, bestCost := -1, 0, "", 0
 	currentLen := utf8.RuneCountInString(current)
+	markerRunes := utf8.RuneCountInString(fmt.Sprintf("[обрезано: %d знаков из %d]", len(renderer.runes)-renderer.limit, len(renderer.runes)))
 	for i, item := range renderer.spans {
 		if selected[i] || !remaining[item.words[0]] {
 			continue
 		}
 		trialPicked := append(append([]int(nil), picked...), i)
 		sort.Ints(trialPicked)
-		trial := renderer.renderPicked(trialPicked, 0, len(renderer.runes))
-		cost := max(utf8.RuneCountInString(trial)-currentLen, 1)
-		if utf8.RuneCountInString(trial) > renderer.limit {
+		trialRunes := renderer.renderPickedRuneCount(trialPicked, 0, len(renderer.runes), markerRunes)
+		cost := max(trialRunes-currentLen, 1)
+		if trialRunes > renderer.limit {
 			continue
 		}
 		score := visibleSpanWords(item, positionWords, positions, remaining)
 		if betterWordSpan(i, score, cost, best, bestScore, bestCost) {
-			best, bestScore, bestText, bestCost = i, score, trial, cost
+			best, bestScore, bestCost = i, score, cost
 		}
+	}
+	if best >= 0 {
+		trialPicked := append(append([]int(nil), picked...), best)
+		sort.Ints(trialPicked)
+		bestText = renderer.renderPicked(trialPicked, 0, len(renderer.runes))
 	}
 	return best, bestText
 }
@@ -2804,17 +2880,6 @@ func lineAnswerWordsWithMatcher(line string, words []string, matcher *wordMatche
 		matcher = newWordMatcher(words)
 	}
 	return matchedWordsInLine(line, words, matcher)
-}
-
-func matchedWordsInLine(line string, words []string, matcher *wordMatcher) []string {
-	positions := matcher.wordPositions(line)
-	var found []string
-	for _, word := range words {
-		if _, ok := positions[word]; ok {
-			found = append(found, word)
-		}
-	}
-	return found
 }
 
 func sameWordSlice(a, b []string) bool {
@@ -3025,8 +3090,20 @@ func (m *wordMatcher) wordPositions(line string) map[string]int {
 		}
 	}
 	positions := make(map[string]int, len(bytePositions))
+	type wordBytePosition struct {
+		word     string
+		position int
+	}
+	ordered := make([]wordBytePosition, 0, len(bytePositions))
 	for word, position := range bytePositions {
-		positions[word] = utf8.RuneCountInString(lower[:position])
+		ordered = append(ordered, wordBytePosition{word: word, position: position})
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].position < ordered[j].position })
+	lastByte, runePosition := 0, 0
+	for _, match := range ordered {
+		runePosition += utf8.RuneCountInString(lower[lastByte:match.position])
+		positions[match.word] = runePosition
+		lastByte = match.position
 	}
 	return positions
 }

@@ -132,6 +132,12 @@ func (p *proxy) run() int {
 	if path == "" {
 		return p.fallback(nil, false, connectPrefix+"no socket path")
 	}
+	// Каталог процесса удалён: демону нечего передать в cwd — сразу CLI,
+	// stdin не тронут
+	cwd, err := os.Getwd()
+	if err != nil {
+		return p.fallback(nil, false, "cwd: "+err.Error())
+	}
 	fd, err := dial(path, time.Now().Add(AckWindow))
 	if err != nil {
 		// Демона нет: stdin не тронут, CLI читает его сам
@@ -149,11 +155,6 @@ func (p *proxy) run() int {
 	if len(stdin) > hookwire.MaxStdin {
 		p.close()
 		return p.fallback(stdin, true, "stdin too large")
-	}
-	cwd, cwdErr := os.Getwd()
-	if cwdErr != nil {
-		p.close()
-		return p.fallback(stdin, true, "cwd: "+cwdErr.Error())
 	}
 	request := hookwire.Request{Env: os.Environ(), Cwd: cwd, PID: os.Getpid(), PPID: os.Getppid(), Stdin: stdin}
 	if len(p.args) > 1 {

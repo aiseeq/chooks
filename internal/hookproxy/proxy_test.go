@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -485,5 +486,40 @@ func TestRefusalBeforeRequestRead(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(stub.stdin); !bytes.Equal(data, bigInput) {
 		t.Fatalf("CLI stdin %d bytes, want %d", len(data), len(bigInput))
+	}
+}
+
+// Каталог процесса удалён: прокси не соединяется с демоном, CLI получает
+// нетронутый stdin и причину cwd
+func TestDeletedCwdFallsBackBeforeDial(t *testing.T) {
+	var requests atomic.Int32
+	d := startFake(t, func(conn *net.UnixConn, r hookwire.Request) {
+		requests.Add(1)
+	})
+	stub := newCLIStub(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stdin := `{"session_id":"s"}`
+	cmd := exec.Command("/bin/sh", "-c", `cd "$D" && rmdir "$D" && exec "$EXE" pre-tool-use`)
+	cmd.Env = append(os.Environ(), proxyHelper+"=1", EnvSocket+"="+d.path, EnvCLI+"="+stub.path, "D="+gone, "EXE="+exe)
+	cmd.Stdin = strings.NewReader(stdin)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("proxy exited 0, want the CLI stub code 7")
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("daemon got %d requests, want 0", n)
+	}
+	calls := stub.calls(t)
+	if len(calls) != 1 || !strings.HasPrefix(calls[0], "cwd: ") {
+		t.Fatalf("CLI calls %q, want one with reason cwd: …", calls)
+	}
+	if got, err := os.ReadFile(stub.stdin); err != nil || string(got) != stdin {
+		t.Fatalf("CLI stdin %q (%v), want %q", got, err, stdin)
 	}
 }

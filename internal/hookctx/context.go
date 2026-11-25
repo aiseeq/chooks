@@ -260,7 +260,7 @@ func (c Context) Location() *time.Location {
 		}
 	}
 	loc, err := time.LoadLocation(tz)
-	//nolint:silent-error-handling // при недоступной базе поясов исходное поведение использует UTC
+	//nolint:silent-error-handling // неизвестный TZ — UTC, как у пакета time для процесса с тем же TZ: время запроса совпадает с временем CLI
 	if err != nil {
 		return time.UTC
 	}

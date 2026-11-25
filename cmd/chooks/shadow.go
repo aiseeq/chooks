@@ -429,8 +429,8 @@ func beginShadow(ctx context.Context, hook shadowHook, hookType string, data []b
 }
 
 // send — после работы хука: connect к демону, затем запись (результат,
-// решение, ответы, состояние «после») и кадр. Любой сбой — молча: хук уже
-// ответил, а неотправленная запись видна в сводке shadow-report как
+// решение, ответы, состояние «после») и кадр. Сбой — строкой Warn в журнал:
+// хук уже ответил, а неотправленная запись видна в сводке shadow-report как
 // пропущенная
 func (s *shadowSession) send(code int, err error) {
 	path := hookproxy.SocketPath(s.request.Getenv)

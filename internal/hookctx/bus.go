@@ -170,7 +170,8 @@ func (c Context) connectBusTarget(ctx context.Context, target busTarget) (*dbus.
 		return conn, false, nil
 	}
 	// Сокет открылся, а auth или Hello не прошли: godbus не идёт к следующему адресу
-	if closeErr := raw.Close(); closeErr != nil {
+	// Провал auth или срок ctx godbus уже закрыл сокет: net.ErrClosed — не сбой закрытия
+	if closeErr := raw.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 		return nil, false, errors.Join(err, fmt.Errorf("close failed D-Bus connection: %w", closeErr))
 	}
 	return nil, false, err
@@ -192,7 +193,7 @@ func busConnection(transport string, raw net.Conn) (*dbus.Conn, error) {
 		err = conn.Hello()
 	}
 	if err != nil && conn != nil {
-		if closeErr := conn.Close(); closeErr != nil {
+		if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 			err = errors.Join(err, fmt.Errorf("close failed D-Bus authentication: %w", closeErr))
 		}
 	}

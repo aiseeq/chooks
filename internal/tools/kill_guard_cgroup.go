@@ -28,7 +28,7 @@ var cgroupControls = map[string]string{
 var cgroupWriteOps = []string{">", ">>", ">|", "&>", "&>>"}
 
 // cgroupHint подсказка к отказу на запись в cgroup сессии
-const cgroupHint = "Cgroup сессии и рабочего стола не трогай. Свой PID: pstop PID (из прошлого Bash — pstop --own-unit PID); чужой не трогай. Лимит юниту без процессов сессии: systemctl --user set-property юнит MemoryMax=…"
+const cgroupHint = "Cgroup и срезы сессии и рабочего стола не трогай. Свой PID: pstop PID; осиротевший свой из прошлого вызова — попробуй pstop --own-unit PID. Отказал — сигнал не шли. Лимит юниту без процессов сессии: systemctl --user set-property юнит MemoryMax=…"
 
 // cgroupWriteTarget файл, в который пишет вызов, и записываемое значение:
 // "" — не видно до запуска (переменная, ввод tee, файл cp и dd)

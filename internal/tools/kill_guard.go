@@ -62,13 +62,13 @@ func NewKillGuardToolForPID(config core.ToolConfig, logger core.Logger, pid int)
 	}, nil
 }
 
-const killGuardHint = "Найди и проверь PID (ps -o pid,ppid,comm,args -p … или pgrep -a '[x]yz'). Свой процесс: pstop PID; из прошлого вызова Bash: pstop --own-unit PID. Чужой не останавливай"
+const killGuardHint = "Найди и проверь PID (ps -o pid,ppid,comm,args -p … или pgrep -a '[x]yz'). Свой потомок текущего вызова: pstop PID; свой осиротевший из прошлого: попробуй pstop --own-unit PID; оба отказали — сигнал не шли"
 const protectedProcessHint = "Процесс защищён: не посылай ему сигнал. Если это тестовый процесс, заверши его штатным механизмом теста; для сессии используй её штатное управление"
 const protectedProcessMarker = "\x00protected-process"
 
 // killGroupHint подсказка к отказу на сигнал группе: отдельные PID группу не
 // заменяют — процесс, который группа породит после перечисления, сигнал не получит
-const killGroupHint = "pstop не умеет группы. Покажи PID (pgrep -a -g PID); свои останавливай по одному: pstop PID (из прошлого Bash — pstop --own-unit PID). Чужие не трогай"
+const killGroupHint = "pstop не умеет группы. Покажи процессы группы: pgrep -a -g PGID; свои PID останавливай по одному через pstop и проверь группу снова — могли появиться новые. Для своего осиротевшего из прошлого вызова попробуй pstop --own-unit PID; отказал — сигнал не шли"
 
 // ValidateTool проверяет команды, посылающие сигналы процессам
 func (t *KillGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {

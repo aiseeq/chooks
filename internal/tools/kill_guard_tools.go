@@ -161,7 +161,7 @@ func (s *killScan) computedTool(c shellcmd.Call, args []word, via string, names 
 // tmux, порт. У systemctl она своя по отказу (unitHint)
 var toolHints = map[string]string{
 	"tmux":  "Назови цель литералом: tmux kill-session -t имя",
-	"fuser": "Укажи порт вместо файла: fuser -k 8080/tcp",
+	"fuser": "Найди PID без сигнала: fuser 8080/tcp или ss -ltnp; проверь его и останови свой через pstop PID (осиротевший свой из прошлого вызова — попробуй pstop --own-unit PID)",
 }
 
 // systemctlHint подсказка к отказу systemctl с менеджером scope (systemctl
@@ -746,7 +746,7 @@ func fuserReason(args []word, via string) string {
 			return fmt.Sprintf("fuser -k %s: цель вычисляется при запуске, проверить её заранее нельзя", n.text)
 		case portRe.MatchString(n.text) || fa.ports && barePortRe.MatchString(n.text):
 		default:
-			return fmt.Sprintf("fuser -k %s шлёт сигнал всем, кто держит файл, каталог или терминал (оболочка в каталоге, claude, терминал на pts): посмотри fuser -v %s и убей PID литералом", n.text, n.text)
+			return fmt.Sprintf("fuser -k %s шлёт сигнал всем, кто держит файл, каталог или терминал (оболочка в каталоге, claude, терминал на pts): найди PID через fuser -v %s или ss -ltnp, проверь его и останови свой через pstop PID (осиротевший свой из прошлого вызова — попробуй pstop --own-unit PID); отказал — сигнал не шли", n.text, n.text)
 		}
 	}
 	return ""

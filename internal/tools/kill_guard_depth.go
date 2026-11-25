@@ -10,7 +10,7 @@ import (
 	"github.com/aiseeq/akit/shellcmd"
 )
 
-const depthHint = "Запусти напрямую. PID найди через pgrep -a '[x]yz'; свой останови pstop PID (из прошлого Bash — pstop --own-unit PID), чужой не трогай. Юнит — systemctl --user stop имя.service"
+const depthHint = "Запусти напрямую. PID найди через pgrep -a '[x]yz'; своего потомка останови pstop PID, осиротевшего своего из прошлого вызова попробуй pstop --own-unit PID; отказал — сигнал не шли. Чужой юнит проверь: systemctl --user status имя.service"
 
 var run0WordRe, dynamicCommandNameRe = regexp.MustCompile(`(^|[^[:alnum:]_.-])run0([^[:alnum:]_.-]|$)`), regexp.MustCompile(`^\s*"?\$([[:alpha:]_][[:alnum:]_]*|\{[[:alpha:]_][[:alnum:]_]*\})"?($|[[:space:]])`)
 var notLevels = []string{"-c", "--command", "pipe", "command", "builtin", "exec", "time", "eval", "-exec", "-execdir", "-ok", "-okdir"}

@@ -105,3 +105,54 @@ func TestWideSearch(t *testing.T) {
 		})
 	}
 }
+
+func TestWideSearchXargsFileArguments(t *testing.T) {
+	const home = "/home/aisee"
+	cases := []struct {
+		name, command string
+		wide          bool
+	}{
+		{
+			name:    "xargs rg reads supplied file list",
+			command: "cut -d: -f1 hits | xargs rg -c -F -f pat",
+		},
+		{
+			name:    "xargs -r with supplied arguments",
+			command: "printf '%s\\n' a b | xargs -r rg foo",
+		},
+		{
+			name:    "xargs -r without input",
+			command: "xargs -r rg foo",
+		},
+		{
+			name:    "xargs -r with empty list",
+			command: "printf '' | xargs -r rg foo",
+		},
+		{
+			name:    "rg without path reads cwd",
+			command: "rg foo",
+			wide:    true,
+		},
+		{
+			name:    "rg with explicit wide path",
+			command: "rg foo /home/aisee",
+			wide:    true,
+		},
+		{
+			name:    "xargs rg with explicit wide path",
+			command: "xargs rg foo /home/aisee",
+			wide:    true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := WideSearch(tc.command, home, home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got != "") != tc.wide {
+				t.Errorf("WideSearch() = %q; want wide=%v", got, tc.wide)
+			}
+		})
+	}
+}

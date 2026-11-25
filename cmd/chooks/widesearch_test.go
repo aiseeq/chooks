@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
 	"github.com/aiseeq/chooks/internal/tools"
 )
 
@@ -40,6 +42,41 @@ func TestWideSearchHint(t *testing.T) {
 			}
 			if c.updated == "" && h.UpdatedInput != nil || c.updated != "" && h.UpdatedInput["command"] != c.updated {
 				t.Errorf("updatedInput = %v, want %q", h.UpdatedInput, c.updated)
+			}
+		})
+	}
+}
+
+func TestWideSearchHintXargsFileArguments(t *testing.T) {
+	t.Setenv("HOME", "/home/aisee")
+	config, logger := silentConfig(t)
+	req := hookctx.New(nil, nil, nil, []string{"HOME=/home/aisee"}, "/home/aisee", 1, 2)
+	ctx := hookctx.WithRequest(context.Background(), req)
+	cases := []struct {
+		name, command string
+		hint          bool
+	}{
+		{"xargs list of files", "cut -d: -f1 hits | xargs rg -c -F -f pat", false},
+		{"xargs -r list", "printf '%s\\n' a b | xargs -r rg foo", false},
+		{"xargs -r without input", "xargs -r rg foo", false},
+		{"xargs -r empty list", "printf '' | xargs -r rg foo", false},
+		{"implicit cwd", "rg foo", true},
+		{"explicit wide path", "rg foo /home/aisee", true},
+		{"xargs explicit wide path", "xargs rg foo /home/aisee", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]string{"command": tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := &core.ToolInput{ToolName: "Bash", CWD: "/home/aisee", ToolInput: raw}
+			got, err := wideSearchContext(ctx, input, config, logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got != "") != tc.hint {
+				t.Errorf("wideSearchContext() = %q; want hint=%v", got, tc.hint)
 			}
 		})
 	}

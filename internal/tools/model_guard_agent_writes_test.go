@@ -476,8 +476,10 @@ func TestModelGuardReviewRoundTwoForms(t *testing.T) {
 		{"npx -y claude-code", "npx -y @anthropic-ai/claude-code -p \"review " + agent + "\""},
 		{"env assignment claude", "env FOO=1 claude -p \"review " + agent + "\""},
 		{"sudo assignment claude", "sudo FOO=1 claude -p \"review " + agent + "\""},
-		{"claude --settings prompt", "claude --settings " + settingsFile + " -p \"review " + agent + "\""},
-		{"claude --mcp-config list prompt", "claude --mcp-config /tmp/a.json /tmp/b.json -p \"review " + agent + "\""},
+		// --settings и --mcp-config — отказ по опции (TestModelGuardClientOptionsRefused):
+		// значение и список перед промптом — у опций из набора
+		{"claude --system-prompt-file prompt", "claude --system-prompt-file " + settingsFile + " -p \"review " + agent + "\""},
+		{"claude --allowedTools list prompt", "claude --allowedTools Bash Grep -p \"review " + agent + "\""},
 		{"go field", "cd ~/git/aguard && perl -0pi -e 's|x|cfg.Restart.Claude = claude|' x.go; cl --cl-check"},
 	}
 	check := func(command string) *core.ValidationResult {

@@ -108,7 +108,9 @@ func TestModelGuard(t *testing.T) {
 		{"переменная в here-doc оболочки", "Bash", "", "bash <<'EOF'\nANTHROPIC_MODEL=sonnet claude -p hi\nEOF", true},
 		{"переменная в here-doc через конвейер", "Bash", "", "cat <<'EOF' | sudo bash\nANTHROPIC_MODEL=sonnet claude -p hi\nEOF", true},
 		{"переменная у команды с claude в $(…)", "Bash", "", `ANTHROPIC_MODEL=sonnet python3 x.py "$(claude --model opus -p hi)"`, false},
-		{"запасной поиск, одобренная", "Bash", "", `claude --model opus -p "hi`, false},
+		// команда с claude не разобрана: его опции не проверить — отказ;
+		// модель в тексте с одобренной — TestModelGuardModelsOnlySkipsClientOptions
+		{"запасной поиск, одобренная", "Bash", "", `claude --model opus -p "hi`, true},
 		{"запасной поиск без агента", "Bash", "", `echo --model sonnet "hi`, false},
 		// env перед оболочкой задаёт модель для claude в её скрипте; пустое
 		// значение — модель по умолчанию; присваивание в промпте за env — не
@@ -143,8 +145,9 @@ func TestModelGuard(t *testing.T) {
 		{"fish set -x", "Bash", "", "fish -c 'set -x ANTHROPIC_MODEL sonnet; claude -p hi'", true},
 		{"fish set -gx", "Bash", "", "fish -c 'set -gx ANTHROPIC_MODEL sonnet; claude -p hi; and true'", true},
 		{"fish set без ключа", "Bash", "", "fish -c 'set ANTHROPIC_MODEL sonnet; claude -p hi'", true},
-		{"fish set -gx одобренной", "Bash", "", "fish -c 'set -gx ANTHROPIC_MODEL opus; claude -p hi'", false},
-		{"fish and одобренная", "Bash", "", "fish -c 'claude --model opus -p hi; and true'", false},
+		// fish вне подмножества: опции claude не проверить — отказ
+		{"fish set -gx одобренной", "Bash", "", "fish -c 'set -gx ANTHROPIC_MODEL opus; claude -p hi'", true},
+		{"fish and одобренная", "Bash", "", "fish -c 'claude --model opus -p hi; and true'", true},
 		{"fish and codex -m", "Bash", "", "fish -c 'codex exec -m gpt-5 hi; and true'", true},
 		{"fish and codex -m одобренная", "Bash", "", "fish -c 'codex exec -m gpt-6-luna hi; and true'", false},
 		// текст ищется только в неразобранном скрипте: set -x внутри fish -c
@@ -191,7 +194,7 @@ func TestModelGuard(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			input := &core.ToolInput{ToolName: tc.tool, Command: tc.command, ToolInput: []byte(tc.raw)}
-			got, err := tool.ValidateTool(gitGuardTestContext(t), input)
+			got, err := settingsModelJudge(tool, tc.command).ValidateTool(gitGuardTestContext(t), input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -423,7 +426,7 @@ func TestModelGuardSettingsFile(t *testing.T) {
 		// FIFO не читается: чтение повесило бы хук (ревью 12.11)
 		"claude -p hi --settings " + fifo: true,
 	} {
-		got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
+		got, err := settingsModelJudge(tool, command).ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -461,7 +464,7 @@ func TestModelGuardSettingsTildeForms(t *testing.T) {
 		{"неизвестный пользователь", "claude --settings ~root/x", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: cwd})
+			got, err := settingsModelJudge(tool, tc.command).ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: cwd})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -605,7 +608,7 @@ func TestModelGuardApprovedModels(t *testing.T) {
 			if c.tool == "Agent" {
 				input.Command = ""
 			}
-			result, err := tool.ValidateTool(gitGuardTestContext(t), input)
+			result, err := settingsModelJudge(tool, c.command).ValidateTool(gitGuardTestContext(t), input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -769,7 +772,7 @@ func TestModelGuardRoundTwo(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: tc.tool, CWD: tc.cwd, Command: tc.command, ToolInput: []byte(tc.raw)})
+			result, err := settingsModelJudge(tool, tc.command).ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: tc.tool, CWD: tc.cwd, Command: tc.command, ToolInput: []byte(tc.raw)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -845,7 +848,7 @@ func TestModelGuardRoundThree(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: tc.tool, CWD: cwd, Command: tc.command})
+			result, err := settingsModelJudge(tool, tc.command).ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: tc.tool, CWD: cwd, Command: tc.command})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1126,7 +1129,7 @@ func TestModelGuardRoundTenPaths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", CWD: tc.cwd, Command: tc.command})
+			result, err := settingsModelJudge(tool, tc.command).ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", CWD: tc.cwd, Command: tc.command})
 			if err != nil {
 				t.Fatal(err)
 			}

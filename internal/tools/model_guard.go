@@ -35,6 +35,9 @@ type approvedModel struct{ name, id string }
 type ModelGuardTool struct {
 	*BaseTool
 	path string
+	// modelsOnly — судится только модель: опции и окружение клиента
+	// (clientOption) не судятся
+	modelsOnly bool
 }
 
 // NewModelGuardTool создаёт проверку выбранной модели.
@@ -44,6 +47,15 @@ func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardT
 	}, nil
 }
 
+// ModelsOnly — проверка запуска claude (modellaunch) судит модель по argv
+// процесса; опции и окружение клиента судит PreToolUse по команде агента.
+// Хуки процесса, которого судит проверка запуска, уже работают, а его
+// --settings ставит и cl пользователя
+func (t *ModelGuardTool) ModelsOnly() *ModelGuardTool {
+	t.modelsOnly = true
+	return t
+}
+
 // ValidateTool проверяет модель лишь у вызовов, которые её явно задают.
 func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput) (*core.ValidationResult, error) {
 	if _, ok := hookctx.Request(ctx); !ok {
@@ -51,13 +63,6 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 	}
 	if !t.IsEnabled() || input == nil {
 		return &core.ValidationResult{IsValid: true}, nil
-	}
-	unsafe, result := t.validateClaudeClientOptions(input.Command)
-	if result != nil {
-		return result, nil
-	}
-	if unsafe {
-		return t.reject("опции клиента claude не входят в безопасный набор", nil), nil
 	}
 	if result := t.validateShellPrefix(input); result != nil {
 		return result, nil
@@ -73,6 +78,12 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 	}
 	var reasons []string
 	for _, c := range candidates {
+		if c.clientOption != "" {
+			if !t.modelsOnly {
+				reasons = append(reasons, c.clientOption)
+			}
+			continue
+		}
 		if c.unknownAgent {
 			reasons = append(reasons, fmt.Sprintf("определение агента %s не найдено: модель не проверить", c.value))
 			continue
@@ -103,22 +114,6 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 		return &core.ValidationResult{IsValid: true}, nil
 	}
 	return t.reject(strings.Join(reasons, "; "), models), nil
-}
-
-func (t *ModelGuardTool) validateClaudeClientOptions(command string) (bool, *core.ValidationResult) {
-	unsafe, err := unsafeClaudeClientOptions(command)
-	if err == nil {
-		return unsafe, nil
-	}
-	var parseErr syntax.ParseError
-	if !errors.As(err, &parseErr) {
-		return false, t.reject("не удалось разобрать опции клиента claude: "+err.Error(), nil)
-	}
-	t.Logger().Warn("model_guard: опции клиента claude не разобраны", "error", err)
-	if unparsedClaudeHasUnsafeOption(command) {
-		return false, t.reject("не удалось разобрать опции клиента claude: "+err.Error(), nil)
-	}
-	return false, nil
 }
 
 func (t *ModelGuardTool) validateShellPrefix(input *core.ToolInput) *core.ValidationResult {
@@ -177,7 +172,9 @@ func (t *ModelGuardTool) CandidateModels(ctx context.Context, input *core.ToolIn
 	candidates := modelCandidates(ctx, input, t.Logger())
 	values := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
-		values = append(values, candidate.value)
+		if candidate.clientOption == "" {
+			values = append(values, candidate.value)
+		}
 	}
 	return values
 }
@@ -190,6 +187,8 @@ type modelCandidate struct {
 	unknownAgentWrite bool
 	unknownAgents     bool
 	unknownSettings   bool
+	// clientOption — отказ опции, подкоманде или окружению клиента claude
+	clientOption string
 }
 
 func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
@@ -247,7 +246,8 @@ func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Log
 	settingsAt := func(cwd string, includeProject bool) []modelCandidate {
 		return settingsForCWD(ctx, cwd, homes, configs, logger, includeProject)
 	}
-	candidates := bashModelCandidatesAt(input.Command, input.CWD, home, cwdCandidates, homes, configs, modelFiles{settings: readSettings, agent: agentModels}, settingsAt, func(name, cwd string, extra []string) []modelCandidate {
+	files := modelFiles{settings: readSettings, agent: agentModels, envValues: clientWordValues(input.Command, request, logger), tempDirs: clientTempDirs(request)}
+	candidates := bashModelCandidatesAt(input.Command, input.CWD, home, cwdCandidates, homes, configs, files, settingsAt, func(name, cwd string, extra []string) []modelCandidate {
 		var found []modelCandidate
 		for _, commandHome := range homes.paths {
 			agentExtra := append([]string(nil), extra...)
@@ -843,6 +843,11 @@ func agentFlagCandidates(agent word, files modelFiles) []modelCandidate {
 type modelFiles struct {
 	settings func(path string, tilde shellcmd.Tilde, cwd string) [][]byte
 	agent    func(name string) []modelCandidate
+	// envValues — значения переменной для слов клиента: присваивания в
+	// команде и env запроса; false — значение не установить
+	envValues func(name string) ([]string, bool)
+	// tempDirs — временные каталоги, куда можно писать журнал --debug-file
+	tempDirs []string
 }
 
 // agentDefinitionModels — модель из определения агента name: Agent без
@@ -1234,8 +1239,13 @@ func usableDirectory(path string, logger core.Logger) bool {
 func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) []modelCandidate {
 	calls, err := shellcmd.Calls(command)
 	if calls == nil && err != nil {
+		if blanked, changed := blankLiteralSubscripts(command); changed {
+			if _, blankErr := shellcmd.Calls(blanked); blankErr == nil {
+				return bashModelCandidatesAt(blanked, initialCWD, home, cwdCandidates, homes, configs, files, settingsAt, agentAt, logger)
+			}
+		}
 		logger.Warn("model_guard: shellcmd не разобрал команду, модели ищутся в тексте", "error", err)
-		return textModelCandidates(command)
+		return append(textModelCandidates(command), unparsedClientCandidates(command)...)
 	}
 	var found []modelCandidate
 	claude := false
@@ -1253,6 +1263,7 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 	if claude {
 		found = append(found, envModelCandidates(command, calls, logger)...)
 		found = append(found, writtenProtectedFileCandidates(command)...)
+		found = append(found, clientEnvironmentCandidates(command, logger)...)
 	}
 	if err != nil {
 		// вызовы найдены не все: вложенный скрипт, который akit не разобрал
@@ -1265,10 +1276,29 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 		}
 		logger.Warn("model_guard: shellcmd разобрал команду не целиком, модели ищутся и в тексте", "error", err)
 		found = append(found, textModelCandidates(text)...)
+		found = append(found, unparsedClientCandidates(text)...)
 	}
 	if whichClaudeSubstitution.MatchString(command) {
 		replaced := whichClaudeSubstitution.ReplaceAllString(command, "claude")
 		found = append(found, textModelCandidates(replaced)...)
+		found = append(found, whichClaudeCandidates(replaced, initialCWD, home, files)...)
+	}
+	return found
+}
+
+// whichClaudeCandidates — отказы опциям claude, запущенного как
+// $(which claude): имя вызова — подстановка, и разбор вызовов его не видит
+func whichClaudeCandidates(replaced, cwd, home string, files modelFiles) []modelCandidate {
+	calls, err := shellcmd.Calls(replaced)
+	if calls == nil && err != nil {
+		return unparsedClientCandidates(replaced)
+	}
+	var found []modelCandidate
+	for i := range calls {
+		if dialect, args, ok := clientCallWords(&calls[i]); ok && dialect == "claude" {
+			refusals, _ := claudeCallCandidates(&calls[i], args, files, cwd, home)
+			found = append(found, refusals...)
+		}
 	}
 	return found
 }
@@ -1291,10 +1321,12 @@ func modelCallDirectory(call *shellcmd.Call, cwd, home string, logger core.Logge
 	return cwd, false
 }
 
-func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate) ([]modelCandidate, bool) {
+// clientCallWords — диалект клиента модели в вызове и слова его аргументов
+// (у npx — после @anthropic-ai/claude-code); false — вызов не клиента
+func clientCallWords(call *shellcmd.Call) (string, []word, bool) {
 	isNpxClaude := call.Name == "npx" && npxClaudeCode(call.Args)
 	if !slices.Contains(modelClients, call.Name) && !isNpxClaude {
-		return nil, false
+		return "", nil, false
 	}
 	callArgs := call.Args
 	if isNpxClaude {
@@ -1306,6 +1338,14 @@ func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []
 	dialect := clientDialect(call.Name)
 	if isNpxClaude {
 		dialect = "claude"
+	}
+	return dialect, args, true
+}
+
+func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate) ([]modelCandidate, bool) {
+	dialect, args, ok := clientCallWords(call)
+	if !ok {
+		return nil, false
 	}
 	callExtraDirs := []string{}
 	localFiles := files
@@ -1324,6 +1364,7 @@ func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []
 	}
 	var found []modelCandidate
 	if dialect == "claude" {
+		found, args = claudeCallCandidates(call, args, files, cwd, home)
 		callExtraDirs = claudeAddedAgentDirs(args, cwd, home)
 		found = append(found, claudeSettingsCandidates(cwdCandidates, homes, configs, settingsAt)...)
 	}
@@ -1684,32 +1725,20 @@ func npxClaudeArgs(args []string) []string {
 	return nil
 }
 
+// claudeAddedAgentDirs — каталоги агентов из пар --add-dir и --plugin-dir
+// (scanClaudeArguments: --opt=value уже разделено)
 func claudeAddedAgentDirs(args []word, cwd, home string) []string {
 	var dirs []string
-	for i := 0; i < len(args); i++ {
-		var path string
-		var tilde shellcmd.Tilde
-		if (args[i].text == "--add-dir" || args[i].text == "--plugin-dir") && i+1 < len(args) {
-			i++
-			path, tilde = args[i].text, args[i].tilde
-		} else if value, ok := strings.CutPrefix(args[i].text, "--add-dir="); ok {
-			if strings.ContainsAny(value, "$`") {
-				continue
-			}
-			path = value
-		} else if value, ok := strings.CutPrefix(args[i].text, "--plugin-dir="); ok {
-			if strings.ContainsAny(value, "$`") {
-				continue
-			}
-			path = value
-		} else {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i].text != "--add-dir" && args[i].text != "--plugin-dir" {
 			continue
 		}
-		text, known := knownPath(path, home)
+		i++
+		text, known := knownPath(args[i].text, home)
 		if !known {
 			continue
 		}
-		resolved := resolvePath(text, tilde, cwd, home)
+		resolved := resolvePath(text, args[i].tilde, cwd, home)
 		dirs = append(dirs, resolved, filepath.Join(resolved, ".claude", "agents"))
 	}
 	return dirs
@@ -2163,26 +2192,13 @@ func assignedModelWord(w string) []modelCandidate {
 }
 
 // valueFlags — флаги Claude, которые model_guard анализирует как пару.
-var valueFlags = []string{"--settings", "--agents", "--agent", "--fallback-model"}
+var valueFlags = []string{"--settings", "--agents", "--agent", "--fallback-model", "--advisor"}
 
 // ClaudeModelArgFlags — флаги claude, которые model_guard читает вместе со
 // значением в следующем слове: модель, настройки, агенты и каталоги агентов.
 // Остальные слова командной строки claude модель не задают
 func ClaudeModelArgFlags() []string {
 	return append([]string{"--model", "--add-dir", "--plugin-dir"}, valueFlags...)
-}
-
-// splitValueFlags разбивает --flag=value для флагов Claude со значением.
-func splitValueFlags(args []word) []word {
-	out := make([]word, 0, len(args))
-	for _, a := range args {
-		if flag, value, ok := strings.Cut(a.text, "="); ok && slices.Contains(valueFlags, flag) {
-			out = append(out, word{text: flag, literal: true, shellLiteral: true, shellLiteralKnown: true}, word{text: value, literal: a.literal, shellLiteral: a.shellLiteral, shellLiteralKnown: a.shellLiteralKnown, tilde: a.tilde})
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
 }
 
 func claudeArgIsLiteral(arg word) bool {
@@ -2270,16 +2286,15 @@ func modelValueFlag(name, flag string) bool {
 		return name == "codex" || name == "opencode"
 	case "-model":
 		return name == "worker"
-	case "--fallback-model":
+	case "--fallback-model", "--advisor":
 		return name == "claude"
 	}
 	return false
 }
 
+// candidatesFromArgs — модели из слов клиента. Слова claude — пары «опция
+// значение» из scanClaudeArguments: --opt=value и кластеры там уже разобраны
 func candidatesFromArgs(name string, args []word, files modelFiles) []modelCandidate {
-	if name == "claude" {
-		args = splitValueFlags(args)
-	}
 	var agentOverrides map[string]bool
 	if name == "claude" {
 		agentOverrides = agentOverrideNames(args, files.settings)

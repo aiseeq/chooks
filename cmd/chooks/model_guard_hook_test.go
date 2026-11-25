@@ -42,8 +42,10 @@ func TestPreToolUseModelOverrides(t *testing.T) {
 		// запись без запуска claude не судится: имя settings.json носят и чужие файлы
 		{"foreign settings write", "cat > app/settings.json <<'EOF'\n{\"model\":\"gpt-4o\"}\nEOF", false, ""},
 		{"overrides not object", `claude --settings '{"modelOverrides":"claude-haiku-5-5"}' --model opus`, true, "модель не проверить"},
-		{"approved override", `claude --settings '{"modelOverrides":{"claude-opus-5-5":"opus"}}' --model opus`, false, ""},
-		{"without overrides", `claude --settings '{"model":"opus"}' --model opus`, false, ""},
+		// --settings у агента — отказ по опции; одобренную замену модели
+		// в --settings судит проверка запуска (TestRuntimeModelGuardModelOverrides)
+		{"approved override", `claude --settings '{"modelOverrides":{"claude-opus-5-5":"opus"}}' --model opus`, true, "опция --settings"},
+		{"without overrides", `claude --settings '{"model":"opus"}' --model opus`, true, "опция --settings"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -593,7 +593,7 @@ func newRuntimeGuard(ctx context.Context, config core.ToolConfig, logger core.Lo
 		if err != nil {
 			return nil, err
 		}
-		judge = modelGuard
+		judge = modelGuard.ModelsOnly()
 	}
 	return modellaunch.New(proc, judge, logger), nil
 }

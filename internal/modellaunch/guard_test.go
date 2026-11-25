@@ -124,7 +124,8 @@ func testGuard(t *testing.T, proc ProcessReader) (*Guard, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(proc, modelGuard, logger), logPath
+	// как newRuntimeGuard в cmd/chooks: проверка запуска судит только модель
+	return New(proc, modelGuard.ModelsOnly(), logger), logPath
 }
 
 func runtimeGuard(t *testing.T, proc ProcessReader) *Guard {

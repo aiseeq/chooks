@@ -70,9 +70,10 @@ type Decision struct {
 
 // Record записывает ev в каталог dir и решает, уведомлять ли: вызовов за
 // Window стало больше threshold, а прошлое уведомление было не позже Window
-// назад. threshold 0 — вызов записывается, уведомления нет. Ошибка — вызов
-// не записан, решения нет
-func Record(dir string, threshold int, ev Event) (Decision, error) {
+// назад. threshold 0 — вызов записывается, уведомления нет. Ошибка записи или
+// получения блокировки возвращает пустое решение; ошибка закрытия замка может
+// сопровождать уже записанное решение.
+func Record(ctx context.Context, dir string, threshold int, ev Event) (decision Decision, retErr error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Decision{}, fmt.Errorf("fallback state dir: %w", err)
 	}
@@ -80,13 +81,17 @@ func Record(dir string, threshold int, ev Event) (Decision, error) {
 	if err != nil {
 		return Decision{}, fmt.Errorf("fallback lock: %w", err)
 	}
-	defer lock.Close()
-	if err := core.LockFile(context.Background(), lock, time.Now().Add(lockWait)); err != nil {
+	defer func() {
+		if err := lock.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("fallback lock close: %w", err))
+		}
+	}()
+	if err := core.LockFile(ctx, lock, time.Now().Add(lockWait)); err != nil {
 		return Decision{}, fmt.Errorf("fallback lock: %w", err)
 	}
 	path := filepath.Join(dir, FileName)
 	st, readErr := load(path)
-	decision := st.add(ev, threshold)
+	decision = st.add(ev, threshold)
 	decision.StateReset = readErr
 	data, err := json.Marshal(st)
 	if err != nil {

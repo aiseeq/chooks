@@ -343,7 +343,7 @@ func TestServeUpdateAfterInstall(t *testing.T) {
 	writeFiles(t, home, map[string]string{"stop": ""})
 	var stopErr error
 	if pid != 0 {
-		stopErr = syscall.Kill(pid, syscall.SIGTERM)
+		stopErr = proc.SignalDescendant(pid, syscall.SIGTERM)
 	}
 	if pid == 0 || stopErr != nil || !waitFor(t, 10*time.Second, func() bool { return processGone(pid) }) {
 		t.Fatalf("v3 pid %d did not stop", pid)
@@ -540,6 +540,7 @@ func settingsWith(t *testing.T, dir, hook string, seconds int) {
 // (CLAUDE_CONFIG_DIR, иначе HOME/.claude), таблица — только запасной
 func TestRequestHookTimeoutFromSettings(t *testing.T) {
 	home := t.TempDir()
+	logger := quietLogger(t)
 	config := filepath.Join(home, "cfg")
 	settingsWith(t, config, hookPreToolUse, 7)
 	settingsWith(t, filepath.Join(home, ".claude"), hookPreToolUse, 9)
@@ -554,11 +555,11 @@ func TestRequestHookTimeoutFromSettings(t *testing.T) {
 		"no settings":       {[]string{"HOME=" + t.TempDir()}, hookPreToolUse, hookTimeouts[hookPreToolUse]},
 		"no HOME":           {nil, hookStatusLine, hookTimeouts[hookStatusLine]},
 	} {
-		if got := requestHookTimeout(c.env, c.hook); got != c.want {
+		if got := requestHookTimeout(logger, c.env, c.hook); got != c.want {
 			t.Errorf("%s: %s, want %s", name, got, c.want)
 		}
 	}
-	srv := newServer(quietLogger(t))
+	srv := newServer(logger)
 	start := time.Now().Add(-time.Second)
 	srv.start = func(int) (time.Time, error) { return start, nil }
 	env := []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + config}

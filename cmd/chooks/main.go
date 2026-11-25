@@ -52,6 +52,7 @@ func main() {
 func runCLI() int {
 	// Некоторые команды не используют cwd и работают даже после удаления
 	// текущего каталога, поэтому ошибка Getwd не мешает запуску CLI.
+	//nolint:ignored-error // команды без зависимости от cwd должны запускаться и после удаления текущего каталога
 	request, _ := hookctx.FromProcess()
 	ctx := context.WithValue(context.Background(), cliTerminationKey{}, (func(int))(os.Exit))
 	ctx = context.WithValue(ctx, fallbackReasonKey{}, takeFallbackReason(&request))
@@ -436,7 +437,9 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	noteCLIFallback(ctx, config, request, hookType, logger)
 	if lost {
 		reason, _ := ctx.Value(fallbackReasonKey{}).(string)
-		_, _ = io.WriteString(request.Stderr, hookproxy.LostMessage(reason))
+		if _, writeErr := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); writeErr != nil {
+			logger.Warn("lost hook message not written", "hook", hookType, "error", writeErr)
+		}
 		return exitError, nil
 	}
 
@@ -445,7 +448,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	var shadow *shadowSession
 	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); cli && reason == "" && config.Daemon.Shadow {
 		if hook, covered := shadowHooks[hookType]; covered {
-			ctx, request, shadow = beginShadow(ctx, hook, hookType, data, session, config, request)
+			ctx, request, shadow = beginShadow(ctx, hook, hookType, data, session, config, logger, request)
 		}
 	}
 
@@ -1125,7 +1128,9 @@ func runStatusLine(ctx context.Context, request hookctx.Context) error {
 	// Обрыв после 'C': строку уже рисовал демон, второй раз её не рисуют
 	// (ротация учёток из строки статуса не запускается дважды)
 	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); hookproxy.Lost(reason) {
-		_, _ = io.WriteString(request.Stderr, hookproxy.LostMessage(reason))
+		if _, writeErr := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); writeErr != nil {
+			logger.Warn("lost hook message not written", "hook", hookStatusLine, "error", writeErr)
+		}
 		return errLostCall
 	}
 	line, err := statusline.Render(ctx, request.Stdin, logger)

@@ -6,6 +6,8 @@
 package hookproxy
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -115,6 +117,8 @@ func (p *proxy) watchTerm() {
 		<-signals
 		p.term.mu.Lock()
 		if p.term.committed && p.term.fd >= 0 {
+			// При сбое доставки демон увидит EOF; прокси обязан завершиться с кодом SIGTERM.
+			//nolint:ignored-error // обработчик SIGTERM завершает процесс, вернуть или залогировать ошибку нельзя
 			_, _ = syscall.SendmsgN(p.term.fd, []byte{hookwire.Terminate}, nil, nil, syscall.MSG_NOSIGNAL|syscall.MSG_DONTWAIT)
 		}
 		p.term.mu.Unlock()
@@ -146,7 +150,11 @@ func (p *proxy) run() int {
 		p.close()
 		return p.fallback(stdin, true, "stdin too large")
 	}
-	cwd, _ := os.Getwd()
+	cwd, cwdErr := os.Getwd()
+	if cwdErr != nil {
+		p.close()
+		return p.fallback(stdin, true, "cwd: "+cwdErr.Error())
+	}
 	request := hookwire.Request{Env: os.Environ(), Cwd: cwd, PID: os.Getpid(), PPID: os.Getppid(), Stdin: stdin}
 	if len(p.args) > 1 {
 		request.Subcommand = p.args[1]
@@ -250,10 +258,17 @@ func (p *proxy) await(stdin []byte) int {
 	}
 	p.close()
 	if len(stdout) > 0 {
-		_, _ = os.Stdout.Write(stdout)
+		if n, err := os.Stdout.Write(stdout); err != nil || n != len(stdout) {
+			if err == nil {
+				err = io.ErrShortWrite
+			}
+			// stdout — протокольный ответ Claude Code; сообщаем о потере
+			// ответа на stderr, сохраняя код решения демона.
+			_, _ = fmt.Fprintf(os.Stderr, "chooks-hook: stdout write failed: %v\n", err)
+		}
 	}
 	if len(stderr) > 0 {
-		_, _ = os.Stderr.Write(stderr)
+		_, _ = os.Stderr.Write(stderr) //nolint:ignored-error // stderr — последний канал диагностики: ошибку его записи сообщить некуда, код решения демона остаётся
 	}
 	return code
 }
@@ -288,7 +303,7 @@ func (p *proxy) fallback(stdin []byte, consumed bool, reason string) int {
 	cli := cliPath()
 	if consumed {
 		if err := replaceStdin(stdin); err != nil {
-			_, _ = os.Stderr.WriteString("chooks-hook: stdin для " + cli + ": " + err.Error() + "\n")
+			_, _ = os.Stderr.WriteString("chooks-hook: stdin для " + cli + ": " + err.Error() + "\n") //nolint:ignored-error // при ошибке stderr сообщить её больше некуда
 			return 1
 		}
 	}
@@ -296,9 +311,9 @@ func (p *proxy) fallback(stdin []byte, consumed bool, reason string) int {
 	env := withEnv(os.Environ(), EnvFallback, strings.ReplaceAll(reason, "\n", " "))
 	err := syscall.Exec(cli, argv, env)
 	if Lost(reason) {
-		_, _ = os.Stderr.WriteString(LostMessage(reason))
+		_, _ = os.Stderr.WriteString(LostMessage(reason)) //nolint:ignored-error // при ошибке stderr сообщить её больше некуда
 	}
-	_, _ = os.Stderr.WriteString("chooks-hook: запасной путь " + cli + ": " + err.Error() + "\n")
+	_, _ = os.Stderr.WriteString("chooks-hook: запасной путь " + cli + ": " + err.Error() + "\n") //nolint:ignored-error // при ошибке stderr сообщить её больше некуда
 	return 1
 }
 
@@ -389,7 +404,7 @@ func withEnv(env []string, key, value string) []string {
 func replaceStdin(data []byte) error {
 	fd, err := unix.MemfdCreate("chooks-hook-stdin", unix.MFD_CLOEXEC)
 	if err != nil {
-		return err
+		return err //nolint:error-wrap // ошибка выводится CLI пользователю без изменения исходного текста
 	}
 	defer syscall.Close(fd)
 	for off := 0; off < len(data); {
@@ -398,12 +413,12 @@ func replaceStdin(data []byte) error {
 			continue
 		}
 		if err != nil {
-			return err
+			return err //nolint:error-wrap // ошибка выводится CLI пользователю без изменения исходного текста
 		}
 		off += n
 	}
 	if _, err := syscall.Seek(fd, 0, 0); err != nil {
-		return err
+		return err //nolint:error-wrap // ошибка выводится CLI пользователю без изменения исходного текста
 	}
 	return syscall.Dup3(fd, 0, 0)
 }
@@ -419,7 +434,7 @@ func readAll(fd int) ([]byte, error) {
 			continue
 		}
 		if err != nil {
-			return buf, err
+			return buf, fmt.Errorf("read hook stdin: %w", err)
 		}
 		if n == 0 {
 			return buf, nil
@@ -433,7 +448,7 @@ func readAll(fd int) ([]byte, error) {
 func dial(path string, deadline time.Time) (int, error) {
 	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
-		return -1, err
+		return -1, fmt.Errorf("create unix socket: %w", err)
 	}
 	if err := setTimeout(fd, syscall.SO_SNDTIMEO, time.Until(deadline)); err != nil {
 		_ = syscall.Close(fd)
@@ -447,7 +462,7 @@ func dial(path string, deadline time.Time) (int, error) {
 	}
 	if err != nil {
 		_ = syscall.Close(fd)
-		return -1, err
+		return -1, err //nolint:error-wrap // текст connect-ошибки используется как причина CLI fallback
 	}
 	return fd, nil
 }

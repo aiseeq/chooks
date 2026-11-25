@@ -260,6 +260,7 @@ func (c Context) Location() *time.Location {
 		}
 	}
 	loc, err := time.LoadLocation(tz)
+	//nolint:silent-error-handling // при недоступной базе поясов исходное поведение использует UTC
 	if err != nil {
 		return time.UTC
 	}
@@ -371,6 +372,7 @@ func (c Context) Abs(path string) string {
 		return path
 	}
 	dir, err := filepath.EvalSymlinks(c.Cwd)
+	//nolint:silent-error-handling // ниже сохраняется исходный cwd; файловая операция сама сообщит о недоступном пути
 	if err != nil {
 		//nolint:fallback-return // cwd без каталога или прав берётся как дал запрос: ОС от него откроет путь или вернёт ошибку открытия, симлинки cwd нужны лишь для чистки у вызывающих
 		dir = c.Cwd

@@ -1,6 +1,7 @@
 package fallbackwatch
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +15,7 @@ var t0 = time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 
 func record(t *testing.T, dir string, threshold int, at time.Time, reason string) Decision {
 	t.Helper()
-	d, err := Record(dir, threshold, Event{At: at, Hook: "pre-tool-use", Reason: reason})
+	d, err := Record(context.Background(), dir, threshold, Event{At: at, Hook: "pre-tool-use", Reason: reason})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestConcurrentRecords(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range 40 {
 		wg.Go(func() {
-			d, err := Record(dir, 10, Event{At: t0.Add(time.Duration(i) * time.Millisecond), Hook: "stop", Reason: fmt.Sprint("r", i%3)})
+			d, err := Record(context.Background(), dir, 10, Event{At: t0.Add(time.Duration(i) * time.Millisecond), Hook: "stop", Reason: fmt.Sprint("r", i%3)})
 			if err != nil {
 				t.Error(err)
 			}
@@ -112,7 +113,7 @@ func TestUnreadableState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d, err := Record(dir, 10, Event{At: t0, Hook: "stop", Reason: "x"})
+	d, err := Record(context.Background(), dir, 10, Event{At: t0, Hook: "stop", Reason: "x"})
 	if err != nil || d.StateReset == nil || d.Count != 1 {
 		t.Fatalf("decision %+v err %v", d, err)
 	}

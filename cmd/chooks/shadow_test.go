@@ -302,7 +302,7 @@ func TestShadowOrderSwapped(t *testing.T) {
 				}
 			}
 			writeFiles(t, homeB, later)
-			out, err := executeShadow(wire, recB)
+			out, err := executeShadow(wire, recB, quietLogger(t))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -331,7 +331,7 @@ func TestShadowOrderSwapped(t *testing.T) {
 				t.Errorf("daemon first: %s %s", status, detail)
 			}
 			// И прямой порядок на тех же данных
-			outA, err := executeShadow(wire, recA)
+			outA, err := executeShadow(wire, recA, quietLogger(t))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -349,7 +349,7 @@ func TestShadowCatchesEachDifference(t *testing.T) {
 	home := shadowHome(t, true)
 	runShadowCLI(t, home, hookNotification, shadowInputs(home)[hookNotification], socket)
 	wire, rec := onlyFrame(t, frames)
-	out, err := executeShadow(wire, rec)
+	out, err := executeShadow(wire, rec, quietLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestShadowCatchesEachDifference(t *testing.T) {
 	socket2, frames2 := captureFrames(t)
 	runShadowCLI(t, home, hookPreToolUse, `{"session_id":"s6","tool_name":"Bash","tool_input":{"command":"kill -9 -1"}}`, socket2)
 	wire, rec = onlyFrame(t, frames2)
-	if out, err = executeShadow(wire, rec); err != nil {
+	if out, err = executeShadow(wire, rec, quietLogger(t)); err != nil {
 		t.Fatal(err)
 	}
 	if rec.Verdict.Decision != "block" || rec.Code != exitBlocked {
@@ -428,7 +428,7 @@ func TestShadowNoExternalEffect(t *testing.T) {
 		t.Fatal("CLI alert not delivered")
 	}
 	for range 3 {
-		out, err := executeShadow(wire, rec)
+		out, err := executeShadow(wire, rec, quietLogger(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -459,7 +459,7 @@ func TestShadowProcNotRecorded(t *testing.T) {
 		t.Fatal("kill guard read no /proc in CLI")
 	}
 	rec.Proc = nil
-	out, err := executeShadow(wire, rec)
+	out, err := executeShadow(wire, rec, quietLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,7 +665,7 @@ func TestShadowNightMark(t *testing.T) {
 	if mark := readFile(t, filepath.Join(home, "state/chooks/night-hint", name)); mark != string(rec.After[0].Data) {
 		t.Fatalf("user mark %q, record %q", mark, rec.After[0].Data)
 	}
-	out, err := executeShadow(wire, rec)
+	out, err := executeShadow(wire, rec, quietLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +677,7 @@ func TestShadowNightMark(t *testing.T) {
 	}
 	late := rec
 	late.Time = shadowAt.Add(2 * time.Millisecond)
-	out, err = executeShadow(wire, late)
+	out, err = executeShadow(wire, late, quietLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -743,7 +743,7 @@ func TestShadowNoKonsoleTitle(t *testing.T) {
 	if !slices.ContainsFunc(rec.Effects, func(e string) bool { return strings.HasPrefix(e, "konsole title ") }) {
 		t.Fatalf("CLI record lacks the Konsole title: %q", rec.Effects)
 	}
-	out, err := executeShadow(wire, rec)
+	out, err := executeShadow(wire, rec, quietLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -814,11 +814,11 @@ func TestShadowForeignStatePath(t *testing.T) {
 	} {
 		r := rec
 		edit(&r)
-		if _, err := executeShadow(wire, r); err == nil || !strings.Contains(err.Error(), "вне охвата") {
+		if _, err := executeShadow(wire, r, quietLogger(t)); err == nil || !strings.Contains(err.Error(), "вне охвата") {
 			t.Errorf("%s: err %v, want path out of scope", name, err)
 		}
 	}
-	if _, err := executeShadow(wire, rec); err != nil {
+	if _, err := executeShadow(wire, rec, quietLogger(t)); err != nil {
 		t.Errorf("unchanged record: %v", err)
 	}
 }
@@ -875,7 +875,7 @@ func TestShadowAfterSnapshotBeforeNeighbor(t *testing.T) {
 		t.Fatalf("session state %q: the neighbour did not write during the notification", got)
 	}
 	wire, rec := onlyFrame(t, frames)
-	out, err := executeShadow(wire, rec)
+	out, err := executeShadow(wire, rec, quietLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}

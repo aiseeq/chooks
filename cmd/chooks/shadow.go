@@ -38,7 +38,7 @@ import (
 // shadowHook — сравниваемая подкоманда: файлы состояния, которые она пишет
 // и читает (снимок «до» и запись «после»); nil — состояния не пишет
 type shadowHook struct {
-	state func(sessionID string) []shadowPath
+	state func(sessionID string) ([]shadowPath, error)
 }
 
 // shadowHooks — подкоманды без внешних эффектов, кроме уведомления и
@@ -77,20 +77,20 @@ type shadowPath struct {
 	Rel  string `json:"rel"`
 }
 
-func sessionStatePaths(sessionID string) []shadowPath {
+func sessionStatePaths(sessionID string) ([]shadowPath, error) {
 	var paths []shadowPath
 	for _, rel := range core.SessionStateFiles(sessionID) {
 		paths = append(paths, shadowPath{Root: shadowRootRuntime, Rel: rel})
 	}
-	return paths
+	return paths, nil
 }
 
-func nightHintPaths(sessionID string) []shadowPath {
+func nightHintPaths(sessionID string) ([]shadowPath, error) {
 	name, err := nighthint.RecordName(sessionID)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return []shadowPath{{Root: shadowRootState, Rel: filepath.Join("night-hint", name)}}
+	return []shadowPath{{Root: shadowRootState, Rel: filepath.Join("night-hint", name)}}, nil
 }
 
 // shadowFile — содержимое файла состояния: нет файла — Exists false;
@@ -376,6 +376,7 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 // shadowSession — тень одного вызова CLI
 type shadowSession struct {
 	hookType string
+	logger   core.Logger
 	request  hookctx.Context
 	data     []byte
 	paths    []shadowPath
@@ -391,13 +392,20 @@ type shadowSession struct {
 // которыми CLI исполняет хук
 // session — сессия входа, уже разобранная для строки длительности: второй
 // разбор входа в мегабайты стоил бы CLI десятки мс
-func beginShadow(ctx context.Context, hook shadowHook, hookType string, data []byte, session string, config *core.Config, request hookctx.Context) (context.Context, hookctx.Context, *shadowSession) {
-	s := &shadowSession{hookType: hookType, data: data, capture: &shadowCapture{}, stdout: &cappedBuffer{}, stderr: &cappedBuffer{}}
+func beginShadow(ctx context.Context, hook shadowHook, hookType string, data []byte, session string, config *core.Config, logger core.Logger, request hookctx.Context) (context.Context, hookctx.Context, *shadowSession) {
+	var paths []shadowPath
+	if hook.state != nil {
+		var stateErr error
+		paths, stateErr = hook.state(session)
+		if stateErr != nil {
+			logger.Warn("shadow state path unavailable", "hook", hookType, "error", stateErr)
+			return ctx, request, nil
+		}
+	}
+	s := &shadowSession{hookType: hookType, logger: logger, data: data, capture: &shadowCapture{}, stdout: &cappedBuffer{}, stderr: &cappedBuffer{}}
 	s.proc = procfs.NewRecorder(request.ProcFS())
 	request.Proc = s.proc
-	if hook.state != nil {
-		s.paths = hook.state(session)
-	}
+	s.paths = paths
 	s.capture.paths = s.paths
 	configPath := request.ConfigPath
 	if configPath != "" && !filepath.IsAbs(configPath) {
@@ -429,7 +437,9 @@ func (s *shadowSession) send(code int, err error) {
 	if path == "" {
 		return
 	}
-	_ = hookproxy.SendShadow(path, shadowSendTimeout, func() ([]byte, error) { return s.frame(code, err) })
+	if sendErr := hookproxy.SendShadow(path, shadowSendTimeout, func() ([]byte, error) { return s.frame(code, err) }); sendErr != nil {
+		s.logger.Warn("shadow record not sent", "hook", s.hookType, "error", sendErr)
+	}
 }
 
 // frame — кадр тени по исполнению CLI
@@ -648,7 +658,7 @@ const shadowExecGrace = time.Second
 // каталоге из снимка «до», /proc и ответы зависимостей — из записи, время —
 // время запроса, лог — в никуда, уведомления выключены. Ошибка — исполнение
 // не состоялось (не сравнимо)
-func executeShadow(wire hookwire.Request, rec shadowRecord) (shadowOutcome, error) {
+func executeShadow(wire hookwire.Request, rec shadowRecord, logger core.Logger) (shadowOutcome, error) {
 	hook, covered := shadowHooks[wire.Subcommand]
 	if !covered {
 		return shadowOutcome{}, fmt.Errorf("подкоманда вне тени")
@@ -660,7 +670,11 @@ func executeShadow(wire hookwire.Request, rec shadowRecord) (shadowOutcome, erro
 	// берётся только содержимое этих путей
 	var paths []shadowPath
 	if hook.state != nil {
-		paths = hook.state(rec.Session)
+		var stateErr error
+		paths, stateErr = hook.state(rec.Session)
+		if stateErr != nil {
+			return shadowOutcome{}, fmt.Errorf("shadow state paths: %w", stateErr)
+		}
 	}
 	before, err := shadowSnapshot(paths, rec.Before)
 	if err != nil {
@@ -708,7 +722,9 @@ func executeShadow(wire hookwire.Request, rec shadowRecord) (shadowOutcome, erro
 		// Обработчик не вернулся: каталог убирает он сам по возврату
 		go func() {
 			<-result
-			_ = os.RemoveAll(tmp)
+			if err := os.RemoveAll(tmp); err != nil {
+				logger.Warn("shadow temp directory cleanup failed", "error", err)
+			}
 		}()
 		return shadowOutcome{}, fmt.Errorf("исполнение дольше %s", timeout)
 	}

@@ -123,7 +123,10 @@ type server struct {
 func newServer(logger core.Logger) *server {
 	s := &server{logger: logger, run: executeHook, sem: make(chan struct{}, serveMaxInFlight), uid: os.Getuid(), start: processStartPID,
 		commitTimeout: serveCommitTimeout, stuckGrace: serveStuckGrace, statsEvery: serveStatsEvery, started: time.Now(),
-		shadowSem: make(chan struct{}, shadowSlots), shadowRun: executeShadow}
+		shadowSem: make(chan struct{}, shadowSlots)}
+	s.shadowRun = func(wire hookwire.Request, record shadowRecord) (shadowOutcome, error) {
+		return executeShadow(wire, record, logger)
+	}
 	if exe, err := newExeWatch(); err != nil {
 		logger.Warn("daemon: own executable unreadable, update after install not detected", "error", err)
 	} else {
@@ -221,11 +224,11 @@ func listenSocket(path string) (*net.UnixListener, error) {
 	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listen on unix socket %s: %w", path, err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = listener.Close()
-		return nil, err
+		return nil, fmt.Errorf("set unix socket permissions: %w", err)
 	}
 	return listener, nil
 }
@@ -431,11 +434,14 @@ func (s *server) serveCommitted(conn *net.UnixConn, accepted time.Time, wire hoo
 	terminated, gone := make(chan struct{}), make(chan struct{})
 	go func() {
 		var b [1]byte
-		n, _ := conn.Read(b[:])
+		n, err := conn.Read(b[:])
 		if n == 1 && b[0] == hookwire.Terminate {
 			close(terminated)
 			cancelCause(errProxyTerminated)
 			return
+		}
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			s.logger.Debug("daemon: request monitor read failed", "hook", wire.Subcommand, "pid", wire.PID, "error", err)
 		}
 		close(gone)
 		cancelCause(errProxyGone)
@@ -570,21 +576,28 @@ func (s *server) refuse(conn *net.UnixConn, hookType, reason string) {
 // п. 3); нет там — запасной из hookTimeouts. Старт не прочитан — от accept
 func (s *server) requestDeadline(pid int, hookType string, env []string, accepted time.Time) time.Time {
 	start, err := s.start(pid)
-	if err != nil || start.After(accepted) {
+	if err != nil {
+		s.logger.Debug("daemon: proxy start time unavailable", "hook", hookType, "pid", pid, "error", err)
+		//nolint:fallback-return // старт прокси не прочитан — срок запроса считается от accept, как указано в контракте функции
+		start = accepted
+	} else if start.After(accepted) {
 		start = accepted
 	}
-	return start.Add(requestHookTimeout(env, hookType) - serveDeadlineMargin)
+	timeout := requestHookTimeout(s.logger, env, hookType)
+	return start.Add(timeout - serveDeadlineMargin)
 }
 
 // requestHookTimeout — таймаут подкоманды из settings.json по env запроса;
 // не прочитан или не задан — запасной из hookTimeouts
-func requestHookTimeout(env []string, hookType string) time.Duration {
+func requestHookTimeout(logger core.Logger, env []string, hookType string) time.Duration {
 	path, err := settingsPathFor(hookctx.New(nil, nil, nil, env, "/", 0, 0))
 	if err != nil {
+		logger.Debug("daemon: hook settings path unavailable", "hook", hookType, "error", err)
 		return hookTimeouts[hookType]
 	}
 	timeout, err := hookTimeout(path, hookType)
 	if err != nil {
+		logger.Debug("daemon: hook timeout unavailable", "hook", hookType, "error", err)
 		return hookTimeouts[hookType]
 	}
 	return timeout
@@ -788,7 +801,7 @@ func transcriptRefusal(stdin []byte) string {
 func procParent(pid int) (int, error) {
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("read /proc/%d/stat: %w", pid, err)
 	}
 	end := bytes.LastIndexByte(data, ')')
 	if end < 0 {
@@ -805,7 +818,7 @@ func procParent(pid int) (int, error) {
 func peerCred(conn *net.UnixConn) (*unix.Ucred, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get unix socket descriptor: %w", err)
 	}
 	var cred *unix.Ucred
 	var credErr error

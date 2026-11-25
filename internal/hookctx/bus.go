@@ -2,6 +2,7 @@ package hookctx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -110,7 +111,7 @@ func parseBusTarget(entry string) (busTarget, bool, error) {
 		}
 		value, err := dbus.UnescapeBusAddressValue(value)
 		if err != nil {
-			return busTarget{}, false, err
+			return busTarget{}, false, fmt.Errorf("decode D-Bus address value: %w", err)
 		}
 		values[key] = value
 	}
@@ -151,7 +152,7 @@ func tcpBusTarget(values map[string]string) (busTarget, bool, error) {
 func (c Context) connectBusTarget(ctx context.Context, target busTarget) (*dbus.Conn, bool, error) {
 	raw, err := (&net.Dialer{}).DialContext(ctx, target.network, target.address)
 	if err != nil {
-		return nil, true, err
+		return nil, true, fmt.Errorf("dial D-Bus %s address: %w", target.network, err)
 	}
 	if target.transport == "unix" {
 		if _, ok := raw.(*net.UnixConn); !ok {
@@ -169,7 +170,9 @@ func (c Context) connectBusTarget(ctx context.Context, target busTarget) (*dbus.
 		return conn, false, nil
 	}
 	// Сокет открылся, а auth или Hello не прошли: godbus не идёт к следующему адресу
-	_ = raw.Close()
+	if closeErr := raw.Close(); closeErr != nil {
+		return nil, false, errors.Join(err, fmt.Errorf("close failed D-Bus connection: %w", closeErr))
+	}
 	return nil, false, err
 }
 
@@ -189,7 +192,9 @@ func busConnection(transport string, raw net.Conn) (*dbus.Conn, error) {
 		err = conn.Hello()
 	}
 	if err != nil && conn != nil {
-		_ = conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close failed D-Bus authentication: %w", closeErr))
+		}
 	}
 	return conn, err
 }

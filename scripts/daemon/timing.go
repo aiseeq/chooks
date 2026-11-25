@@ -70,11 +70,11 @@ func runTiming(argv []string) (code int, retErr error) {
 	if err != nil {
 		return 2, err
 	}
-	logFile, err := os.Create(filepath.Join(bin.work, "daemon.log"))
+	logFile, err := createDaemonLog(bin.work)
 	if err != nil {
-		return 2, fmt.Errorf("daemon log: %w", err)
+		return 2, err
 	}
-	defer logFile.Close()
+	defer closeDaemonLog(&retErr, logFile)
 	d, err := startDaemon(bin.cli, logFile, "")
 	if err != nil {
 		return 2, err

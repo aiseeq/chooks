@@ -24,10 +24,14 @@ import (
 
 // proxyHelper — бинарь тестов становится прокси (Main) в TestMain
 const proxyHelper = "HOOKPROXY_TEST_MAIN"
+const proxyCloseStdout = "HOOKPROXY_TEST_CLOSE_STDOUT"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(proxyHelper) == "1" {
 		_ = os.Unsetenv(proxyHelper)
+		if os.Getenv(proxyCloseStdout) == "1" {
+			_ = syscall.Close(1)
+		}
 		os.Exit(Main(os.Args))
 	}
 	os.Exit(m.Run())
@@ -113,6 +117,10 @@ type result struct {
 }
 
 func runProxy(t *testing.T, socket string, stub cliStub, stdin []byte, args ...string) result {
+	return runProxyWithEnv(t, socket, stub, stdin, nil, args...)
+}
+
+func runProxyWithEnv(t *testing.T, socket string, stub cliStub, stdin []byte, extraEnv []string, args ...string) result {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -120,6 +128,7 @@ func runProxy(t *testing.T, socket string, stub cliStub, stdin []byte, args ...s
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Env = append(os.Environ(), proxyHelper+"=1", EnvSocket+"="+socket, EnvCLI+"="+stub.path, "PROXY_TEST_MARK=1")
+	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -134,6 +143,21 @@ func runProxy(t *testing.T, socket string, stub cliStub, stdin []byte, args ...s
 		t.Fatal(err)
 	}
 	return r
+}
+
+func TestStdoutWriteFailurePreservesHookExitCode(t *testing.T) {
+	d := startFake(t, func(conn *net.UnixConn, _ hookwire.Request) {
+		_, _ = conn.Write([]byte{hookwire.Accepted})
+		if b, err := readByte(conn, 5*time.Second); err != nil || b != hookwire.Commit {
+			t.Errorf("commit: %q %v", b, err)
+			return
+		}
+		_, _ = conn.Write(hookwire.EncodeResult(2, []byte("deny"), nil))
+	})
+	r := runProxyWithEnv(t, d.path, cliStub{}, []byte(`{}`), []string{proxyCloseStdout + "=1"}, "pre-tool-use")
+	if r.code != 2 || !strings.Contains(r.stderr, "chooks-hook: stdout write failed:") {
+		t.Fatalf("code %d stderr %q", r.code, r.stderr)
+	}
 }
 
 // bigInput — stdin больше буфера pipe (64 КиБ)

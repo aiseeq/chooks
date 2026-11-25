@@ -273,10 +273,13 @@ func noteCLIFallback(ctx context.Context, config *core.Config, request hookctx.C
 		logger.Warn("hook fallback not counted", "hook", hookType, "error", err)
 		return
 	}
-	decision, err := fallbackwatch.Record(dir, config.Daemon.FallbackThreshold(), fallbackwatch.Event{At: time.Now(), Hook: hookType, Reason: reason})
+	decision, err := fallbackwatch.Record(ctx, dir, config.Daemon.FallbackThreshold(), fallbackwatch.Event{At: time.Now(), Hook: hookType, Reason: reason})
 	if err != nil {
-		logger.Warn("hook fallback not counted", "hook", hookType, "error", err)
-		return
+		if decision.Count == 0 {
+			logger.Warn("hook fallback not counted", "hook", hookType, "error", err)
+			return
+		}
+		logger.Warn("hook fallback lock not closed", "hook", hookType, "error", err)
 	}
 	if decision.StateReset != nil {
 		logger.Warn("hook fallback count started anew", "hook", hookType, "error", decision.StateReset)

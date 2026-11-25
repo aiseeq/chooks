@@ -4,6 +4,7 @@ import (
 	"bytes"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -590,11 +591,11 @@ func runEqual(argv []string) (code int, retErr error) {
 	if err := os.WriteFile(r.fallbackLog, nil, 0o600); err != nil {
 		return 2, fmt.Errorf("fallback log: %w", err)
 	}
-	logFile, err := os.Create(filepath.Join(bin.work, "daemon.log"))
+	logFile, err := createDaemonLog(bin.work)
 	if err != nil {
-		return 2, fmt.Errorf("daemon log: %w", err)
+		return 2, err
 	}
-	defer logFile.Close()
+	defer closeDaemonLog(&retErr, logFile)
 	d, err := startDaemon(bin.cli, logFile, "")
 	if err != nil {
 		return 2, err
@@ -625,4 +626,18 @@ func runEqual(argv []string) (code int, retErr error) {
 		return 1, nil
 	}
 	return 0, nil
+}
+
+func createDaemonLog(work string) (*os.File, error) {
+	logFile, err := os.Create(filepath.Join(work, "daemon.log"))
+	if err != nil {
+		return nil, fmt.Errorf("daemon log: %w", err)
+	}
+	return logFile, nil
+}
+
+func closeDaemonLog(retErr *error, logFile *os.File) {
+	if err := logFile.Close(); err != nil {
+		*retErr = errors.Join(*retErr, fmt.Errorf("close daemon log: %w", err))
+	}
 }

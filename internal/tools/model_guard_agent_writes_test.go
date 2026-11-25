@@ -748,6 +748,52 @@ func TestModelGuardReviewRoundSixForms(t *testing.T) {
 	}
 }
 
+func TestModelGuardClientStdinAfterClaudeCD(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	deny := []string{
+		"cd ~/.claude && echo hi | claude",
+		"cd ~/.claude && cat x | cl",
+		"cd ~/.claude && claude < file",
+		"cd ~/.claude && claude 0<file",
+		"cd ~/.claude && claude <> file",
+		"cd ~/.claude && claude <<EOF\nprompt\nEOF",
+		"cd ~/.claude && claude <<<prompt",
+		"cd ~/.claude && echo hi | claude mcp list",
+		"cd ~/.claude && claude <&3",
+		"cd ~/.claude && claude 0>file",
+	}
+	pass := []string{
+		"cd ~/.claude && claude",
+		"cd ~/.claude && claude mcp list 2>/dev/null",
+		"cd ~/.claude && claude mcp list | cat",
+		"cd ~/.claude && claude mcp list >/dev/null",
+		"cd ~/.claude && claude mcp list >/dev/null 2>&1",
+		"cd ~/.claude && popd",
+	}
+	check := func(command string) *core.ValidationResult {
+		t.Helper()
+		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for _, command := range deny {
+		t.Run("deny "+command, func(t *testing.T) {
+			if result := check(command); result.IsValid {
+				t.Fatalf("пропуск, ждали отказ: %q", command)
+			}
+		})
+	}
+	for _, command := range pass {
+		t.Run("pass "+command, func(t *testing.T) {
+			if result := check(command); !result.IsValid {
+				t.Fatalf("отказ, ждали пропуск: %+v", result.Violations)
+			}
+		})
+	}
+}
+
 func TestModelGuardReviewRoundSevenForms(t *testing.T) {
 	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
 	const (

@@ -2,6 +2,7 @@ package selflaunch
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -17,7 +18,7 @@ func StartSkillReloadCleanup(stateDir, textsDir, logFile string, now time.Time) 
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		return err
+		return fmt.Errorf("find chooks executable: %w", err)
 	}
 	return desktop.StartDetached(skillReloadCleanupCommand(executable, stateDir, textsDir, logFile, now))
 }

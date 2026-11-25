@@ -285,7 +285,7 @@ func runTracked(cmd *exec.Cmd) ([]byte, error) {
 	}
 	if err := cmd.Start(); err != nil {
 		judgeGroups.Unlock()
-		return nil, err
+		return nil, fmt.Errorf("start judge command: %w", err)
 	}
 	pid := cmd.Process.Pid
 	judgeGroups.pids[pid] = true

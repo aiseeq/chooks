@@ -1006,7 +1006,7 @@ func cdLiteralArgument(c shCommand, multi bool) (shWord, bool) {
 	if len(c.words) > 0 && (c.words[0].redirect || assignWord.MatchString(c.words[0].raw)) {
 		return shWord{}, false
 	}
-	words := cdCommandWords(c.words)
+	words := stripKeywords(c.words)
 	if c.subshell || len(words) == 0 || commandName(words[0].raw) != "cd" {
 		return shWord{}, false
 	}

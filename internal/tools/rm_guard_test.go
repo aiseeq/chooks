@@ -104,6 +104,25 @@ func TestRmGuardNoglobCdRelativeGlob(t *testing.T) {
 	}
 }
 
+func TestRmGuardWrappedCdDoesNotUseClaude330Exception(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		`builtin cd . && rm -f dir/*`,
+		`command cd . && rm -f dir/*`,
+		`builtin cd ./build && rm -f cache/*`,
+		`command cd ./build && rm -f cache/*`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if result := validateRmWith(t, newRmGuard(t), command, root); result.IsValid {
+				t.Fatalf("обёрнутый cd должен быть отклонён: %q", command)
+			}
+		})
+	}
+}
+
 func TestWrappedCommandWordsPreservesWordsOnShellcmdError(t *testing.T) {
 	parsed := &shScript{}
 	parseShell(`fish -c 'if'`, false, parsed)

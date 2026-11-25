@@ -82,23 +82,26 @@ var (
 	topDirTarget    = regexp.MustCompile(`(?i)^[\x{E020}"']*\$(?:\{(` + reName + `)(?::?-(?:["']{2}|"?\$\{?(` + reName + `)\}?"?)?)?\}|(` + reName + `))[\x{E020}"']*\\?/(` + reTop + `)(?:[\\/]+\*+)*/?[\x{E020}"']*$`)
 	unreadVarTarget = regexp.MustCompile(`^[\x{E020}"']*\$\{(` + reName + `|[0-9]+|[@*])(?:[%#/,^?](?:[^{}]|\{[^{}]*\})*|:[0-9](?:[^{}]|\{[^{}]*\})*|:?\+(?:[^{}]|\{[^{}]*\})*|:?=(?:["']{2}|"?\$\{?` + reName + `\}?"?)?|:?[-=]["']?/[/.]*["']?)\}` + reAfter)
 	// bareVar слово целиком — одна переменная: "$D", ${D}, $D/
-	bareVar        = regexp.MustCompile(`^[\x{E020}"']*\$(?:\{(` + reName + `)(?::?[?-][^}]*)?\}|(` + reName + `))[\x{E020}"']*$`)
-	assignWord     = regexp.MustCompile(`^(` + reName + `)\+?=`)
-	plainName      = regexp.MustCompile(`^` + reName + `$`)
-	braceExpansion = regexp.MustCompile(`\{[^{}'"]*(?:,|\.\.)[^{}'"]*\}`)
-	lastPathPart   = regexp.MustCompile(`/+[^/]*/*$`)
-	singleQuoted   = regexp.MustCompile(`^'[^']*\$`)
-	positionalNm   = regexp.MustCompile(`\$\{?([0-9]+|[@*!])`)
-	rmHomeGlob     = regexp.MustCompile(`^~/\*+/*$`)
-	dotSlashes     = regexp.MustCompile(`/(?:\./)+`)
-	manySlashes    = regexp.MustCompile(`/{2,}`)
-	dirPrinting    = regexp.MustCompile(`^\s*(?:(cd|pwd|dirname)(?:[^A-Za-z0-9_-]|$)|git\s+(rev-parse)\b)`)
-	dirnameOrCd    = regexp.MustCompile(`^\s*(?:cd|dirname)\s+(?:--?\w*\s+)*([^\s;&|]*)`)
-	normallySet    = map[string]bool{"HOME": true, "USERPROFILE": true, "XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_CACHE_HOME": true, "XDG_STATE_HOME": true, "XDG_RUNTIME_DIR": true, "PWD": true, "OLDPWD": true, "TMPDIR": true, "TMP": true, "TEMP": true}
-	rmKeywords     = map[string]bool{"do": true, "then": true, "else": true, "elif": true, "if": true, "while": true, "until": true, "!": true, "coproc": true, "done": true, "fi": true, "esac": true}
-	inlineShells   = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true}
-	declarers      = map[string]bool{"export": true, "declare": true, "typeset": true, "readonly": true, "local": true}
-	dirChangers    = map[string]bool{"cd": true, "pushd": true, "popd": true, "chdir": true}
+	bareVar    = regexp.MustCompile(`^[\x{E020}"']*\$(?:\{(` + reName + `)(?::?[?-][^}]*)?\}|(` + reName + `))[\x{E020}"']*$`)
+	assignWord = regexp.MustCompile(`^(` + reName + `)\+?=`)
+	// mainWrappers и wrapperDuration — обёртки и длительности прежнего разбора main
+	mainWrappers    = map[string]bool{"time": true, "timeout": true, "nice": true, "nohup": true, "env": true, "command": true, "builtin": true, "stdbuf": true, "noglob": true}
+	wrapperDuration = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?[smhd]?$`)
+	plainName       = regexp.MustCompile(`^` + reName + `$`)
+	braceExpansion  = regexp.MustCompile(`\{[^{}'"]*(?:,|\.\.)[^{}'"]*\}`)
+	lastPathPart    = regexp.MustCompile(`/+[^/]*/*$`)
+	singleQuoted    = regexp.MustCompile(`^'[^']*\$`)
+	positionalNm    = regexp.MustCompile(`\$\{?([0-9]+|[@*!])`)
+	rmHomeGlob      = regexp.MustCompile(`^~/\*+/*$`)
+	dotSlashes      = regexp.MustCompile(`/(?:\./)+`)
+	manySlashes     = regexp.MustCompile(`/{2,}`)
+	dirPrinting     = regexp.MustCompile(`^\s*(?:(cd|pwd|dirname)(?:[^A-Za-z0-9_-]|$)|git\s+(rev-parse)\b)`)
+	dirnameOrCd     = regexp.MustCompile(`^\s*(?:cd|dirname)\s+(?:--?\w*\s+)*([^\s;&|]*)`)
+	normallySet     = map[string]bool{"HOME": true, "USERPROFILE": true, "XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_CACHE_HOME": true, "XDG_STATE_HOME": true, "XDG_RUNTIME_DIR": true, "PWD": true, "OLDPWD": true, "TMPDIR": true, "TMP": true, "TEMP": true}
+	rmKeywords      = map[string]bool{"do": true, "then": true, "else": true, "elif": true, "if": true, "while": true, "until": true, "!": true, "coproc": true, "done": true, "fi": true, "esac": true}
+	inlineShells    = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true}
+	declarers       = map[string]bool{"export": true, "declare": true, "typeset": true, "readonly": true, "local": true}
+	dirChangers     = map[string]bool{"cd": true, "pushd": true, "popd": true, "chdir": true}
 )
 
 // ValidateTool проверяет цели rm и rmdir в команде Bash
@@ -552,7 +555,25 @@ func (t *RmGuardTool) checkCommand(words []shWord, v *rmVars, src inline) []stri
 // shWord, чтобы проверки целей использовали прежнее представление кавычек и
 // подстановок.
 func wrappedCommandWords(words []shWord, start int, cdRule bool) []shWord {
-	start = skipTimeKeyword(words, start)
+	got := shellcmdCommandWords(words, start, cdRule)
+	if len(got) > 0 && !wrapperLeft(got[0].raw) {
+		return got
+	}
+	skipped := skipMainWrappers(words, start)
+	if skipped == start {
+		return got
+	}
+	return shellcmdCommandWords(words, skipped, cdRule)
+}
+
+// wrapperLeft слово, на котором shellcmd остановился, хотя main снимал его
+// как обёртку или её аргумент: time, TIME, \time, «--», длительность
+func wrapperLeft(raw string) bool {
+	return mainWrappers[commandName(raw)] || strings.HasPrefix(raw, "-") || wrapperDuration.MatchString(raw)
+}
+
+// shellcmdCommandWords слова команды с имени утилиты после обёрток, снятых shellcmd
+func shellcmdCommandWords(words []shWord, start int, cdRule bool) []shWord {
 	if start >= len(words) {
 		return nil
 	}
@@ -628,14 +649,18 @@ func wrappedCommandWords(words []shWord, start int, cdRule bool) []shWord {
 	return words[wordIndex:]
 }
 
-// skipTimeKeyword пропускает `time` с его опциями так же, как прежний разбор
-// main снимал обёртку time: имя через commandName (без \, пути и регистра),
-// затем все слова с «-». shellcmd разбирает `time -- rm` как вызов `--`, а
-// bash исполняет rm; `TIME` и `\TIME` бывают функцией-обёрткой
-func skipTimeKeyword(words []shWord, start int) int {
-	for start < len(words) && commandName(words[start].raw) == "time" {
+// skipMainWrappers снимает обёртки так же, как прежний разбор main
+// (cdCommandWords до перехода на shellcmd): имя через commandName (без \, пути
+// и регистра) из mainWrappers, за ним слова с «-», присваивания и длительности.
+// Шаг идёт только там, где shellcmd оставил в начале обёртку (wrapperLeft):
+// `env -u HOME rm` shellcmd разбирает верно, а цикл main принял бы HOME за
+// команду. Шаг держит ветку не слабее main: shellcmd
+// разбирает `time -- rm` как вызов `--`, а функция-обёртка `TIME 5 rm` для
+// него — команда `5`, тогда как bash исполняет rm
+func skipMainWrappers(words []shWord, start int) int {
+	for start < len(words) && mainWrappers[commandName(words[start].raw)] {
 		start++
-		for start < len(words) && strings.HasPrefix(words[start].raw, "-") {
+		for start < len(words) && (strings.HasPrefix(words[start].raw, "-") || assignWord.MatchString(words[start].raw) || wrapperDuration.MatchString(words[start].raw)) {
 			start++
 		}
 	}

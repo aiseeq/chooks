@@ -396,7 +396,7 @@ func TestBoundToolsLastCallsFillHalfBudget(t *testing.T) {
 		in := fmt.Sprintf("ls %02d", i)
 		tools[i] = Tool{Time: "t", Name: "Bash", Input: in, fullInput: in}
 	}
-	got, err := boundTools(tools, "ответ", 1000)
+	got, err := boundToolsContext(context.Background(), tools, "ответ", 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +418,7 @@ func TestBoundToolsKeepsLastCallsEvenWhenBudgetIsTooSmall(t *testing.T) {
 		out := strings.Repeat("вывод ", 50)
 		tools[i] = Tool{Time: "t", Name: "Bash", Input: "ls", fullInput: "ls", Output: out, fullOutput: out}
 	}
-	got, err := boundTools(tools, "ответ", 100)
+	got, err := boundToolsContext(context.Background(), tools, "ответ", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +459,7 @@ func TestBoundToolsLastCallsLeaveSmallCallsShareToLargeOne(t *testing.T) {
 	}
 	large := strings.Repeat("y", 5000)
 	tools[0].Output, tools[0].fullOutput = large, large
-	got, err := boundTools(tools, "ответ", 3000)
+	got, err := boundToolsContext(context.Background(), tools, "ответ", 3000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +479,7 @@ func TestBoundToolsStaysWithinBudgetWhenSplittingGaps(t *testing.T) {
 		tools[i] = Tool{Time: "2026-01-01T00:00:00Z", Name: "Bash", Input: in, fullInput: in, Output: out, fullOutput: out}
 	}
 	for budget := 700; budget <= 6000; budget += 37 {
-		got, err := boundTools(tools, "ответ", budget)
+		got, err := boundToolsContext(context.Background(), tools, "ответ", budget)
 		if err != nil {
 			t.Fatal(err)
 		}

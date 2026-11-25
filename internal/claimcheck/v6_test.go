@@ -262,7 +262,7 @@ func TestCallsOnlyCropsLongInputAndKeepsLaterCalls(t *testing.T) {
 		t.Fatalf("last call was lost after cropping an earlier call: %+v", in.TurnTools)
 	}
 
-	bounded, err := boundTools([]Tool{
+	bounded, err := boundToolsContext(context.Background(), []Tool{
 		{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("a", 9000)},
 		{Name: "Bash", callsOnly: true, fullInput: strings.Repeat("b", 9000)},
 	}, "", 2500)
@@ -475,7 +475,7 @@ func TestCallsOnlyBoundToolsPrioritizesRelevantExcerptAndKeepsShortInputWhole(t 
 	longSize, _ := toolsJSONSize([]Tool{longFit})
 	shortSize, _ := toolsJSONSize([]Tool{shortFit})
 	budget := longSize + shortSize + minimumTail + 700
-	bounded, err := boundTools(tools, "needle result", budget)
+	bounded, err := boundToolsContext(context.Background(), tools, "needle result", budget)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +495,7 @@ func TestCallsOnlyBoundToolsExpandsSelectedLongInput(t *testing.T) {
 	for i := range tools {
 		tools[i] = Tool{Name: "Bash", callsOnly: true, fullInput: strings.Repeat(string(rune('a'+i)), 2000)}
 	}
-	bounded, err := boundTools(tools, "ответ", 8000)
+	bounded, err := boundToolsContext(context.Background(), tools, "ответ", 8000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -694,7 +694,7 @@ func TestCallsOnlyRelevantCallsSurviveRandomTurns(t *testing.T) {
 			relevant[id] = rng.Intn(relevantShare+1) != 0
 			tools[i] = Tool{Time: id, Name: "Bash", callsOnly: true, fullInput: randomCallInput(rng, length, relevant[id])}
 		}
-		bounded, err := boundTools(tools, "needle найден", budget)
+		bounded, err := boundToolsContext(context.Background(), tools, "needle найден", budget)
 		if err != nil {
 			t.Fatalf("trial %d: %v", trial, err)
 		}
@@ -764,7 +764,7 @@ func TestCallsOnlyLastRelevantCallsGrowInPriorityOrder(t *testing.T) {
 	for i := range lastTurnToolsKept {
 		tools = append(tools, Tool{Time: fmt.Sprintf("last-%d", i), Name: "Bash", callsOnly: true, fullInput: "cat needle " + strings.Repeat(string(rune('a'+i)), 2000)})
 	}
-	bounded, err := boundTools(tools, "needle найден", 6000)
+	bounded, err := boundToolsContext(context.Background(), tools, "needle найден", 6000)
 	if err != nil {
 		t.Fatal(err)
 	}

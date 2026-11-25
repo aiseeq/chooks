@@ -605,30 +605,6 @@ func lastAnswerLine(path string) (int, string, error) {
 	return line, text, err
 }
 
-// sendCallLine — строка ответа агента с вызовом письма: по tool_use_id, без
-// него — последний вызов письма с тем же текстом
-func sendCallLine(path, toolUseID, text string) (int, error) {
-	line := 0
-	err := scanTranscript(path, []byte(`"tool_use"`), func(n int, r *row) {
-		for i := range r.Blocks {
-			b := &r.Blocks[i]
-			if b.Type != "tool_use" || !isSend(b.Name) {
-				continue
-			}
-			if toolUseID != "" {
-				if b.ID == toolUseID {
-					line = n
-				}
-				continue
-			}
-			if message, err := stringField(b.Input, "message"); err == nil && message == text {
-				line = n
-			}
-		}
-	})
-	return line, err
-}
-
 // scanTranscript разбирает только строки ответа агента с needle: транскрипт
 // бывает в сотни МБ
 func scanTranscript(path string, needle []byte, fn func(int, *row)) error {

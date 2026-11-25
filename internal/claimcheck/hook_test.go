@@ -263,7 +263,7 @@ func TestAccountsFailover(t *testing.T) {
 	ok := answerOf(okClaim)
 	judge.answer = func(account string) (string, error) {
 		if account == "/acc/work" && out {
-			return "", errors.New("codex turn failed: Your workspace is out of credits.")
+			return "", errors.New("codex turn failed: Your workspace is out of credits")
 		}
 		return ok(account)
 	}
@@ -339,7 +339,7 @@ func TestWorkerMarkSkipsAccount(t *testing.T) {
 }
 
 func TestAllAccountsOutIsLimitFailure(t *testing.T) {
-	judge := &stubJudge{answer: func(string) (string, error) { return "", errors.New("You've hit your usage limit") }}
+	judge := &stubJudge{answer: func(string) (string, error) { return "", errors.New("you've hit your usage limit") }}
 	h := testHook(t, judge)
 	h.Accounts = []string{"/a", "/b"}
 	h.Stop(context.Background(), stopEvent(t))
@@ -496,7 +496,13 @@ func TestStopSlotsLimitConcurrency(t *testing.T) {
 		h3.Stop(context.Background(), firstEvent)
 		close(firstDone)
 	}()
-	<-held.entered
+	select {
+	case <-held.entered:
+	case <-time.After(10 * time.Second):
+		close(held.release)
+		<-firstDone
+		t.Fatal("held judge did not start before timeout")
+	}
 	// Бюджет ждущего — на весь Stop, включая чтение транскрипта до очереди:
 	// 2 с хватает на вход под нагрузкой гейта, а место держит канал, не часы
 	waiting := h3

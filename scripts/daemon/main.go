@@ -76,6 +76,43 @@ func (b *binaries) resolve() error {
 	return absPath(&b.proxy)
 }
 
+// prepareBinaries gives both executables stable argv[0] basenames, which are
+// visible as comm to process based guards. Prefer hard links; copy across
+// filesystems or when linking is unavailable.
+func prepareBinaries(work, cli, proxy string) (string, string, error) {
+	dir, err := os.MkdirTemp(work, "binaries-")
+	if err != nil {
+		return "", "", fmt.Errorf("binary dir: %w", err)
+	}
+	stage := func(src, name string) (string, error) {
+		dst := filepath.Join(dir, name)
+		if err := os.Link(src, dst); err == nil {
+			return dst, nil
+		}
+		info, err := os.Stat(src)
+		if err != nil {
+			return "", fmt.Errorf("stat binary %s: %w", src, err)
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return "", fmt.Errorf("read binary %s: %w", src, err)
+		}
+		if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+			return "", fmt.Errorf("copy binary %s: %w", src, err)
+		}
+		return dst, nil
+	}
+	stagedCLI, err := stage(cli, "chooks")
+	if err != nil {
+		return "", "", err
+	}
+	stagedProxy, err := stage(proxy, "chooks-hook")
+	if err != nil {
+		return "", "", err
+	}
+	return stagedCLI, stagedProxy, nil
+}
+
 // resolveCLI — флаги режима без прокси: --cli и --work
 func (b *binaries) resolveCLI() error {
 	if b.cli == "" || b.work == "" {

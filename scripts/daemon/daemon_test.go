@@ -2,10 +2,39 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 )
+
+func TestPrepareBinariesCanonicalNames(t *testing.T) {
+	inputs := t.TempDir()
+	cli := filepath.Join(inputs, "br-chooks")
+	proxy := filepath.Join(inputs, "br-hook")
+	for path, content := range map[string]string{cli: "cli", proxy: "proxy"} {
+		if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	work := t.TempDir()
+	gotCLI, gotProxy, err := prepareBinaries(work, cli, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(gotCLI) != "chooks" || filepath.Base(gotProxy) != "chooks-hook" {
+		t.Fatalf("binary names %q, %q", filepath.Base(gotCLI), filepath.Base(gotProxy))
+	}
+	for path, want := range map[string]string{gotCLI: "cli", gotProxy: "proxy"} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s: got %q, want %q", path, got, want)
+		}
+	}
+}
 
 func TestNormalize(t *testing.T) {
 	raw := []byte("time=\"2026-11-22 21:00:01\" elapsed_ms=12 pid=4242 other=142420 took=3.1ms\n" +

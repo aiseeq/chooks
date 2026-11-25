@@ -35,6 +35,11 @@ func runTiming(argv []string) (code int, retErr error) {
 	if err := bin.resolve(); err != nil {
 		return 2, err
 	}
+	stagedCLI, stagedProxy, err := prepareBinaries(bin.work, bin.cli, bin.proxy)
+	if err != nil {
+		return 2, err
+	}
+	bin.cli, bin.proxy = stagedCLI, stagedProxy
 	root := filepath.Join(bin.work, "sandbox")
 	if err := os.RemoveAll(root); err != nil {
 		return 2, fmt.Errorf("reset sandbox: %w", err)

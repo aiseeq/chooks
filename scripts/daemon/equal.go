@@ -563,6 +563,11 @@ func runEqual(argv []string) (code int, retErr error) {
 	if err := bin.resolve(); err != nil {
 		return 2, err
 	}
+	stagedCLI, stagedProxy, err := prepareBinaries(bin.work, bin.cli, bin.proxy)
+	if err != nil {
+		return 2, err
+	}
+	bin.cli, bin.proxy = stagedCLI, stagedProxy
 	eq1, err := corpusCases(*inputs, "equal")
 	if err != nil {
 		return 2, err

@@ -1002,12 +1002,11 @@ func cdGlobTargetAllowed(cmds []shCommand, target shWord, rmIndex int, base, cur
 
 // cdLiteralArgument проверяет форму cd до фильтрации префиксов; при нескольких
 // cd локальная ветка Claude Code допускает перенаправления и необязательное --.
+// Исключение Claude Code — только для буквального первого слова cd: обёртка,
+// ключевое слово, \cd, путь или другой регистр его не получают
 func cdLiteralArgument(c shCommand, multi bool) (shWord, bool) {
-	if len(c.words) > 0 && (c.words[0].redirect || assignWord.MatchString(c.words[0].raw)) {
-		return shWord{}, false
-	}
-	words := stripKeywords(c.words)
-	if c.subshell || len(words) == 0 || commandName(words[0].raw) != "cd" {
+	words := c.words
+	if c.subshell || len(words) == 0 || words[0].raw != "cd" {
 		return shWord{}, false
 	}
 	var args []shWord

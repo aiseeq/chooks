@@ -2,6 +2,41 @@ package tools
 
 import "testing"
 
+func TestReplaceOption(t *testing.T) {
+	cases := []struct {
+		option string
+		want   bool
+	}{
+		{"-I{}", true},
+		{"-i", true},
+		{"--replace=word", true},
+		{"-0rI{}", true},
+		{"-rI", true},
+		{"-dI", false},
+		{"-nI", false},
+		{"--delimiter=I", false},
+		{"list", false},
+		{"--", false},
+		{"-r", false},
+		{"-ri", true},
+		{"-aI", false},
+		{"-eI", false},
+		{"-EI", false},
+		{"-LI", false},
+		{"-lI", false},
+		{"-PI", false},
+		{"-sI", false},
+		{"--interactive", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.option, func(t *testing.T) {
+			if got := replaceOption(tc.option); got != tc.want {
+				t.Errorf("replaceOption(%q) = %v, want %v", tc.option, got, tc.want)
+			}
+		})
+	}
+}
+
 // Подсказка на рекурсивный обход большого дерева (тикет wide-search-hint)
 func TestWideSearch(t *testing.T) {
 	const home = "/home/u"
@@ -142,6 +177,134 @@ func TestWideSearchXargsFileArguments(t *testing.T) {
 			name:    "xargs rg with explicit wide path",
 			command: "xargs rg foo /home/aisee",
 			wide:    true,
+		},
+		{
+			name:    "xargs replacement in rg pattern is not a path",
+			command: "printf 'needle\\n' | xargs -I{} rg -e '{}' --",
+			wide:    true,
+		},
+		{
+			name:    "xargs replace in rg pattern is not a path",
+			command: "printf 'needle\\n' | xargs --replace rg -e '{}' --",
+			wide:    true,
+		},
+		{
+			name:    "xargs replacement in grep pattern is not a path",
+			command: "printf x | xargs -I{} grep -r -e '{}'",
+			wide:    true,
+		},
+		{
+			name:    "xargs shell script positional argument in rg pattern",
+			command: "ls | xargs -n1 sh -c 'rg \"$1\"' _",
+			wide:    true,
+		},
+		{
+			name:    "xargs shell script all arguments in rg option",
+			command: "ls | xargs sh -c 'rg -e \"$@\"' _",
+			wide:    true,
+		},
+		{
+			name:    "xargs shell script positional argument as rg path",
+			command: "ls | xargs -n1 sh -c 'rg needle \"$1\"' _",
+		},
+		{
+			name:    "xargs shell command has no explicit path",
+			command: "xargs -r sh -c 'rg needle' _",
+			wide:    true,
+		},
+		{
+			name:    "xargs short replacement",
+			command: "ls | xargs -i rg -e {} --",
+			wide:    true,
+		},
+		{
+			name:    "xargs attached short replacement",
+			command: "ls | xargs -i{} rg -e {} --",
+			wide:    true,
+		},
+		{
+			name:    "xargs delimiter value before replacement",
+			command: "ls | xargs -d ' ' -I{} rg -e {} --",
+			wide:    true,
+		},
+		{
+			name:    "xargs long delimiter value before replacement",
+			command: "ls | xargs --delimiter=' ' -I{} rg -e {} --",
+			wide:    true,
+		},
+		{
+			name:    "xargs process slot value before replacement",
+			command: "ls | xargs --process-slot-var V -I{} rg -e {} --",
+			wide:    true,
+		},
+		{
+			name:    "xargs replacement in short option cluster",
+			command: "ls | xargs -0rI{} rg -e {} --",
+			wide:    true,
+		},
+		{
+			name:    "xargs separate replacement in short option cluster",
+			command: "ls | xargs -rI {} rg -e {} --",
+			wide:    true,
+		},
+		{
+			name:    "xargs zsh script has no explicit path",
+			command: "ls | xargs zsh -c 'rg needle' _",
+			wide:    true,
+		},
+		{
+			name:    "xargs dash script has no explicit path",
+			command: "ls | xargs dash -c 'rg needle' _",
+			wide:    true,
+		},
+		{
+			name:    "xargs shell passes input as rg paths",
+			command: `ls | xargs sh -c 'rg x "$@"' _`,
+		},
+		{
+			name:    "xargs replacement in shell script pattern is not a path",
+			command: "ls | xargs -I{} sh -c 'rg -e {} --'",
+			wide:    true,
+		},
+		{
+			name:    "xargs rg pattern option is not a path",
+			command: "ls | xargs rg -I needle",
+		},
+		{
+			name:    "xargs one argument rg pattern option is not a path",
+			command: "ls | xargs -n1 rg -I needle",
+		},
+		{
+			name:    "shell command with inner xargs appends paths",
+			command: "sh -c 'ls | xargs rg needle'",
+		},
+		{
+			name:    "bash command with inner xargs appends paths",
+			command: "bash -c 'ls | xargs rg needle'",
+		},
+		{
+			name:    "bash command with inner grep xargs appends paths",
+			command: "bash -c 'ls | xargs -r grep -rn needle'",
+		},
+		{
+			name:    "shell command with max one inner xargs appends paths",
+			command: "sh -c 'ls | xargs -n1 rg needle'",
+		},
+		{
+			name:    "replacement shell command with inner xargs appends paths",
+			command: "ls | xargs -I{} bash -c 'ls {} | xargs rg needle'",
+		},
+		{
+			name:    "xargs replacement is an rg positional path",
+			command: "ls | xargs -I{} rg x {}",
+		},
+		{
+			name:    "xargs separate replacement is an rg positional path",
+			command: "ls | xargs -I X rg x X",
+		},
+		{
+			name:    "xargs replace is an rg positional path",
+			command: "ls | xargs --replace rg x {}",
 		},
 	}
 	for _, tc := range cases {

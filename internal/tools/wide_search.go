@@ -56,9 +56,9 @@ func WideSearch(command, cwd, home string) (string, error) {
 			continue
 		}
 		if len(paths) == 0 {
-			// xargs/parallel feed positional paths to the command. Without
-			// an explicit path in its argv, it does not search the cwd.
-			if slices.Contains(c.Via, "xargs") || slices.Contains(c.Via, "parallel") {
+			// xargs/parallel feed positional paths to the command. Without a
+			// path argument, only xargs without replacement appends input paths.
+			if slices.Contains(c.Via, "parallel") || xargsAppendsInput(c, calls) {
 				continue
 			}
 			paths = []walkArg{{text: "."}}
@@ -74,6 +74,27 @@ func WideSearch(command, cwd, home string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// xargsAppendsInput reports whether the xargs wrapper feeding c appends its
+// input as positional arguments. A shell -c between xargs and c gets them as
+// script arguments, not as paths of c: a path of c from "$1" or "$@" is
+// already in its argv, and without one c searches the cwd.
+func xargsAppendsInput(c *shellcmd.Call, calls []shellcmd.Call) bool {
+	xargs := -1
+	for i, via := range c.Via {
+		if via == "xargs" {
+			xargs = i
+		}
+	}
+	if xargs < 0 {
+		return false
+	}
+	options := xargsOptions(*c, calls)
+	if slices.ContainsFunc(options, replaceOption) {
+		return false
+	}
+	return !slices.Contains(c.Via[xargs+1:], "-c")
 }
 
 // shallowFind — у find литеральный -maxdepth от 0 до 3 (тикет

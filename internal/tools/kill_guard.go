@@ -887,7 +887,23 @@ func scriptUsesImplicitArgument(c shellcmd.Call) bool {
 
 // replaceOption опция xargs, подставляющая ввод в аргументы команды
 func replaceOption(opt string) bool {
-	return strings.HasPrefix(opt, "-I") || strings.HasPrefix(opt, "-i") || strings.HasPrefix(opt, "--replace")
+	if strings.HasPrefix(opt, "--replace") {
+		return true
+	}
+	if len(opt) < 2 || opt[0] != '-' || opt[1] == '-' {
+		return false
+	}
+	for i := 1; i < len(opt); i++ {
+		switch opt[i] {
+		case 'I', 'i':
+			return true
+		// These xargs options take the rest of a short cluster as their value,
+		// so an I/i in that value does not enable replacement.
+		case 'a', 'd', 'e', 'E', 'L', 'l', 'n', 'P', 's':
+			return false
+		}
+	}
+	return false
 }
 
 // xargsOptions опции xargs, за которым исполняется c. Обёртки shellcmd

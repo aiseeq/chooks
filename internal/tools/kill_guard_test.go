@@ -99,6 +99,8 @@ func TestKillGuardBlocks(t *testing.T) {
 		`pkill -f 'run.sh reflect-longcat'; pkill -f 'farm-reflect-longcat'; sleep 2`,
 		"kill `pgrep opencode`",
 		`pgrep opencode | xargs kill -9`,
+		// -rI{} в связке: ввод подставляется в скрипт sh -c
+		`echo 'x; kill 1' | xargs -rI{} sh -c 'echo {}'`,
 		`kill -9 -1`,
 		`kill 1500`,
 		`sudo kill -TERM 1`,

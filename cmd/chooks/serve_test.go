@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/akit/proc"
+	"github.com/spf13/pflag"
 
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/fallbackwatch"
@@ -247,6 +248,21 @@ func countingRun(calls *atomic.Int64) hookRunner {
 	}
 }
 
+// timeoutFlagError — текст ошибки pflag на `--timeout bad`: он меняется от
+// версии pflag (v1.1.0 — «must be a duration like…»), а тест проверяет, что
+// демон отдаёт ошибку разбора argv в CLI, а не её текст
+func timeoutFlagError(t *testing.T) string {
+	t.Helper()
+	flags := pflag.NewFlagSet("timeout", pflag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.Duration("timeout", 0, "")
+	err := flags.Parse([]string{"--timeout", "bad"})
+	if err == nil {
+		t.Fatal("pflag принял --timeout bad")
+	}
+	return err.Error()
+}
+
 // Сценарий 8 и проверки до «принято»: каждый запрос, который демон исполнил
 // бы не так, как CLI, или пришедший не от своего процесса, получает «в CLI» с
 // причиной, и исполнитель не вызывается
@@ -289,7 +305,7 @@ func TestServeRefusesBeforeAccept(t *testing.T) {
 		{"subcommand", func(r *hookwire.Request) { r.Subcommand = "version" }, "subcommand"},
 		{"extra arg", func(r *hookwire.Request) { r.Args = []string{"extra"} }, "argv: positional"},
 		{"unknown flag", func(r *hookwire.Request) { r.Subcommand, r.Args = hookNightHint, []string{"--probe"} }, "argv: unknown flag: --probe"},
-		{"bad timeout", func(r *hookwire.Request) { r.Args = []string{"--timeout", "bad"} }, `argv: invalid argument "bad" for "--timeout" flag: time: invalid duration "bad"`},
+		{"bad timeout", func(r *hookwire.Request) { r.Args = []string{"--timeout", "bad"} }, "argv: " + timeoutFlagError(t)},
 		{"relative config", func(r *hookwire.Request) { r.Args = []string{"--config", "c.yaml"} }, "config: relative"},
 		{"relative HOME", func(r *hookwire.Request) { r.Env = replaceEnv(r.Env, "HOME", "home") }, "env: HOME relative"},
 		{"relative XDG_RUNTIME_DIR", func(r *hookwire.Request) { r.Env = replaceEnv(r.Env, "XDG_RUNTIME_DIR", "run") }, "env: XDG_RUNTIME_DIR relative"},

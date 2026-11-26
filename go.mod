@@ -3,13 +3,13 @@ module github.com/aiseeq/chooks
 go 1.26.0
 
 require (
-	github.com/aiseeq/akit v1.91.13
-	github.com/godbus/dbus/v5 v5.2.2
+	github.com/aiseeq/akit v1.91.15
+	github.com/godbus/dbus/v5 v5.2.4
 	github.com/pmezard/go-difflib v1.0.0
-	github.com/spf13/cobra v1.8.0
-	github.com/spf13/pflag v1.0.5
-	golang.org/x/sys v0.49.0
-	golang.org/x/text v0.43.0
+	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.1.0
+	golang.org/x/sys v0.50.0
+	golang.org/x/text v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
 	mvdan.cc/sh/v3 v3.14.1
 )

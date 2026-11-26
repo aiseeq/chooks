@@ -2395,66 +2395,260 @@ func excerptRemainingWords(lineWords [][]string) map[string]bool {
 	return remaining
 }
 
-type excerptWindow struct{ index, score, cost int }
+type excerptWindow struct {
+	index, score, cost, heapIndex int
+	words                         []string
+	changed                       bool
+}
 
-func excerptWindows(lines []string, lineWords [][]string, lengths []int, remaining map[string]bool) []excerptWindow {
-	windows := make([]excerptWindow, 0, len(lines))
+type excerptWindowHeap []*excerptWindow
+
+func (h excerptWindowHeap) Len() int { return len(h) }
+func (h excerptWindowHeap) Less(i, j int) bool {
+	a, b := h[i], h[j]
+	ac, bc := max(a.cost, 1), max(b.cost, 1)
+	if a.score*bc != b.score*ac {
+		return a.score*bc > b.score*ac
+	}
+	if a.score != b.score {
+		return a.score > b.score
+	}
+	return a.index < b.index
+}
+func (h excerptWindowHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].heapIndex = i
+	h[j].heapIndex = j
+}
+func (h excerptWindowHeap) down(i int) {
+	for {
+		child := 2*i + 1
+		if child >= len(h) {
+			return
+		}
+		if child+1 < len(h) && h.Less(child+1, child) {
+			child++
+		}
+		if !h.Less(child, i) {
+			return
+		}
+		h.Swap(i, child)
+		i = child
+	}
+}
+func (h excerptWindowHeap) fix(i int) {
+	for i > 0 {
+		parent := (i - 1) / 2
+		if !h.Less(i, parent) {
+			break
+		}
+		h.Swap(i, parent)
+		i = parent
+	}
+	h.down(i)
+}
+func (h *excerptWindowHeap) pop() *excerptWindow {
+	last := len(*h) - 1
+	(*h).Swap(0, last)
+	w := (*h)[last]
+	(*h)[last] = nil
+	*h = (*h)[:last]
+	w.heapIndex = -1
+	if len(*h) > 0 {
+		(*h).down(0)
+	}
+	return w
+}
+
+func excerptWindows(lines []string, lineWords [][]string, lengths []int, remaining map[string]bool) excerptWindowHeap {
+	windows := make(excerptWindowHeap, 0, len(lines))
 	for i := range lines {
 		if len(lineWords[i]) == 0 {
 			continue
 		}
-		score, cost := 0, 0
-		for _, word := range neighboringAnswerWords(lineWords, i) {
-			if remaining[word] {
-				score++
-			}
-		}
+		words := neighboringAnswerWords(lineWords, i)
+		cost := 0
 		for j := max(0, i-1); j <= min(len(lines)-1, i+1); j++ {
 			cost += lengths[j] + 1
 		}
-		if cost < 1 {
-			cost = 1
-		}
-		windows = append(windows, excerptWindow{i, score, cost})
+		windows = append(windows, &excerptWindow{index: i, score: countVisibleWords(words, remaining), cost: cost, heapIndex: len(windows), words: words})
 	}
-	sort.Slice(windows, func(i, j int) bool {
-		a, b := windows[i], windows[j]
-		if a.score*b.cost != b.score*a.cost {
-			return a.score*b.cost > b.score*a.cost
-		}
-		if a.score != b.score {
-			return a.score > b.score
-		}
-		return a.index < b.index
-	})
+	for i := len(windows)/2 - 1; i >= 0; i-- {
+		windows.down(i)
+	}
 	return windows
 }
 
-func fitExcerptWindows(windows []excerptWindow, lines []string, lineWords [][]string, lengths []int, remaining map[string]bool, selected []bool, limit int) {
-	selectedCount, selectedRunes, omittedRuns := 0, 0, 1
-	for _, candidate := range windows {
-		best := candidate.index
-		if countVisibleWords(neighboringAnswerWords(lineWords, best), remaining) == 0 {
+// excerptSelection tracks the exact rendered length. The Fenwick tree finds
+// the omitted run split by a selected line in logarithmic time.
+type excerptSelection struct {
+	selected                           []bool
+	lengths, tree                      []int
+	count, runes, omitted, markerRunes int
+}
+
+func excerptMarkerLength(n int) int {
+	digits := 1
+	for n >= 10 {
+		n /= 10
+		digits++
+	}
+	// The fixed part of "[… N строк …]" is 12 runes.
+	return 12 + digits
+}
+func (s *excerptSelection) sum(end int) int {
+	n := 0
+	for end > 0 {
+		n += s.tree[end]
+		end -= end & -end
+	}
+	return n
+}
+
+// kth returns the zero-based index of the kth selected line (k starts at 1).
+func (s *excerptSelection) kth(k int) int {
+	index, step := 0, 1
+	for step < len(s.tree) {
+		step <<= 1
+	}
+	for step >>= 1; step > 0; step >>= 1 {
+		next := index + step
+		if next < len(s.tree) && s.tree[next] < k {
+			index = next
+			k -= s.tree[next]
+		}
+	}
+	return index
+}
+func (s *excerptSelection) set(i int, value bool) {
+	// Compute the omitted run as if i were still omitted.
+	leftCount := s.sum(i)
+	left, right := -1, len(s.selected)
+	if leftCount > 0 {
+		left = s.kth(leftCount)
+	}
+	through := s.sum(i + 1)
+	if through < s.count {
+		right = s.kth(through + 1)
+	}
+	oldLength := right - left - 1
+	delta := -1
+	if !value {
+		delta = 1
+	}
+	s.markerRunes += delta * excerptMarkerLength(oldLength)
+	s.omitted += delta
+	if n := i - left - 1; n > 0 {
+		s.markerRunes -= delta * excerptMarkerLength(n)
+		s.omitted -= delta
+	}
+	if n := right - i - 1; n > 0 {
+		s.markerRunes -= delta * excerptMarkerLength(n)
+		s.omitted -= delta
+	}
+	change := 1
+	if !value {
+		change = -1
+	}
+	s.count += change
+	s.runes += change * s.lengths[i]
+	s.selected[i] = value
+	for j := i + 1; j < len(s.tree); j += j & -j {
+		s.tree[j] += change
+	}
+}
+func (s *excerptSelection) fits(limit int) bool {
+	return s.runes+s.markerRunes+max(s.count+s.omitted-1, 0) <= limit
+}
+func (s *excerptSelection) add(from, to int) []int {
+	var added []int
+	for i := from; i <= to; i++ {
+		if !s.selected[i] {
+			s.set(i, true)
+			added = append(added, i)
+		}
+	}
+	return added
+}
+func (s *excerptSelection) undo(added []int) {
+	for i := len(added) - 1; i >= 0; i-- {
+		s.set(added[i], false)
+	}
+}
+
+// A selected line can remove at most one omission marker and one newline.
+// Reject an impossible window before updating the tree for each trial line.
+func (s *excerptSelection) tryAdd(from, to, limit int) ([]int, bool) {
+	lower := s.runes + s.markerRunes + max(s.count+s.omitted-1, 0)
+	marker := excerptMarkerLength(len(s.selected)) + 1
+	for i := from; i <= to; i++ {
+		if !s.selected[i] {
+			lower += s.lengths[i] - marker
+		}
+	}
+	if lower > limit {
+		return nil, false
+	}
+	added := s.add(from, to)
+	if s.fits(limit) {
+		return added, true
+	}
+	s.undo(added)
+	return nil, false
+}
+
+func fitExcerptWindows(windows excerptWindowHeap, lines []string, lineWords [][]string, lengths []int, remaining map[string]bool, selected []bool, limit int) {
+	state := excerptSelection{selected: selected, lengths: lengths, tree: make([]int, len(lines)+1), omitted: 1, markerRunes: excerptMarkerLength(len(lines))}
+	byIndex := make([]*excerptWindow, len(lines))
+	for _, w := range windows {
+		byIndex[w.index] = w
+	}
+	for len(windows) > 0 {
+		// Scores can only decrease, so their cached values are upper bounds. Costs
+		// are kept current even for stale scores; recheck the top before using it.
+		w := windows[0]
+		score := countVisibleWords(w.words, remaining)
+		if score != w.score {
+			w.score = score
+			windows.fix(0)
 			continue
 		}
-		from, to := max(0, best-1), min(len(lines)-1, best+1)
-		added := selectWindow(selected, lengths, from, to, &selectedCount, &selectedRunes, &omittedRuns)
-		if !excerptSelectionFits(selectedCount, selectedRunes, omittedRuns, limit) {
-			undoExcerptWindow(selected, lengths, added, &selectedCount, &selectedRunes, &omittedRuns)
-			if !selected[best] {
-				added = selectWindow(selected, lengths, best, best, &selectedCount, &selectedRunes, &omittedRuns)
-				if !excerptSelectionFits(selectedCount, selectedRunes, omittedRuns, limit) {
-					undoExcerptWindow(selected, lengths, added, &selectedCount, &selectedRunes, &omittedRuns)
-					continue
+		if score == 0 {
+			break
+		}
+		w = windows.pop()
+		from, to := max(0, w.index-1), min(len(lines)-1, w.index+1)
+		added, fits := state.tryAdd(from, to, limit)
+		if !fits && !selected[w.index] {
+			added, fits = state.tryAdd(w.index, w.index, limit)
+			if !fits {
+				continue
+			}
+		}
+		var changed []*excerptWindow
+		for _, i := range added {
+			for _, word := range lineWords[i] {
+				delete(remaining, word)
+			}
+			for j := max(0, i-1); j <= min(len(lines)-1, i+1); j++ {
+				other := byIndex[j]
+				if other != nil && other.heapIndex >= 0 && !other.changed {
+					other.changed = true
+					changed = append(changed, other)
 				}
 			}
 		}
-		for j := from; j <= to; j++ {
-			if selected[j] {
-				for _, word := range lineWords[j] {
-					delete(remaining, word)
+		// Selecting a line can make a neighboring window cheaper, so update its
+		// cost immediately; a lazy score alone would not account for this increase.
+		for _, other := range changed {
+			other.changed = false
+			other.cost = 0
+			for i := max(0, other.index-1); i <= min(len(lines)-1, other.index+1); i++ {
+				if !selected[i] {
+					other.cost += lengths[i] + 1
 				}
 			}
+			windows.fix(other.heapIndex)
 		}
 	}
 }
@@ -2467,48 +2661,6 @@ func countVisibleWords(words []string, remaining map[string]bool) int {
 		}
 	}
 	return count
-}
-
-func selectWindow(selected []bool, lengths []int, from, to int, count, runes, omitted *int) []int {
-	var added []int
-	for i := from; i <= to; i++ {
-		if selected[i] {
-			continue
-		}
-		leftOmitted := i > 0 && !selected[i-1]
-		rightOmitted := i+1 < len(selected) && !selected[i+1]
-		*count++
-		*runes += lengths[i]
-		if leftOmitted && rightOmitted {
-			*omitted++
-		} else if !leftOmitted && !rightOmitted {
-			*omitted--
-		}
-		selected[i] = true
-		added = append(added, i)
-	}
-	return added
-}
-
-func undoExcerptWindow(selected []bool, lengths []int, added []int, count, runes, omitted *int) {
-	for i := len(added) - 1; i >= 0; i-- {
-		index := added[i]
-		leftOmitted := index > 0 && !selected[index-1]
-		rightOmitted := index+1 < len(selected) && !selected[index+1]
-		*count--
-		*runes -= lengths[index]
-		if leftOmitted && rightOmitted {
-			*omitted--
-		} else if !leftOmitted && !rightOmitted {
-			*omitted++
-		}
-		selected[index] = false
-	}
-}
-
-func excerptSelectionFits(count, runes, omitted, limit int) bool {
-	segments := count + omitted
-	return runes+32*omitted+max(segments-1, 0) <= limit
 }
 
 type wordSpan struct {

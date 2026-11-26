@@ -1,11 +1,33 @@
 package tools
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/aiseeq/akit/shellcmd"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
+
+func shellANSIValue(value string) (string, error) {
+	for i := 0; i+2 < len(value); i++ {
+		if value[i] != '\\' {
+			continue
+		}
+		if value[i+1] == 'c' && value[i+2]&0x1f == 0 {
+			return "", fmt.Errorf("ANSI-строка содержит NUL; убери управляющее экранирование и укажи значение литералом")
+		}
+		i++
+	}
+	decoded, _, err := expand.Format(nil, value, nil)
+	if err != nil {
+		return "", fmt.Errorf("decode ANSI string: %w", err)
+	}
+	if strings.ContainsRune(decoded, 0) {
+		return "", fmt.Errorf("ANSI-строка содержит NUL; убери \\0 и укажи значение литералом")
+	}
+	return decoded, nil
+}
 
 // word слово команды; literal — в нём нет подстановок $ и `; braces — bash
 // раскрывает в нём фигурные скобки ({a,b}, {1..3}) в несколько слов
@@ -16,6 +38,8 @@ type word struct {
 	shellLiteralKnown bool
 	tilde             shellcmd.Tilde
 	braces            bool
+	invalidANSI       bool
+	ansiEscapedQuote  bool
 }
 
 // computedArg — слово из shellcmd.Call.Args вычисляется при запуске.
@@ -80,7 +104,16 @@ func literalValue(w *syntax.Word) (string, bool) {
 		case *syntax.Lit:
 			b.WriteString(p.Value)
 		case *syntax.SglQuoted:
-			b.WriteString(p.Value)
+			if p.Dollar {
+				value, err := expand.Literal(nil, &syntax.Word{Parts: []syntax.WordPart{p}})
+				if err != nil {
+					// error-masked-as-false-bool: safe — false means the value is unknown and callers refuse or conservatively analyse it.
+					return "", false
+				}
+				b.WriteString(value)
+			} else {
+				b.WriteString(p.Value)
+			}
 		case *syntax.DblQuoted:
 			for _, inner := range p.Parts {
 				lit, ok := inner.(*syntax.Lit)

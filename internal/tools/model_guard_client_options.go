@@ -11,6 +11,7 @@ import (
 	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/hookctx"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -157,6 +158,469 @@ var claudeCommandOptions = map[string]map[string]claudeOption{
 // 2.1.332 читает их сотни, и новая в следующей версии может снять хуки
 var claudeEnvironmentName = regexp.MustCompile(`\b(?:CLAUDE|ANTHROPIC)_[A-Za-z0-9_]+`)
 
+// environmentHazard inspects the complete command when it invokes a client.
+func environmentHazard(command string, client bool, home string) (bool, error) {
+	if !claudeClientWord.MatchString(command) {
+		return false, nil
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	// error-string-compare: safe — the parser exposes no sentinel for an unclosed here-document.
+	if err != nil && strings.Contains(err.Error(), "unclosed here-document") {
+		if before, _, ok := strings.Cut(command, "<<"); ok {
+			file, err = syntax.NewParser().Parse(strings.NewReader(before), "")
+		}
+	}
+	if err != nil {
+		return false, fmt.Errorf("parse environment: %w", err)
+	}
+	if !client && !wrapperHasClient(file, command) {
+		return false, nil
+	}
+	hazard := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.DeclClause:
+			hazard = hazard || dynamicDeclaration(command, n)
+		case *syntax.CallExpr:
+			hazard = hazard || dynamicEnvironmentCall(command, n, home)
+		}
+		return true
+	})
+	return hazard, nil
+}
+
+func wrapperHasClient(file *syntax.File, command string) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		args, env := shellNestedCommandArgs(command, call, "env")
+		if !env {
+			if _, tmux := shellNestedCommandArgs(command, call, "tmux"); tmux {
+				start, end := int(call.Pos().Offset()), int(call.End().Offset())
+				if start >= 0 && start <= end && end <= len(command) && claudeClientWord.MatchString(command[start:end]) {
+					found = true
+				}
+			}
+			return true
+		}
+		for _, arg := range args {
+			value, literal := literalValue(arg)
+			if literal && claudeClientWord.MatchString(value) {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func dynamicDeclaration(command string, decl *syntax.DeclClause) bool {
+	for _, arg := range decl.Args {
+		start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
+		if start < 0 || end > len(command) || start > end {
+			continue
+		}
+		raw := command[start:end]
+		name, _, _ := strings.Cut(raw, "=")
+		if strings.HasPrefix(raw, "-n") || arg.Name == nil && strings.ContainsAny(name, "$`{") {
+			return true
+		}
+	}
+	return false
+}
+
+func dynamicEnvironmentCall(command string, call *syntax.CallExpr, home string) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	if args, ok := shellNestedCommandArgs(command, call, "env"); ok && envWordsHazard(args, false) {
+		return true
+	}
+	if args, ok := shellNestedCommandArgs(command, call, "tmux"); ok && tmuxEnvironmentHazard(tmuxDefaultHomeArgs(args, home)) {
+		return true
+	}
+	name, literal := shellEffectiveCommand(call.Args)
+	if !literal {
+		return false
+	}
+	for i, arg := range call.Args[1:] {
+		_, literal := literalValue(arg)
+		switch name {
+		case "printf":
+			if i > 0 && !literal {
+				prev, _ := literalValue(call.Args[i])
+				if prev == "-v" {
+					return true
+				}
+			}
+		default:
+			if shellVariableWriter(name) && !literal && !literalAssignmentName(arg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// A computed value after a literal NAME= does not compute the target name.
+func literalAssignmentName(word *syntax.Word) bool {
+	if len(word.Parts) == 0 {
+		return false
+	}
+	part, ok := word.Parts[0].(*syntax.Lit)
+	if !ok {
+		return false
+	}
+	name, _, assigned := strings.Cut(part.Value, "=")
+	return assigned && syntax.ValidName(name)
+}
+
+// Normalize only a literal tmux -e HOME assignment equal to the request's
+// home. Its environment effect is already the default checked by model_guard.
+func tmuxDefaultHomeArgs(args []*syntax.Word, home string) []*syntax.Word {
+	if home == "" || !filepath.IsAbs(home) || !tmuxPrintClient(args) {
+		return args
+	}
+	result := slices.Clone(args)
+	previousEnv := false
+	for i, arg := range args {
+		value, literal := literalValue(arg)
+		if !literal {
+			previousEnv = false
+			continue
+		}
+		assignment := value
+		attached := strings.HasPrefix(value, "-e") && len(value) > 2
+		if attached {
+			assignment = value[2:]
+		}
+		if (previousEnv || attached) && assignment == "HOME="+home {
+			replacement := "CHOOKS_DEFAULT_HOME=1"
+			if attached {
+				replacement = "-e" + replacement
+			}
+			result[i] = &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: replacement}}}
+		}
+		previousEnv = value == "-e"
+	}
+	return result
+}
+
+// tmuxPrintClient only relaxes HOME for visible print clients.
+func tmuxPrintClient(args []*syntax.Word) bool {
+	found := false
+	for _, arg := range args {
+		value, _ := literalValue(arg)
+		calls, err := shellcmd.Calls(value)
+		// silent-error-handling: safe — a non-command word provides no client proof.
+		if err != nil {
+			continue
+		}
+		for i := range calls {
+			if !slices.Contains([]string{"claude", "cl"}, calls[i].Name) {
+				continue
+			}
+			if !slices.Contains(calls[i].Args, "-p") && !slices.Contains(calls[i].Args, "--print") {
+				return false
+			}
+			found = true
+		}
+	}
+	return found
+}
+
+// shellNestedCommandArgs locates the unwrapped program using shellcmd's own
+// wrapper parser and maps its arguments back to their syntax nodes.
+func shellNestedCommandArgs(source string, call *syntax.CallExpr, name string) ([]*syntax.Word, bool) {
+	start, end := int(call.Pos().Offset()), int(call.End().Offset())
+	if start < 0 || end > len(source) || start > end {
+		return nil, false
+	}
+	calls, err := shellcmd.Calls(source[start:end])
+	if err != nil {
+		// error-masked-as-false-bool: safe — failure leaves the wrapper unresolved for the main parser to refuse.
+		return nil, false
+	}
+	for i := range calls {
+		if calls[i].Name != name || calls[i].Offset < 0 {
+			continue
+		}
+		for j, arg := range call.Args {
+			if int(arg.Pos().Offset()) == start+calls[i].Offset {
+				return call.Args[j+1:], true
+			}
+		}
+	}
+	return nil, false
+}
+
+func unsafeEnvironmentName(name string) bool {
+	if name == "CLAUDE_CODE_EFFORT_LEVEL" {
+		return false
+	}
+	if name == "HOME" || name == "PATH" || name == "BASH_ENV" || name == "ENV" || name == "BUN_OPTIONS" || name == "NODE_OPTIONS" || strings.HasPrefix(name, "LD_") {
+		return true
+	}
+	_, model := modelEnvNames[name]
+	return model || claudeEnvironmentName.MatchString(name) && !slices.Contains(claudeEnvironmentAllowed, name)
+}
+
+func tmuxEnvironmentValue(word *syntax.Word) bool {
+	value, literal := literalValue(word)
+	if !literal {
+		return true
+	}
+	name, _, assigned := strings.Cut(value, "=")
+	return !assigned || unsafeEnvironmentName(name)
+}
+
+func tmuxEnvironmentHazard(args []*syntax.Word) bool {
+	for i := 0; i < len(args); i++ {
+		value, literal := literalValue(args[i])
+		if !literal {
+			continue
+		}
+		if value == "-L" || value == "-S" || value == "-f" || value == "-T" {
+			i++
+			continue
+		}
+		if value == "new" || value == "new-session" {
+			return tmuxNewSessionHazard(args[i+1:])
+		}
+		if value == "setenv" || len(value) >= len("set-e") && strings.HasPrefix("set-environment", value) {
+			return tmuxSetEnvironmentHazard(args[i+1:])
+		}
+		if !strings.HasPrefix(value, "-") {
+			return false
+		}
+	}
+	return false
+}
+
+func tmuxSetEnvironmentHazard(args []*syntax.Word) bool {
+	for _, arg := range args {
+		value, literal := literalValue(arg)
+		if !literal {
+			return true
+		}
+		if strings.HasPrefix(value, "-") {
+			continue
+		}
+		return unsafeEnvironmentName(value)
+	}
+	return true
+}
+
+func tmuxNewSessionHazard(args []*syntax.Word) bool {
+	for i := 0; i < len(args); i++ {
+		value, literal := literalValue(args[i])
+		if !literal {
+			return true
+		}
+		if strings.HasPrefix(value, "-e") && len(value) > 2 {
+			name, _, ok := strings.Cut(value[2:], "=")
+			if !ok || unsafeEnvironmentName(name) {
+				return true
+			}
+			continue
+		}
+		if value == "-e" || strings.HasPrefix(value, "-") && strings.HasSuffix(value, "e") {
+			if i+1 >= len(args) || tmuxEnvironmentValue(args[i+1]) {
+				return true
+			}
+			i++
+			continue
+		}
+		if slices.Contains([]string{"-s", "-c", "-t", "-x", "-y", "-n"}, value) {
+			i++
+			continue
+		}
+		if !strings.HasPrefix(value, "-") {
+			return tmuxSessionCommandHazard(value)
+		}
+	}
+	return false
+}
+
+func tmuxSessionCommandHazard(command string) bool {
+	calls, callsErr := shellcmd.Calls(command)
+	// error-masking: safe — an unparsed session command is refused.
+	if callsErr != nil {
+		return true
+	}
+	wrappedEnv := false
+	for i := range calls {
+		if calls[i].Name == "env" && sessionEnvCallHazard(calls[i].Args) {
+			return true
+		}
+		wrappedEnv = wrappedEnv || slices.Contains(calls[i].Via, "env")
+		if calls[i].Name == "" || calls[i].ScriptInput {
+			return true
+		}
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	// error-masking: safe — true denotes refusal of an unparsed session command.
+	if err != nil {
+		return true
+	}
+	hazard := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		_, literal := shellEffectiveCommand(call.Args)
+		if !literal {
+			hazard = true
+			return true
+		}
+		hazard = hazard || sessionWrappedEnvHazard(command, call, wrappedEnv)
+		for _, assign := range call.Assigns {
+			if assign.Name == nil || unsafeEnvironmentName(assign.Name.Value) {
+				hazard = true
+			}
+		}
+		return true
+	})
+	return hazard
+}
+
+func sessionWrappedEnvHazard(command string, call *syntax.CallExpr, wrappedEnv bool) bool {
+	if args, ok := shellNestedCommandArgs(command, call, "env"); ok && envWordsHazard(args, true) {
+		return true
+	}
+	if wrappedEnv {
+		for i, arg := range call.Args {
+			if value, literal := literalValue(arg); literal && value == "env" {
+				return envWordsHazard(call.Args[i+1:], true)
+			}
+		}
+	}
+	return false
+}
+
+func sessionEnvCallHazard(args []string) bool {
+	values := make([]envArgument, len(args))
+	for i, arg := range args {
+		values[i] = envArgument{arg, !computedArg(arg)}
+	}
+	return envArgumentsHazard(values, true)
+}
+
+func envWordsHazard(args []*syntax.Word, checkAssignments bool) bool {
+	values := make([]envArgument, len(args))
+	for i, arg := range args {
+		value, literal := literalValue(arg)
+		if checkAssignments && !literal {
+			return true
+		}
+		values[i] = envArgument{value, literal}
+	}
+	return envArgumentsHazard(values, checkAssignments)
+}
+
+type envArgument struct {
+	value   string
+	literal bool
+}
+
+// cyclomatic-complexity: safe — env options, assignments and command are distinct shell boundaries.
+func envArgumentsHazard(args []envArgument, checkAssignments bool) bool {
+	for i := 0; i < len(args); i++ {
+		value := args[i].value
+		if !args[i].literal {
+			return true
+		}
+		if value == "-S" || value == "--split-string" {
+			if i+1 >= len(args) || !args[i+1].literal {
+				return true
+			}
+			return envSplitHazard(args[i+1].value)
+		}
+		if strings.HasPrefix(value, "-S") {
+			return envSplitHazard(value[2:])
+		}
+		if split, ok := strings.CutPrefix(value, "--split-string="); ok {
+			return envSplitHazard(split)
+		}
+		if name, ok := strings.CutPrefix(value, "--unset="); ok {
+			if name == "" || name == "HOME" {
+				return true
+			}
+			continue
+		}
+		if name, ok := strings.CutPrefix(value, "-u"); ok && name != "" {
+			if name == "HOME" {
+				return true
+			}
+			continue
+		}
+		if value == "-u" || value == "--unset" || value == "-C" || value == "--chdir" {
+			i++
+			if i >= len(args) || !args[i].literal || (value == "-u" || value == "--unset") && args[i].value == "HOME" {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(value, "-") {
+			continue
+		}
+		if name, _, assigned := strings.Cut(value, "="); assigned {
+			if checkAssignments && unsafeEnvironmentName(name) {
+				return true
+			}
+			continue
+		}
+		return false
+	}
+	return false
+}
+
+// env -S accepts its own quoting and escapes. Only a fully literal split
+// whose environment and client are visible is safe to hand to shellcmd.
+func envSplitHazard(text string) bool {
+	var words []*syntax.Word
+	for word, err := range syntax.NewParser().WordsSeq(strings.NewReader(text)) {
+		// error-masking: safe — a split string that cannot be parsed is refused.
+		if err != nil {
+			return true
+		}
+		words = append(words, word)
+	}
+	if len(words) == 0 {
+		return true
+	}
+	values := make([]envArgument, len(words))
+	for i, word := range words {
+		value, literal := literalValue(word)
+		values[i] = envArgument{value, literal}
+	}
+	if envArgumentsHazard(values, true) {
+		return true
+	}
+	commandSeen := false
+	for _, arg := range values {
+		value := arg.value
+		if !arg.literal {
+			return true
+		}
+		if commandSeen {
+			continue
+		}
+		if _, _, assigned := strings.Cut(value, "="); assigned {
+			continue
+		}
+		if value != "claude" && value != "cl" {
+			return true
+		}
+		commandSeen = true
+	}
+	return !commandSeen
+}
+
 // claudeEnvironmentAllowed — переменные claude, которые не снимают хуки и не
 // подменяют настройки, MCP и плагины. Модель (modelEnvNames) и
 // CLAUDE_CODE_SHELL_PREFIX model_guard судит отдельно
@@ -292,7 +756,7 @@ func scanClaudeArguments(args []word, values func(string) ([]string, bool)) clau
 			queue = nil
 		case arg.mayBeOption:
 			if !arg.hookWord {
-				parsed.refuse(fmt.Sprintf("слово %s начинается подстановкой: её значение с - claude примет за опцию; значение опции пиши через = (--opt=…), промпт — после --", arg.word.text))
+				parsed.refuse(fmt.Sprintf("слово %s начинается подстановкой: её значение с - claude примет за опцию; значение опции пиши --opt=\"$VALUE\", промпт — после --", arg.word.text))
 			}
 			parsed.unknownLast = true
 		case !claudeMaybeOption(arg.text) || !claudeOptionStart(arg.text[1]):
@@ -320,7 +784,7 @@ func (p *claudeArguments) refuseHookWords(args []claudeArg) {
 			}
 			arg.hookWord = true
 			if arg.unresolved {
-				p.refuse(fmt.Sprintf("слово %s может оказаться %s: claude ищет это слово в argv сам, и в месте значения опции, и %s; значение опции пиши через = (--opt=…), промпт — после --", arg.word.text, name, claudeRefusedOptions[name]))
+				p.refuse(fmt.Sprintf("слово %s может оказаться %s: claude ищет это слово в argv сам, и в месте значения опции, и %s; значение опции пиши --opt=\"$VALUE\", промпт — после --", arg.word.text, name, claudeRefusedOptions[name]))
 				continue
 			}
 			// тот же текст, что у опции: слово в месте опции даёт один отказ
@@ -349,7 +813,7 @@ func splitsRefusal(arg claudeArg) string {
 	if arg.err != nil {
 		return fmt.Sprintf("слово %s не разобрано (%v): опции клиента claude не проверить", arg.word.text, arg.err)
 	}
-	return fmt.Sprintf("слово %s без кавычек bash может разбить на несколько слов (подстановка, фигурные скобки): за ними может стоять опция claude; возьми слово в кавычки", arg.word.text)
+	return fmt.Sprintf("слово %s без кавычек bash может разбить на несколько слов (подстановка, фигурные скобки или маска) либо убрать пустое слово: за ними может стоять опция claude; возьми слово в кавычки (например --opt=\"$VALUE\") или убери пустую подстановку", arg.word.text)
 }
 
 // lookup — опция подкоманды (claudeCommandOptions) или claude
@@ -499,6 +963,11 @@ func (p *claudeArguments) refuseCommand() {
 // команде или env запроса) подставляется
 func newClaudeArg(arg word, values func(string) ([]string, bool)) claudeArg {
 	parsed := claudeArg{word: arg, text: arg.text, splits: arg.braces}
+	if arg.invalidANSI {
+		parsed.err = fmt.Errorf("ANSI-строка содержит NUL; убери \\0 и укажи значение литералом")
+		parsed.splits = true
+		return parsed
+	}
 	if !computedArg(arg.text) {
 		return parsed
 	}
@@ -529,7 +998,17 @@ func (a *claudeArg) renderParts(b *strings.Builder, parts []syntax.WordPart, quo
 		case *syntax.Lit:
 			a.write(b, p.Value)
 		case *syntax.SglQuoted:
-			a.write(b, p.Value)
+			if p.Dollar {
+				value, err := shellANSIValue(p.Value)
+				if err != nil {
+					a.err = err
+					a.splits = true
+					continue
+				}
+				a.write(b, value)
+			} else {
+				a.write(b, p.Value)
+			}
 		case *syntax.DblQuoted:
 			a.renderParts(b, p.Parts, true, values)
 		case *syntax.ParamExp:
@@ -590,12 +1069,23 @@ func heredocCat(subst *syntax.CmdSubst) (*syntax.Word, bool) {
 
 // renderParam — $X: известное значение, одно из нескольких или неизвестное
 func (a *claudeArg) renderParam(b *strings.Builder, p *syntax.ParamExp, quoted bool, values func(string) ([]string, bool)) {
+	if !quoted && values != nil {
+		if _, changed := values("\x00IFS"); changed {
+			a.unknownPart(b, false)
+			return
+		}
+	}
 	found := simpleParamValues(p, values)
 	if len(found) == 0 {
 		a.unknownPart(b, quoted)
 		// "$@" и "${a[@]}" дают несколько слов и в кавычках
 		a.splits = a.splits || p.Index != nil || p.Param != nil && (p.Param.Value == "@" || p.Param.Value == "*")
 		return
+	}
+	// A joined, unquoted value is ambiguous to users and shell word splitting;
+	// the quoted --opt="$VALUE" form preserves its argument boundary.
+	if !quoted && b.Len() > 0 {
+		a.splits = true
 	}
 	// без кавычек пустое значение убирает слово, пробел и маска дают
 	// несколько слов
@@ -644,8 +1134,45 @@ func simpleParamValues(p *syntax.ParamExp, values func(string) ([]string, bool))
 // clientWordValues — значения переменной для слов клиента claude:
 // присваивания и циклы for в команде, env запроса. Второй результат — все
 // значения известны
+// cyclomatic-complexity: safe — each branch distinguishes a shell write, inherited value, or literal alternative.
 func clientWordValues(command string, request hookctx.Context, logger core.Logger) func(string) ([]string, bool) {
+	assigns, assignsErr := shellcmd.Assigns("IFS=\n" + command)
+	ifsChanged := false
+	for _, assign := range assigns {
+		ifsChanged = ifsChanged || assign.Name == "IFS" && (assign.Offset != 0 || assign.Unknown)
+	}
 	return func(name string) ([]string, bool) {
+		if name == "\x00IFS" {
+			return nil, ifsChanged || assignsErr != nil
+		}
+		if slices.Contains([]string{"_", "BASH_REMATCH", "OPTARG", "MAPFILE", "REPLY", "FUNCNAME"}, name) {
+			return nil, false
+		}
+		// Sentinel makes implicit writes (read, printf -v, unset) visible too.
+		prefix := name + "=\n"
+		marked, err := shellcmd.Assigns(prefix + command)
+		if err != nil {
+			return nil, false
+		}
+		conditional := false
+		for _, assign := range marked {
+			if assign.Name == name && (assign.Unknown || assign.Append) {
+				// A for-loop itself marks its iterator unknown. Its literal
+				// alternatives are handled below, provided no other write or
+				// global uncertainty can change them.
+				file, parseErr := syntax.NewParser().Parse(strings.NewReader(command), "")
+				if parseErr != nil {
+					logger.Warn("model_guard: цикл не разобран", "error", parseErr)
+					return nil, false
+				}
+				if !literalLoopOnly(file, command, name, logger) {
+					return nil, false
+				}
+				loop, _ := forLoopValues(file, name)
+				conditional = len(loop) == 0
+				break
+			}
+		}
 		file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 		if err != nil {
 			// неразобранная команда: значения не известны, слово с этой
@@ -656,11 +1183,175 @@ func clientWordValues(command string, request hookctx.Context, logger core.Logge
 		values, dynamic := shellEnvValues(command, name, logger)
 		loopValues, loopDynamic := forLoopValues(file, name)
 		values = append(values, loopValues...)
-		if inherited, ok := request.LookupEnv(name); ok {
+		guaranteed := conditional && assignmentBeforeEveryClient(file, command, name)
+		if inherited, ok := request.LookupEnv(name); ok && !guaranteed {
 			values = append(values, inherited)
+		} else if conditional && !guaranteed {
+			values = append(values, "")
 		}
 		return values, !dynamic && !loopDynamic && len(values) > 0
 	}
+}
+
+func assignmentBeforeEveryClient(file *syntax.File, command, name string) bool {
+	calls, err := shellcmd.Calls(command)
+	if err != nil {
+		// error-masked-as-false-bool: safe — false means the assignment is not proven to dominate the client.
+		return false
+	}
+	count := 0
+	for i := range calls {
+		call := &calls[i]
+		if !slices.Contains([]string{"claude", "cl"}, call.Name) {
+			continue
+		}
+		dominates := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			bin, ok := node.(*syntax.BinaryCmd)
+			if ok && bin.Op == syntax.AndStmt && int(bin.Y.Pos().Offset()) <= call.Offset && call.Offset < int(bin.Y.End().Offset()) && assignmentOnSuccess(bin.X, name) {
+				dominates = true
+			}
+			return true
+		})
+		if !dominates {
+			return false
+		}
+		count++
+	}
+	return count > 0
+}
+
+func assignmentOnSuccess(stmt *syntax.Stmt, name string) bool {
+	switch node := stmt.Cmd.(type) {
+	case *syntax.BinaryCmd:
+		return node.Op == syntax.AndStmt && (assignmentOnSuccess(node.X, name) || assignmentOnSuccess(node.Y, name))
+	case *syntax.CallExpr:
+		if len(node.Args) != 0 {
+			return false
+		}
+		for _, assign := range node.Assigns {
+			if assign.Name != nil && assign.Name.Value == name && !assign.Append && assign.Value != nil {
+				_, literal := literalValue(assign.Value)
+				return literal
+			}
+		}
+	}
+	return false
+}
+
+func literalLoopOnly(file *syntax.File, command, name string, logger core.Logger) bool {
+	loop, dynamic := forLoopValues(file, name)
+	if dynamic {
+		return false
+	}
+	marked, err := shellcmd.Assigns(environmentControl + "=\n" + command)
+	if err != nil {
+		logger.Warn("model_guard: присваивания цикла не разобраны", "error", err)
+		return false
+	}
+	hasLiteral := len(loop) > 0
+	for _, assign := range marked {
+		if assign.Name == environmentControl && assign.Unknown {
+			return false
+		}
+		if assign.Name == name {
+			if assign.Append || strings.ContainsAny(assign.Value, "$`\\") {
+				return false
+			}
+			hasLiteral = true
+		}
+	}
+	if !hasLiteral {
+		return false
+	}
+	return !hasDynamicValueWrite(file)
+}
+
+func hasDynamicValueWrite(file *syntax.File) bool {
+	unsafe := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node.(type) {
+		case *syntax.ArithmCmd, *syntax.ArithmExp:
+			unsafe = true
+		}
+		if param, ok := node.(*syntax.ParamExp); ok && param.Exp != nil && (param.Exp.Op.String() == ":=" || param.Exp.Op.String() == "=") {
+			unsafe = true
+		}
+		if decl, ok := node.(*syntax.DeclClause); ok {
+			if decl.Variant.Value == "readonly" {
+				unsafe = true
+			}
+			for _, arg := range decl.Args {
+				if arg.Value != nil {
+					value, literal := literalValue(arg.Value)
+					unsafe = unsafe || literal && strings.HasPrefix(value, "-") && strings.ContainsAny(value, "ilurn")
+				}
+			}
+		}
+		if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) > 0 {
+			cmd, literal := shellEffectiveCommand(call.Args)
+			if !literal || shellVariableWriter(cmd) {
+				unsafe = true
+			}
+		}
+		return true
+	})
+	return unsafe
+}
+
+func shellVariableWriter(name string) bool {
+	return slices.Contains([]string{"read", "printf", "mapfile", "readarray", "unset", "getopts", "wait", "export", "declare", "typeset", "readonly", "local"}, name)
+}
+
+// shellEffectiveCommand resolves quote removal and the shell's builtin/command
+// wrappers. A dynamic command could itself be a shell variable writer.
+func shellEffectiveCommand(args []*syntax.Word) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		if _, literal := literalValue(args[i]); !literal {
+			return "", false
+		}
+		value, err := shellStaticValue(args[i])
+		if err != nil {
+			// error-masked-as-false-bool: safe — false means the command is unknown and is refused.
+			return "", false
+		}
+		if value != "builtin" && value != "command" {
+			return filepath.Base(value), true
+		}
+		// quadratic-loop: safe — i only advances and each wrapper option is visited once.
+		for i+1 < len(args) {
+			option, literal := literalValue(args[i+1])
+			if !literal || !strings.HasPrefix(option, "-") {
+				break
+			}
+			i++
+			if option == "--" {
+				break
+			}
+		}
+	}
+	return "", false
+}
+
+func shellStaticValue(word *syntax.Word) (string, error) {
+	var out strings.Builder
+	for _, part := range word.Parts {
+		if lit, ok := part.(*syntax.Lit); ok {
+			for i := 0; i < len(lit.Value); i++ {
+				if lit.Value[i] == '\\' && i+1 < len(lit.Value) {
+					i++
+				}
+				out.WriteByte(lit.Value[i])
+			}
+			continue
+		}
+		value, err := expand.Literal(nil, &syntax.Word{Parts: []syntax.WordPart{part}})
+		if err != nil {
+			return "", fmt.Errorf("decode shell word: %w", err)
+		}
+		out.WriteString(value)
+	}
+	return out.String(), nil
 }
 
 // clientTempDirs — временные каталоги, куда claude может писать журнал
@@ -733,6 +1424,9 @@ func debugFileRefusal(arg claudeArg, tempDirs []string, cwd, home string) string
 // коде бинаря 2.1.332). Определение, которое не прочесть, судит model_guard
 // (строку или файл --agents не разобрать)
 func agentsRefusal(arg claudeArg, read func(string, shellcmd.Tilde, string) [][]byte, cwd string) string {
+	if arg.word.ansiEscapedQuote {
+		return "в --agents использован апостроф с экранированием внутри $'…': передай JSON в двойных кавычках или файлом"
+	}
 	if arg.unresolved {
 		return ""
 	}
@@ -799,6 +1493,16 @@ var environmentSourcing = []string{"source", ".", "eval"}
 // claudeEnvironmentAllowed и modelEnvNames
 func clientEnvironmentNames(command string) []string {
 	names := append(claudeEnvironmentName.FindAllString(command, -1), "HOME")
+	if file, err := syntax.NewParser().Parse(strings.NewReader(command), ""); err == nil {
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if w, ok := node.(*syntax.Word); ok {
+				if value, literal := literalValue(w); literal {
+					names = append(names, claudeEnvironmentName.FindAllString(value, -1)...)
+				}
+			}
+			return true
+		})
+	}
 	names = slices.DeleteFunc(names, func(name string) bool {
 		_, model := modelEnvNames[name]
 		return model || slices.Contains(claudeEnvironmentAllowed, name)
@@ -827,16 +1531,15 @@ func environmentRefusal(name string) string {
 	if effect, ok := claudeEnvironmentEffects[name]; ok {
 		return fmt.Sprintf("переменная %s у клиента claude %s", name, effect)
 	}
-	return fmt.Sprintf("переменная %s у клиента claude не в списке известных: в нём только переменные, которые не снимают хуки и не подменяют настройки, MCP и плагины", name)
+	return fmt.Sprintf("переменная %s у клиента claude не в списке известных: в нём только переменные, которые не снимают хуки и не подменяют настройки, MCP и плагины; убери это присваивание из окружения клиента", name)
 }
 
 // unknownEnvironmentCandidates — переменные names, которые команда задаёт без
 // видимого значения: read, printf -v, mapfile, getopts (по имени), source и
 // eval (любые). Копия команды начинается присваиванием этих имён и
 // environmentControl, и akit shellcmd.Assigns помечает его Unknown, если
-// дальше значение могло смениться. Снятый весь учёт — отказ, только если в
-// команде есть environmentSourcing: вложенный скрипт (bash -c) окружение
-// этой оболочки не меняет
+// дальше значение могло смениться. При снятом учёте source/eval могут задать
+// любые имена; в остальных случаях судятся имена, видимые в команде.
 func unknownEnvironmentCandidates(command string, calls []shellcmd.Call, names []string) ([]modelCandidate, error) {
 	sentinel := strings.Join(append(slices.Clone(names), environmentControl), "= ") + "=\n"
 	assigns, err := shellcmd.Assigns(sentinel + command)
@@ -855,6 +1558,12 @@ func unknownEnvironmentCandidates(command string, calls []shellcmd.Call, names [
 			sourcing = sourcing || slices.Contains(environmentSourcing, calls[i].Name)
 		}
 		if !sourcing {
+			if name := namedEnvironmentWrite(calls, names); name != "" {
+				return []modelCandidate{clientOptionCandidate(fmt.Sprintf("окружение клиента claude может задать %s, но значение не проверить; задай его литералом или запусти claude отдельной командой", name))}, nil
+			}
+			if environmentControlUnknown(command) {
+				return []modelCandidate{clientOptionCandidate("окружение клиента claude не проверить после неизвестной команды; запусти claude отдельной командой и задай окружение литералами")}, nil
+			}
 			return nil, nil
 		}
 		return []modelCandidate{clientOptionCandidate("команда с source или eval может задать окружение клиента claude (HOME, CLAUDE_*): его не проверить; задай переменные в команде литералом")}, nil
@@ -862,7 +1571,142 @@ func unknownEnvironmentCandidates(command string, calls []shellcmd.Call, names [
 	if len(unknown) == 0 {
 		return nil, nil
 	}
+	if len(unknown) == 1 && strings.Contains(command, "unset "+unknown[0]) {
+		return []modelCandidate{clientOptionCandidate(fmt.Sprintf("команда снимает переменную %s у клиента claude; убери unset или задай окружение явно", unknown[0]))}, nil
+	}
 	return []modelCandidate{clientOptionCandidate(fmt.Sprintf("переменные %s у клиента claude команда задаёт без видимого значения (read, printf -v): их не проверить", strings.Join(unknown, ", ")))}, nil
+}
+
+// A known external command or a child shell cannot modify the calling shell.
+// Replace only that command word before asking Assigns about the whole command.
+// cyclomatic-complexity: safe — each branch conservatively identifies whether a preceding command can change the shell environment.
+func environmentControlUnknown(command string) bool {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	// error-masking: safe — an unparsed environment is refused.
+	if err != nil {
+		return true
+	}
+	knownCommands := map[string]string{}
+	functions := map[string]bool{}
+	conditional := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.FuncDecl:
+			if n.Name != nil {
+				functions[n.Name.Value] = true
+			}
+			return false
+		case *syntax.IfClause, *syntax.CaseClause, *syntax.WhileClause, *syntax.ForClause, *syntax.BinaryCmd:
+			conditional = true
+		}
+		return true
+	})
+	modified := []byte(command)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		for _, assign := range call.Assigns {
+			if assign.Name != nil && assign.Value != nil {
+				value, literal := literalValue(assign.Value)
+				if literal && !assign.Append {
+					knownCommands[assign.Name.Value] = value
+				} else {
+					delete(knownCommands, assign.Name.Value)
+				}
+			}
+		}
+		if len(call.Args) == 0 {
+			return true
+		}
+		name, literal := literalValue(call.Args[0])
+		if literal && (shellVariableWriter(name) || slices.Contains(environmentSourcing, name)) {
+			clear(knownCommands)
+		}
+		safeChild := literal && (shellcmd.IsShell(filepath.Base(name)) || wrappedChildShell(command, call))
+		parts := call.Args[0].Parts
+		if len(parts) == 1 {
+			if quoted, ok := parts[0].(*syntax.DblQuoted); ok {
+				parts = quoted.Parts
+			}
+		}
+		if !safeChild && len(parts) == 1 {
+			p, ok := parts[0].(*syntax.ParamExp)
+			if ok && p.Param != nil && p.Exp == nil && !conditional {
+				value, exists := knownCommands[p.Param.Value]
+				safeChild = exists && shellSafeExternal(value) && !functions[filepath.Base(value)]
+			}
+		}
+		if !safeChild {
+			if !literal {
+				clear(knownCommands)
+			}
+			return true
+		}
+		start, end := int(call.Args[0].Pos().Offset()), int(call.Args[0].End().Offset())
+		if start >= 0 && end <= len(modified) && start < end {
+			modified[start] = ':'
+			for i := start + 1; i < end; i++ {
+				modified[i] = ' '
+			}
+		}
+		return true
+	})
+	marked, err := shellcmd.Assigns(environmentControl + "=\n" + string(modified))
+	// error-masking: safe — true means the unparsed environment is refused.
+	if err != nil {
+		return true
+	}
+	for _, assign := range marked {
+		if assign.Name == environmentControl && assign.Unknown {
+			return true
+		}
+	}
+	return false
+}
+
+func shellSafeExternal(name string) bool {
+	if name == "" || strings.ContainsAny(name, " \t\n$`\\") {
+		return false
+	}
+	name = filepath.Base(name)
+	return !shellVariableWriter(name) && !slices.Contains([]string{"eval", "source", ".", "set", "cd", "pushd", "popd", "builtin", "command", "trap", "alias", "shopt", "exec"}, name)
+}
+
+func wrappedChildShell(prefix string, call *syntax.CallExpr) bool {
+	start, end := int(call.Pos().Offset()), int(call.End().Offset())
+	if start < 0 || start > end || end > len(prefix) {
+		return false
+	}
+	calls, err := shellcmd.Calls(prefix[start:end])
+	if err != nil {
+		// error-masked-as-false-bool: safe — false keeps the command classified as unknown.
+		return false
+	}
+	child := false
+	for i := range calls {
+		if slices.Contains([]string{"claude", "cl"}, calls[i].Name) {
+			return false
+		}
+		child = child || shellcmd.IsShell(calls[i].Name) || slices.ContainsFunc(calls[i].Via, shellcmd.IsShell)
+	}
+	return child
+}
+
+func namedEnvironmentWrite(calls []shellcmd.Call, names []string) string {
+	for i := range calls {
+		call := &calls[i]
+		if !shellVariableWriter(call.Name) {
+			continue
+		}
+		for _, name := range names {
+			if slices.Contains(call.Args, name) {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // literalSubscript — индекс в присваивании элементу массива из одних

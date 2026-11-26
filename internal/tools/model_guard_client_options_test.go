@@ -7,7 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
+	"github.com/aiseeq/chooks/internal/hookctx"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 type clientOptionCase struct {
@@ -58,6 +61,216 @@ func TestAgentsRefusalLabelsInlineUnparseableJSON(t *testing.T) {
 	want := "строку --agents не разобрать: откажись от запуска, пока JSON не исправлен"
 	if reason != want {
 		t.Fatalf("agentsRefusal() = %q, want %q", reason, want)
+	}
+}
+
+func TestModelGuardClientWordValuesReview(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	runClientOptionCases(t, tool, []clientOptionCase{
+		{"printf", `X=foo; printf -v X %s --bare; claude -p --model opus "$X" hi`, false, "--bare"},
+		{"read", `X=foo; read -r X <<< --bare; claude -p --model opus "$X" hi`, false, "--bare"},
+		{"mapfile", `X=foo; mapfile -t X <<< --bare; claude -p --model opus "$X" hi`, false, "--bare"},
+		{"append", `X=--bar; X+=e; claude -p --model opus --name "$X" hi`, false, "--bare"},
+		{"nameref", `X=foo; declare -n R=X; R=--bare; claude -p --model opus "$X" hi`, false, "--bare"},
+		{"ifs", `IFS=,; X=hi,--bare; claude -p --model opus $X`, false, "несколько слов"},
+		{"ifs read", `read -r IFS <<< ,; X=hi,--bare; claude -p --model opus $X`, false, "несколько слов"},
+		{"ifs printf", `printf -v IFS %s ,; X=hi,--bare; claude -p --model opus $X`, false, "несколько слов"},
+		{"ifs quoted", `IFS=,; X=hello; claude -p --model opus "$X"`, true, ""},
+		{"glob question", `claude -p --model opus --name --bar? hi`, false, "маска"},
+		{"glob bracket", `claude -p --model opus --name --b[a]re hi`, false, "маска"},
+		{"glob star", `claude -p --model opus *`, false, "маска"},
+		{"quoted glob", `claude -p --model opus --name 'hi*' hi`, true, ""},
+		{"escaped glob", `claude -p --model opus --name hi\* hi`, true, ""},
+		{"ansi bare", `claude -p --model opus --name $'--b\x61re' hi`, false, "--bare"},
+		{"ansi agents", `claude -p --model opus --agents $'{"x":{"description":"d","prompt":"p","mcp\x53ervers":["m"]}}' hi`, false, "mcpServers"},
+		{"global unknown read", `read -r CLAUDE_CODE_SIMPLE <<< 1; export CLAUDE_CODE_SIMPLE; bash -c true; claude -p --model opus hi`, false, "CLAUDE_CODE_SIMPLE"},
+		{"global unknown printf", `printf -v CLAUDE_CODE_SIMPLE 1; export CLAUDE_CODE_SIMPLE; sh -c :; claude -p --model opus hi`, false, "CLAUDE_CODE_SIMPLE"},
+		{"global unknown command", `read -r CLAUDE_CODE_SIMPLE <<< 1; export CLAUDE_CODE_SIMPLE; $(echo true); claude -p --model opus hi`, false, "CLAUDE_CODE_SIMPLE"},
+		{"global unknown earlier shell", `bash -c :; read -r CLAUDE_CODE_SIMPLE <<< 1; export CLAUDE_CODE_SIMPLE; claude -p --model opus hi`, false, "CLAUDE_CODE_SIMPLE"},
+		{"nameref environment", `declare -n R=CLAUDE_CODE_SIMPLE; export R=1; claude -p --model opus hi`, false, "CLAUDE_CODE_SIMPLE"},
+		{"dynamic nameref environment", `declare -n R=$N; export R=1; claude -p --model opus hi`, false, "имя"},
+		{"global unknown home", `read -r HOME <<< /tmp/x; bash -c :; claude -p --model opus hi`, false, "HOME"},
+		{"dynamic export name", `X=LAUDE; export C${X}_CODE_SIMPLE=1; claude -p --model opus hi`, false, "имя"},
+		{"dynamic env name", `X=LAUDE; env C${X}_CODE_SIMPLE=1 claude -p --model opus hi`, false, "имя"},
+		{"dynamic export word", `N=CLAUDE_CODE_SIMPLE; export "$N=1"; claude -p --model opus hi`, false, "имя"},
+		{"dynamic declare name", `X=CLAUDE_CODE_SIMPLE; declare -x "$X"=1; claude -p --model opus hi`, false, "имя"},
+		{"dynamic env", `X=CLAUDE_CODE_SIMPLE; env "$X=1" claude -p --model opus hi`, false, "имя"},
+		{"ansi env", `export $'CLAUDE_CODE_SIMPL\x45'=1; claude -p --model opus hi`, false, "имя"},
+		{"brace export", `export {CLAUDE_CODE_SIMPLE,Y}=1; claude -p --model opus hi`, false, "имя"},
+		{"env substitution", `env $(cat /tmp/envf) claude -p --model opus hi`, false, "окружение"},
+		{"env split", `env -S 'CLAUDE_CODE_SIMPLE=1 claude -p --model opus hi'`, false, "окружение"},
+		{"tmux environment", `tmux new-session -d -e CLAUDE_CODE_SIMPLE=1 'claude -p --model opus hi'`, false, "окружение"},
+		{"empty substitution advice", `X=; claude -p --model opus $X hi`, false, "убери пустую подстановку"},
+	})
+}
+
+func TestModelGuardWordValuesSecondReview(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	runClientOptionCases(t, tool, []clientOptionCase{
+		{"ansi independent path", `claude -p --model opus --debug-file '/tmp/x\0/../../srv/hook' --name $'/tmp/x\0/../../srv/hook' hi`, false, "NUL"},
+		{"ansi no collision", `claude -p --model opus --debug-file '/tmp/x\x2f../../srv/hook' --name $'/tmp/x\x2f../../srv/hook' hi`, true, ""},
+		{"ansi concatenation", `claude -p --model opus --name $'--b\x61re'"" hi`, false, "--bare"},
+		{"ansi fragments", `claude -p --model opus --name $'--b\x61'r'e' hi`, false, "--bare"},
+		{"ansi dynamic suffix", `X=; claude -p --model opus --name $'--b\x61re'"$X" hi`, false, "--bare"},
+		{"ansi dynamic nul", `X=hi; claude -p --model opus --name $'x\0y'"$X" hi`, false, "NUL"},
+		{"ansi agent concatenation", `claude -p --model opus --agents $'{"x":{"mcp\x53ervers":["m"]}}'"" hi`, false, "mcpServers"},
+		{"underscore", `_=foo; : --bare; claude -p --model opus --name "$_" hi`, false, "--bare"},
+		{"rematch", `BASH_REMATCH=foo; [[ --bare =~ .* ]]; claude -p --model opus "$BASH_REMATCH" hi`, false, "--bare"},
+		{"optarg", `OPTARG=foo; getopts a: o -a --bare; claude -p --model opus "$OPTARG" hi`, false, "--bare"},
+		{"mapfile implicit", `MAPFILE=foo; mapfile -t <<< --bare; claude -p --model opus "$MAPFILE" hi`, false, "--bare"},
+		{"reply implicit", `REPLY=foo; select X in a; do break; done <<< --bare; claude -p --model opus "$REPLY" hi`, false, "--bare"},
+		{"conditional and", `cd /tmp && P=abc && claude -p --model opus "$P"`, true, ""},
+		{"conditional if", `if true; then P=abc; fi; claude -p --model opus "$P"`, true, ""},
+		{"lowercase declaration", `declare -l X; X=--BARE; claude -p --model opus "$X"`, false, "--bare"},
+		{"conditional resume", `cd /tmp && U=abc && claude -p --model opus --resume "$U" hi`, true, ""},
+		{"conditional previous unsafe", `U=--bare; false && U=abc; claude -p --model opus --name "$U" hi`, false, "--bare"},
+		{"conditional unquoted session", `cd /tmp && U=abc && date && timeout 120 claude -p --model opus --session-id $U hi`, true, ""},
+		{"conditional script resume", `cd /tmp && U=abc && timeout 60 script -qfc "claude -p --model opus --resume $U hi" /tmp/out`, true, ""},
+		{"loop command substitution", `for k in A B; do c=$(cat x); claude -p --model opus "hi $c"; done`, true, ""},
+		{"nested help", `bash -c 'claude --help | grep help'`, true, ""},
+		{"dynamic command after", `claude -p --model opus hi; G=git; $G status; echo $HOME`, true, ""},
+		{"dynamic command before", `G=git; $G status; claude -p --model opus hi; ls $HOME`, true, ""},
+		{"unknown command before", `$CHOOKS_UNKNOWN status; claude -p --model opus hi`, false, "окружение"},
+		{"trap before", `trap 'export HOME=/tmp' DEBUG; claude -p --model opus hi`, false, "окружение"},
+		{"git function", `G=git; git() { export HOME=/tmp; }; $G status; claude -p --model opus hi`, false, "окружение"},
+		{"export after client", `claude -p --model opus hi | grep -e foo; export N$X=1`, false, "окружение"},
+		{"mention after export", `claude -p --model opus hi; export N$X=1; echo claude`, false, "окружение"},
+		{"read home after client", `claude -p --model opus hi; read -r HOME <<< /tmp`, false, "HOME"},
+		{"set home after client", `claude -p --model opus hi; HOME=/tmp`, false, "HOME"},
+		{"read home before client", `read -r HOME <<< /tmp; claude -p --model opus hi`, false, "HOME"},
+		{"tmux grep", `tmux new-session -d -s s 'claude -p --model opus hi' && grep -e foo /dev/null`, true, ""},
+		{"env split long", `env --split-string='CLAUDE_CODE_SIMPLE=1 claude -p --model opus hi'`, false, "окружение"},
+		{"env split cl", `env -S 'CLAUDE_CODE_SIMPLE=1 cl -p --model opus hi'`, false, "окружение"},
+		{"env variable", `V=$(cat /tmp/envf); env $V claude -p --model opus hi`, false, "окружение"},
+		{"env with prompt variable", `P=hello; env claude -p --model opus "$P"`, true, ""},
+		{"env unset allowed", `env -u CLAUDE_AX_SCREEN_READER claude -p --model opus hi`, true, ""},
+		{"env unset allowed before script", `env -u CLAUDE_AX_SCREEN_READER script -qfc "claude --help" /tmp/out`, true, ""},
+		{"client only in printed path", `printf '%s' /tmp/bin/claude; env -i HOME=/tmp "$@" /tmp/tool`, true, ""},
+		{"client only in mock path", `S=/tmp; printf '%s' /tmp/bin/claude; env -i HOME=/tmp "$@" $S/cl $ARGS`, true, ""},
+		{"env dynamic unset", `env -u "$NAME" claude -p --model opus hi`, false, "окружение"},
+		{"tmux attached env", `tmux new-session -d -eCLAUDE_CODE_SIMPLE=1 'claude -p --model opus hi'`, false, "окружение"},
+		{"tmux set env", `tmux set-environment -g CLAUDE_CODE_SIMPLE 1; tmux new-session -d 'claude -p --model opus hi'`, false, "окружение"},
+		{"tmux session home", `tmux new-session -d "env HOME=$H CLAUDE_CONFIG_DIR=$H/.claude bash" && tmux send-keys "claude -p --model opus hi" Enter`, false, "HOME"},
+		{"tmux session cl", `tmux new-session -d -e HOME=/tmp 'cl -p --model opus hi'`, false, "HOME"},
+		{"export dynamic later arg", `X=LAUDE; export Y=1 "C${X}_CODE_SIMPLE=1"; claude -p --model opus hi`, false, "окружение"},
+		{"dynamic printf target", `X=LAUDE; printf -v "C${X}_CODE_SIMPLE" 1; export "C${X}_CODE_SIMPLE"; claude -p --model opus hi`, false, "окружение"},
+		{"dynamic read target", `X=LAUDE; read -r "C${X}_CODE_SIMPLE" <<< 1; export "C${X}_CODE_SIMPLE"; claude -p --model opus hi`, false, "окружение"},
+		{"unquoted attached advice", `cd /tmp && U=abc && claude -p --model opus --session-id=$U hi`, false, `--opt="$VALUE"`},
+		{"quoted attached", `cd /tmp && U=abc && claude -p --model opus --session-id="$U" hi`, true, ""},
+	})
+}
+
+func TestShellUnquotedGlob(t *testing.T) {
+	for _, tc := range []struct {
+		word string
+		glob bool
+	}{
+		{`hi\*`, false},
+		{`hi\\*`, true},
+		{`--b[a]re`, true},
+		{`plain`, false},
+	} {
+		if got := shellUnquotedGlob(tc.word); got != tc.glob {
+			t.Errorf("shellUnquotedGlob(%q) = %v, want %v", tc.word, got, tc.glob)
+		}
+	}
+}
+
+func TestClaudeArgPatternQuotesLiteral(t *testing.T) {
+	arg := newClaudeArg(word{text: `"--ba.$UNKNOWN"`}, nil)
+	if arg.couldBe("--bare") {
+		t.Fatal("literal dot must not match the r in --bare")
+	}
+	if !arg.couldBe("--ba.re") {
+		t.Fatal("literal dot and unknown suffix must remain possible")
+	}
+}
+
+func TestClientReviewBoundaries(t *testing.T) {
+	t.Run("agents JSON with whitespace", func(t *testing.T) {
+		arg := claudeArg{text: `  {"x":{"hooks":{}}}`}
+		if reason := agentsRefusal(arg, nil, ""); !strings.Contains(reason, "hooks") {
+			t.Fatalf("expected hooks refusal, got %q", reason)
+		}
+	})
+	t.Run("debug file under temporary claude directory", func(t *testing.T) {
+		arg := claudeArg{text: "/tmp/.claude/agent.md"}
+		if reason := debugFileRefusal(arg, []string{"/tmp"}, "/tmp", "/home/test"); !strings.Contains(reason, ".claude") {
+			t.Fatalf("expected .claude refusal, got %q", reason)
+		}
+	})
+	t.Run("dynamic brace word", func(t *testing.T) {
+		words, err := shellBraceWords(`claude ${X}{a,b}`)
+		if err != nil || !words[`${X}{a,b}`] {
+			t.Fatalf("dynamic brace word: %v, %v", words, err)
+		}
+	})
+	t.Run("unparsed call", func(t *testing.T) {
+		call := shellcmd.Call{Name: "claude", Raw: `claude 'unterminated`, Args: []string{"word"}}
+		_, args, ok := clientCallWords(&call)
+		if !ok || len(args) != 1 || !args[0].braces {
+			t.Fatalf("unparsed arguments: %v, %v", args, ok)
+		}
+	})
+	t.Run("empty append is not empty assignment", func(t *testing.T) {
+		command := `X+=`
+		file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		values, _ := shellEnvDeclarations(file, command, "X")
+		if len(values) != 0 {
+			t.Fatalf("append must not be treated as X=: %q", values)
+		}
+	})
+}
+
+func TestClientUnknownIFSAndLoopWrites(t *testing.T) {
+	values := clientWordValues("X='", hookctx.Context{}, nil)
+	if _, changed := values("\x00IFS"); !changed {
+		t.Fatal("unparsed input must leave IFS unknown")
+	}
+	for _, tc := range []struct {
+		command string
+		known   bool
+	}{
+		{`for P in a b; do :; done`, true},
+		{`:`, false},
+		{`for P in "$X"; do :; done`, false},
+		{`for P in a "$X"; do :; done`, false},
+		{`for P in a b; do read P; done`, false},
+		{`for P in a b; do $CMD; done`, false},
+		{`P=abc; P+=; claude "$P"`, false},
+		{`trap 'echo x' DEBUG; for P in a b; do :; done`, false},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			file, err := syntax.NewParser().Parse(strings.NewReader(tc.command), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := literalLoopOnly(file, tc.command, "P", nil); got != tc.known {
+				t.Fatalf("literalLoopOnly = %v, want %v", got, tc.known)
+			}
+		})
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader(`$CMD`), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasDynamicValueWrite(file) {
+		t.Fatal("a dynamic command can write shell variables")
+	}
+}
+
+func TestLiteralWrapperClientWithoutUnwrappedCall(t *testing.T) {
+	for _, command := range []string{
+		`env -S 'CLAUDE_CODE_SIMPLE=1 cl -p hi'`,
+		`tmux new-session -e HOME=/tmp 'cl -p hi'`,
+	} {
+		hazard, err := environmentHazard(command, false, "")
+		if err != nil || !hazard {
+			t.Fatalf("%s: hazard=%v err=%v", command, hazard, err)
+		}
 	}
 }
 
@@ -117,7 +330,7 @@ func TestModelGuardClientOptionsRefused(t *testing.T) {
 		{"unparsed", "claude -p --model opus --bare 'unterminated", false, "не разобрана"},
 		{"quoted substitution prompt", `claude -p --model opus "$(cat /tmp/claude-tmp/p.md)"`, false, "после --"},
 		{"optional value unknown", `claude -p --model opus -r "$CHOOKS_TEST_UNSET" hi`, false, "может оказаться --bare"},
-		{"optional value unknown names forms", `claude -p --model opus --resume "$CHOOKS_TEST_UNSET" hi`, false, "(--opt=…), промпт — после --"},
+		{"optional value unknown names forms", `claude -p --model opus --resume "$CHOOKS_TEST_UNSET" hi`, false, `--opt="$VALUE", промпт — после --`},
 		{"substitution with suffix", `claude -p --model opus "$CHOOKS_TEST_UNSET suffix"`, false, "начинается подстановкой"},
 		{"optional value splits", "claude -p --model opus -r $CHOOKS_TEST_UNSET hi", false, "несколько слов"},
 		{"optional value splits after literal", "claude -p --model opus -r x$CHOOKS_TEST_UNSET hi", false, "несколько слов"},

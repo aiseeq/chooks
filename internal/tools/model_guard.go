@@ -1279,6 +1279,13 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 		found = append(found, writtenProtectedFileCandidates(command)...)
 		found = append(found, clientEnvironmentCandidates(command, calls, home, logger)...)
 	}
+	environmentUnknown, environmentErr := environmentHazard(command, claude, home)
+	if environmentErr != nil {
+		logger.Warn("model_guard: окружение не разобрано", "error", environmentErr)
+	}
+	if environmentUnknown || environmentErr != nil {
+		found = append(found, clientOptionCandidate("окружение клиента claude задано через вычисляемое имя или обёртку: HOME и CLAUDE_CONFIG_DIR могут изменить настройки и хуки; укажи имена переменных литералами, убери присваивания HOME, его снятие через env -u, CLAUDE_CONFIG_DIR и переменные вроде CLAUDE_CODE_SIMPLE, затем вызови claude напрямую"))
+	}
 	if err != nil {
 		// вызовы найдены не все: вложенный скрипт, который akit не разобрал
 		// (fish вне простого подмножества: and, set -x, подстановка), отдаёт
@@ -1346,9 +1353,16 @@ func clientCallWords(call *shellcmd.Call) (string, []word, bool) {
 	if isNpxClaude {
 		callArgs = npxClaudeArgs(call.Args)
 	}
-	literalArgs := shellCallArgumentLiterals(call.Raw, call.Name)
+	literalArgs, ansi := shellCallArgumentMetadata(call)
 	literalOffset := npxClaudeArgumentOffset(call.Args, isNpxClaude)
 	args := modelCallWords(call, callArgs, literalArgs, literalOffset)
+	for i := range args {
+		if index := i + literalOffset; index < len(ansi) && ansi[index].present {
+			args[i].text = ansi[index].text
+			args[i].invalidANSI = ansi[index].invalid
+			args[i].ansiEscapedQuote = ansi[index].escapedQuote
+		}
+	}
 	braceWords, err := shellBraceWords(call.Raw)
 	for i := range args {
 		// вызов не разобран: фигурных скобок не видно, любое слово может
@@ -1360,6 +1374,87 @@ func clientCallWords(call *shellcmd.Call) (string, []word, bool) {
 		dialect = "claude"
 	}
 	return dialect, args, true
+}
+
+type ansiWord struct {
+	text         string
+	present      bool
+	invalid      bool
+	escapedQuote bool
+}
+
+// shellCallArgumentMetadata uses the same wrapper expansion as call discovery
+// to locate the client's source word, then recovers each argv word by position.
+// cyclomatic-complexity: safe — the checks keep parsing and argument offsets aligned.
+func shellCallArgumentMetadata(target *shellcmd.Call) ([]bool, []ansiWord) {
+	raw := target.Raw
+	calls, callsErr := shellcmd.Calls(raw)
+	// silent-error-handling: safe — the ordinary call parser reports malformed input separately.
+	if callsErr != nil {
+		return nil, nil
+	}
+	offset := -1
+	for i := range calls {
+		if calls[i].Name == target.Name && slices.Equal(calls[i].Args, target.Args) {
+			offset = calls[i].Offset
+			break
+		}
+	}
+	if offset < 0 {
+		return nil, nil
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader(raw), "")
+	// silent-error-handling: safe — shellBraceWords parses the same call and rejects it on error.
+	if err != nil {
+		return nil, nil
+	}
+	var words []ansiWord
+	var flags []bool
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || found {
+			return true
+		}
+		startIndex := -1
+		for i, arg := range call.Args {
+			if int(arg.Pos().Offset()) == offset {
+				startIndex = i
+				break
+			}
+		}
+		if startIndex < 0 {
+			return true
+		}
+		args := call.Args[startIndex+1:]
+		words = make([]ansiWord, len(args))
+		flags = make([]bool, len(args))
+		found = true
+		for i, w := range args {
+			start, end := int(w.Pos().Offset()), int(w.End().Offset())
+			if start >= 0 && start <= end && end <= len(raw) {
+				flags[i] = shellWordSourceLiteral(raw[start:end])
+			}
+			invalid := false
+			hasANSI := false
+			escapedQuote := false
+			for _, part := range w.Parts {
+				q, ok := part.(*syntax.SglQuoted)
+				if !ok || !q.Dollar {
+					continue
+				}
+				hasANSI = true
+				escapedQuote = escapedQuote || strings.Contains(q.Value, `\'`)
+				_, err := shellANSIValue(q.Value)
+				invalid = invalid || err != nil
+			}
+			if value, ok := literalValue(w); hasANSI && ok {
+				words[i] = ansiWord{text: value, present: true, invalid: invalid, escapedQuote: escapedQuote}
+			}
+		}
+		return false
+	})
+	return flags, words
 }
 
 func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate) ([]modelCandidate, bool) {
@@ -1427,7 +1522,7 @@ func claudeSettingsCandidates(cwdCandidates []string, homes, configs pathSet, se
 	return found
 }
 
-var whichClaudeSubstitution = regexp.MustCompile(`\$\(\s*which\s+claude\s*\)`)
+var whichClaudeSubstitution = regexp.MustCompile(`\$\(\s*(?:which\s+claude|command\s+-v\s+claude)\s*\)`)
 
 var protectedSettingsTarget = regexp.MustCompile(`(?i)(?:settings(?:\.local)?\.json|agents/[^\s"';&|<>]+\.md)`)
 var writtenAgentTarget = regexp.MustCompile(`(?:^|/)agents/.+\.md$`)
@@ -2228,37 +2323,6 @@ func claudeArgIsLiteral(arg word) bool {
 	return arg.literal
 }
 
-func shellCallArgumentLiterals(raw, commandName string) []bool {
-	file, err := syntax.NewParser().Parse(strings.NewReader(raw), "")
-	if err != nil {
-		return nil
-	}
-	var flags []bool
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if len(flags) != 0 {
-			return false
-		}
-		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
-		}
-		commandWord := call.Args[0]
-		start, end := int(commandWord.Pos().Offset()), int(commandWord.End().Offset())
-		if start < 0 || end < start || end > len(raw) || filepath.Base(strings.Trim(raw[start:end], "'\"")) != commandName {
-			return true
-		}
-		flags = make([]bool, len(call.Args)-1)
-		for i, arg := range call.Args[1:] {
-			start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
-			if start >= 0 && end >= start && end <= len(raw) {
-				flags[i] = shellWordSourceLiteral(raw[start:end])
-			}
-		}
-		return false
-	})
-	return flags
-}
-
 // shellBraceWords — слова raw, которые bash раскрывает фигурными скобками:
 // значение литерального слова, исходный текст слова с подстановкой (так их
 // отдаёт shellcmd.Call.Args). Слово в кавычках с тем же текстом тоже
@@ -2285,8 +2349,26 @@ func shellBraceWords(raw string) (map[string]bool, error) {
 		if syntax.SplitBraces(w) {
 			words[text] = true
 		}
+		for _, part := range w.Parts {
+			if lit, ok := part.(*syntax.Lit); ok && shellUnquotedGlob(lit.Value) {
+				words[text] = true
+			}
+		}
 	}
 	return words, nil
+}
+
+func shellUnquotedGlob(text string) bool {
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\\' {
+			i++
+			continue
+		}
+		if strings.ContainsRune("*?[", rune(text[i])) {
+			return true
+		}
+	}
+	return false
 }
 
 func shellWordSourceLiteral(source string) bool {

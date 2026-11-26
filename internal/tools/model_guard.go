@@ -97,7 +97,11 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 			continue
 		}
 		if c.unknownAgents {
-			reasons = append(reasons, "файл --agents не прочитать: модель агента не проверить")
+			if c.agentsInline {
+				reasons = append(reasons, "строку --agents не разобрать: модель агента не проверить")
+			} else {
+				reasons = append(reasons, "файл --agents не прочитать: модель агента не проверить")
+			}
 			continue
 		}
 		if c.unknownSettings {
@@ -186,6 +190,7 @@ type modelCandidate struct {
 	unknownWrite      bool
 	unknownAgentWrite bool
 	unknownAgents     bool
+	agentsInline      bool
 	unknownSettings   bool
 	// clientOption — отказ опции, подкоманде или окружению клиента claude
 	clientOption string
@@ -2428,7 +2433,7 @@ func agentOverrideNames(args []word, readSettings func(string, shellcmd.Tilde, s
 		}
 		arg := args[i+1]
 		raws := [][]byte{[]byte(arg.text)}
-		if !strings.HasPrefix(strings.TrimSpace(arg.text), "{") {
+		if !inlineAgentsJSON(arg.text) {
 			if !arg.literal || !claudeArgIsLiteral(arg) || arg.tilde&(shellcmd.TildeOther|shellcmd.TildeModeUnknown) != 0 {
 				continue
 			}
@@ -2453,7 +2458,7 @@ func agentOverrideModels(args []word, name string, readSettings func(string, she
 		}
 		arg := args[i+1]
 		raws := [][]byte{[]byte(arg.text)}
-		if !strings.HasPrefix(strings.TrimSpace(arg.text), "{") {
+		if !inlineAgentsJSON(arg.text) {
 			if readSettings == nil || !arg.literal || !claudeArgIsLiteral(arg) {
 				continue
 			}
@@ -2461,37 +2466,55 @@ func agentOverrideModels(args []word, name string, readSettings func(string, she
 		}
 		for _, raw := range raws {
 			if parsed, ok := parseAgentsJSON(raw); ok {
-				found = append(found, parsed[name]...)
+				found = append(found, flattenAgentModels(map[string]map[string]json.RawMessage{name: parsed[name]})...)
 			}
 		}
 	}
 	return found
 }
 
-func parseAgentsJSON(raw []byte) (map[string][]modelCandidate, bool) {
+// parseAgentsJSON разбирает определения агентов один раз для проверок моделей
+// и запрещённых ключей. Ключи остаются точными, как в JSON.
+func parseAgentsJSON(raw []byte) (map[string]map[string]json.RawMessage, bool) {
 	var agents map[string]json.RawMessage
 	if json.Unmarshal(raw, &agents) != nil || agents == nil {
 		return nil, false
 	}
-	models := make(map[string][]modelCandidate, len(agents))
+	parsed := make(map[string]map[string]json.RawMessage, len(agents))
 	for name, rawAgent := range agents {
-		models[name] = nil
-		var agent struct {
-			Model string `json:"model"`
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(rawAgent, &fields) != nil || fields == nil {
+			return nil, false
 		}
-		if json.Unmarshal(rawAgent, &agent) == nil && strings.TrimSpace(agent.Model) != "" && !strings.EqualFold(agent.Model, "inherit") {
-			models[name] = append(models[name], modelCandidate{value: agent.Model})
+		if rawModel, ok := fields["model"]; ok {
+			var model string
+			if json.Unmarshal(rawModel, &model) != nil {
+				return nil, false
+			}
 		}
+		parsed[name] = fields
 	}
-	return models, true
+	return parsed, true
 }
 
-func flattenAgentModels(models map[string][]modelCandidate) []modelCandidate {
+func flattenAgentModels(agents map[string]map[string]json.RawMessage) []modelCandidate {
 	var found []modelCandidate
-	for _, name := range slices.Sorted(maps.Keys(models)) {
-		found = append(found, models[name]...)
+	for _, name := range slices.Sorted(maps.Keys(agents)) {
+		rawModel, ok := agents[name]["model"]
+		if !ok {
+			continue
+		}
+		var model string
+		if json.Unmarshal(rawModel, &model) == nil && strings.TrimSpace(model) != "" && !strings.EqualFold(model, "inherit") {
+			found = append(found, modelCandidate{value: model})
+		}
 	}
 	return found
+}
+
+func inlineAgentsJSON(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || trimmed == "null"
 }
 
 // jsonModelKey — ключ модели в исходном тексте JSON, в том числе с
@@ -2558,12 +2581,13 @@ func jsonObjects(text string) [][]byte {
 // jsonModelCandidates — модели в JSON флага claude: --settings (строка JSON
 // или файл: model и env.ANTHROPIC_MODEL…) и --agents (model каждого агента).
 // Файла --settings ещё нет — модели в тексте команды, которая его пишет.
-// Не JSON — моделей нет: такой запуск claude сам не начнётся
+// Некорректный --agents возвращает unknownAgents, чтобы ошибка разбора не
+// позволяла пропустить модель агента.
 func jsonModelCandidates(flag string, arg word, readSettings func(string, shellcmd.Tilde, string) [][]byte, agent func(string) []modelCandidate) []modelCandidate {
 	if flag == "--agents" {
-		inlineJSON := strings.HasPrefix(strings.TrimSpace(arg.text), "{")
+		inlineJSON := inlineAgentsJSON(arg.text)
 		if !arg.literal || (!inlineJSON && !claudeArgIsLiteral(arg)) {
-			return []modelCandidate{{value: arg.text, unknownAgents: true}}
+			return []modelCandidate{{value: arg.text, unknownAgents: true, agentsInline: inlineJSON}}
 		}
 		raws := [][]byte{[]byte(arg.text)}
 		if !inlineJSON {
@@ -2578,8 +2602,8 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string, shellc
 		var found []modelCandidate
 		for _, raw := range raws {
 			models, ok := parseAgentsJSON(raw)
-			if !ok && !inlineJSON {
-				return []modelCandidate{{value: arg.text, unknownAgents: true}}
+			if !ok {
+				return []modelCandidate{{value: arg.text, unknownAgents: true, agentsInline: inlineJSON}}
 			}
 			found = append(found, flattenAgentModels(models)...)
 		}

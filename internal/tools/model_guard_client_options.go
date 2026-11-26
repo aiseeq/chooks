@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -732,23 +731,26 @@ func debugFileRefusal(arg claudeArg, tempDirs []string, cwd, home string) string
 // agentsRefusal — определение --agents (строка JSON или файл), где агент
 // задаёт mcpServers или hooks: свои MCP-серверы и хуки агента (схема агента в
 // коде бинаря 2.1.332). Определение, которое не прочесть, судит model_guard
-// («файл --agents не прочитать»)
+// (строку или файл --agents не разобрать)
 func agentsRefusal(arg claudeArg, read func(string, shellcmd.Tilde, string) [][]byte, cwd string) string {
 	if arg.unresolved {
 		return ""
 	}
 	raws := [][]byte{[]byte(arg.text)}
-	if !strings.HasPrefix(strings.TrimSpace(arg.text), "{") {
+	inlineJSON := inlineAgentsJSON(arg.text)
+	if !inlineJSON {
 		if read == nil {
 			return ""
 		}
 		raws = read(arg.text, arg.word.tilde, cwd)
 	}
 	for _, raw := range raws {
-		// не JSON — claude сам не запустится
-		var agents map[string]map[string]json.RawMessage
-		if json.Unmarshal(raw, &agents) != nil {
-			continue
+		agents, ok := parseAgentsJSON(raw)
+		if !ok {
+			if inlineJSON {
+				return "строку --agents не разобрать: откажись от запуска, пока JSON не исправлен"
+			}
+			return "файл --agents не прочитать: откажись от запуска, пока JSON не исправлен"
 		}
 		for _, name := range slices.Sorted(maps.Keys(agents)) {
 			for _, key := range []string{"mcpServers", "hooks"} {

@@ -35,6 +35,32 @@ func runClientOptionCases(t *testing.T, tool *ModelGuardTool, cases []clientOpti
 	}
 }
 
+func TestAgentsRefusalRejectsUnparseableJSON(t *testing.T) {
+	cases := []struct {
+		name, raw string
+	}{
+		{"invalid top-level JSON", `{"x":`},
+		{"agent is not an object", `{"x":"hooks"}`},
+		{"null top-level", `null`},
+		{"null agent", `{"x":null}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if reason := agentsRefusal(claudeArg{text: tc.raw}, nil, t.TempDir()); reason == "" {
+				t.Fatal("agentsRefusal accepted unparseable --agents JSON")
+			}
+		})
+	}
+}
+
+func TestAgentsRefusalLabelsInlineUnparseableJSON(t *testing.T) {
+	reason := agentsRefusal(claudeArg{text: `{"x":`}, nil, t.TempDir())
+	want := "строку --agents не разобрать: откажись от запуска, пока JSON не исправлен"
+	if reason != want {
+		t.Fatalf("agentsRefusal() = %q, want %q", reason, want)
+	}
+}
+
 // Пункты 1–7 ревью f9e6d56: снятие хуков и подмена настроек — отказ, в том
 // числе без -p и за обёртками
 func TestModelGuardClientOptionsRefused(t *testing.T) {
@@ -282,9 +308,14 @@ func TestModelGuardClientAgentDefinitions(t *testing.T) {
 	runClientOptionCases(t, tool, []clientOptionCase{
 		{"inline mcp servers", `claude -p --model opus --agents '{"x":{"description":"d","prompt":"p","model":"opus","mcpServers":{}}}' --agent x hi`, false, "агент x в --agents задаёт mcpServers"},
 		{"inline hooks", `claude -p --model opus --agents '{"x":{"description":"d","prompt":"p","model":"opus","hooks":{}}}' --agent x hi`, false, "агент x в --agents задаёт hooks"},
+		{"mcp servers with escaped newline", `claude -p --model opus --agents '{"x":{"description":"d","prompt":"a\nb","mcpServers":["m"]}}' hi`, false, "mcpServers"},
+		{"hooks with escaped newline", `claude -p --model opus --agents '{"x":{"description":"d","prompt":"a\nb","hooks":{}}}' hi`, false, "hooks"},
+		{"escaped quote slash and backslash keep refusal", `claude -p --model opus --agents '{"x":{"description":"d","prompt":"a\"b\\c\/d\ne","hooks":{}}}' hi`, false, "hooks"},
+		{"unparseable inline agents refused", "claude -p --model opus --agents '{\"x\":{\"description\":\"d\",\"prompt\":\"a\nb\",\"hooks\":{}}}' hi", false, "не разобрать"},
 		{"file mcp servers", "claude -p --model opus --agents " + withServers + " --agent x hi", false, "агент x в --agents задаёт mcpServers"},
 		{"file without servers", "claude -p --model opus --agents " + plain + " --agent x hi", true, ""},
-		{"agents not objects", `claude -p --model opus --agents '{"x":"hooks"}' hi`, true, ""},
+		{"agents not objects", `claude -p --model opus --agents '{"x":"hooks"}' hi`, false, "не разобрать"},
+		{"agents without model allowed with escaped newline", `claude -p --model opus --agents '{"x":{"description":"d","prompt":"a\nb"}}' hi`, true, ""},
 	})
 }
 

@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -40,8 +42,8 @@ func TestModelGuardClientOptionsRefused(t *testing.T) {
 	runClientOptionCases(t, tool, []clientOptionCase{
 		{"safe mode", "claude --safe-mode hi", false, "--safe-mode"},
 		{"safe mode in cluster", "claude -p-safe-mode hi", false, "--safe-mode"},
-		{"simple env", "CLAUDE_CODE_SIMPLE=1 claude -p hi", false, "CLAUDE_CODE_SIMPLE"},
-		{"safe mode env", "CLAUDE_CODE_SAFE_MODE=1 claude -p hi", false, "CLAUDE_CODE_SAFE_MODE"},
+		{"simple env", "CLAUDE_CODE_SIMPLE=1 claude -p hi", false, "CLAUDE_CODE_SIMPLE у клиента claude то же, что --bare"},
+		{"safe mode env", "CLAUDE_CODE_SAFE_MODE=1 claude -p hi", false, "CLAUDE_CODE_SAFE_MODE у клиента claude то же, что --safe-mode"},
 		{"config dir env", "CLAUDE_CONFIG_DIR=/tmp/claude-tmp/x claude -p hi", false, "CLAUDE_CONFIG_DIR"},
 		{"exported simple env", "export CLAUDE_CODE_SIMPLE=1; claude -p --model opus hi", false, "CLAUDE_CODE_SIMPLE"},
 		{"env wrapper simple env", "env CLAUDE_CODE_SIMPLE=1 claude -p --model opus hi", false, "CLAUDE_CODE_SIMPLE"},
@@ -88,11 +90,14 @@ func TestModelGuardClientOptionsRefused(t *testing.T) {
 		{"unquoted value with spaces", "A='opus --bare'; claude -p --append-system-prompt $A hi", false, "несколько слов"},
 		{"unparsed", "claude -p --model opus --bare 'unterminated", false, "не разобрана"},
 		{"quoted substitution prompt", `claude -p --model opus "$(cat /tmp/claude-tmp/p.md)"`, false, "после --"},
-		{"optional value unknown", `claude -p --model opus -r "$CHOOKS_TEST_UNSET" hi`, false, "начинается подстановкой"},
+		{"optional value unknown", `claude -p --model opus -r "$CHOOKS_TEST_UNSET" hi`, false, "может оказаться --bare"},
+		{"optional value unknown names forms", `claude -p --model opus --resume "$CHOOKS_TEST_UNSET" hi`, false, "(--opt=…), промпт — после --"},
+		{"substitution with suffix", `claude -p --model opus "$CHOOKS_TEST_UNSET suffix"`, false, "начинается подстановкой"},
 		{"optional value splits", "claude -p --model opus -r $CHOOKS_TEST_UNSET hi", false, "несколько слов"},
 		{"optional value splits after literal", "claude -p --model opus -r x$CHOOKS_TEST_UNSET hi", false, "несколько слов"},
-		{"variadic stops at unknown", `claude -p --model opus --allowedTools Bash "$CHOOKS_TEST_UNSET" hi`, false, "начинается подстановкой"},
-		{"loop option", "for o in -c --bare; do claude -p --model opus $o hi; done", false, "начинается подстановкой"},
+		{"variadic stops at unknown", `claude -p --model opus --allowedTools Bash "$CHOOKS_TEST_UNSET suffix" hi`, false, "начинается подстановкой"},
+		{"loop option", "for o in -c --bare; do claude -p --model opus $o hi; done", false, "может оказаться --bare"},
+		{"loop option with suffix", `for o in -c -d; do claude -p --model opus "${o}x" hi; done`, false, "начинается подстановкой"},
 		{"loop escaped item", `for o in \--bare x; do claude -p --model opus $o hi; done`, false, "несколько слов"},
 		{"loop without in", "o=x; f() { for o; do claude -p --model opus $o hi; done; }; f --bare", false, "несколько слов"},
 		{"loop brace item", "for o in {--bare,x}; do claude -p --model opus $o hi; done", false, "несколько слов"},
@@ -107,7 +112,7 @@ func TestModelGuardClientOptionsRefused(t *testing.T) {
 		{"help not last", "claude --help --bare", false, "--bare"},
 		{"help keeps model", "claude --model claude-haiku-4-5 --help", false, "claude-haiku-4-5"},
 		{"help after split word", "claude -p hi $CHOOKS_TEST_UNSET --help", false, "несколько слов"},
-		{"help after substitution", `claude -p hi "$CHOOKS_TEST_UNSET" --help`, false, "начинается подстановкой"},
+		{"help after substitution", `claude -p hi "$CHOOKS_TEST_UNSET x" --help`, false, "начинается подстановкой"},
 		{"help keeps debug file", "claude --debug-file /home/x/.claude/settings.json --help", false, "--debug-file"},
 		{"help keeps feeder", "echo --help | xargs claude --bare", false, "xargs"},
 		{"agents with mcp", "claude agents --mcp-config /tmp/claude-tmp/mcp.json", false, "--mcp-config"},
@@ -116,12 +121,56 @@ func TestModelGuardClientOptionsRefused(t *testing.T) {
 		{"cl option after name", "cl -n x --cl-ls", false, "--cl-ls"},
 		{"associative key before client", "declare -A R; R[gh:a/b#1]=x; claude --bare -p hi", false, "--bare"},
 		{"subscript with space stays unparsed", "R[a b:c]=x; claude -p --model opus hi", false, "не разобрана"},
-		{"associative key and inherited value", `declare -A R; R[gh:a#1]=x; claude -p --model opus "$HOME"`, false, "начинается подстановкой"},
-		{"heredoc of other command", "claude -p --model opus \"$(tac <<'EOF'\nhi\nEOF\n)\"", false, "начинается подстановкой"},
-		{"heredoc with tab strip", "claude -p --model opus \"$(cat <<-'EOF'\nhi\nEOF\n)\"", false, "начинается подстановкой"},
-		{"heredoc escape unquoted", "claude -p --model opus \"$(cat <<EOF\n\\x\nEOF\n)\"", false, "начинается подстановкой"},
+		{"associative key and inherited value", `declare -A R; R[gh:a#1]=x; claude -p --model opus "$HOME"`, false, "может оказаться --bare"},
+		{"heredoc of other command", "claude -p --model opus \"$(tac <<'EOF'\nhi\nEOF\n)\"", false, "может оказаться --bare"},
+		{"heredoc with tab strip", "claude -p --model opus \"$(cat <<-'EOF'\nhi\nEOF\n)\"", false, "может оказаться --bare"},
+		{"heredoc escape unquoted", "claude -p --model opus \"$(cat <<EOF\n\\x\nEOF\n)\"", false, "может оказаться --bare"},
+		{"heredoc variable first", "claude -p --model opus \"$(cat <<EOF\n$CHOOKS_TEST_UNSET\nEOF\n)\"", false, "может оказаться --bare"},
+		{"unquoted heredoc with variable", "claude -p --model opus $(cat <<EOF\nhi $CHOOKS_TEST_UNSET\nEOF\n)", false, "несколько слов"},
 		{"heredoc option", "claude -p --model opus \"$(cat <<'EOF'\n--bare\nEOF\n)\"", false, "--bare"},
 		{"unquoted heredoc splits", "claude -p --model opus $(cat <<'EOF'\nhi --bare\nEOF\n)", false, "несколько слов"},
+		{"unquoted heredoc empty", "claude -p --model opus $(cat <<'EOF'\n\nEOF\n) hi", false, "несколько слов"},
+		// ревью eb4fda4, п. 1–2: --restricted и слова, которые claude ищет в argv сам
+		{"restricted", "claude -p --model opus --restricted hi", false, "не читает файлы настроек"},
+		{"restricted first", "claude --restricted --tools Bash -p --model opus hi", false, "--restricted"},
+		{"restricted after double dash", "claude -p --model opus -- --restricted", false, "--restricted"},
+		{"restricted env", "CLAUDE_CODE_RESTRICTED=1 claude -p --model opus --tools Bash hi", false, "CLAUDE_CODE_RESTRICTED"},
+		{"bare as value", "claude -p --model opus --append-system-prompt --bare hi", false, "--bare"},
+		{"bare as short value", "claude -p --model opus -n --bare hi", false, "--bare"},
+		{"safe mode as value", "claude -p --model opus --name --safe-mode hi", false, "--safe-mode"},
+		{"bare as debug file", "claude -p --model opus --debug-file --bare hi", false, "--bare"},
+		{"bare as variadic value", "claude -p --model opus --add-dir --bare -- hi", false, "--bare"},
+		{"restricted as value", "claude -p --model opus --append-system-prompt --restricted hi", false, "--restricted"},
+		{"substitution as required value", `claude -p --model opus --session-id "$(uuidgen)" hi`, false, "может оказаться --bare"},
+
+		// п. 4, 7: HOME и переменные claude — белым списком
+		{"home", "HOME=/tmp/claude-tmp/fakehome claude -p --model opus hi", false, "HOME у клиента claude берёт настройки и хуки из .claude другого каталога"},
+		{"exported home", "export HOME=/tmp/claude-tmp/fakehome; claude -p --model opus hi", false, "HOME"},
+		{"env home", "env HOME=/tmp/claude-tmp/fakehome claude -p --model opus hi", false, "HOME"},
+
+		{"unknown simple env", "CLAUDE_CODE_SIMPLE=$CHOOKS_TEST_UNSET claude -p --model opus hi", false, "то же, что --bare"},
+		{"plugin dirs env", "CLAUDE_CODE_PLUGIN_DIRS=/tmp/x claude -p --model opus hi", false, "каталоги плагинов"},
+		{"personal config env", "CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1 claude -p --model opus hi", false, "личные хуки"},
+		{"managed settings env", "CLAUDE_CODE_MANAGED_SETTINGS_PATH=/tmp/x claude -p --model opus hi", false, "управляемые настройки"},
+		{"config dir elsewhere", "CLAUDE_CONFIG_DIR=/tmp/claude-tmp/x claude -p --model opus hi", false, "не из ~/.claude"},
+		{"empty config dir", "CLAUDE_CONFIG_DIR= claude -p --model opus hi", false, "CLAUDE_CONFIG_DIR у клиента claude берёт настройки и хуки не из ~/.claude"},
+		{"empty exported config dir", "export CLAUDE_CONFIG_DIR=; claude -p --model opus hi", false, "CLAUDE_CONFIG_DIR у клиента claude"},
+		{"empty simple env", "CLAUDE_CODE_SIMPLE= claude -p --model opus hi", false, "CLAUDE_CODE_SIMPLE у клиента claude"},
+		{"unknown claude env", "ANTHROPIC_BASE_URL=http://127.0.0.1:9 claude -p --model opus hi", false, "ANTHROPIC_BASE_URL у клиента claude не в списке известных"},
+		{"read env", "read -r CLAUDE_CODE_SIMPLE <<< 1; export CLAUDE_CODE_SIMPLE; claude -p --model opus hi", false, "переменные CLAUDE_CODE_SIMPLE у клиента claude команда задаёт без видимого значения"},
+		{"printf env", "printf -v CLAUDE_CODE_SIMPLE 1; export CLAUDE_CODE_SIMPLE; claude -p --model opus hi", false, "CLAUDE_CODE_SIMPLE у клиента claude команда задаёт"},
+		{"source env", "source /tmp/claude-tmp/env.sh; claude -p --model opus hi", false, "команда с source или eval"},
+		{"dot env", ". /tmp/claude-tmp/env.sh && claude -p --model opus hi", false, "команда с source или eval"},
+		{"eval env", `eval "$CHOOKS_TEST_UNSET"; claude -p --model opus hi`, false, "команда с source или eval"},
+		// п. 9: фигурные скобки и .claude проекта в журнале
+		{"brace option", "claude -p --model opus {--bare,} hi", false, "в кавычки"},
+		{"brace settings", "claude -p --model opus {--settings,/tmp/x.json} hi", false, "фигурные скобки"},
+		{"debug file in project claude dir", "claude -p --model opus --debug-file /tmp/claude-tmp/w/.claude/settings.json hi", false, "каталог .claude"},
+		{"debug file beside temp dir", "claude -p --model opus --debug-file /tmpx/d.log hi", false, "вне временного каталога"},
+		// п. 10: тексты отказа
+		{"unknown harmless option", "claude -p --model opus --thinking-display summarized hi", false, "--thinking-display клиента claude не в списке известных"},
+		{"writing subcommand lists readers", "claude config set -g model opus", false, "не в списке читающих: без отказа — только mcp list, mcp get <имя>, auth status, plugin list, plugins list, agents, logs <имя>, doctor"},
+		{"split word asks for quotes", "claude -p --model opus $CHOOKS_TEST_UNSET hi", false, "возьми слово в кавычки"},
 	})
 }
 
@@ -137,7 +186,7 @@ func TestModelGuardClientOptionsAllowed(t *testing.T) {
 		{"fallback approved", "claude -p --model opus --fallback-model opus hi", true, ""},
 		{"advisor approved", "claude -p --model opus --advisor opus hi", true, ""},
 		{"betas", "claude -p --model opus --betas x hi", true, ""},
-		{"restricted", "claude -p --model opus --restricted hi", true, ""},
+
 		{"strict mcp", "claude -p --model opus --strict-mcp-config hi", true, ""},
 		{"ide chrome brief", "claude -p --model opus --ide --chrome --no-chrome --brief hi", true, ""},
 		{"prompt suggestions", "claude -p --model opus --prompt-suggestions hi", true, ""},
@@ -165,7 +214,26 @@ func TestModelGuardClientOptionsAllowed(t *testing.T) {
 		{"add dirs", "claude -p --model opus --add-dir /tmp/claude-tmp/a /tmp/claude-tmp/b -- hi", true, ""},
 		{"substitution prompt after double dash", `claude -p --model opus -- "$(cat /tmp/claude-tmp/p.md)"`, true, ""},
 		{"substitution after literal", `claude -p --model opus "prompt: $(cat /tmp/claude-tmp/p.md)"`, true, ""},
-		{"substitution as required value", `claude -p --model opus --session-id "$(uuidgen)" hi`, true, ""},
+		{"substitution attached to required value", `claude -p --model opus --session-id="$(uuidgen)" hi`, true, ""},
+		{"substitution with prefix as required value", `claude -p --model opus --append-system-prompt "Контекст: $(cat /tmp/claude-tmp/p.md)" hi`, true, ""},
+		{"unquoted heredoc with variable inside", "claude -p --model opus \"$(cat <<EOF\nhello $CHOOKS_TEST_UNSET\nEOF\n)\"", true, ""},
+		{"bare value inside word", "claude -p --model opus --append-system-prompt 'not --bare' hi", true, ""},
+		{"logs", "claude logs abc", true, ""},
+		{"doctor", "claude doctor", true, ""},
+		{"default config dir", "CLAUDE_CONFIG_DIR=~/.claude claude -p --model opus hi", true, ""},
+		{"claude md env", "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude -p --model opus --add-dir /tmp/claude-tmp/a hi", true, ""},
+		{"model env judged elsewhere", "ANTHROPIC_MODEL=opus claude -p hi", true, ""},
+
+		{"nested script keeps environment", "bash -c 'echo claude'; claude -p --model opus hi", true, ""},
+		{"read of other variable", "read -r X <<< 1; claude -p --model opus hi", true, ""},
+		{"read of assigned other variable", "X=1; read -r X <<< 2; claude -p --model opus hi", true, ""},
+		{"default config dir with slash", "CLAUDE_CONFIG_DIR=~/.claude/ claude -p --model opus hi", true, ""},
+		{"bare in prompt after double dash", "claude -p --model opus -- hi --bare", true, ""},
+		{"quoted heredoc with backslash", "claude -p --model opus \"$(cat <<'EOF'\nline \\ end\nEOF\n)\"", true, ""},
+		{"substitution prompt after double dash may not be restricted", `claude -p --model opus -- "$CHOOKS_TEST_UNSET"`, true, ""},
+		{"env mentioned in prompt", "claude -p --model opus 'объясни CLAUDE_CODE_SIMPLE'", true, ""},
+		{"agents without hooks", `claude -p --model opus --agents '{"x":{"description":"d","prompt":"p","model":"opus"}}' --agent x hi`, true, ""},
+		{"quoted brace", `claude -p --model opus "{--bare,}" hi`, true, ""},
 		{"substitution attached to optional", `claude -p --model opus --resume="$CHOOKS_TEST_UNSET" hi`, true, ""},
 		{"loop values", "for m in default auto; do claude -p --model opus --permission-mode $m hi; done", true, ""},
 		{"loop values as prompt", "for p in one two; do claude -p --model opus $p; done", true, ""},
@@ -184,8 +252,7 @@ func TestModelGuardClientOptionsAllowed(t *testing.T) {
 		{"agents json", "claude agents --json --all --cwd /tmp/claude-tmp", true, ""},
 		{"unquoted known variable", "A=/tmp/claude-tmp/a; claude -p --model opus --add-dir $A hi", true, ""},
 		{"bare after double dash", "claude -p --model opus hi -- --bare", true, ""},
-		{"empty simple env", "CLAUDE_CODE_SIMPLE= claude -p --model opus hi", true, ""},
-		{"quoted empty simple env", "CLAUDE_CODE_SIMPLE='' claude -p --model opus hi", true, ""},
+
 		{"printed", "echo claude --bare", true, ""},
 		{"printed unparsed", "echo claude 'unterminated", true, ""},
 		{"help", "claude --help", true, ""},
@@ -197,6 +264,46 @@ func TestModelGuardClientOptionsAllowed(t *testing.T) {
 		{"cl utility", "cl --cl-ls --under /tmp/claude-tmp --json", true, ""},
 		{"cl passes options", "cl -n probe --model opus", true, ""},
 	})
+}
+
+// Ревью eb4fda4, п. 6: агент в --agents со своими MCP-серверами или хуками —
+// отказ, строкой и из файла
+func TestModelGuardClientAgentDefinitions(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	dir := t.TempDir()
+	withServers := filepath.Join(dir, "servers.json")
+	plain := filepath.Join(dir, "plain.json")
+	if err := os.WriteFile(withServers, []byte(`{"a":{"description":"d","prompt":"p","model":"opus"},"x":{"description":"d","prompt":"p","model":"opus","mcpServers":{"m":{"command":"/bin/true"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, []byte(`{"x":{"description":"d","prompt":"p","model":"opus"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runClientOptionCases(t, tool, []clientOptionCase{
+		{"inline mcp servers", `claude -p --model opus --agents '{"x":{"description":"d","prompt":"p","model":"opus","mcpServers":{}}}' --agent x hi`, false, "агент x в --agents задаёт mcpServers"},
+		{"inline hooks", `claude -p --model opus --agents '{"x":{"description":"d","prompt":"p","model":"opus","hooks":{}}}' --agent x hi`, false, "агент x в --agents задаёт hooks"},
+		{"file mcp servers", "claude -p --model opus --agents " + withServers + " --agent x hi", false, "агент x в --agents задаёт mcpServers"},
+		{"file without servers", "claude -p --model opus --agents " + plain + " --agent x hi", true, ""},
+		{"agents not objects", `claude -p --model opus --agents '{"x":"hooks"}' hi`, true, ""},
+	})
+}
+
+// Слово-подстановка в месте опции, которое может оказаться --bare, получает
+// один отказ: с формами --opt=… и промпта после --, без второго текста о
+// подстановке в месте опции
+func TestModelGuardHookWordRefusedOnce(t *testing.T) {
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: `claude -p --model opus "$CHOOKS_TEST_UNSET"`, CWD: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsValid || len(result.Violations) != 1 {
+		t.Fatalf("valid=%v violations=%v, want one refusal", result.IsValid, result.Violations)
+	}
+	message := result.Violations[0].Message
+	if !strings.Contains(message, "может оказаться --bare") || strings.Contains(message, "начинается подстановкой") {
+		t.Fatalf("message %q, want only the hook word refusal", message)
+	}
 }
 
 // Проверка запуска (modellaunch) судит только модель: опции и окружение

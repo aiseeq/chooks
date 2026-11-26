@@ -7,13 +7,15 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// word слово команды; literal — в нём нет подстановок $ и `
+// word слово команды; literal — в нём нет подстановок $ и `; braces — bash
+// раскрывает в нём фигурные скобки ({a,b}, {1..3}) в несколько слов
 type word struct {
 	text              string
 	literal           bool
 	shellLiteral      bool
 	shellLiteralKnown bool
 	tilde             shellcmd.Tilde
+	braces            bool
 }
 
 // computedArg — слово из shellcmd.Call.Args вычисляется при запуске.

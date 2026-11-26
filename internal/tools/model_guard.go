@@ -459,7 +459,16 @@ func shellEnvDeclarations(file *syntax.File, command, name string) ([]string, bo
 		values = append(values, value)
 	}
 	addAssign := func(assign *syntax.Assign) {
-		if assign == nil || assign.Name == nil || assign.Value == nil {
+		if assign == nil || assign.Name == nil {
+			return
+		}
+		// X= — пустое значение: claude 2.1.332 берёт CLAUDE_CONFIG_DIR через
+		// ??, и пустой каталог настроек — текущий
+		if assign.Value == nil && !assign.Naked && !assign.Append && assign.Array == nil && assign.Index == nil {
+			add(assign.Name.Value, "", true, false)
+			return
+		}
+		if assign.Value == nil {
 			return
 		}
 		value, literal := literalValue(assign.Value)
@@ -1263,7 +1272,7 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 	if claude {
 		found = append(found, envModelCandidates(command, calls, logger)...)
 		found = append(found, writtenProtectedFileCandidates(command)...)
-		found = append(found, clientEnvironmentCandidates(command, logger)...)
+		found = append(found, clientEnvironmentCandidates(command, calls, home, logger)...)
 	}
 	if err != nil {
 		// вызовы найдены не все: вложенный скрипт, который akit не разобрал
@@ -1335,6 +1344,12 @@ func clientCallWords(call *shellcmd.Call) (string, []word, bool) {
 	literalArgs := shellCallArgumentLiterals(call.Raw, call.Name)
 	literalOffset := npxClaudeArgumentOffset(call.Args, isNpxClaude)
 	args := modelCallWords(call, callArgs, literalArgs, literalOffset)
+	braceWords, err := shellBraceWords(call.Raw)
+	for i := range args {
+		// вызов не разобран: фигурных скобок не видно, любое слово может
+		// разбиться
+		args[i].braces = err != nil || braceWords[args[i].text]
+	}
 	dialect := clientDialect(call.Name)
 	if isNpxClaude {
 		dialect = "claude"
@@ -2237,6 +2252,36 @@ func shellCallArgumentLiterals(raw, commandName string) []bool {
 		return false
 	})
 	return flags
+}
+
+// shellBraceWords — слова raw, которые bash раскрывает фигурными скобками:
+// значение литерального слова, исходный текст слова с подстановкой (так их
+// отдаёт shellcmd.Call.Args). Слово в кавычках с тем же текстом тоже
+// попадёт сюда: отказ лишний, но не пропуск
+func shellBraceWords(raw string) (map[string]bool, error) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(raw), "")
+	if err != nil {
+		return nil, fmt.Errorf("parse call for brace expansion: %w", err)
+	}
+	var all []*syntax.Word
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if w, ok := node.(*syntax.Word); ok {
+			all = append(all, w)
+		}
+		return true
+	})
+	// SplitBraces меняет слово: после обхода
+	words := map[string]bool{}
+	for _, w := range all {
+		text, literal := literalValue(w)
+		if !literal {
+			text = raw[w.Pos().Offset():w.End().Offset()]
+		}
+		if syntax.SplitBraces(w) {
+			words[text] = true
+		}
+	}
+	return words, nil
 }
 
 func shellWordSourceLiteral(source string) bool {

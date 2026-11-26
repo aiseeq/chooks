@@ -321,7 +321,7 @@ func TestModelGuardReviewRoundOneForms(t *testing.T) {
 
 		{"sudo -u root -- claude", "sudo -u root -- claude -p \"review " + agent + "\""},
 		{"sudo -E claude", "sudo -E claude -p \"review " + agent + "\""},
-		{"env -i assignment claude", "env -i HOME=/h claude -p \"review " + agent + "\""},
+		{"env -i assignment claude", "env -i LANG=C claude -p \"review " + agent + "\""},
 		{"env -uX claude", "env -uFOO claude -p \"review " + agent + "\""},
 		{"timeout -k duration claude", "timeout -k 5 600 claude -p \"review " + agent + "\""},
 		{"timeout --sig abbreviation claude", "timeout --sig INT 600 claude -p \"review " + agent + "\""},
@@ -976,7 +976,9 @@ func TestModelGuardShortFlagCluster(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command})
+			// cwd вне временного каталога: относительный --debug-file не
+			// попадает в /tmp, где бы ни лежал пакет
+			result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: tc.command, CWD: "/nonexistent-chooks-test/project"})
 			if err != nil {
 				t.Fatal(err)
 			}

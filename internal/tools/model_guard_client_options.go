@@ -1,7 +1,9 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -72,7 +74,7 @@ var claudeOptions = map[string]claudeOption{
 	"--disable-slash-commands": {}, "--exclude-dynamic-system-prompt-sections": {},
 	"--fork-session": {}, "--forward-subagent-text": {}, "--include-hook-events": {},
 	"--include-partial-messages": {}, "--no-session-persistence": {}, "--replay-user-messages": {},
-	"--restricted": {}, "--strict-mcp-config": {}, "--bg": {}, "--background": {},
+	"--strict-mcp-config": {}, "--bg": {}, "--background": {},
 
 	"--allowedTools": {arity: claudeValues}, "--allowed-tools": {arity: claudeValues},
 	"--disallowedTools": {arity: claudeValues}, "--disallowed-tools": {arity: claudeValues},
@@ -99,6 +101,27 @@ var claudeOptions = map[string]claudeOption{
 	"--debug-file": {arity: claudeValue, kind: claudeDebugFile},
 }
 
+// claudeRefusedOptions — что делают опции вне claudeOptions, которыми claude
+// снимает хуки или подменяет настройки, MCP и плагины (claude --help
+// 2.1.332): отказ называет это, прочим опциям вне набора — «не в списке
+// известных»
+var claudeRefusedOptions = map[string]string{
+	"--bare":            "снимает хуки и плагины (минимальный режим, CLAUDE_CODE_SIMPLE)",
+	"--safe-mode":       "снимает хуки, плагины, MCP-серверы, агенты и CLAUDE.md",
+	"--restricted":      "не читает файлы настроек: хуки из ~/.claude/settings.json не работают",
+	"--settings":        "берёт настройки (хуки, модель, env) из файла или строки JSON",
+	"--setting-sources": "выбирает, какие файлы настроек читать: без user хуки из ~/.claude не работают",
+	"--mcp-config":      "добавляет MCP-серверы",
+	"--plugin-dir":      "добавляет плагин с его хуками и агентами",
+	"--plugin-url":      "скачивает и добавляет плагин с его хуками и агентами",
+}
+
+// claudeHookWords — слова, которые claude ищет в argv сам, помимо commander:
+// --bare и --safe-mode до первого «--» (по коду бинаря 2.1.332: includes,
+// ZQt), --restricted — в replConfigArgv, где граница «--» по коду не видна.
+// Значение опции, равное такому слову, тоже снимает хуки
+var claudeHookWords = []string{"--bare", "--safe-mode", "--restricted"}
+
 // claudeShortOptions — короткие опции из claudeOptions; -w (--worktree) в
 // набор не входит
 var claudeShortOptions = map[byte]string{
@@ -114,9 +137,13 @@ var claudeCommands = []string{
 	"serve", "setup", "setup-token", "stop", "ultrareview", "update", "upgrade", "worktree-hook", "xaa",
 }
 
-// claudeReadingCommands — подкоманды, которые только читают: остальные
-// добавляют MCP-серверы и плагины, меняют настройки, вход или сам клиент
-var claudeReadingCommands = [][]string{{"mcp", "list"}, {"mcp", "get", ""}, {"auth", "status"}, {"plugin", "list"}, {"plugins", "list"}, {"agents"}}
+// claudeReadingCommands — подкоманды, которые только читают; "" — любое слово
+// (имя сервера, сессии). Остальные добавляют MCP-серверы и плагины, меняют
+// настройки, вход или сам клиент либо не проверены
+var claudeReadingCommands = [][]string{
+	{"mcp", "list"}, {"mcp", "get", ""}, {"auth", "status"}, {"plugin", "list"}, {"plugins", "list"},
+	{"agents"}, {"logs", ""}, {"doctor"},
+}
 
 // claudeCommandOptions — опции подкоманды, которые не подменяют модель,
 // настройки, MCP и плагины: claude agents --json [--all] [--cwd <путь>]
@@ -126,15 +153,33 @@ var claudeCommandOptions = map[string]map[string]claudeOption{
 	"agents": {"--json": {}, "--all": {}, "--cwd": {arity: claudeValue}},
 }
 
-// claudeConfigEnvironment — переменные, с которыми claude снимает хуки или
-// берёт настройки не из ~/.claude: CLAUDE_CODE_SIMPLE — то же, что --bare,
-// CLAUDE_CODE_SAFE_MODE — --safe-mode (по коду бинаря 2.1.332),
-// CLAUDE_CONFIG_DIR — другой каталог настроек и хуков,
-// CLAUDE_CODE_PLUGIN_DIRS — каталоги плагинов, CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG —
-// личные хуки не исполняются (по тексту в бинаре, не исполнено)
-var claudeConfigEnvironment = []string{
-	"CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_PLUGIN_DIRS",
-	"CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG",
+// claudeEnvironmentName — переменная claude (CLAUDE_*, ANTHROPIC_*) в тексте
+// команды. Такие переменные у вызова claude судятся белым списком: claude
+// 2.1.332 читает их сотни, и новая в следующей версии может снять хуки
+var claudeEnvironmentName = regexp.MustCompile(`\b(?:CLAUDE|ANTHROPIC)_[A-Za-z0-9_]+`)
+
+// claudeEnvironmentAllowed — переменные claude, которые не снимают хуки и не
+// подменяют настройки, MCP и плагины. Модель (modelEnvNames) и
+// CLAUDE_CODE_SHELL_PREFIX model_guard судит отдельно
+var claudeEnvironmentAllowed = []string{
+	"CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
+	"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "CLAUDE_AX_SCREEN_READER", "CLAUDE_AX_STARTUP_QUIET_MS",
+}
+
+// claudeEnvironmentEffects — что делают переменные, которыми claude снимает
+// хуки или берёт настройки не из ~/.claude: SIMPLE, SAFE_MODE, RESTRICTED —
+// по коду бинаря 2.1.332, прочее — по его тексту (не исполнено). Отказ
+// называет это, прочим вне claudeEnvironmentAllowed — «не в списке
+// известных». HOME судится с ними: claude берёт настройки из $HOME/.claude
+var claudeEnvironmentEffects = map[string]string{
+	"CLAUDE_CODE_SIMPLE":                   "то же, что --bare: снимает хуки и плагины",
+	"CLAUDE_CODE_SAFE_MODE":                "то же, что --safe-mode: снимает хуки, плагины и MCP-серверы",
+	"CLAUDE_CODE_RESTRICTED":               "то же, что --restricted: не читает файлы настроек, хуки не работают",
+	"CLAUDE_CONFIG_DIR":                    "берёт настройки и хуки не из ~/.claude",
+	"HOME":                                 "берёт настройки и хуки из .claude другого каталога",
+	"CLAUDE_CODE_PLUGIN_DIRS":              "добавляет каталоги плагинов с их хуками",
+	"CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG": "не исполняет личные хуки",
+	"CLAUDE_CODE_MANAGED_SETTINGS_PATH":    "берёт управляемые настройки (и их хуки) из другого каталога",
 }
 
 // argumentFeeders — обёртки, которые дописывают клиенту слова из ввода: их
@@ -146,14 +191,19 @@ var argumentFeeders = []string{"xargs", "parallel"}
 // подстановка без кавычек, которую bash может разбить на несколько слов;
 // unresolved — в text осталась неизвестная подстановка; mayBeOption — слово
 // начинается подстановкой, значение которой может начаться с `-`: commander
-// примет его за опцию
+// примет его за опцию; hookWord — слово получило отказ как возможное
+// claudeHookWords; pattern — регулярное выражение значений слова с
+// подстановкой: литерал, `.*` за неизвестной частью, перечень значений
+// переменной цикла
 type claudeArg struct {
 	word        word
 	text        string
+	pattern     string
 	dynamic     bool
 	splits      bool
 	unresolved  bool
 	mayBeOption bool
+	hookWord    bool
 	err         error
 }
 
@@ -167,6 +217,7 @@ type claudeArguments struct {
 	judged      []word
 	operands    []claudeArg
 	debugFiles  []claudeArg
+	agents      []claudeArg
 	refusals    []string
 	help        bool
 	unknownLast bool
@@ -200,6 +251,11 @@ func claudeCallCandidates(call *shellcmd.Call, args []word, files modelFiles, cw
 			parsed.refuse(reason)
 		}
 	}
+	for _, definition := range parsed.agents {
+		if reason := agentsRefusal(definition, files.settings, cwd); reason != "" {
+			parsed.refuse(reason)
+		}
+	}
 	found := make([]modelCandidate, 0, len(parsed.refusals))
 	for _, reason := range parsed.refusals {
 		found = append(found, clientOptionCandidate(reason))
@@ -213,19 +269,16 @@ func scanClaudeArguments(args []word, values func(string) ([]string, bool)) clau
 	for i, arg := range args {
 		queue[i] = newClaudeArg(arg, values)
 	}
+	parsed.refuseHookWords(queue)
 	variadic := ""
 	for len(queue) > 0 {
 		arg := queue[0]
 		queue = queue[1:]
 		unknownBefore := parsed.unknownLast
 		parsed.unknownLast = false
-		if arg.err != nil {
-			parsed.refuse(fmt.Sprintf("слово %s не разобрано (%v): опции клиента claude не проверить", arg.word.text, arg.err))
-			parsed.unknownLast = true
-			continue
-		}
+		// слово, которое не разобрано, тоже splits
 		if arg.splits {
-			parsed.refuse(fmt.Sprintf("слово %s: подстановка может дать несколько слов, опции клиента claude не проверить", arg.word.text))
+			parsed.refuse(splitsRefusal(arg))
 			parsed.unknownLast = true
 			continue
 		}
@@ -239,7 +292,9 @@ func scanClaudeArguments(args []word, values func(string) ([]string, bool)) clau
 			parsed.operands = append(parsed.operands, queue...)
 			queue = nil
 		case arg.mayBeOption:
-			parsed.refuse(fmt.Sprintf("слово %s начинается подстановкой: её значение с - claude примет за опцию; значение опции пиши через =, промпт — после --", arg.word.text))
+			if !arg.hookWord {
+				parsed.refuse(fmt.Sprintf("слово %s начинается подстановкой: её значение с - claude примет за опцию; значение опции пиши через = (--opt=…), промпт — после --", arg.word.text))
+			}
 			parsed.unknownLast = true
 		case !claudeMaybeOption(arg.text) || !claudeOptionStart(arg.text[1]):
 			parsed.operands = append(parsed.operands, arg)
@@ -249,6 +304,53 @@ func scanClaudeArguments(args []word, values func(string) ([]string, bool)) clau
 		}
 	}
 	return parsed
+}
+
+// refuseHookWords — слово argv, которое есть или может оказаться (подстановка
+// с неизвестным значением) одним из claudeHookWords: claude ищет его сам, и
+// в месте значения опции тоже. --bare и --safe-mode — до первого «--»
+func (p *claudeArguments) refuseHookWords(args []claudeArg) {
+	beforeDashDash := true
+	for i := range args {
+		arg := &args[i]
+		for _, name := range claudeHookWords {
+			// после «--» — только --restricted литералом: промпт из
+			// подстановки там — исход отказа «пиши промпт после --»
+			if !beforeDashDash && (name != "--restricted" || arg.unresolved) || !arg.couldBe(name) {
+				continue
+			}
+			arg.hookWord = true
+			if arg.unresolved {
+				p.refuse(fmt.Sprintf("слово %s может оказаться %s: claude ищет это слово в argv сам, и в месте значения опции, и %s; значение опции пиши через = (--opt=…), промпт — после --", arg.word.text, name, claudeRefusedOptions[name]))
+				continue
+			}
+			// тот же текст, что у опции: слово в месте опции даёт один отказ
+			p.refuse(refusedOption(name))
+		}
+		beforeDashDash = beforeDashDash && arg.text != "--"
+	}
+}
+
+// couldBe — значение слова равно text или может ему равняться (pattern)
+func (a claudeArg) couldBe(text string) bool {
+	if !a.unresolved {
+		return a.text == text
+	}
+	return regexp.MustCompile(`(?s)^(?:` + a.pattern + `)$`).MatchString(text)
+}
+
+// write — известная часть слова
+func (a *claudeArg) write(b *strings.Builder, text string) {
+	b.WriteString(text)
+	a.pattern += regexp.QuoteMeta(text)
+}
+
+// splitsRefusal — слово, которое bash может разбить на несколько
+func splitsRefusal(arg claudeArg) string {
+	if arg.err != nil {
+		return fmt.Sprintf("слово %s не разобрано (%v): опции клиента claude не проверить", arg.word.text, arg.err)
+	}
+	return fmt.Sprintf("слово %s без кавычек bash может разбить на несколько слов (подстановка, фигурные скобки): за ними может стоять опция claude; возьми слово в кавычки", arg.word.text)
 }
 
 // lookup — опция подкоманды (claudeCommandOptions) или claude
@@ -281,7 +383,10 @@ func (p *claudeArguments) refuse(reason string) {
 }
 
 func refusedOption(name string) string {
-	return fmt.Sprintf("опция %s клиента claude вне проверенного набора: такие опции подменяют модель, настройки, MCP, плагины или снимают хуки", name)
+	if effect, ok := claudeRefusedOptions[name]; ok {
+		return fmt.Sprintf("опция %s клиента claude %s", name, effect)
+	}
+	return fmt.Sprintf("опция %s клиента claude не в списке известных: в нём только опции, которые не подменяют модель, настройки, MCP, плагины и хуки", name)
 }
 
 // option — опция в arg; возвращает остаток слов и имя опции, которая берёт
@@ -329,7 +434,7 @@ func (p *claudeArguments) apply(name string, spec claudeOption, arg claudeArg, a
 			return queue, ""
 		}
 		if queue[0].splits {
-			p.refuse(fmt.Sprintf("значение %s опции %s: подстановка может дать несколько слов, опции клиента claude не проверить", queue[0].word.text, name))
+			p.refuse(splitsRefusal(queue[0]))
 		}
 		p.value(name, queue[0])
 		queue = queue[1:]
@@ -356,6 +461,9 @@ func (p *claudeArguments) value(name string, arg claudeArg) {
 	switch claudeOptions[name].kind {
 	case claudeJudged, claudeRefusedJudged:
 		p.judged = append(p.judged, word{text: name, literal: true, shellLiteral: true, shellLiteralKnown: true}, arg.word)
+		if name == "--agents" {
+			p.agents = append(p.agents, arg)
+		}
 	case claudeDebugFile:
 		p.debugFiles = append(p.debugFiles, arg)
 	}
@@ -376,7 +484,14 @@ func (p *claudeArguments) refuseCommand() {
 			return
 		}
 	}
-	p.refuse(fmt.Sprintf("подкоманда claude %s меняет настройки, MCP, плагины или сам клиент; без отказа — только mcp list, mcp get, auth status, plugin list", strings.Join(texts, " ")))
+	forms := make([]string, len(claudeReadingCommands))
+	for i, form := range claudeReadingCommands {
+		forms[i] = strings.Join(form, " ")
+		if form[len(form)-1] == "" {
+			forms[i] = strings.Join(form[:len(form)-1], " ") + " <имя>"
+		}
+	}
+	p.refuse(fmt.Sprintf("подкоманда claude %s не в списке читающих: без отказа — только %s", strings.Join(texts, " "), strings.Join(forms, ", ")))
 }
 
 // newClaudeArg — значение слова вызова. Литеральное слово shellcmd отдаёт
@@ -384,7 +499,7 @@ func (p *claudeArguments) refuseCommand() {
 // простая переменная ($X, ${X}) с одним известным значением (присваивание в
 // команде или env запроса) подставляется
 func newClaudeArg(arg word, values func(string) ([]string, bool)) claudeArg {
-	parsed := claudeArg{word: arg, text: arg.text}
+	parsed := claudeArg{word: arg, text: arg.text, splits: arg.braces}
 	if !computedArg(arg.text) {
 		return parsed
 	}
@@ -413,55 +528,65 @@ func (a *claudeArg) renderParts(b *strings.Builder, parts []syntax.WordPart, quo
 	for _, part := range parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
-			b.WriteString(p.Value)
+			a.write(b, p.Value)
 		case *syntax.SglQuoted:
-			b.WriteString(p.Value)
+			a.write(b, p.Value)
 		case *syntax.DblQuoted:
 			a.renderParts(b, p.Parts, true, values)
 		case *syntax.ParamExp:
 			a.renderParam(b, p, quoted, values)
 		case *syntax.CmdSubst:
-			body, known := heredocCatValue(p)
+			hdoc, known := heredocCat(p)
 			if !known {
 				a.unknownPart(b, quoted)
 				continue
 			}
-			a.splits = a.splits || !quoted && (body == "" || strings.ContainsAny(body, " \t\n*?["))
-			b.WriteString(body)
+			// тело here-doc — как слово в двойных кавычках; $(…) снимает
+			// хвостовые переводы строки
+			start, patternStart := b.Len(), len(a.pattern)
+			a.renderParts(b, hdoc.Parts, true, values)
+			text := b.String()
+			body := strings.TrimRight(text[start:], "\n")
+			b.Reset()
+			b.WriteString(text[:start] + body)
+			// QuoteMeta перевод строки не экранирует
+			a.pattern = a.pattern[:patternStart] + strings.TrimRight(a.pattern[patternStart:], "\n")
+			a.splits = a.splits || !quoted && (body == "" || strings.ContainsAny(body, " \t\n*?[$"))
 		default:
 			a.unknownPart(b, quoted)
 		}
 	}
 }
 
-// heredocCatValue — значение $(cat <<'EOF' … EOF): тело here-doc без
-// подстановок, без хвостовых переводов строки. Иное — не известно, как и `\`
-// в теле с ограничителем без кавычек: bash снимает это экранирование
-func heredocCatValue(subst *syntax.CmdSubst) (string, bool) {
+// heredocCat — тело here-doc в $(cat <<EOF … EOF). Иное — не известно, как и
+// `\` в теле с ограничителем без кавычек: bash снимает это экранирование
+// (`\` с переводом строки склеивает строки). В теле с ограничителем в
+// кавычках подстановок нет
+func heredocCat(subst *syntax.CmdSubst) (*syntax.Word, bool) {
 	if len(subst.Stmts) != 1 {
-		return "", false
+		return nil, false
 	}
 	stmt := subst.Stmts[0]
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok || stmt.Negated || stmt.Background || stmt.Coprocess || len(call.Assigns) != 0 || len(call.Args) != 1 || len(stmt.Redirs) != 1 {
-		return "", false
+		return nil, false
 	}
 	if name, literal := literalValue(call.Args[0]); !literal || name != "cat" {
-		return "", false
+		return nil, false
 	}
 	redir := stmt.Redirs[0]
 	if redir.Op != syntax.Hdoc || redir.Hdoc == nil {
-		return "", false
+		return nil, false
 	}
-	body, literal := literalValue(redir.Hdoc)
 	quoted := slices.ContainsFunc(redir.Word.Parts, func(part syntax.WordPart) bool {
 		_, lit := part.(*syntax.Lit)
 		return !lit
 	})
-	if !literal || strings.Contains(body, `\`) && !quoted {
-		return "", false
-	}
-	return strings.TrimRight(body, "\n"), true
+	escaped := slices.ContainsFunc(redir.Hdoc.Parts, func(part syntax.WordPart) bool {
+		lit, ok := part.(*syntax.Lit)
+		return ok && strings.Contains(lit.Value, `\`)
+	})
+	return redir.Hdoc, quoted || !escaped
 }
 
 // renderParam — $X: известное значение, одно из нескольких или неизвестное
@@ -479,12 +604,17 @@ func (a *claudeArg) renderParam(b *strings.Builder, p *syntax.ParamExp, quoted b
 		return value == "" || strings.ContainsAny(value, " \t\n*?[")
 	})
 	if len(found) == 1 {
-		b.WriteString(found[0])
+		a.write(b, found[0])
 		return
 	}
 	// несколько значений (цикл for): слово одно, но какое — не известно
 	a.mayBeOption = a.mayBeOption || b.Len() == 0 && slices.ContainsFunc(found, func(value string) bool { return strings.HasPrefix(value, "-") })
 	b.WriteString("$")
+	alternatives := make([]string, len(found))
+	for i, value := range found {
+		alternatives[i] = regexp.QuoteMeta(value)
+	}
+	a.pattern += "(?:" + strings.Join(alternatives, "|") + ")"
 	a.unresolved = true
 }
 
@@ -492,6 +622,7 @@ func (a *claudeArg) renderParam(b *strings.Builder, p *syntax.ParamExp, quoted b
 func (a *claudeArg) unknownPart(b *strings.Builder, quoted bool) {
 	a.mayBeOption = a.mayBeOption || b.Len() == 0
 	b.WriteString("$")
+	a.pattern += ".*"
 	a.unresolved = true
 	a.splits = a.splits || !quoted
 }
@@ -587,6 +718,9 @@ func debugFileRefusal(arg claudeArg, tempDirs []string, cwd, home string) string
 		path = filepath.Join(cwd, path)
 	}
 	path = filepath.Clean(path)
+	if slices.Contains(strings.Split(path, string(filepath.Separator)), ".claude") {
+		return fmt.Sprintf("--debug-file %s пишет в каталог .claude: там настройки, агенты и хуки", path)
+	}
 	for _, dir := range tempDirs {
 		if dir != "" && strings.HasPrefix(path, filepath.Clean(dir)+string(filepath.Separator)) {
 			return ""
@@ -595,17 +729,138 @@ func debugFileRefusal(arg claudeArg, tempDirs []string, cwd, home string) string
 	return fmt.Sprintf("--debug-file %s пишет вне временного каталога (%s): там могут быть настройки, агенты и хуки", path, strings.Join(tempDirs, ", "))
 }
 
-// clientEnvironmentCandidates — отказ переменным claudeConfigEnvironment с
-// непустым или неизвестным значением в команде с клиентом claude
-func clientEnvironmentCandidates(command string, logger core.Logger) []modelCandidate {
-	var found []modelCandidate
-	for _, name := range claudeConfigEnvironment {
-		values, dynamic := shellEnvValues(command, name, logger)
-		if dynamic || slices.ContainsFunc(values, func(value string) bool { return value != "" }) {
-			found = append(found, clientOptionCandidate(fmt.Sprintf("переменная %s у клиента claude снимает хуки или берёт настройки не из ~/.claude", name)))
+// agentsRefusal — определение --agents (строка JSON или файл), где агент
+// задаёт mcpServers или hooks: свои MCP-серверы и хуки агента (схема агента в
+// коде бинаря 2.1.332). Определение, которое не прочесть, судит model_guard
+// («файл --agents не прочитать»)
+func agentsRefusal(arg claudeArg, read func(string, shellcmd.Tilde, string) [][]byte, cwd string) string {
+	if arg.unresolved {
+		return ""
+	}
+	raws := [][]byte{[]byte(arg.text)}
+	if !strings.HasPrefix(strings.TrimSpace(arg.text), "{") {
+		if read == nil {
+			return ""
+		}
+		raws = read(arg.text, arg.word.tilde, cwd)
+	}
+	for _, raw := range raws {
+		// не JSON — claude сам не запустится
+		var agents map[string]map[string]json.RawMessage
+		if json.Unmarshal(raw, &agents) != nil {
+			continue
+		}
+		for _, name := range slices.Sorted(maps.Keys(agents)) {
+			for _, key := range []string{"mcpServers", "hooks"} {
+				if _, ok := agents[name][key]; ok {
+					return fmt.Sprintf("агент %s в --agents задаёт %s: агент приносит свои MCP-серверы и хуки; задай агенту только модель, промпт и инструменты", name, key)
+				}
+			}
 		}
 	}
-	return found
+	return ""
+}
+
+// clientEnvironmentCandidates — отказ переменным claude вне
+// claudeEnvironmentAllowed и HOME, которые команда с клиентом claude задаёт
+// (присваивание, export, env, declare -x, set -a) любым значением, кроме
+// прежнего: HOME — домашний каталог, CLAUDE_CONFIG_DIR — ~/.claude. Значение
+// без вида (read, printf -v, source, eval) — unknownEnvironmentCandidates
+func clientEnvironmentCandidates(command string, calls []shellcmd.Call, home string, logger core.Logger) []modelCandidate {
+	names := clientEnvironmentNames(command)
+	var found []modelCandidate
+	for _, name := range names {
+		values, dynamic := shellEnvValues(command, name, logger)
+		if dynamic || slices.ContainsFunc(values, func(value string) bool { return !defaultEnvironmentValue(name, value, home) }) {
+			found = append(found, clientOptionCandidate(environmentRefusal(name)))
+		}
+	}
+	unknown, err := unknownEnvironmentCandidates(command, calls, names)
+	if err != nil {
+		// неразобранную команду с claude судит unparsedClientCandidates
+		logger.Warn("model_guard: присваивания окружения claude не разобраны", "error", err)
+		return found
+	}
+	return append(found, unknown...)
+}
+
+// environmentControl — имя, которого нет в команде: если и его присваивание
+// Assigns пометил Unknown, учёт снят весь (eval, source, вложенный скрипт,
+// команда из подстановки)
+const environmentControl = "CHOOKS_ENVIRONMENT_CONTROL"
+
+// environmentSourcing — команды, которые задают переменные оболочки, где
+// потом запустится claude, текстом, которого в команде нет
+var environmentSourcing = []string{"source", ".", "eval"}
+
+// clientEnvironmentNames — HOME и переменные claude из текста команды вне
+// claudeEnvironmentAllowed и modelEnvNames
+func clientEnvironmentNames(command string) []string {
+	names := append(claudeEnvironmentName.FindAllString(command, -1), "HOME")
+	names = slices.DeleteFunc(names, func(name string) bool {
+		_, model := modelEnvNames[name]
+		return model || slices.Contains(claudeEnvironmentAllowed, name)
+	})
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+// defaultEnvironmentValue — значение, с которым claude читает прежние
+// настройки: HOME — домашний каталог, CLAUDE_CONFIG_DIR — ~/.claude
+func defaultEnvironmentValue(name, value, home string) bool {
+	if after, ok := strings.CutPrefix(value, "~"); ok && (after == "" || strings.HasPrefix(after, "/")) {
+		value = home + after
+	}
+	value = filepath.Clean(value)
+	switch name {
+	case "HOME":
+		return value == filepath.Clean(home)
+	case "CLAUDE_CONFIG_DIR":
+		return value == filepath.Join(home, ".claude")
+	}
+	return false
+}
+
+func environmentRefusal(name string) string {
+	if effect, ok := claudeEnvironmentEffects[name]; ok {
+		return fmt.Sprintf("переменная %s у клиента claude %s", name, effect)
+	}
+	return fmt.Sprintf("переменная %s у клиента claude не в списке известных: в нём только переменные, которые не снимают хуки и не подменяют настройки, MCP и плагины", name)
+}
+
+// unknownEnvironmentCandidates — переменные names, которые команда задаёт без
+// видимого значения: read, printf -v, mapfile, getopts (по имени), source и
+// eval (любые). Копия команды начинается присваиванием этих имён и
+// environmentControl, и akit shellcmd.Assigns помечает его Unknown, если
+// дальше значение могло смениться. Снятый весь учёт — отказ, только если в
+// команде есть environmentSourcing: вложенный скрипт (bash -c) окружение
+// этой оболочки не меняет
+func unknownEnvironmentCandidates(command string, calls []shellcmd.Call, names []string) ([]modelCandidate, error) {
+	sentinel := strings.Join(append(slices.Clone(names), environmentControl), "= ") + "=\n"
+	assigns, err := shellcmd.Assigns(sentinel + command)
+	if err != nil {
+		return nil, fmt.Errorf("shellcmd assigns: %w", err)
+	}
+	var unknown []string
+	for _, assign := range assigns {
+		if assign.Offset < len(sentinel) && assign.Unknown {
+			unknown = append(unknown, assign.Name)
+		}
+	}
+	if slices.Contains(unknown, environmentControl) {
+		sourcing := false
+		for i := range calls {
+			sourcing = sourcing || slices.Contains(environmentSourcing, calls[i].Name)
+		}
+		if !sourcing {
+			return nil, nil
+		}
+		return []modelCandidate{clientOptionCandidate("команда с source или eval может задать окружение клиента claude (HOME, CLAUDE_*): его не проверить; задай переменные в команде литералом")}, nil
+	}
+	if len(unknown) == 0 {
+		return nil, nil
+	}
+	return []modelCandidate{clientOptionCandidate(fmt.Sprintf("переменные %s у клиента claude команда задаёт без видимого значения (read, printf -v): их не проверить", strings.Join(unknown, ", ")))}, nil
 }
 
 // literalSubscript — индекс в присваивании элементу массива из одних

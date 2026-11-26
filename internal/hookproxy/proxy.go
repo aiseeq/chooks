@@ -32,12 +32,11 @@ const (
 )
 
 // LostPrefix — начало причины, с которой прокси зовёт CLI после обрыва
-// связи с демоном после 'C': эффект хука мог уже случиться, и CLI хук не
-// исполняет, а только записывает вызов в счёт и в файл длительностей и
-// отвечает кодом 1 (ревью 8f10b59, п. 3)
+// связи с демоном после 'C': pre-tool-use CLI повторяет проверку, остальные
+// хуки только записывают вызов в счёт и в файл длительностей
 const LostPrefix = "lost: "
 
-// Lost — reason несёт обрыв после 'C': CLI хук не повторяет
+// Lost — reason несёт обрыв после 'C'
 func Lost(reason string) bool {
 	return strings.HasPrefix(reason, LostPrefix)
 }
@@ -229,8 +228,9 @@ var errNoRefusal = syscall.EPROTO
 const lateReasonWait = time.Second
 
 // await ждёт результат без срока: срок хука держит Claude Code, а демон
-// отменяет запрос по своему сроку и по обрыву. Обрыв — CLI без повтора хука
-// (lost): эффект хука мог уже случиться. 'F' вместо результата — демон 'C'
+// отменяет запрос по своему сроку и по обрыву. Обрыв — CLI с причиной lost:
+// pre-tool-use повторит проверку, остальные хуки только запишут вызов. 'F'
+// вместо результата — демон 'C'
 // не дождался и запрос не исполнял: CLI исполнит его один раз (ревью 2б-1,
 // п. 8)
 func (p *proxy) await(stdin []byte) int {
@@ -275,9 +275,9 @@ func (p *proxy) await(stdin []byte) int {
 }
 
 // lost — связь оборвалась после 'C' (демон упал или вышел посреди запроса):
-// execve CLI с причиной LostPrefix. CLI хук не повторяет, а пишет вызов в
-// счёт уходов и в файл длительностей и выходит с кодом 1 и строкой в stderr
-// (LostMessage). CLI не запустился — та же строка от прокси, код 1
+// execve CLI с причиной LostPrefix. Pre-tool-use повторяет проверку; остальные
+// хуки только записываются. Если CLI для pre-tool-use не запустился, прокси
+// завершает вызов кодом 2 с просьбой повторить команду.
 func (p *proxy) lost(stdin []byte, err error) int {
 	p.close()
 	return p.fallback(stdin, true, LostPrefix+err.Error())
@@ -304,6 +304,9 @@ func (p *proxy) fallback(stdin []byte, consumed bool, reason string) int {
 	cli := cliPath()
 	if consumed {
 		if err := replaceStdin(stdin); err != nil {
+			if lostPreToolUse(p.args, reason) {
+				return interruptedPreToolUse("stdin для " + cli + ": " + err.Error())
+			}
 			_, _ = os.Stderr.WriteString("chooks-hook: stdin для " + cli + ": " + err.Error() + "\n") //nolint:ignored-error // при ошибке stderr сообщить её больше некуда
 			return 1
 		}
@@ -311,11 +314,23 @@ func (p *proxy) fallback(stdin []byte, consumed bool, reason string) int {
 	argv := append([]string{cli}, p.args[min(1, len(p.args)):]...)
 	env := withEnv(os.Environ(), EnvFallback, strings.ReplaceAll(reason, "\n", " "))
 	err := syscall.Exec(cli, argv, env)
+	if lostPreToolUse(p.args, reason) {
+		return interruptedPreToolUse("запасной путь " + cli + ": " + err.Error())
+	}
 	if Lost(reason) {
 		_, _ = os.Stderr.WriteString(LostMessage(reason)) //nolint:ignored-error // при ошибке stderr сообщить её больше некуда
 	}
 	_, _ = os.Stderr.WriteString("chooks-hook: запасной путь " + cli + ": " + err.Error() + "\n") //nolint:ignored-error // при ошибке stderr сообщить её больше некуда
 	return 1
+}
+
+func lostPreToolUse(args []string, reason string) bool {
+	return Lost(reason) && len(args) > 1 && args[1] == "pre-tool-use"
+}
+
+func interruptedPreToolUse(cause string) int {
+	_, _ = fmt.Fprintf(os.Stderr, "chooks-hook: проверка прервана, повтори команду: %s\n", cause)
+	return 2
 }
 
 func socketPath() string {

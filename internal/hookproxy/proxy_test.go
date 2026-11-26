@@ -274,7 +274,8 @@ func TestRefusalPassesReason(t *testing.T) {
 }
 
 // Сценарий 1: после «принято» обрыв — до результата или посреди него — CLI
-// зовётся один раз с причиной «lost: …» (он хук не повторяет, а записывает
+// зовётся один раз с причиной «lost: …» (pre-tool-use повторяет проверку,
+// остальные хуки записывают
 // вызов: ревью 8f10b59, п. 3), неполный вывод не отдаётся
 func TestDropAfterAcceptDoesNotRetry(t *testing.T) {
 	for name, tail := range map[string][]byte{
@@ -302,6 +303,55 @@ func TestDropAfterAcceptDoesNotRetry(t *testing.T) {
 				t.Fatalf("CLI stdin %q %v", data, err)
 			}
 		})
+	}
+}
+
+func TestLostPreToolUseExecFailureBlocks(t *testing.T) {
+	d := startFake(t, func(conn *net.UnixConn, _ hookwire.Request) {
+		_, _ = conn.Write([]byte{hookwire.Accepted})
+		if b, err := readByte(conn, 5*time.Second); err != nil || b != hookwire.Commit {
+			t.Errorf("commit: %q %v", b, err)
+		}
+	})
+	stub := newCLIStub(t)
+	r := runProxyWithEnv(t, d.path, stub, []byte(`{}`), []string{EnvCLI + "=/nonexistent/chooks"}, "pre-tool-use")
+	if r.code != 2 || !strings.Contains(r.stderr, "проверка прервана, повтори команду") || strings.Contains(r.stderr, "хук не повторён") {
+		t.Fatalf("code %d stderr %q", r.code, r.stderr)
+	}
+}
+
+func TestNonLostPreToolUseExecFailureKeepsErrorCode(t *testing.T) {
+	stub := newCLIStub(t)
+	r := runProxyWithEnv(t, filepath.Join(t.TempDir(), "no-daemon.sock"), stub, []byte(`{}`), []string{EnvCLI + "=/nonexistent/chooks"}, "pre-tool-use")
+	if r.code != 1 || strings.Contains(r.stderr, "проверка прервана, повтори команду") {
+		t.Fatalf("code %d stderr %q", r.code, r.stderr)
+	}
+}
+
+func TestLostPreToolUseStdinReplacementFailureBlocks(t *testing.T) {
+	strace, err := exec.LookPath("strace")
+	if err != nil {
+		t.Skip("strace is not installed")
+	}
+	d := startFake(t, func(conn *net.UnixConn, _ hookwire.Request) {
+		_, _ = conn.Write([]byte{hookwire.Accepted})
+		if b, err := readByte(conn, 5*time.Second); err != nil || b != hookwire.Commit {
+			t.Errorf("commit: %q %v", b, err)
+		}
+	})
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(strace, "-f", "-qq", "-e", "trace=memfd_create", "-e", "inject=memfd_create:error=EMFILE", exe, "pre-tool-use")
+	cmd.Env = append(os.Environ(), proxyHelper+"=1", EnvSocket+"="+d.path, EnvCLI+"=/unused/chooks")
+	cmd.Stdin = strings.NewReader(`{}`)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err = cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 || !strings.Contains(stderr.String(), "проверка прервана, повтори команду") {
+		t.Fatalf("error %v stdout %q stderr %q", err, stdout.String(), stderr.String())
 	}
 }
 

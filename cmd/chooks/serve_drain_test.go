@@ -192,44 +192,70 @@ func TestProxyLostAfterCommitIsRecorded(t *testing.T) {
 	}
 }
 
-// Ревью 8f10b59, п. 3, pre-tool-use: обрыв после 'C' без исполнения — та же
-// запись. Демон — заглушка: «принято», 'C', закрытие
+// Обрыв после 'C': pre-tool-use повторяет проверку, остальные хуки сохраняют
+// прежнее поведение. Демон — заглушка: «принято», 'C', закрытие
 func TestProxyLostPreToolUse(t *testing.T) {
-	home := t.TempDir()
-	writeFiles(t, home, map[string]string{".config/chooks/config.yaml": serveConfig})
-	socket := filepath.Join(socketDir(t), "drop.sock")
-	listener, err := listenSocket(socket)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name, hook, input, stderr string
+		code                      int
+	}{
+		{name: "denied model", hook: hookPreToolUse, input: `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"claude -p --model haiku hi"}}`, code: exitBlocked, stderr: `модель "haiku" не одобрена`},
+		{name: "allowed command", hook: hookPreToolUse, input: `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}`, code: exitAllowed},
+		{name: "check interrupted", hook: hookPreToolUse, input: `not json`, code: exitBlocked, stderr: "проверка прервана, повтори команду"},
+		{name: "stop is not repeated", hook: hookStop, input: `{}`, code: exitError, stderr: "после «принято», хук не повторён"},
 	}
-	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			conn, err := listener.AcceptUnix()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeFiles(t, home, map[string]string{
+				".config/chooks/config.yaml": serveConfig,
+				".config/models/approved":    "opus claude-opus-5-5\nsonnet claude-sonnet-5-5\n",
+			})
+			socket := filepath.Join(socketDir(t), "drop.sock")
+			listener, err := listenSocket(socket)
 			if err != nil {
-				return
+				t.Fatal(err)
 			}
-			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-			buf := make([]byte, 64<<10)
-			_, _ = conn.Read(buf)
-			_, _ = conn.Write([]byte{hookwire.Accepted})
-			_, _ = conn.Read(buf[:1])
-			_ = conn.Close()
-		}
-	}()
-	runs := filepath.Join(home, "cli-runs")
-	r := runBinary(t, proxyHelper, []string{hookPreToolUse}, proxyEnv(t, absoluteEnv(home), socket, runs), home, []byte(preToolUseLS))
-	if r.code != exitError || !strings.Contains(r.stderr, "после «принято», хук не повторён") {
-		t.Fatalf("code %d stdout %q stderr %q", r.code, r.stdout, r.stderr)
-	}
-	reasons := lines(readFile(t, runs))
-	rows := durationLines(t, home)
-	if len(reasons) != 1 || !hookproxy.Lost(reasons[0]) || len(rows) != 1 || len(rows[0]) != 8 ||
-		rows[0][5] != statusLost || rows[0][6] != executorDaemon || rows[0][7] != reasons[0] {
-		t.Fatalf("reasons %q tsv %q", reasons, rows)
-	}
-	if events := fallbackEvents(t, home); len(events) != 1 || !hookproxy.Lost(events[0].Reason) {
-		t.Fatalf("fallback count %+v", events)
+			t.Cleanup(func() { _ = listener.Close() })
+			go func() {
+				for {
+					conn, err := listener.AcceptUnix()
+					if err != nil {
+						return
+					}
+					_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+					buf := make([]byte, 64<<10)
+					_, _ = conn.Read(buf)
+					_, _ = conn.Write([]byte{hookwire.Accepted})
+					_, _ = conn.Read(buf[:1])
+					_ = conn.Close()
+				}
+			}()
+			runs := filepath.Join(home, "cli-runs")
+			r := runBinary(t, proxyHelper, []string{tt.hook}, proxyEnv(t, absoluteEnv(home), socket, runs), home, []byte(tt.input))
+			if r.code != tt.code || (tt.stderr != "" && !strings.Contains(r.stderr, tt.stderr)) {
+				t.Fatalf("code %d stdout %q stderr %q, want code %d containing %q", r.code, r.stdout, r.stderr, tt.code, tt.stderr)
+			}
+			reasons := lines(readFile(t, runs))
+			if len(reasons) != 1 || !hookproxy.Lost(reasons[0]) {
+				t.Fatalf("fallback reasons %q", reasons)
+			}
+			if tt.hook == hookPreToolUse {
+				rows := durationLines(t, home)
+				if len(rows) != 1 || len(rows[0]) != 8 || rows[0][1] != tt.hook || rows[0][5] != statusLostRetried || rows[0][6] != executorCLI || rows[0][7] != reasons[0] {
+					t.Fatalf("duration rows %q", rows)
+				}
+				if events := fallbackEvents(t, home); len(events) != 1 || events[0].Hook != tt.hook || events[0].Reason != reasons[0] {
+					t.Fatalf("fallback count %+v", events)
+				}
+				if tt.name == "check interrupted" {
+					log := readFile(t, filepath.Join(home, ".claude", "logs", "chooks.log"))
+					if !strings.Contains(log, "pre-tool-use check failed after daemon connection loss") || !strings.Contains(log, "invalid character") {
+						t.Fatalf("original check error missing from log: %s", log)
+					}
+				}
+			}
+		})
 	}
 }
 

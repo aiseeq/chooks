@@ -371,7 +371,11 @@ func prepareHookRun(ctx context.Context, hookType string, request hookctx.Contex
 	lost := false
 	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); cli && hookproxy.Lost(reason) {
 		lost = true
-		timer.setExecutor(executorDaemon, reason)
+		executor := executorDaemon
+		if hookType == hookPreToolUse {
+			executor = executorCLI
+		}
+		timer.setExecutor(executor, reason)
 	}
 	return ctx, request, timer, cli, terminated, lost
 }
@@ -393,10 +397,14 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	// закрывает файл сам — последним, после строк таймера, и на пути ошибки
 	var logger core.FileLogger
 	defer func() {
+		code, err = lostPreToolUseResult(lost, hookType, logger, code, err)
 		status := "ok"
 		switch {
 		case lost:
 			status = statusLost
+			if hookType == hookPreToolUse {
+				status = statusLostRetried
+			}
 		case err != nil || code == exitError:
 			status = "error"
 		}
@@ -435,12 +443,9 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	timer.setLogger(logger)
 	timer.setDurations(config.Logger)
 	noteCLIFallback(ctx, config, request, hookType, logger)
-	if lost {
-		reason, _ := ctx.Value(fallbackReasonKey{}).(string)
-		if _, writeErr := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); writeErr != nil {
-			logger.Warn("lost hook message not written", "hook", hookType, "error", writeErr)
-		}
-		return exitError, nil
+	handled, lostCode, lostErr := handleLostHook(ctx, hookType, lost, request, logger)
+	if handled {
+		return lostCode, lostErr
 	}
 
 	// Тень: CLI, исполняющий хук сам (не запасной путь прокси), шлёт демону
@@ -459,6 +464,27 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		shadow.send(code, err)
 	}
 	return code, err
+}
+
+func handleLostHook(ctx context.Context, hookType string, lost bool, request hookctx.Context, logger core.Logger) (bool, int, error) {
+	if !lost || hookType == hookPreToolUse {
+		return false, exitAllowed, nil
+	}
+	reason, _ := ctx.Value(fallbackReasonKey{}).(string)
+	if _, err := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); err != nil {
+		logger.Warn("lost hook message not written", "hook", hookType, "error", err)
+	}
+	return true, exitError, nil
+}
+
+func lostPreToolUseResult(lost bool, hookType string, logger core.Logger, code int, err error) (int, error) {
+	if !lost || hookType != hookPreToolUse || err == nil {
+		return code, err
+	}
+	if logger != nil {
+		logger.Error("pre-tool-use check failed after daemon connection loss", "error", err)
+	}
+	return exitBlocked, fmt.Errorf("проверка прервана, повтори команду")
 }
 
 // dispatchHook — работа подкоманды хука после конфига и лога: её же зовёт

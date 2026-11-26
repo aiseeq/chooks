@@ -43,8 +43,9 @@ const (
 )
 
 // statusLost — исход вызова, у которого связь прокси с демоном оборвалась
-// после 'C': CLI его не повторял (hookproxy.Lost)
+// после 'C', и повторная проверка CLI не запускалась
 const statusLost = "lost"
+const statusLostRetried = "lost-retried"
 
 // timeoutSlack — насколько раньше своего таймаута SIGTERM считается всё же
 // таймаутом: таймер Claude Code стартует раньше процесса, отсчёт которого под

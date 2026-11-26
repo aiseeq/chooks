@@ -2,7 +2,7 @@ package tools
 
 import "testing"
 
-// Мера мастера (тикет wide-search-shallow-find): find с -maxdepth ≤ 3 без другого широкого обхода подсказку не даёт
+// Мера мастера: литеральная глубина до 3 у find и rg без другого широкого обхода не даёт подсказку.
 func TestWideSearchMaxdepth(t *testing.T) {
 	const home = "/home/u"
 	cases := []struct {
@@ -10,6 +10,39 @@ func TestWideSearchMaxdepth(t *testing.T) {
 		wide               bool
 	}{
 		{"find ~ -maxdepth 1", "find ~ -maxdepth 1 -name x", "/tmp", false},
+		{"du -d 1", "du -d 1 ~", "/tmp", true},
+		{"du -d1", "du -d1 ~", "/tmp", true},
+		{"du -sh --max-depth=1", "du -sh --max-depth=1 ~", "/tmp", true},
+		{"du --max-depth 2", "du --max-depth 2 ~", "/tmp", true},
+		{"du -hd1", "du -hd1 ~", "/tmp", true},
+		{"rg --max-depth 2", "rg --max-depth 2 x ~", "/tmp", false},
+		{"rg --max-depth=2", "rg --max-depth=2 x ~", "/tmp", false},
+		{"rg --maxdepth 1", "rg --maxdepth 1 x ~", "/tmp", false},
+		{"rg --maxdepth=1", "rg --maxdepth=1 x ~", "/tmp", false},
+		{"rg -d 3", "rg -d 3 x ~", "/tmp", false},
+		{"rg -d1 слитно", "rg -d1 x ~", "/tmp", false},
+		{"rg --color=never перед -d", "rg --color=never -d 1 x ~", "/tmp", false},
+		{"du -shd со значением следующим словом", "du -shd 1 ~", "/tmp", true},
+		{"du -d 4", "du -d 4 ~", "/tmp", true},
+		{"rg --max-depth 5", "rg --max-depth 5 x ~", "/tmp", true},
+		{"du без глубины", "du -s ~", "/tmp", true},
+		{"rg без глубины", "rg x ~", "/tmp", true},
+		{"du глубина с переменной", `du -d "$N" ~`, "/tmp", true},
+		{"rg -- после", "rg -- -d1 ~", "/tmp", true},
+		{"rg глубина -1", "rg -d -1 x ~", "/tmp", true},
+		{"rg длинная опция с d и цифрой", "rg --max-depth-extra=1 x ~", "/tmp", true},
+		{"rg -ed1 — значение regexp", "rg -ed1 ~", "/tmp", true},
+		{"rg -tmd 2 — значение type", "rg -tmd 2 ~", "/tmp", true},
+		{"rg -gd1 — значение glob", "rg -gd1 x ~", "/tmp", true},
+		{"rg -Td1 — значение type-not", "rg -Td1 x ~", "/tmp", true},
+		{"rg -rd1 — значение replace", "rg -rd1 x ~", "/tmp", true},
+		{"rg -Ed1 — значение encoding", "rg -Ed1 x ~", "/tmp", true},
+		{"rg -e -d1 — regexp затем шаблон", "rg -e -d1 ~", "/tmp", true},
+		{"rg -e -d 1 — regexp затем шаблон", "rg -e -d 1 ~", "/tmp", true},
+		{"rg -f -d1 — файл затем шаблон", "rg -f -d1 ~", "/tmp", true},
+		{"rg -A -d1 — контекст затем шаблон", "rg -A -d1 x ~", "/tmp", true},
+		{"rg --regexp -d1 — regexp затем шаблон", "rg --regexp -d1 ~", "/tmp", true},
+		{"rg -e --max-depth=1 — значение regexp", "rg -e --max-depth=1 ~", "/tmp", true},
 		{"find ~ -maxdepth 3", "find ~ -maxdepth 3 -type d", "/tmp", false},
 		{"find ~/.cache -maxdepth 2", "find ~/.cache -maxdepth 2 -name '*.log'", "/tmp", false},
 		{"find -maxdepth после выражения", "find ~ -name x -maxdepth 2", "/tmp", false},
@@ -27,6 +60,8 @@ func TestWideSearchMaxdepth(t *testing.T) {
 		{"-maxdepth только внутри -execdir", "find ~ -name x -execdir ls -maxdepth 1 {} +", "/tmp", true},
 		// мелкий find с -exec рекурсивной команды — широкий обход
 		{"мелкий find -exec du", `find ~ -maxdepth 1 -exec du -sh {} \;`, "/tmp", true},
+		{"мелкий find -exec du -d 1", `find ~ -maxdepth 1 -exec du -d 1 {} +`, "/tmp", true},
+		{"мелкий find -exec rg -d 1", `find ~ -maxdepth 1 -exec rg -d 1 x {} +`, "/tmp", false},
 		{"мелкий find -exec grep -r", "find ~ -maxdepth 2 -type d -exec grep -rl x {} +", "/tmp", true},
 		{"мелкий find -exec find", `find ~ -maxdepth 1 -type d -exec find {} -name x \;`, "/tmp", true},
 		{"мелкий find -ok du", `find ~ -maxdepth 1 -ok du -s {} \;`, "/tmp", true},

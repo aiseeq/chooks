@@ -24,6 +24,10 @@ const WideSearchHintText = "дерево большое: код — `git grep` �
 var wideRoots = []string{"", ".cache", ".cache/claude-tmp", ".cache/claude-tmp/claude-1000", "git", "work",
 	".local/state", ".local/state/worker", ".claude/projects", ".claude/improve/runs", "sc2", "sc2/demu"}
 
+// shallowSearchMaxDepth — глубина find и rg, до которой обход не считается
+// широким (тикеты wide-search-shallow-find, wide-search-depth-flags)
+const shallowSearchMaxDepth = 3
+
 // WideSearch — первый в команде рекурсивный обход большого дерева: grep -r,
 // rg, find, du, ls -R по пути из wideRoots или его предку. Относительный
 // путь и вызов без пути — от cwd (cd и pushd с известным путём, cd без
@@ -42,7 +46,7 @@ func WideSearch(command, cwd, home string) (string, error) {
 			cwd = changeDir(c, cwd, home)
 			continue
 		}
-		if c.Name == "find" && shallowFind(c.Args) {
+		if shallowTraversal(c) {
 			if !hasUnknownRecursivePath(calls, home) {
 				continue
 			}
@@ -96,8 +100,110 @@ func shallowFind(args []string) bool {
 	if !foundDepth || recursiveExec {
 		return false
 	}
-	n, err := strconv.Atoi(maxDepth)
-	return err == nil && n <= 3
+	return depthInRange(maxDepth)
+}
+
+func shallowTraversal(c *shellcmd.Call) bool {
+	switch c.Name {
+	case "find":
+		return shallowFind(c.Args)
+	case "rg":
+		return shallowDepth(c.Args)
+	default:
+		return false
+	}
+}
+
+// shallowDepth — литеральная глубина rg (-d N, -dN, --max-depth[=]N,
+// --maxdepth[=]N); действует последняя, как у самого rg.
+func shallowDepth(args []string) bool {
+	var depth string
+	found := false
+	for i := 0; i < len(args); i++ {
+		value, hasDepth, skip, stop := rgDepthArg(args, i)
+		if stop {
+			break
+		}
+		if hasDepth {
+			depth, found = value, true
+		}
+		i += skip
+	}
+	return found && depthInRange(depth)
+}
+
+func rgDepthArg(args []string, i int) (depth string, found bool, skip int, stop bool) {
+	a := args[i]
+	if a == "--" {
+		return "", false, 0, true
+	}
+	if value, ok := rgDepthValue(a); ok {
+		return value, true, 0, false
+	}
+	if strings.HasPrefix(a, "--") {
+		return rgLongDepthArg(args, i)
+	}
+	return rgShortDepthArg(args, i)
+}
+
+func rgLongDepthArg(args []string, i int) (depth string, found bool, skip int, stop bool) {
+	a := args[i]
+	if a == "--max-depth" || a == "--maxdepth" {
+		if i+1 < len(args) {
+			return args[i+1], true, 1, false
+		}
+		return "", true, 0, false
+	}
+	name, _, hasValue := strings.Cut(a, "=")
+	if slices.Contains(rgValueOpts, name) && !hasValue && i+1 < len(args) {
+		return "", false, 1, false
+	}
+	return "", false, 0, false
+}
+
+func rgShortDepthArg(args []string, i int) (depth string, found bool, skip int, stop bool) {
+	a := args[i]
+	if len(a) < 2 || a[0] != '-' {
+		return "", false, 0, false
+	}
+	for j := 1; j < len(a); j++ {
+		opt := "-" + a[j:j+1]
+		if !slices.Contains(rgValueOpts, opt) {
+			continue
+		}
+		if opt == "-d" {
+			if j+1 < len(a) {
+				return a[j+1:], true, 0, false
+			}
+			if i+1 < len(args) {
+				return args[i+1], true, 1, false
+			}
+			return "", true, 0, false
+		}
+		if j == len(a)-1 && i+1 < len(args) {
+			return "", false, 1, false
+		}
+		return "", false, 0, false
+	}
+	return "", false, 0, false
+}
+
+func rgDepthValue(arg string) (string, bool) {
+	for _, name := range []string{"--max-depth", "--maxdepth"} {
+		if arg == name {
+			return "", false
+		}
+		if value, ok := strings.CutPrefix(arg, name+"="); ok {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+// depthInRange — глубина литералом от 0 до shallowSearchMaxDepth
+func depthInRange(depth string) bool {
+	n, err := strconv.Atoi(depth)
+	return err == nil && n >= 0 && n <= shallowSearchMaxDepth
 }
 
 func isFindExec(arg string) bool {
@@ -129,7 +235,7 @@ func execWalksRecursively(args []string) bool {
 	for i := range parsed {
 		c := &parsed[i]
 
-		if c.Name == "find" && shallowFind(c.Args) {
+		if shallowTraversal(c) {
 			continue
 		}
 		if _, recursive := walkPaths(c); recursive {
@@ -338,8 +444,10 @@ func directoriesRecurse(args []string) bool {
 
 func rgPaths(c *shellcmd.Call) []walkArg {
 	patternGiven := slices.Contains(c.Args, "--files") || hasFlag(c.Args, 'e', "--regexp") || hasFlag(c.Args, 'f', "--file")
-	return positional(c, []string{"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-M", "-j", "-d", "-E", "-r", "--regexp", "--file", "--glob", "--iglob", "--type", "--type-not", "--max-count", "--context", "--after-context", "--before-context", "--max-columns", "--threads", "--max-depth", "--max-filesize", "--encoding", "--replace", "--type-add", "--type-clear", "--sort", "--sortr", "--ignore-file", "--pre", "--pre-glob", "--color", "--colors", "--context-separator", "--field-context-separator", "--field-match-separator", "--path-separator", "--dfa-size-limit", "--regex-size-limit", "--engine", "--hostname-bin", "--hyperlink-format"}, !patternGiven)
+	return positional(c, rgValueOpts, !patternGiven)
 }
+
+var rgValueOpts = []string{"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-M", "-j", "-d", "-E", "-r", "--regexp", "--file", "--glob", "--iglob", "--type", "--type-not", "--max-count", "--context", "--after-context", "--before-context", "--max-columns", "--threads", "--max-depth", "--maxdepth", "--max-filesize", "--encoding", "--replace", "--type-add", "--type-clear", "--sort", "--sortr", "--ignore-file", "--pre", "--pre-glob", "--color", "--colors", "--context-separator", "--field-context-separator", "--field-match-separator", "--path-separator", "--dfa-size-limit", "--regex-size-limit", "--engine", "--hostname-bin", "--hyperlink-format"}
 
 // findPaths — начальные точки find: слова до первого выражения
 func findPaths(c *shellcmd.Call) []walkArg {

@@ -99,7 +99,7 @@ func TestModelGuardClientWordValuesReview(t *testing.T) {
 		{"brace export", `export {CLAUDE_CODE_SIMPLE,Y}=1; claude -p --model opus hi`, false, "имя"},
 		{"env substitution", `env $(cat /tmp/envf) claude -p --model opus hi`, false, "окружение"},
 		{"env split", `env -S 'CLAUDE_CODE_SIMPLE=1 claude -p --model opus hi'`, false, "окружение"},
-		{"tmux environment", `tmux new-session -d -e CLAUDE_CODE_SIMPLE=1 'claude -p --model opus hi'`, false, "окружение"},
+		{"tmux environment", `tmux new-session -d -e CLAUDE_CODE_SIMPLE=1 'claude -p --model opus hi'`, false, "CLAUDE_CODE_SIMPLE у клиента claude"},
 		{"empty substitution advice", `X=; claude -p --model opus $X hi`, false, "убери пустую подстановку"},
 	})
 }
@@ -148,8 +148,8 @@ func TestModelGuardWordValuesSecondReview(t *testing.T) {
 		{"client only in printed path", `printf '%s' /tmp/bin/claude; env -i HOME=/tmp "$@" /tmp/tool`, true, ""},
 		{"client only in mock path", `S=/tmp; printf '%s' /tmp/bin/claude; env -i HOME=/tmp "$@" $S/cl $ARGS`, true, ""},
 		{"env dynamic unset", `env -u "$NAME" claude -p --model opus hi`, false, "окружение"},
-		{"tmux attached env", `tmux new-session -d -eCLAUDE_CODE_SIMPLE=1 'claude -p --model opus hi'`, false, "окружение"},
-		{"tmux set env", `tmux set-environment -g CLAUDE_CODE_SIMPLE 1; tmux new-session -d 'claude -p --model opus hi'`, false, "окружение"},
+		{"tmux attached env", `tmux new-session -d -eCLAUDE_CODE_SIMPLE=1 'claude -p --model opus hi'`, false, "CLAUDE_CODE_SIMPLE у клиента claude"},
+		{"tmux set env", `tmux set-environment -g CLAUDE_CODE_SIMPLE 1; tmux new-session -d 'claude -p --model opus hi'`, false, "CLAUDE_CODE_SIMPLE у клиента claude"},
 		{"tmux session home", `tmux new-session -d "env HOME=$H CLAUDE_CONFIG_DIR=$H/.claude bash" && tmux send-keys "claude -p --model opus hi" Enter`, false, "HOME"},
 		{"tmux session cl", `tmux new-session -d -e HOME=/tmp 'cl -p --model opus hi'`, false, "HOME"},
 		{"export dynamic later arg", `X=LAUDE; export Y=1 "C${X}_CODE_SIMPLE=1"; claude -p --model opus hi`, false, "окружение"},
@@ -263,14 +263,14 @@ func TestClientUnknownIFSAndLoopWrites(t *testing.T) {
 }
 
 func TestLiteralWrapperClientWithoutUnwrappedCall(t *testing.T) {
-	for _, command := range []string{
-		`env -S 'CLAUDE_CODE_SIMPLE=1 cl -p hi'`,
-		`tmux new-session -e HOME=/tmp 'cl -p hi'`,
-	} {
-		hazard, err := environmentHazard(command, false, "")
-		if err != nil || !hazard {
-			t.Fatalf("%s: hazard=%v err=%v", command, hazard, err)
-		}
+	hazard, err := environmentHazard(`env -S 'CLAUDE_CODE_SIMPLE=1 cl -p hi'`, false)
+	if err != nil || !hazard {
+		t.Fatalf("env -S: hazard=%v err=%v", hazard, err)
+	}
+	// окружение сессии tmux судит текст, который tmux отдаст оболочке
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	if result := modelGuardTmuxVerdict(t, tool, `tmux new-session -e HOME=/tmp 'cl -p hi'`, t.TempDir()); result.IsValid {
+		t.Fatal("tmux session with HOME=/tmp allowed")
 	}
 }
 

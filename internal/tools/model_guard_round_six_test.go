@@ -34,7 +34,7 @@ func TestRoundSixEnvironmentHazardWholeCommand(t *testing.T) {
 		{`claude -p --model opus hi; export "$N=1"`, true},
 		{`echo hi; export "$N=1"`, false},
 	} {
-		got, err := environmentHazard(tc.command, true, "/home/aisee")
+		got, err := environmentHazard(tc.command, true)
 		if err != nil || got != tc.want {
 			t.Errorf("%q: hazard=%v err=%v, want %v", tc.command, got, err, tc.want)
 		}
@@ -60,8 +60,8 @@ func TestRoundSixEnvironmentControlParseError(t *testing.T) {
 
 func TestRoundSixTmuxClientWithExpandedArguments(t *testing.T) {
 	command := `tmux new-session -d "env HOME=$H CLAUDE_CONFIG_DIR=$H/.claude bash" && tmux send-keys "$R/cl -p hi" Enter`
-	hazard, err := environmentHazard(command, false, "/home/aisee")
-	if err != nil || !hazard {
-		t.Fatalf("hazard=%v err=%v, want refusal for the tmux environment", hazard, err)
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	if result := modelGuardTmuxVerdict(t, tool, command, t.TempDir()); result.IsValid {
+		t.Fatal("tmux session environment from variables allowed")
 	}
 }

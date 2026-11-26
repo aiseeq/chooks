@@ -67,6 +67,9 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 	if result := t.validateShellPrefix(input); result != nil {
 		return result, nil
 	}
+	if result := t.validateTmuxShellPrefix(input); result != nil {
+		return result, nil
+	}
 	candidates := modelCandidates(ctx, input, t.Logger())
 	if len(candidates) == 0 {
 		return &core.ValidationResult{IsValid: true}, nil
@@ -196,7 +199,9 @@ type modelCandidate struct {
 	clientOption string
 }
 
-func modelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
+// commandModelCandidates — кандидаты самой команды; текст, который она отдаёт
+// оболочке через tmux, добавляет modelCandidates
+func commandModelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
 	if input.ToolName != "Agent" && !core.IsShellTool(input.ToolName) {
 		return nil
 	}
@@ -1279,7 +1284,7 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 		found = append(found, writtenProtectedFileCandidates(command)...)
 		found = append(found, clientEnvironmentCandidates(command, calls, home, logger)...)
 	}
-	environmentUnknown, environmentErr := environmentHazard(command, claude, home)
+	environmentUnknown, environmentErr := environmentHazard(command, claude)
 	if environmentErr != nil {
 		logger.Warn("model_guard: окружение не разобрано", "error", environmentErr)
 	}

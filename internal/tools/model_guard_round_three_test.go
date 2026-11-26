@@ -92,47 +92,12 @@ func TestModelGuardRoundFourMutationCases(t *testing.T) {
 	})
 }
 
-func TestRoundFourTmuxDefaultHome(t *testing.T) {
-	for _, tc := range []struct {
-		command string
-		home    string
-		want    bool
-	}{
-		{`tmux new -d -s s -e HOME=/home/aisee 'claude -p --model opus hi'`, "/home/aisee", false},
-		{`tmux new -d -s s -e HOME=/home/aisee 'claude --print --model opus hi'`, "/home/aisee", false},
-		{`tmux new -d -s s -e HOME=/home/aisee 'cl -p --model opus hi'`, "/home/aisee", false},
-		{`tmux new -d -s s -e HOME=/home/aisee 'claude --model opus'`, "/home/aisee", true},
-		{`tmux new -d -s s -e HOME=/home/aisee 'claude -p --model opus hi'`, "/home/other", true},
-		{`tmux new -d -eHOME=/home/aisee 'claude -p --model opus hi'`, "/home/aisee", false},
-		{`tmux new -d -e HOME=/tmp/x 'claude -p --model opus hi'`, "/home/aisee", true},
-		{`tmux new -d -e 'HOME=~' 'claude -p --model opus hi'`, "/home/aisee", true},
-		{`tmux new -d -e HOME=relative 'claude -p --model opus hi'`, "relative", true},
-		{`tmux new -d -e HOME= 'claude -p --model opus hi'`, "", true},
-	} {
-		got, err := environmentHazard(tc.command, true, tc.home)
-		if err != nil || got != tc.want {
-			t.Errorf("%q with HOME=%q: hazard=%v err=%v, want %v", tc.command, tc.home, got, err, tc.want)
-		}
-	}
-}
-
 func TestRoundFourEnvOptionValues(t *testing.T) {
 	for _, option := range []string{"-C", "--chdir", "-u", "--unset"} {
 		args := []envArgument{{option, true}, {"$VALUE", false}, {"claude", true}}
 		if !envArgumentsHazard(args, true) {
 			t.Errorf("%s with an unknown value must be refused", option)
 		}
-	}
-}
-
-func TestRoundFourPrintClientAlias(t *testing.T) {
-	file, err := syntax.NewParser().Parse(strings.NewReader(`tmux new 'cl -p --model opus hi'`), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	call := file.Stmts[0].Cmd.(*syntax.CallExpr)
-	if !tmuxPrintClient(call.Args[1:]) {
-		t.Fatal("cl -p should be recognized as a print client")
 	}
 }
 
@@ -199,7 +164,8 @@ func TestModelGuardRoundThreeEnvironmentOrder(t *testing.T) {
 		{"R57", "\\env -S 'CLAUDE_CODE_SIMPLE=1 claude -p --model opus hi'", false, ""},
 		{"G18", "tmux new -d -s x -e TERM=xterm 'claude --model opus'", true, ""},
 		{"G19", "tmux new -d -s s -e FOO=1 'claude -p --model opus hi'", true, ""},
-		{"T06", "tmux new -d -s s -e CLAUDE_CODE_EFFORT_LEVEL=high 'claude --model opus'", true, ""},
+		// переменная не из списка известных: отказ, как у прямой формы (new:F04)
+		{"T06", "tmux new -d -s s -e CLAUDE_CODE_EFFORT_LEVEL=high 'claude --model opus'", false, "не в списке известных"},
 		{"T01", "tmux capture-pane -p -e -t s; tmux send-keys -t s 'claude -p --model opus hi' Enter", true, ""},
 		{"nested timeout env", `tmux new -d 'timeout 5 env HOME=/tmp/x claude -p --model opus hi'`, false, ""},
 		{"nested shell env", `tmux new -d 'bash -c "env HOME=/tmp/x claude -p --model opus hi"'`, false, ""},
@@ -210,8 +176,8 @@ func TestModelGuardRoundThreeEnvironmentOrder(t *testing.T) {
 func TestModelGuardRoundThreeEnvironmentAdvice(t *testing.T) {
 	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
 	runClientOptionCases(t, tool, []clientOptionCase{
-		{"Q85", `tmux new -d 'env HOME=/tmp/x claude -p --model opus hi'`, false, "убери присваивания HOME"},
-		{"K04", `tmux new -d -s s "env HOME=/tmp/x bash" && tmux send-keys -t s claude Enter`, false, "убери присваивания HOME"},
+		{"Q85", `tmux new -d 'env HOME=/tmp/x claude -p --model opus hi'`, false, "переменная HOME у клиента claude"},
+		{"K04", `tmux new -d -s s "env HOME=/tmp/x bash" && tmux send-keys -t s claude Enter`, false, "переменная HOME у клиента claude"},
 	})
 }
 
@@ -261,17 +227,14 @@ func TestRoundThreeUnknownCommandMayWriteValue(t *testing.T) {
 
 func TestRoundThreeEnvironmentParserBoundaries(t *testing.T) {
 	command := `echo claude; export "$N=1"`
-	if hazard, err := environmentHazard(command, false, ""); err != nil || hazard {
+	if hazard, err := environmentHazard(command, false); err != nil || hazard {
 		t.Fatalf("no client: hazard=%v, err=%v", hazard, err)
 	}
-	if hazard, err := environmentHazard(command, true, ""); err != nil || !hazard {
+	if hazard, err := environmentHazard(command, true); err != nil || !hazard {
 		t.Fatalf("whole command: hazard=%v, err=%v", hazard, err)
 	}
 	if !slices.Contains(clientEnvironmentNames(`echo $'CLAUDE_CODE_\x53IMPLE'`), "CLAUDE_CODE_SIMPLE") {
 		t.Fatal("escaped environment name was not decoded")
-	}
-	if !tmuxSessionCommandHazard(`bash -c 'env HOME=/tmp/x claude -p --model opus hi'`) {
-		t.Fatal("nested session shell can replace HOME")
 	}
 }
 
@@ -368,18 +331,6 @@ func TestRoundFourShellWrappersAreNotExternal(t *testing.T) {
 		if shellSafeExternal(name) {
 			t.Errorf("%q can execute shell builtins and must not be classified as external", name)
 		}
-	}
-}
-
-func TestRoundFourTmuxSessionUnknownInput(t *testing.T) {
-	if !tmuxSessionCommandHazard(`echo | bash -s; cat <(x)`) {
-		t.Fatal("shell script read from an unknown pipe must be refused")
-	}
-	if !tmuxSessionCommandHazard(`"$PROGRAM" --model opus`) {
-		t.Fatal("a computed session command must be refused")
-	}
-	if !tmuxSessionCommandHazard(`bash -c '"$(cat /tmp/command)"'`) {
-		t.Fatal("a nested command substitution must be refused")
 	}
 }
 

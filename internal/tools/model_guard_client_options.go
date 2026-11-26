@@ -159,8 +159,9 @@ var claudeCommandOptions = map[string]map[string]claudeOption{
 var claudeEnvironmentName = regexp.MustCompile(`\b(?:CLAUDE|ANTHROPIC)_[A-Za-z0-9_]+`)
 
 // environmentHazard inspects the complete command when it invokes a client.
-func environmentHazard(command string, client bool, home string) (bool, error) {
-	if !claudeClientWord.MatchString(command) {
+func environmentHazard(command string, client bool) (bool, error) {
+	// tmuxClientWord видит и claude-code: npx @anthropic-ai/claude-code
+	if !tmuxClientWord.MatchString(command) {
 		return false, nil
 	}
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
@@ -182,7 +183,7 @@ func environmentHazard(command string, client bool, home string) (bool, error) {
 		case *syntax.DeclClause:
 			hazard = hazard || dynamicDeclaration(command, n)
 		case *syntax.CallExpr:
-			hazard = hazard || dynamicEnvironmentCall(command, n, home)
+			hazard = hazard || dynamicEnvironmentCall(command, n)
 		}
 		return true
 	})
@@ -198,12 +199,6 @@ func wrapperHasClient(file *syntax.File, command string) bool {
 		}
 		args, env := shellNestedCommandArgs(command, call, "env")
 		if !env {
-			if _, tmux := shellNestedCommandArgs(command, call, "tmux"); tmux {
-				start, end := int(call.Pos().Offset()), int(call.End().Offset())
-				if start >= 0 && start <= end && end <= len(command) && claudeClientWord.MatchString(command[start:end]) {
-					found = true
-				}
-			}
 			return true
 		}
 		for _, arg := range args {
@@ -232,14 +227,14 @@ func dynamicDeclaration(command string, decl *syntax.DeclClause) bool {
 	return false
 }
 
-func dynamicEnvironmentCall(command string, call *syntax.CallExpr, home string) bool {
+func dynamicEnvironmentCall(command string, call *syntax.CallExpr) bool {
 	if len(call.Args) == 0 {
 		return false
 	}
-	if args, ok := shellNestedCommandArgs(command, call, "env"); ok && envWordsHazard(args, false) {
+	if args, ok := shellNestedCommandArgs(command, call, "env"); ok && envWordsHazard(args) {
 		return true
 	}
-	if args, ok := shellNestedCommandArgs(command, call, "tmux"); ok && tmuxEnvironmentHazard(tmuxDefaultHomeArgs(args, home)) {
+	if args, ok := shellWrappedEnvArgs(command, call); ok && envWordsHazard(args) {
 		return true
 	}
 	name, literal := shellEffectiveCommand(call.Args)
@@ -278,58 +273,31 @@ func literalAssignmentName(word *syntax.Word) bool {
 	return assigned && syntax.ValidName(name)
 }
 
-// Normalize only a literal tmux -e HOME assignment equal to the request's
-// home. Its environment effect is already the default checked by model_guard.
-func tmuxDefaultHomeArgs(args []*syntax.Word, home string) []*syntax.Word {
-	if home == "" || !filepath.IsAbs(home) || !tmuxPrintClient(args) {
-		return args
+// shellWrappedEnvArgs — слова после env, который shellcmd снял обёрткой
+// вызова (timeout 9 env -u HOME claude: вызов — claude, env — в Via)
+func shellWrappedEnvArgs(source string, call *syntax.CallExpr) ([]*syntax.Word, bool) {
+	start, end := int(call.Pos().Offset()), int(call.End().Offset())
+	if start < 0 || end > len(source) || start > end {
+		return nil, false
 	}
-	result := slices.Clone(args)
-	previousEnv := false
-	for i, arg := range args {
-		value, literal := literalValue(arg)
-		if !literal {
-			previousEnv = false
-			continue
-		}
-		assignment := value
-		attached := strings.HasPrefix(value, "-e") && len(value) > 2
-		if attached {
-			assignment = value[2:]
-		}
-		if (previousEnv || attached) && assignment == "HOME="+home {
-			replacement := "CHOOKS_DEFAULT_HOME=1"
-			if attached {
-				replacement = "-e" + replacement
-			}
-			result[i] = &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: replacement}}}
-		}
-		previousEnv = value == "-e"
+	calls, err := shellcmd.Calls(source[start:end])
+	if err != nil {
+		// error-masked-as-false-bool: safe — неразобранный вызов отказывает основной разбор
+		return nil, false
 	}
-	return result
-}
-
-// tmuxPrintClient only relaxes HOME for visible print clients.
-func tmuxPrintClient(args []*syntax.Word) bool {
-	found := false
-	for _, arg := range args {
-		value, _ := literalValue(arg)
-		calls, err := shellcmd.Calls(value)
-		// silent-error-handling: safe — a non-command word provides no client proof.
-		if err != nil {
-			continue
-		}
-		for i := range calls {
-			if !slices.Contains([]string{"claude", "cl"}, calls[i].Name) {
-				continue
-			}
-			if !slices.Contains(calls[i].Args, "-p") && !slices.Contains(calls[i].Args, "--print") {
-				return false
-			}
-			found = true
+	wrapped := false
+	for i := range calls {
+		wrapped = wrapped || slices.Contains(calls[i].Via, "env")
+	}
+	if !wrapped {
+		return nil, false
+	}
+	for i, arg := range call.Args {
+		if value, literal := literalValue(arg); literal && value == "env" {
+			return call.Args[i+1:], true
 		}
 	}
-	return found
+	return nil, false
 }
 
 // shellNestedCommandArgs locates the unwrapped program using shellcmd's own
@@ -368,158 +336,13 @@ func unsafeEnvironmentName(name string) bool {
 	return model || claudeEnvironmentName.MatchString(name) && !slices.Contains(claudeEnvironmentAllowed, name)
 }
 
-func tmuxEnvironmentValue(word *syntax.Word) bool {
-	value, literal := literalValue(word)
-	if !literal {
-		return true
-	}
-	name, _, assigned := strings.Cut(value, "=")
-	return !assigned || unsafeEnvironmentName(name)
-}
-
-func tmuxEnvironmentHazard(args []*syntax.Word) bool {
-	for i := 0; i < len(args); i++ {
-		value, literal := literalValue(args[i])
-		if !literal {
-			continue
-		}
-		if value == "-L" || value == "-S" || value == "-f" || value == "-T" {
-			i++
-			continue
-		}
-		if value == "new" || value == "new-session" {
-			return tmuxNewSessionHazard(args[i+1:])
-		}
-		if value == "setenv" || len(value) >= len("set-e") && strings.HasPrefix("set-environment", value) {
-			return tmuxSetEnvironmentHazard(args[i+1:])
-		}
-		if !strings.HasPrefix(value, "-") {
-			return false
-		}
-	}
-	return false
-}
-
-func tmuxSetEnvironmentHazard(args []*syntax.Word) bool {
-	for _, arg := range args {
-		value, literal := literalValue(arg)
-		if !literal {
-			return true
-		}
-		if strings.HasPrefix(value, "-") {
-			continue
-		}
-		return unsafeEnvironmentName(value)
-	}
-	return true
-}
-
-func tmuxNewSessionHazard(args []*syntax.Word) bool {
-	for i := 0; i < len(args); i++ {
-		value, literal := literalValue(args[i])
-		if !literal {
-			return true
-		}
-		if strings.HasPrefix(value, "-e") && len(value) > 2 {
-			name, _, ok := strings.Cut(value[2:], "=")
-			if !ok || unsafeEnvironmentName(name) {
-				return true
-			}
-			continue
-		}
-		if value == "-e" || strings.HasPrefix(value, "-") && strings.HasSuffix(value, "e") {
-			if i+1 >= len(args) || tmuxEnvironmentValue(args[i+1]) {
-				return true
-			}
-			i++
-			continue
-		}
-		if slices.Contains([]string{"-s", "-c", "-t", "-x", "-y", "-n"}, value) {
-			i++
-			continue
-		}
-		if !strings.HasPrefix(value, "-") {
-			return tmuxSessionCommandHazard(value)
-		}
-	}
-	return false
-}
-
-func tmuxSessionCommandHazard(command string) bool {
-	calls, callsErr := shellcmd.Calls(command)
-	// error-masking: safe — an unparsed session command is refused.
-	if callsErr != nil {
-		return true
-	}
-	wrappedEnv := false
-	for i := range calls {
-		if calls[i].Name == "env" && sessionEnvCallHazard(calls[i].Args) {
-			return true
-		}
-		wrappedEnv = wrappedEnv || slices.Contains(calls[i].Via, "env")
-		if calls[i].Name == "" || calls[i].ScriptInput {
-			return true
-		}
-	}
-	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
-	// error-masking: safe — true denotes refusal of an unparsed session command.
-	if err != nil {
-		return true
-	}
-	hazard := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
-		}
-		_, literal := shellEffectiveCommand(call.Args)
-		if !literal {
-			hazard = true
-			return true
-		}
-		hazard = hazard || sessionWrappedEnvHazard(command, call, wrappedEnv)
-		for _, assign := range call.Assigns {
-			if assign.Name == nil || unsafeEnvironmentName(assign.Name.Value) {
-				hazard = true
-			}
-		}
-		return true
-	})
-	return hazard
-}
-
-func sessionWrappedEnvHazard(command string, call *syntax.CallExpr, wrappedEnv bool) bool {
-	if args, ok := shellNestedCommandArgs(command, call, "env"); ok && envWordsHazard(args, true) {
-		return true
-	}
-	if wrappedEnv {
-		for i, arg := range call.Args {
-			if value, literal := literalValue(arg); literal && value == "env" {
-				return envWordsHazard(call.Args[i+1:], true)
-			}
-		}
-	}
-	return false
-}
-
-func sessionEnvCallHazard(args []string) bool {
-	values := make([]envArgument, len(args))
-	for i, arg := range args {
-		values[i] = envArgument{arg, !computedArg(arg)}
-	}
-	return envArgumentsHazard(values, true)
-}
-
-func envWordsHazard(args []*syntax.Word, checkAssignments bool) bool {
+func envWordsHazard(args []*syntax.Word) bool {
 	values := make([]envArgument, len(args))
 	for i, arg := range args {
 		value, literal := literalValue(arg)
-		if checkAssignments && !literal {
-			return true
-		}
 		values[i] = envArgument{value, literal}
 	}
-	return envArgumentsHazard(values, checkAssignments)
+	return envArgumentsHazard(values, false)
 }
 
 type envArgument struct {

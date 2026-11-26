@@ -41,7 +41,7 @@ func TestRoundFiveEnvironmentHazardAfterNpx(t *testing.T) {
 		`claude -p --model opus hi; N=HOME; declare -x "$N=/tmp/x"; npx @anthropic-ai/claude-code -p --model opus hi`,
 		`claude -p --model opus hi; env --unset=HOME npx @anthropic-ai/claude-code -p --model opus hi`,
 	} {
-		if hazard, err := environmentHazard(command, true, "/home/aisee"); err != nil || !hazard {
+		if hazard, err := environmentHazard(command, true); err != nil || !hazard {
 			t.Errorf("%q: hazard=%v err=%v", command, hazard, err)
 		}
 	}

@@ -101,9 +101,45 @@ func runShadowCLI(t *testing.T, home, hook, stdin, socket string, extra ...strin
 // runShadowCLIWith — runShadowCLI с /proc запроса proc; nil — /proc машины
 func runShadowCLIWith(t *testing.T, home, hook, stdin, socket string, proc procfs.FS, extra ...string) shadowCall {
 	t.Helper()
-	env := append(absoluteEnv(home), hookproxy.EnvSocket+"="+socket, alertLogEnv+"="+filepath.Join(home, "alerts"),
+	alerts := filepath.Join(home, "alerts")
+	release, pidLog := shadowTempPath(t, home, "release-alert-"), shadowTempPath(t, home, "alert-pid-")
+	env := append(absoluteEnv(home), hookproxy.EnvSocket+"="+socket, alertLogEnv+"="+alerts,
 		"CLAUDE_PID="+strconv.Itoa(os.Getpid()), "TZ=Europe/Berlin")
 	env = append(env, extra...)
+	env = append(env, alertHoldEnv+"="+release, alertPIDLogEnv+"="+pidLog)
+	t.Cleanup(func() {
+		if err := os.WriteFile(release, nil, 0o600); err != nil {
+			t.Errorf("release detached alert writer: %v", err)
+		}
+		if hook != hookNotification {
+			return
+		}
+
+		var pid int
+		startDeadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(startDeadline) {
+			if data, err := os.ReadFile(pidLog); err == nil {
+				pid = completeAlertWriterPID(string(data))
+			}
+			if pid != 0 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if pid == 0 {
+			t.Errorf("detached alert writer did not start; pid log %q", pidLog)
+			return
+		}
+
+		exitDeadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(exitDeadline) {
+			if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); os.IsNotExist(err) {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Errorf("detached alert writer pid %d did not exit", pid)
+	})
 	var stdout, stderr bytes.Buffer
 	request := hookctx.New(strings.NewReader(stdin), &stdout, &stderr, env, filepath.Join(home, "work"), os.Getpid(), os.Getppid())
 	request.Time = shadowAt
@@ -116,6 +152,22 @@ func runShadowCLIWith(t *testing.T, home, hook, stdin, socket string, proc procf
 		fmt.Fprintf(&stderr, "chooks: %v\n", err)
 	}
 	return shadowCall{code: code, stdout: stdout.String(), stderr: stderr.String(), elapsed: elapsed}
+}
+
+func shadowTempPath(t *testing.T, dir, prefix string) string {
+	t.Helper()
+	f, err := os.CreateTemp(dir, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := f.Name()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // Входы сравниваемых подкоманд сессии s6

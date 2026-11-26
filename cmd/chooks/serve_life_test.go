@@ -46,7 +46,8 @@ const (
 	// alertHoldEnv — файл, до появления которого бинарь тестов в роли
 	// deliver-alert не выходит (не дольше 30 с): живой фоновый процесс
 	// хука. Свой pid он пишет в журнал строкой «pid N»
-	alertHoldEnv = "CHOOKS_TEST_ALERT_HOLD"
+	alertHoldEnv   = "CHOOKS_TEST_ALERT_HOLD"
+	alertPIDLogEnv = "CHOOKS_TEST_ALERT_PID_LOG"
 	// versionTrailer — метка версии в хвосте копии бинаря тестов
 	versionTrailer = "\nCHOOKS-TEST-VERSION="
 )
@@ -72,7 +73,11 @@ func recordTestAlert() int {
 	if release == "" {
 		return 0
 	}
-	appendTestLine(os.Getenv(alertLogEnv), fmt.Sprintf("pid %d", os.Getpid()))
+	pidLog := os.Getenv(alertPIDLogEnv)
+	if pidLog == "" {
+		pidLog = os.Getenv(alertLogEnv)
+	}
+	appendTestLine(pidLog, fmt.Sprintf("pid %d", os.Getpid()))
 	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 		if _, err := os.Stat(release); err == nil {
 			break

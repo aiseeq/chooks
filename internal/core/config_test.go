@@ -138,7 +138,7 @@ func TestClaimCheckPromptConfig(t *testing.T) {
 	for _, tc := range []struct {
 		value string
 		valid bool
-	}{{"v3", true}, {"v6", true}, {"v7", false}} {
+	}{{"v3", true}, {"v6", true}, {"v7", true}, {"v8", false}} {
 		t.Run(tc.value, func(t *testing.T) {
 			cfg, err := LoadConfig(writeConfig(t, "tools:\n  claim_check:\n    prompt: "+tc.value+"\n"))
 			if (err == nil) != tc.valid {

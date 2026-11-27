@@ -99,19 +99,24 @@ type Hook struct {
 
 // Entry — строка журнала
 type Entry struct {
-	Prompt     string  `json:"prompt,omitempty"`
-	Final      *string `json:"final,omitempty"`
-	Sourced    *bool   `json:"sourced,omitempty"`
-	Marked     *bool   `json:"marked,omitempty"`
-	Evidence   *string `json:"evidence,omitempty"`
-	Time       string  `json:"time"`
-	Session    string  `json:"session,omitempty"`
-	SessionID  string  `json:"session_id"`
-	Transcript string  `json:"transcript,omitempty"`
-	Event      string  `json:"event"`
-	Outcome    string  `json:"outcome"`
-	Reason     string  `json:"reason,omitempty"`
-	Error      string  `json:"error,omitempty"`
+	Prompt   string  `json:"prompt,omitempty"`
+	Final    *string `json:"final,omitempty"`
+	Sourced  *bool   `json:"sourced,omitempty"`
+	Marked   *bool   `json:"marked,omitempty"`
+	Evidence *string `json:"evidence,omitempty"`
+	// v7: вопрос или черновик и его признаки
+	Ask         *string `json:"ask,omitempty"`
+	AskKind     *string `json:"ask_kind,omitempty"`
+	AskMark     *bool   `json:"ask_mark,omitempty"`
+	CheckedLine *bool   `json:"checked_line,omitempty"`
+	Time        string  `json:"time"`
+	Session     string  `json:"session,omitempty"`
+	SessionID   string  `json:"session_id"`
+	Transcript  string  `json:"transcript,omitempty"`
+	Event       string  `json:"event"`
+	Outcome     string  `json:"outcome"`
+	Reason      string  `json:"reason,omitempty"`
+	Error       string  `json:"error,omitempty"`
 	// LatencyMS — от начала хука до исхода; SlotWaitMS — из них ожидание места
 	LatencyMS  int64 `json:"latency_ms"`
 	SlotWaitMS int64 `json:"slot_wait_ms"`
@@ -181,8 +186,8 @@ func (h Hook) Stop(ctx context.Context, event StopEvent) Outcome {
 	started := h.now()
 	entry := Entry{Time: started.Format(time.RFC3339), Session: event.Name, SessionID: event.SessionID,
 		Transcript: event.TranscriptPath, Event: EventStop}
-	if h.Prompt == "v6" {
-		entry.Prompt = "v6"
+	if FinalOnly(h.Prompt) {
+		entry.Prompt = h.Prompt
 	}
 	if event.StopHookActive {
 		entry.Outcome, entry.Answer = OutcomeSecondAnswer, questioncheck.Excerpt(event.LastMessage, answerExcerpt)
@@ -198,7 +203,7 @@ func (h Hook) Stop(ctx context.Context, event StopEvent) Outcome {
 	if err != nil {
 		return h.fail(entry, started, FailInput, err)
 	}
-	if h.Prompt == "v6" {
+	if FinalOnly(h.Prompt) {
 		input.Answer = mask(event.LastMessage)
 		input.CallsOnly = true
 	}
@@ -206,15 +211,16 @@ func (h Hook) Stop(ctx context.Context, event StopEvent) Outcome {
 	if err != nil { //nolint:silent-error-handling verdict logs failures through h.fail and records queue timeouts before returning
 		return Outcome{Result: entry.Outcome}
 	}
-	if h.Prompt == "v6" {
-		if strings.TrimSpace(*entry.Final) == "" || *entry.Sourced || *entry.Marked {
+	if FinalOnly(h.Prompt) {
+		reasons := finalReasons(entry)
+		if len(reasons) == 0 {
 			entry.Outcome = OutcomePass
 			h.finish(entry, started)
 			return Outcome{Result: OutcomePass}
 		}
 		entry.Outcome = OutcomeBlock
 		h.finish(entry, started)
-		return Outcome{Block: true, Reason: fmt.Sprintf("Итоговое утверждение: «%s». Чем проверить: %s. Проверь утверждение или пометь, что оно не проверено.", *entry.Final, *entry.Evidence), Result: OutcomeBlock}
+		return Outcome{Block: true, Reason: strings.Join(reasons, "\n\n"), Result: OutcomeBlock}
 	}
 	flagged := verdict.FlaggedClaims()
 	if len(flagged) == 0 {
@@ -231,7 +237,7 @@ func (h Hook) Stop(ctx context.Context, event StopEvent) Outcome {
 // (retry_same); изменённый судится заново, но отказов за ход сессии не больше
 // sendDenialLimit — дальше пропуск (retry_limit)
 func (h Hook) Send(ctx context.Context, event SendEvent) Outcome {
-	if h.Prompt == "v6" {
+	if FinalOnly(h.Prompt) {
 		return Outcome{Result: OutcomeSkip}
 	}
 	started := h.now()
@@ -351,8 +357,8 @@ func (h Hook) verdict(ctx context.Context, entry *Entry, input *Input, started t
 		entry.Outcome = OutcomeError
 		return Verdict{}, err
 	}
-	if h.Prompt == "v6" {
-		v, parseErr := parseV6(answer)
+	if FinalOnly(h.Prompt) {
+		v, parseErr := parseFinal(answer, h.Prompt == "v7")
 		if parseErr != nil {
 			h.fail(*entry, started, FailParse, parseErr)
 			h.judgeFailed(FailParse, h.now())
@@ -360,6 +366,7 @@ func (h Hook) verdict(ctx context.Context, entry *Entry, input *Input, started t
 			return Verdict{}, parseErr
 		}
 		entry.Final, entry.Sourced, entry.Marked, entry.Evidence = v.Final, v.Sourced, v.Marked, v.Evidence
+		entry.Ask, entry.AskKind, entry.AskMark, entry.CheckedLine = v.Ask, v.AskKind, v.AskMark, v.CheckedLine
 		h.judgeAnswered(*entry, h.now())
 		return Verdict{}, nil
 	}
@@ -523,7 +530,7 @@ func (h Hook) waitLine(ctx context.Context, path string, latest bool, find func(
 			}
 			done := make(chan result, 1)
 			go func() {
-				input, err := build(ctx, path, found, Options{CallsOnly: h.Prompt == "v6"})
+				input, err := build(ctx, path, found, Options{CallsOnly: FinalOnly(h.Prompt)})
 				done <- result{input, err}
 			}()
 			select {
@@ -723,18 +730,79 @@ func writeFlags(b *strings.Builder, flagged []Claim) {
 	}
 }
 
-// v6 uses pointers to reject missing or null fields instead of guessing.
+// v6 и v7: указатели отличают пропущенное или null поле от пустого значения
 type finalVerdict struct {
 	Final    *string `json:"final"`
 	Sourced  *bool   `json:"sourced"`
 	Marked   *bool   `json:"marked"`
 	Evidence *string `json:"evidence"`
+	// v7: вопрос пользователю или черновик людям
+	Ask         *string `json:"ask"`
+	AskKind     *string `json:"ask_kind"`
+	AskMark     *bool   `json:"ask_mark"`
+	CheckedLine *bool   `json:"checked_line"`
 }
 
-func parseV6(answer string) (finalVerdict, error) {
+func (v finalVerdict) complete(withAsk bool) bool {
+	if v.Final == nil || v.Sourced == nil || v.Marked == nil || v.Evidence == nil {
+		return false
+	}
+	if !withAsk {
+		return true
+	}
+	if v.Ask == nil || v.AskKind == nil || v.AskMark == nil || v.CheckedLine == nil {
+		return false
+	}
+	switch *v.AskKind {
+	case askQuestion, askDraft, "":
+		return true
+	}
+	return false
+}
+
+const (
+	askQuestion = "question"
+	askDraft    = "draft"
+)
+
+// finalReasons — причины возврата агента: итог без источника (v6) и вопрос
+// или черновик без строки ❓ или «Проверил: <id>» (v7). Пусто — пропуск
+func finalReasons(e Entry) []string {
+	var reasons []string
+	if strings.TrimSpace(*e.Final) != "" && !*e.Sourced && !*e.Marked {
+		reasons = append(reasons, fmt.Sprintf("Итоговое утверждение: «%s». Чем проверить: %s. Проверь утверждение или пометь, что оно не проверено.", *e.Final, *e.Evidence))
+	}
+	if e.AskKind == nil {
+		return reasons
+	}
+	const check = "Нет строки «Проверил: <id>». До показа %s проверяет свежий агент (общий CLAUDE.md, «Проверка свежим агентом»)%s, а под ним строку «Проверил: <id>», где id — метка этой проверки (вызов Agent или задача worker). Без проведённой проверки строку не пиши."
+	switch *e.AskKind {
+	case askQuestion:
+		var parts []string
+		if !*e.AskMark {
+			parts = append(parts, "Нет строки ❓: вопрос ставят в строку, которая начинается с ❓.")
+		}
+		if !*e.CheckedLine {
+			parts = append(parts, fmt.Sprintf(check, "вопрос", ": отдай ему вопрос со строкой «Искал» без своих выводов. Нашёл он ответ — сделай по нему и вопрос не задавай; не нашёл — повтори вопрос в строке ❓"))
+		}
+		if len(parts) > 0 {
+			reasons = append(reasons, fmt.Sprintf("Вопрос пользователю: «%s». %s", *e.Ask, strings.Join(parts, " ")))
+		}
+	case askDraft:
+		if !*e.CheckedLine {
+			reasons = append(reasons, fmt.Sprintf("Черновик людям: «%s». %s", *e.Ask, fmt.Sprintf(check, "черновик", "; после проверки покажи исправленный черновик")))
+		}
+	}
+	return reasons
+}
+
+func parseFinal(answer string, withAsk bool) (finalVerdict, error) {
 	for i := strings.Index(answer, "{"); i >= 0; {
 		var v finalVerdict
-		if err := json.NewDecoder(strings.NewReader(answer[i:])).Decode(&v); err == nil && v.Final != nil && v.Sourced != nil && v.Marked != nil && v.Evidence != nil {
+		if err := json.NewDecoder(strings.NewReader(answer[i:])).Decode(&v); err == nil && v.complete(withAsk) {
+			if !withAsk {
+				v.Ask, v.AskKind, v.AskMark, v.CheckedLine = nil, nil, nil, nil
+			}
 			return v, nil
 		}
 		next := strings.Index(answer[i+1:], "{")
@@ -742,6 +810,9 @@ func parseV6(answer string) (finalVerdict, error) {
 			break
 		}
 		i += next + 1
+	}
+	if withAsk {
+		return finalVerdict{}, fmt.Errorf("invalid v7 judge answer")
 	}
 	return finalVerdict{}, fmt.Errorf("invalid v6 judge answer")
 }

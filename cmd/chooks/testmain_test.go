@@ -149,7 +149,7 @@ var sharedEntries = []string{
 	"understand-check.jsonl",
 	// claim-check: схемы ответа общие для процесса и могут появиться от
 	// живого хука во время тестового прогона
-	"claimcheck/verdict-schema.json", "claimcheck/verdict-schema-v6.json",
+	"claimcheck/verdict-schema.json", "claimcheck/verdict-schema-v6.json", "claimcheck/verdict-schema-v7.json",
 	// skill-reload: отметка суточной чистки и каталог текстов скиллов
 	"skill-reload/.last-cleanup", "skill-reload/texts",
 	// каталоги записей сессий: живой хук создаёт их при первой записи

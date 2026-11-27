@@ -97,8 +97,11 @@ func newClaimHook(ctx context.Context, config *core.Config, logger core.Logger, 
 			return claimcheck.Hook{}, err
 		}
 		cli.Prompt = claimcheck.JudgePrompt
-		if prompt == "v6" {
+		switch prompt {
+		case "v6":
 			cli.Prompt = claimcheck.JudgePromptV6
+		case "v7":
+			cli.Prompt = claimcheck.JudgePromptV7
 		}
 		cli.OutputSchema, err = writeClaimSchemaVersion(slotDir, prompt)
 		if err != nil {
@@ -137,8 +140,11 @@ func newClaimHook(ctx context.Context, config *core.Config, logger core.Logger, 
 // её из файла. Файл переписывается, только если отличается
 func writeClaimSchemaVersion(dir, version string) (string, error) {
 	schema, name := claimcheck.Schema, "verdict-schema.json"
-	if version == "v6" {
+	switch version {
+	case "v6":
 		schema, name = claimcheck.SchemaV6, "verdict-schema-v6.json"
+	case "v7":
+		schema, name = claimcheck.SchemaV7, "verdict-schema-v7.json"
 	}
 	path := filepath.Join(dir, name)
 	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, schema) {
@@ -273,7 +279,7 @@ func runClaimStop(ctx context.Context, data []byte, config *core.Config, logger 
 // runClaimSend судит письмо SendMessage; не письмо или пустой текст — без
 // судьи
 func runClaimSend(ctx context.Context, input *core.ToolInput, config *core.Config, logger core.Logger) claimcheck.Outcome {
-	if config.Tools[claimCheckTool].Prompt == "v6" {
+	if claimcheck.FinalOnly(config.Tools[claimCheckTool].Prompt) {
 		return claimcheck.Outcome{Result: claimcheck.OutcomeSkip}
 	}
 	var call struct {

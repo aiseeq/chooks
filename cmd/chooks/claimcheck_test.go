@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -522,6 +523,46 @@ func TestClaimStopFailoverOnCreditsExit(t *testing.T) {
 // судью: заглушка codex жива до сигнала и мертва после выхода хука (ревью
 // Terra 5ec62fa, п. 1)
 func TestClaimStopSIGTERMKillsJudge(t *testing.T) {
+	const helperEnv = "CHOOKS_CLAIM_SIGTERM_HELPER"
+	if os.Getenv(helperEnv) != "1" {
+		// Имя — из t.Name(): переименованный тест не уходит в пустой зелёный
+		// прогон. Срок родителя не передаётся: паника таймаута не запускает
+		// t.Cleanup, и дочерний процесс не успел бы убрать судью; он ограничен
+		// своими сроками и переживает родителя на секунды
+		cmd := exec.Command(testBinary(t), "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), helperEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("isolated subreaper test failed: %v\n%s", err, output)
+		}
+		if !strings.Contains(string(output), "--- PASS: "+t.Name()+" ") {
+			t.Fatalf("isolated subreaper test did not run:\n%s", output)
+		}
+		return
+	}
+	if err := proc.BecomeChildSubreaper(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := proc.StopDescendants(0, syscall.SIGKILL); err != nil {
+			t.Errorf("cleanup test descendants: %v", err)
+		}
+		// StopDescendants signals, but deliberately does not reap. This helper
+		// process owns adopted judge grandchildren, so reap them before exit.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			var status syscall.WaitStatus
+			pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+			if pid > 0 {
+				continue
+			}
+			if errors.Is(err, syscall.ECHILD) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Error("adopted test descendants were not reaped")
+	})
 	e := newClaimEnv(t)
 	answer := "Готово: тест прошёл."
 	transcript := writeStopTranscript(t, e.root, answer)
@@ -588,10 +629,5 @@ func TestClaimStopSIGTERMKillsJudge(t *testing.T) {
 	}
 	if len(leftovers) > 0 {
 		t.Errorf("%d codex processes left after hook SIGTERM: %v", len(leftovers), leftovers)
-		for _, pid := range leftovers {
-			if _, err := proc.StopChild(pid, 0, func() error { return syscall.Kill(pid, syscall.SIGKILL) }); err != nil {
-				t.Errorf("cleanup codex process %d: %v", pid, err)
-			}
-		}
 	}
 }

@@ -93,6 +93,18 @@ func TestKillJudgeGroups(t *testing.T) {
 	if child == 0 {
 		t.Fatal("judge child not started")
 	}
+	reaped := false
+	t.Cleanup(func() {
+		if reaped {
+			return
+		}
+		stat, err := proc.ReadStat("/proc", child)
+		if err == nil && stat.State != "Z" && stat.State != "X" {
+			_ = proc.SignalDescendant(child, syscall.SIGKILL)
+		}
+		var status syscall.WaitStatus
+		_, _ = syscall.Wait4(child, &status, 0, nil)
+	})
 	if n := KillJudgeGroups(nil); n != 1 {
 		t.Errorf("killed groups %d, want 1", n)
 	}
@@ -109,7 +121,8 @@ func TestKillJudgeGroups(t *testing.T) {
 		}
 		t.Fatal("judge not killed")
 	}
-	// Потомок без wait родителя остаётся зомби до init: смотрим состояние
+	// Потомок без wait родителя становится зомби у subreaper: проверяем это,
+	// затем забираем его статус, чтобы зомби не жил до конца тестового бинаря.
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child))
 		if err != nil || strings.Contains(string(stat), ") Z ") {
@@ -119,6 +132,15 @@ func TestKillJudgeGroups(t *testing.T) {
 			_ = proc.SignalDescendant(child, syscall.SIGKILL)
 			t.Fatalf("judge child %d survived", child)
 		}
+	}
+	var status syscall.WaitStatus
+	waited, err := syscall.Wait4(child, &status, 0, nil)
+	if err != nil && err != syscall.ECHILD || err == nil && waited != child {
+		t.Fatalf("reap judge child %d: waited=%d err=%v", child, waited, err)
+	}
+	reaped = true
+	if _, err := proc.ReadStat("/proc", child); !proc.Gone(err) {
+		t.Fatalf("judge child %d remains after Wait4: %v", child, err)
 	}
 	if _, err := runTracked(exec.Command("/bin/true")); err == nil {
 		t.Error("judge started after KillJudgeGroups")

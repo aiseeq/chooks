@@ -230,7 +230,7 @@ func writeFiles(t *testing.T, root string, files map[string]string) {
 			t.Fatal(err)
 		}
 		mode := os.FileMode(0o600)
-		if strings.HasPrefix(name, "bin/") || strings.HasSuffix(name, ".sh") {
+		if strings.HasPrefix(name, "bin/") || strings.Contains(name, "/bin/") || strings.HasSuffix(name, ".sh") {
 			mode = 0o700
 		}
 		if err := os.WriteFile(path, []byte(body), mode); err != nil {
@@ -1076,6 +1076,228 @@ func TestProxyInterleavedFixturesMatchCLI(t *testing.T) {
 	}
 	if served.Load() < perFixture {
 		t.Fatalf("daemon served %d of %d requests; fallbacks %v", served.Load(), 2*perFixture, fallbacks[:min(5, len(fallbacks))])
+	}
+}
+
+// TestDaemonOutsideShadowHooksMatchCLI covers the three hooks whose decisions
+// are not part of shadow-mode parity. The fixture's claude executable is a
+// deterministic local stub; no model process is started.
+func TestDaemonOutsideShadowHooksMatchCLI(t *testing.T) {
+	encode := func(v any) []byte {
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	tests := []struct {
+		name, command string
+		input         func(f fixture, transcript string) []byte
+	}{
+		{
+			name: "understand-check", command: hookUnderstandCheck,
+			input: func(f fixture, transcript string) []byte {
+				return encode(map[string]any{"session_id": "s3", "cwd": f.work, "transcript_path": transcript,
+					"hook_event_name": "PreToolUse", "tool_name": "Write", "tool_input": map[string]string{"file_path": filepath.Join("..", "home", ".claude", "CLAUDE.md"), "content": "change the rule"}, "tool_use_id": "tool-1"})
+			},
+		},
+		{
+			name: "post-tool-batch", command: hookPostToolBatch,
+			input: func(f fixture, transcript string) []byte {
+				return encode(map[string]any{"session_id": "s3", "cwd": f.work, "transcript_path": transcript, "hook_event_name": "PostToolBatch"})
+			},
+		},
+		{
+			name: "user-prompt-submit", command: hookUserPromptSubmit,
+			input: func(f fixture, transcript string) []byte {
+				return encode(map[string]any{"session_id": "s3", "cwd": f.work, "transcript_path": transcript, "hook_event_name": "UserPromptSubmit", "prompt": "Continue the fixture task."})
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reuse the exact sandbox root so path-derived idempotency keys are
+			// comparable. Clear hook state between runs so the CLI cannot mask a
+			// daemon omission or mutation.
+			cliFixture := newFixture(t, "A")
+			proxyFixture := cliFixture
+			config := strings.ReplaceAll(fixtureAConfig, `\n`, "\n")
+			writeFiles(t, cliFixture.root, map[string]string{"home/.config/chooks/config.yaml": config})
+			writeFiles(t, proxyFixture.root, map[string]string{"home/.config/chooks/config.yaml": config})
+			judgeStub := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"{\\\"verdict\\\":\\\"fix\\\",\\\"fixes\\\":[{\\\"quote\\\":\\\"Continue the fixture task.\\\",\\\"action\\\":\\\"change the rule\\\",\\\"why\\\":\\\"recorded fixture disagreement\\\",\\\"fix\\\":\\\"review the instruction\\\"}]}\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n"
+			if tc.command == hookUnderstandCheck {
+				writeFiles(t, cliFixture.root, map[string]string{"home/bin/claude": judgeStub})
+				writeFiles(t, proxyFixture.root, map[string]string{"home/bin/claude": judgeStub})
+			}
+			transcript := func(f fixture) string { return filepath.Join(f.work, "transcript.jsonl") }
+			instructionPath := filepath.Join(cliFixture.root, "home", ".claude", "CLAUDE.md")
+			transcriptLine := func(path string) string {
+				toolName, toolInput := "Write", any(map[string]string{"file_path": path, "content": "change the rule"})
+				if tc.command == hookUnderstandCheck {
+					toolInput = map[string]string{"file_path": filepath.Join("..", "home", ".claude", "CLAUDE.md"), "content": "change the rule"}
+				}
+				if tc.command == hookPostToolBatch {
+					// Bash edits are not a tracked evEdit: the agent has not read the
+					// resulting skill contents, so skill-reload should remind it.
+					toolName, toolInput = "Bash", map[string]string{"command": "external skill update fixture"}
+				}
+				data, err := json.Marshal(map[string]any{"type": "assistant", "sessionId": "s3", "uuid": "assistant-1", "parentUuid": "user-1", "timestamp": "2999-11-26T10:00:03Z", "message": map[string]any{"role": "assistant", "stop_reason": "tool_use", "content": []any{map[string]any{"type": "tool_use", "id": "tool-1", "name": toolName, "input": toolInput}}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(data) + "\n"
+			}
+			previousUser := `{"type":"user","sessionId":"s3","uuid":"user-0","timestamp":"2999-11-26T09:59:58Z","origin":{"kind":"human"},"message":{"role":"user","content":"Earlier fixture request."}}` + "\n"
+			previousAnswer := `{"type":"assistant","sessionId":"s3","uuid":"assistant-0","parentUuid":"user-0","timestamp":"2999-11-26T09:59:59Z","message":{"role":"assistant","content":"Earlier fixture response.","stop_reason":"end_turn"}}` + "\n"
+			userLine := `{"type":"user","sessionId":"s3","uuid":"user-1","timestamp":"2999-11-26T10:00:01Z","origin":{"kind":"human"},"message":{"role":"user","content":"Continue the fixture task."}}` + "\n"
+			cliTranscriptData := previousUser + previousAnswer + userLine + transcriptLine(instructionPath)
+			proxyTranscriptData := previousUser + previousAnswer + userLine + transcriptLine(strings.Replace(instructionPath, cliFixture.root, proxyFixture.root, 1))
+			if tc.command == hookPostToolBatch {
+				cliSkill := filepath.Join(cliFixture.root, "home", ".claude", "skills", "demo", "SKILL.md")
+				proxySkill := filepath.Join(proxyFixture.root, "home", ".claude", "skills", "demo", "SKILL.md")
+				writeFiles(t, cliFixture.root, map[string]string{"home/.claude/skills/demo/SKILL.md": "new skill text\n"})
+				writeFiles(t, proxyFixture.root, map[string]string{"home/.claude/skills/demo/SKILL.md": "new skill text\n"})
+				metaLine := func(path string) string {
+					data, err := json.Marshal(map[string]any{"type": "user", "isMeta": true, "sessionId": "s3", "uuid": "skill-load", "timestamp": "2999-11-26T10:00:00Z", "message": map[string]any{"role": "user", "content": "Base directory for this skill: " + filepath.Dir(path) + "\n\nold skill text\n"}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					return string(data) + "\n"
+				}
+				cliTranscriptData = metaLine(cliSkill) + previousUser + previousAnswer + userLine + transcriptLine(cliSkill)
+				proxyTranscriptData = metaLine(proxySkill) + previousUser + previousAnswer + userLine + transcriptLine(proxySkill)
+			}
+			writeFiles(t, cliFixture.root, map[string]string{"work/transcript.jsonl": cliTranscriptData})
+			writeFiles(t, proxyFixture.root, map[string]string{"work/transcript.jsonl": proxyTranscriptData})
+			cliInput, proxyInput := tc.input(cliFixture, transcript(cliFixture)), tc.input(proxyFixture, transcript(proxyFixture))
+			// Use a separate daemon process here, just like `chooks serve`: the
+			// process boundary is part of these outside-shadow parity decisions.
+			sv := startSupervised(t, testBinary(t), cliFixture.root)
+			if tc.command == hookPostToolBatch {
+				config = strings.Replace(config, "skill_reload: {enabled: false}", "skill_reload: {enabled: true}", 1)
+				writeFiles(t, cliFixture.root, map[string]string{"home/.config/chooks/config.yaml": config})
+				writeFiles(t, proxyFixture.root, map[string]string{"home/.config/chooks/config.yaml": config})
+				writeFiles(t, cliFixture.root, map[string]string{"home/state/chooks/skill-reload/.last-cleanup": ""})
+			}
+			cliRuns, proxyRuns := filepath.Join(t.TempDir(), "cli-runs"), filepath.Join(t.TempDir(), "proxy-runs")
+			cliEnv := proxyEnv(t, cliFixture.env, sv.socket, cliRuns)
+			cli := runBinary(t, argvCLIHelper, []string{tc.command}, cliEnv, cliFixture.work, cliInput)
+			var cliDenied, cliRepeat proxyRun
+			if tc.command == hookUnderstandCheck {
+				cliDenied = cli
+				// The second CLI call must see the first denial's stored key. The
+				// daemon then receives the same request against that same state.
+				cliRepeatRun := runBinary(t, argvCLIHelper, []string{tc.command}, cliEnv, cliFixture.work, cliInput)
+				cliRepeat = cliRepeatRun
+				if cliDenied.stdout == cliRepeat.stdout || !strings.Contains(cliDenied.stdout, `"permissionDecision":"deny"`) || strings.Contains(cliRepeat.stdout, `"permissionDecision":"deny"`) {
+					t.Fatal("understand-check fixture did not exercise the recorded-denial repeat")
+				}
+			}
+			if tc.command != hookUnderstandCheck {
+				if err := os.RemoveAll(filepath.Join(cliFixture.root, "home", "state", "chooks")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.command == hookPostToolBatch {
+				writeFiles(t, cliFixture.root, map[string]string{"home/state/chooks/skill-reload/.last-cleanup": ""})
+			}
+			proxyEnv := proxyEnv(t, proxyFixture.env, sv.socket, proxyRuns)
+			proxied := runBinary(t, proxyHelper, []string{tc.command}, proxyEnv, proxyFixture.work, proxyInput)
+			if tc.command == hookUnderstandCheck {
+				deniedKeys := filepath.Join(cliFixture.root, "home", "state", "chooks", "understand-check", "s3")
+				if cliRepeat.code != proxied.code || cliRepeat.stdout != proxied.stdout {
+					t.Fatalf("daemon repeat differs from CLI repeat: cli=(%d %q) daemon=(%d %q)", cliRepeat.code, cliRepeat.stdout, proxied.code, proxied.stdout)
+				}
+				if count := len(lines(readFile(t, deniedKeys))); count != 1 {
+					t.Fatalf("recorded-denial repeat stored %d keys; want one shared key", count)
+				}
+				// Clear the one denied-key record and exercise the fresh judge
+				// denial in the daemon process as a second parity observation.
+				if err := os.Remove(deniedKeys); err != nil {
+					t.Fatal(err)
+				}
+				proxyDeniedRun := runBinary(t, proxyHelper, []string{tc.command}, proxyEnv, proxyFixture.work, proxyInput)
+				if cliDenied.code != proxyDeniedRun.code || cliDenied.stdout != proxyDeniedRun.stdout || !strings.Contains(proxyDeniedRun.stdout, `"permissionDecision":"deny"`) {
+					t.Fatalf("daemon fresh denial differs from CLI: cli=(%d %q) daemon=(%d %q)", cliDenied.code, cliDenied.stdout, proxyDeniedRun.code, proxyDeniedRun.stdout)
+				}
+				proxied = proxyDeniedRun
+			} else if diff := diffOutcome(outcomeOf(t, cliFixture, cli), outcomeOf(t, proxyFixture, proxied)); diff != "" {
+				t.Fatalf("daemon differs from CLI: %s", diff)
+			}
+			if tc.command == hookPostToolBatch && (!strings.Contains(cli.stdout, "Скилл demo") || !strings.Contains(proxied.stdout, "Скилл demo")) {
+				t.Fatalf("skill reminder not exercised: cli=(code %d stdout %q stderr %q log %q) proxy=(code %d stdout %q stderr %q log %q)", cli.code, cli.stdout, cli.stderr, readFile(t, filepath.Join(cliFixture.root, "home", ".claude", "logs", "chooks.log")), proxied.code, proxied.stdout, proxied.stderr, readFile(t, filepath.Join(proxyFixture.root, "home", ".claude", "logs", "chooks.log")))
+			}
+			if fallback := lines(readFile(t, proxyRuns)); len(fallback) != 0 {
+				t.Fatalf("proxy fell back to CLI: %q", fallback)
+			}
+		})
+	}
+}
+
+func TestDaemonUserPromptSubmitBlocksFromRequestProcReader(t *testing.T) {
+	config, _ := silentConfig(t)
+	home := t.TempDir()
+	approved := filepath.Join(home, "approved")
+	if err := os.WriteFile(approved, []byte("opus claude-opus-5-5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := runtimeGuardRequest(t, home, "MODELS_APPROVED="+approved)
+	data := []byte(`{"hook_event_name":"UserPromptSubmit","session_id":"daemon-proc-reader","prompt":"continue"}`)
+	ctx := hookctx.WithRequest(context.Background(), request)
+	ctx = context.WithValue(ctx, runtimeGuardKey{}, runtimeGuardDeps{proc: runtimeProc{hook: request.PID}})
+	ctx = context.WithValue(ctx, daemonCallKey{}, &daemonCall{})
+	logger, _ := fileLogger(t)
+	code, err := dispatchHook(ctx, hookUserPromptSubmit, data, config, logger, newHookTimerForRequest(hookUserPromptSubmit, request), request)
+	if code != exitBlocked || err == nil || !strings.Contains(err.Error(), `модель "haiku" не одобрена`) {
+		t.Fatalf("daemon UserPromptSubmit = %d, %v; want blocked by injected request ProcReader", code, err)
+	}
+}
+
+func TestDaemonUserPromptSubmitSavesWorkingState(t *testing.T) {
+	config, _ := silentConfig(t)
+	runtimeDir, work := t.TempDir(), t.TempDir()
+	request := hookctx.New(bytes.NewReader(nil), io.Discard, io.Discard,
+		[]string{"XDG_RUNTIME_DIR=" + runtimeDir}, work, 12001, 12000)
+	data := []byte(`{"hook_event_name":"UserPromptSubmit","session_id":"daemon-state-save","prompt":"continue"}`)
+	ctx := hookctx.WithRequest(context.Background(), request)
+	ctx = context.WithValue(ctx, daemonCallKey{}, &daemonCall{})
+	logger, _ := fileLogger(t)
+	code, err := dispatchHook(ctx, hookUserPromptSubmit, data, config, logger, newHookTimerForRequest(hookUserPromptSubmit, request), request)
+	if code != exitAllowed || err != nil {
+		t.Fatalf("daemon UserPromptSubmit = %d, %v; want allowed", code, err)
+	}
+	state, recorded, err := core.LookupSessionStateIn(filepath.Join(runtimeDir, "chooks"), "daemon-state-save")
+	if err != nil || !recorded || state != core.StateWorking {
+		t.Fatalf("session state = %q, recorded %v, %v; want recorded working state", state, recorded, err)
+	}
+}
+
+func TestDaemonRequestUsesWireCwd(t *testing.T) {
+	wantCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCwd := make(chan string, 1)
+	ts := startServer(t, func(_ context.Context, request hookctx.Context, _ string) int {
+		gotCwd <- request.Cwd
+		return exitAllowed
+	})
+	freshStart(ts.srv)
+	request := selfRequest(t, hookUserPromptSubmit, absoluteEnv(t.TempDir()), `{"hook_event_name":"UserPromptSubmit","session_id":"cwd-wire","prompt":"continue"}`)
+	conn, ack, reason := sendRequest(t, ts.path, request)
+	if ack != hookwire.Accepted {
+		t.Fatalf("request ack = %q, %q; want accepted", ack, reason)
+	}
+	if code, _, _ := commitAndWait(t, conn); code != exitAllowed {
+		t.Fatalf("daemon exit code = %d; want allowed", code)
+	}
+	select {
+	case got := <-gotCwd:
+		if got != wantCwd {
+			t.Fatalf("daemon request cwd = %q; want wire cwd %q", got, wantCwd)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not run hook")
 	}
 }
 

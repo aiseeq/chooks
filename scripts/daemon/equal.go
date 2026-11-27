@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/aiseeq/chooks/internal/fallbackwatch"
@@ -66,12 +67,23 @@ const (
 	fileClipLimit   = 700
 )
 
+const (
+	fixtureMTimeYear = 2026
+	fixtureMTimeDay  = 26
+)
+
+var fixtureMTime = time.Date(fixtureMTimeYear, time.November, fixtureMTimeDay, 0, 0, 0, 0, time.UTC)
+
 // eqCase — один вход: подкоманда, JSON stdin (или сырой), аргументы, правки env
 // и cwd процесса
 type eqCase struct {
 	name, suite, cmd string
+	branch           string
+	project          string
 	data             any
 	raw              []byte
+	transcript       []byte
+	fixtures         map[string]string
 	hasRaw           bool
 	args             []string
 	env              map[string]string
@@ -122,6 +134,81 @@ func extraCases() ([]eqCase, error) {
 	return cases, nil
 }
 
+func corpusMetadataPath(inputs, subdir, cmd, name, ext string) string {
+	return filepath.Join(inputs, subdir, cmd, strings.TrimSuffix(filepath.Base(name), ".json")+ext)
+}
+
+func loadCorpusProject(inputs, cmd, name string, e *eqCase) error {
+	path := corpusMetadataPath(inputs, "sources", cmd, name, ".json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read source metadata %s: %w", path, err)
+	}
+	var source struct {
+		CWD string `json:"cwd"`
+	}
+	if err := json.Unmarshal(data, &source); err != nil {
+		return fmt.Errorf("source metadata %s: %w", path, err)
+	}
+	e.project = source.CWD
+	return nil
+}
+
+func loadCorpusBranch(inputs, cmd, name string, e *eqCase) error {
+	path := corpusMetadataPath(inputs, "branches", cmd, name, ".txt")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read branch label %s: %w", path, err)
+	}
+	e.branch = strings.TrimSpace(string(data))
+	return nil
+}
+
+func loadCorpusFixtures(inputs, cmd, name string, e *eqCase) error {
+	path := corpusMetadataPath(inputs, "fixtures", cmd, name, ".json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read fixture %s: %w", path, err)
+	}
+	if err := json.Unmarshal(data, &e.fixtures); err != nil {
+		return fmt.Errorf("fixture %s: %w", path, err)
+	}
+	return nil
+}
+
+func loadCorpusTranscript(inputs, cmd, name string, e *eqCase) error {
+	path := corpusMetadataPath(inputs, "transcripts", cmd, name, ".jsonl")
+	snapshot, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read transcript snapshot %s: %w", path, err)
+	}
+	e.transcript = snapshot
+	return nil
+}
+
+func loadCorpusMetadata(inputs, cmd, name string, e *eqCase) error {
+	for _, load := range []func(string, string, string, *eqCase) error{
+		loadCorpusProject, loadCorpusBranch, loadCorpusFixtures, loadCorpusTranscript,
+	} {
+		if err := load(inputs, cmd, name, e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // corpusCases — входы eq1/inputs: подкаталог — подкоманда
 func corpusCases(inputs, suite string) ([]eqCase, error) {
 	dirs, err := os.ReadDir(inputs)
@@ -145,6 +232,9 @@ func corpusCases(inputs, suite string) ([]eqCase, error) {
 				return nil, fmt.Errorf("input %s: %w", f, err)
 			}
 			e := eqCase{name: suite + ":" + d.Name() + "/" + filepath.Base(f), suite: suite, cmd: d.Name(), data: data}
+			if err := loadCorpusMetadata(inputs, d.Name(), f, &e); err != nil {
+				return nil, err
+			}
 			switch {
 			case d.Name() == "pre-tool-use" && filepath.Base(f) == "00.json":
 				e.args = []string{"--verbose"}
@@ -192,8 +282,10 @@ func marshal(v any) ([]byte, error) {
 // пишут вызов в $HOME и отвечают постоянным текстом, модели не запускаются
 const (
 	webtextScript = "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"source\":\"direct\",\"path\":\"page.txt\"}'\n"
-	claudeScript  = "#!/bin/sh\necho \"claude $*\" >> \"$HOME/stub-calls.log\"\n{ pwd; env | sort; } >> \"$HOME/stub-env.log\"\ncat >/dev/null\n" +
-		`printf '%s\n' '{"type":"result","result":"{\"verdict\":\"ok\",\"why\":\"stub\"}","usage":{"input_tokens":1,"output_tokens":1}}'` + "\n"
+	claudeScript  = "#!/bin/sh\n# equal-stub-deny; recorded denial response: {\"verdict\":\"fix\"}\necho \"claude $*\" >> \"$HOME/stub-calls.log\"\n{ pwd; env | sort; } >> \"$HOME/stub-env.log\"\nrequest=$(cat)\n" +
+		`deny=0; if [ -f "$HOME/deny-term.txt" ]; then term=$(cat "$HOME/deny-term.txt"); case "$request" in *"$term"*) deny=1 ;; esac; fi; if [ "$deny" = 1 ] && [ -f "$HOME/deny-answer.json" ]; then answer=$(cat "$HOME/deny-answer.json"); else answer='{"verdict":"ok"}'; fi` + "\n" +
+		`escaped=$(printf '%s' "$answer" | sed 's/\\/\\\\/g; s/"/\\"/g')` + "\n" +
+		`printf '{"type":"result","result":"%s","usage":{"input_tokens":1,"output_tokens":1}}\n' "$escaped"` + "\n"
 	codexScript = "#!/bin/sh\necho \"codex $*\" >> \"$HOME/stub-calls.log\"\ncat >/dev/null\necho '{}'\n"
 	dbusScript  = "#!/bin/sh\necho \"dbus-launch\" >> \"$HOME/stub-calls.log\"\nexit 1\n"
 )
@@ -268,6 +360,19 @@ func prepare(root, suite string) (sandbox, error) {
 	return s, nil
 }
 
+func installTranscript(s sandbox, snapshot []byte) error {
+	if len(snapshot) == 0 {
+		return nil
+	}
+	marks := strings.NewReplacer(homeMark, s.home, workMark, s.work)
+	path := marks.Replace(filepath.Join(workMark, "transcript.jsonl"))
+	snapshot = []byte(marks.Replace(string(snapshot)))
+	if err := os.WriteFile(path, snapshot, 0o600); err != nil {
+		return fmt.Errorf("transcript snapshot: %w", err)
+	}
+	return nil
+}
+
 var (
 	reTime    = regexp.MustCompile(`\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)?`)
 	reElapsed = regexp.MustCompile(`((?:elapsed_ms|timeout_ms)=)\d+`)
@@ -277,7 +382,49 @@ var (
 	reDur     = regexp.MustCompile(`((?:duration|took)=)\S+`)
 	reMS      = regexp.MustCompile(`( ms=)\d+`)
 	reLatency = regexp.MustCompile(`("latency_ms":)\d+`)
+	reUUID    = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f-]{27,}\b`)
+	reToolID  = regexp.MustCompile(`\btoolu_[A-Za-z0-9]+\b`)
 )
+
+func scrubPayloadIDs(value any) any {
+	switch v := value.(type) {
+	case string:
+		v = reTime.ReplaceAllString(v, "<time>")
+		v = reUUID.ReplaceAllString(v, "<uuid>")
+		v = reToolID.ReplaceAllString(v, "<tool-id>")
+		return v
+	case []any:
+		out := make([]any, len(v))
+		for i := range v {
+			out[i] = scrubPayloadIDs(v[i])
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, item := range v {
+			lower := strings.ToLower(k)
+			if lower == "session_id" || lower == "sessionid" || lower == "transcript_path" || lower == "tool_use_id" || lower == "uuid" || lower == "timestamp" || lower == "cwd" {
+				continue
+			}
+			out[k] = scrubPayloadIDs(item)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func distinctPayload(c *eqCase) (string, error) {
+	fixtures := map[string]any{}
+	for k, v := range c.fixtures {
+		fixtures[k] = v
+	}
+	canonical, err := json.Marshal(scrubPayloadIDs(map[string]any{"input": c.data, "transcript": string(c.transcript), "fixtures": fixtures}))
+	if err != nil {
+		return "", fmt.Errorf("canonical payload: %w", err)
+	}
+	return string(canonical), nil
+}
 
 // dropLines — строки, зависящие от нагрузки машины, и строка запасного пути
 // (у отдельного CLI её нет)
@@ -299,6 +446,11 @@ func normalize(raw []byte, pid int) []byte {
 		}
 	}
 	return replacePID(bytes.Join(kept, []byte("\n")), pid)
+}
+
+func normalizeSandbox(raw []byte, pid int, root string) []byte {
+	raw = normalize(raw, pid)
+	return bytes.ReplaceAll(raw, []byte(root), []byte("@SANDBOX@"))
 }
 
 // replacePID — pid отдельным числом (не частью другого числа) меняется на метку
@@ -356,6 +508,7 @@ func snapshot(root string, pid int) (map[string]string, error) {
 		if err != nil {
 			return fmt.Errorf("rel: %w", err)
 		}
+
 		switch {
 		case d.Type()&fs.ModeSymlink != 0:
 			target, err := os.Readlink(path)
@@ -372,10 +525,12 @@ func snapshot(root string, pid int) (map[string]string, error) {
 			if err != nil {
 				return fmt.Errorf("snapshot: %w", err)
 			}
+			data = bytes.ReplaceAll(data, []byte(filepath.Join(root, "work", "transcript.jsonl")), []byte("@WORK@/transcript.jsonl"))
 			if strings.HasSuffix(rel, "chooks-hooks.tsv") {
 				snap[rel] = string(tsvNorm(data))
 			} else {
-				snap[rel] = string(normalize(data, pid))
+				data = normalizeSandbox(data, pid, root)
+				snap[rel] = string(data)
 			}
 		}
 		return nil
@@ -403,45 +558,37 @@ type equalRun struct {
 	sandbox         string
 	socket, wrapper string
 	fallbackLog     string
+	invocations     int
 }
 
-func (r equalRun) invoke(binary string, c *eqCase) (observed, string, error) {
-	s, err := prepare(r.sandbox, c.suite)
+func (r *equalRun) invoke(binary string, c *eqCase) (result observed, reason string, retErr error) {
+	root := filepath.Join(r.sandbox, fmt.Sprintf("case-%06d", r.invocations))
+	r.invocations++
+	s, err := prepare(root, c.suite)
 	if err != nil {
+		return observed{}, "", fmt.Errorf("prepare sandbox: %w", err)
+	}
+	defer func() {
+		if err := removeSandbox(s.root); err != nil && retErr == nil {
+			retErr = fmt.Errorf("cleanup sandbox: %w", err)
+		}
+	}()
+	if err := installTranscript(s, c.transcript); err != nil {
 		return observed{}, "", err
 	}
-	env := map[string]string{
-		"HOME": s.home, "XDG_CONFIG_HOME": s.home + "/.config", "XDG_STATE_HOME": s.home + "/.local/state",
-		"XDG_RUNTIME_DIR": s.run, "CLAUDE_CONFIG_DIR": s.home + "/.claude", "PATH": s.home + "/bin:/usr/bin:/bin",
-		"LANG": "C.UTF-8", "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + s.root + "/no-bus",
-		"DBUS_SYSTEM_BUS_ADDRESS": "unix:path=" + s.root + "/no-system-bus",
+	if err := installFixtures(s, c.fixtures); err != nil {
+		return observed{}, "", err
 	}
-	if c.suite == "equal2" {
-		env["TMPDIR"] = s.root + "/tmp"
-	}
-	maps.Copy(env, c.env)
-	for _, k := range c.drop {
-		delete(env, k)
-	}
+	env := invocationEnv(s, c)
 	// Переменные прокси у обеих сторон: env одинаков
 	env["CHOOKS_HOOK_SOCKET"], env["CHOOKS_HOOK_CLI"] = r.socket, r.wrapper
 	var list []string
 	for _, k := range slices.Sorted(maps.Keys(env)) {
 		list = append(list, k+"="+env[k])
 	}
-	var args []string
-	if c.cmd != "" {
-		args = append(args, c.cmd)
-	}
-	marks := strings.NewReplacer(homeMark, s.home, workMark, s.work)
-	for _, a := range c.args {
-		args = append(args, marks.Replace(a))
-	}
-	stdin := c.raw
-	if !c.hasRaw {
-		if stdin, err = marshal(subst(c.data, s.home, s.work)); err != nil {
-			return observed{}, "", err
-		}
+	args, stdin, err := invocationInput(s, c)
+	if err != nil {
+		return observed{}, "", fmt.Errorf("prepare hook input: %w", err)
 	}
 	dir := s.work
 	switch c.procCwd {
@@ -455,15 +602,20 @@ func (r equalRun) invoke(binary string, c *eqCase) (observed, string, error) {
 	if err != nil {
 		return observed{}, "", fmt.Errorf("fallback log: %w", err)
 	}
-	o, err := runOne(binary, args, list, dir, stdin)
+	var o outcome
+	if c.cmd == "user-prompt-submit" && c.branch == "block" {
+		o, err = runOneUnderClaude(binary, args, list, dir, stdin, "unlisted")
+	} else {
+		o, err = runOne(binary, args, list, dir, stdin)
+	}
 	if err != nil {
-		return observed{}, "", err
+		return observed{}, "", fmt.Errorf("run hook: %w", err)
 	}
 	data, err := os.ReadFile(r.fallbackLog)
 	if err != nil {
 		return observed{}, "", fmt.Errorf("fallback log: %w", err)
 	}
-	reason := ""
+	reason = ""
 	if int64(len(data)) > info.Size() {
 		reason = strings.TrimSpace(string(data[info.Size():]))
 	}
@@ -471,7 +623,78 @@ func (r equalRun) invoke(binary string, c *eqCase) (observed, string, error) {
 	if err != nil {
 		return observed{}, "", err
 	}
-	return observed{code: o.code, stdout: string(normalize(o.stdout, o.pid)), stderr: string(normalize(o.stderr, o.pid)), files: files}, reason, nil
+	return observed{code: o.code, stdout: string(normalizeSandbox(o.stdout, o.pid, s.root)), stderr: string(normalizeSandbox(o.stderr, o.pid, s.root)), files: files}, reason, nil
+}
+
+func installFixtures(s sandbox, fixtures map[string]string) error {
+	for name, body := range fixtures {
+		marks := strings.NewReplacer(homeMark, s.home, workMark, s.work)
+		name, body = marks.Replace(name), marks.Replace(body)
+		rel := filepath.Clean(filepath.FromSlash(name))
+		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("fixture path escapes sandbox: %q", name)
+		}
+		path := filepath.Join(s.root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return fmt.Errorf("fixture directory: %w", err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			return fmt.Errorf("fixture file: %w", err)
+		}
+		if err := os.Chtimes(path, fixtureMTime, fixtureMTime); err != nil {
+			return fmt.Errorf("fixture time: %w", err)
+		}
+	}
+	return nil
+}
+
+func invocationEnv(s sandbox, c *eqCase) map[string]string {
+	env := map[string]string{
+		"HOME": s.home, "XDG_CONFIG_HOME": s.home + "/.config", "XDG_STATE_HOME": s.home + "/.local/state",
+		"XDG_RUNTIME_DIR": s.run, "CLAUDE_CONFIG_DIR": s.home + "/.claude", "PATH": s.home + "/bin:/usr/bin:/bin",
+		"LANG": "C.UTF-8", "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + s.root + "/no-bus",
+		"DBUS_SYSTEM_BUS_ADDRESS": "unix:path=" + s.root + "/no-system-bus",
+	}
+	if c.suite == "equal2" {
+		env["TMPDIR"] = s.root + "/tmp"
+	}
+	maps.Copy(env, c.env)
+	for _, k := range c.drop {
+		delete(env, k)
+	}
+	return env
+}
+
+func invocationInput(s sandbox, c *eqCase) ([]string, []byte, error) {
+	var args []string
+	if c.cmd != "" {
+		args = append(args, c.cmd)
+	}
+	marks := strings.NewReplacer(homeMark, s.home, workMark, s.work)
+	for _, arg := range c.args {
+		args = append(args, marks.Replace(arg))
+	}
+	if c.hasRaw {
+		return args, c.raw, nil
+	}
+	stdin, err := marshal(subst(c.data, s.home, s.work))
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal hook input: %w", err)
+	}
+	return args, stdin, nil
+}
+
+var removeSandboxAttempt = os.RemoveAll
+
+func removeSandbox(root string) error {
+	var err error
+	for range 10 {
+		if err = removeSandboxAttempt(root); err == nil {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return err
 }
 
 func clip(s string, n int, tail bool) string {
@@ -518,30 +741,122 @@ func diffObserved(a, b observed) []string {
 	return out
 }
 
-func compareCases(r equalRun, cli, proxy string, cases []eqCase) ([]string, int, int, map[string][]string, error) {
+type hookEqualStats struct {
+	inputs, mismatches, served int
+	branches                   map[string]int
+	branchPayloads             map[string]map[string]bool
+	branchSessions             map[string]map[string]bool
+	branchProjects             map[string]map[string]bool
+}
+
+func decisionBranch(hook string, result observed) string {
+	denied := bytes.Contains([]byte(result.stdout), []byte(`"permissionDecision":"deny"`))
+	calledJudge := false
+	for path := range result.files {
+		if strings.HasSuffix(path, "stub-calls.log") {
+			calledJudge = true
+			break
+		}
+	}
+	switch hook {
+	case "understand-check":
+		if denied {
+			return "judge-deny"
+		}
+		if calledJudge {
+			return "judge-ok"
+		}
+		return "skip"
+	case "post-tool-batch":
+		if strings.TrimSpace(result.stdout) != "" {
+			return "reminder"
+		}
+		return "skip"
+	case "user-prompt-submit":
+		if result.code == 2 && strings.Contains(result.stderr, "не одобрена") {
+			return "block"
+		}
+		if strings.TrimSpace(result.stdout) != "" {
+			return "reminder"
+		}
+		return "skip"
+	default:
+		return "other"
+	}
+}
+
+func compareCases(r equalRun, cli, proxy string, cases []eqCase) ([]string, int, int, map[string][]string, map[string]hookEqualStats, error) {
 	var lines []string
 	mismatches, served := 0, 0
 	fallbacks := map[string][]string{}
+	byHook := map[string]hookEqualStats{}
 	for i := range cases {
 		c := &cases[i]
+		// Reuse the exact absolute root for both executions. invoke cleans the CLI
+		// sandbox before the daemon prepares it, so path-derived keys are compared as written.
+		r.invocations = i * 2
+		stats := byHook[c.cmd]
+		stats.inputs++
+		if stats.branches == nil {
+			stats.branches = map[string]int{}
+			stats.branchPayloads = map[string]map[string]bool{}
+			stats.branchSessions = map[string]map[string]bool{}
+			stats.branchProjects = map[string]map[string]bool{}
+		}
+		payload, err := distinctPayload(c)
+		if err != nil {
+			return nil, mismatches, served, fallbacks, byHook, err
+		}
 		want, _, err := r.invoke(cli, c)
 		if err != nil {
-			return nil, mismatches, served, fallbacks, err
+			return nil, mismatches, served, fallbacks, byHook, err
 		}
+		r.invocations = i * 2
 		got, reason, err := r.invoke(proxy, c)
 		if err != nil {
-			return nil, mismatches, served, fallbacks, err
+			return nil, mismatches, served, fallbacks, byHook, err
 		}
 		if reason == "" {
 			served++
+			stats.served++
 		} else {
 			fallbacks[reason] = append(fallbacks[reason], c.name)
 		}
+		branch := decisionBranch(c.cmd, want)
+		if c.branch != "" && c.branch != branch {
+			lines = append(lines, fmt.Sprintf("### %s (branch: want %s, got %s)", c.name, c.branch, branch))
+			mismatches++
+			stats.mismatches++
+		}
+		stats.branches[branch]++
+		if payloadMap, ok := c.data.(map[string]any); ok {
+			if session, ok := payloadMap["session_id"].(string); ok && session != "" {
+				if stats.branchSessions[branch] == nil {
+					stats.branchSessions[branch] = map[string]bool{}
+				}
+				stats.branchSessions[branch][session] = true
+				project := c.project
+				if project == "" {
+					project, _ = payloadMap["cwd"].(string)
+				}
+				if stats.branchProjects[branch] == nil {
+					stats.branchProjects[branch] = map[string]bool{}
+				}
+				stats.branchProjects[branch][project] = true
+				if stats.branchPayloads[branch] == nil {
+					stats.branchPayloads[branch] = map[string]bool{}
+				}
+				stats.branchPayloads[branch][payload] = true
+			}
+		}
 		diff := diffObserved(want, got)
 		if len(diff) == 0 {
+			byHook[c.cmd] = stats
 			continue
 		}
 		mismatches++
+		stats.mismatches++
+		byHook[c.cmd] = stats
 		path := "daemon"
 		if reason != "" {
 			path = "CLI: " + reason
@@ -549,7 +864,34 @@ func compareCases(r equalRun, cli, proxy string, cases []eqCase) ([]string, int,
 		lines = append(lines, fmt.Sprintf("### %s (path: %s)", c.name, path))
 		lines = append(lines, diff...)
 	}
-	return lines, mismatches, served, fallbacks, nil
+	return lines, mismatches, served, fallbacks, byHook, nil
+}
+
+func loadEqualCases(inputs, suite string) ([]eqCase, error) {
+	if suite != "equal" && suite != "equal2" && suite != "both" {
+		return nil, fmt.Errorf("invalid --suite %q: want equal, equal2 or both", suite)
+	}
+	var eq1, eq2, extra []eqCase
+	var err error
+	if suite == "equal" || suite == "both" {
+		eq1, err = corpusCases(inputs, "equal")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if suite == "equal2" || suite == "both" {
+		eq2, err = corpusCases(inputs, "equal2")
+		if err != nil {
+			return nil, err
+		}
+		if suite == "both" {
+			extra, err = extraCases()
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return slices.Concat(eq1, eq2, extra), nil
 }
 
 func runEqual(argv []string) (code int, retErr error) {
@@ -557,6 +899,9 @@ func runEqual(argv []string) (code int, retErr error) {
 	var bin binaries
 	bin.register(fsFlags)
 	inputs := fsFlags.String("inputs", "", "eq1/inputs из hd/s2a/review2/equality")
+	extraInputs := fsFlags.String("extra-inputs", "", "дополнительный корпус corpusCases")
+	extraSuite := fsFlags.String("extra-suite", "equal", "набор дополнительного корпуса: equal или equal2")
+	suite := fsFlags.String("suite", "both", "корпус: equal, equal2 или both")
 	report := fsFlags.String("report", "", "файл отчёта о расхождениях")
 	if err := fsFlags.Parse(argv); err != nil {
 		return 2, fmt.Errorf("flags: %w", err)
@@ -569,19 +914,14 @@ func runEqual(argv []string) (code int, retErr error) {
 		return 2, err
 	}
 	bin.cli, bin.proxy = stagedCLI, stagedProxy
-	eq1, err := corpusCases(*inputs, "equal")
+	cases, err := loadEqualCases(*inputs, *suite)
 	if err != nil {
 		return 2, err
 	}
-	eq2, err := corpusCases(*inputs, "equal2")
+	cases, err = appendExtraCorpus(cases, *extraInputs, *extraSuite)
 	if err != nil {
 		return 2, err
 	}
-	extra, err := extraCases()
-	if err != nil {
-		return 2, err
-	}
-	cases := slices.Concat(eq1, eq2, extra)
 	r := equalRun{sandbox: filepath.Join(bin.work, "sandbox"), wrapper: filepath.Join(bin.work, "cli-fallback.sh"),
 		fallbackLog: filepath.Join(bin.work, "fallbacks.log")}
 	wrapper := "#!/bin/sh\nprintf '%s\\n' \"$CHOOKS_FALLBACK\" >> " + strconv.Quote(r.fallbackLog) + "\nexec " + strconv.Quote(bin.cli) + " \"$@\"\n"
@@ -601,19 +941,26 @@ func runEqual(argv []string) (code int, retErr error) {
 		return 2, err
 	}
 	r.socket = d.socket
-	lines, mismatches, served, fallbacks, runErr := compareCases(r, bin.cli, bin.proxy, cases)
+	lines, mismatches, served, fallbacks, byHook, runErr := compareCases(r, bin.cli, bin.proxy, cases)
 	daemonExit := d.stop()
 	if runErr != nil {
 		return 2, runErr
 	}
 	head := []string{
-		fmt.Sprintf("cases: %d (equal %d, equal2 %d)", len(cases), len(eq1), len(cases)-len(eq1)),
+		fmt.Sprintf("cases: %d (suite %s)", len(cases), *suite),
 		fmt.Sprintf("mismatches: %d", mismatches),
 		fmt.Sprintf("served by daemon: %d", served),
 		fmt.Sprintf("CLI fallback: %d", len(cases)-served),
 	}
 	for _, reason := range slices.Sorted(maps.Keys(fallbacks)) {
 		head = append(head, fmt.Sprintf("  %s: %d — %s", reason, len(fallbacks[reason]), strings.Join(fallbacks[reason], ", ")))
+	}
+	for _, hook := range slices.Sorted(maps.Keys(byHook)) {
+		stats := byHook[hook]
+		head = append(head, fmt.Sprintf("hook %s: inputs %d, mismatches %d, served by daemon %d", hook, stats.inputs, stats.mismatches, stats.served))
+		for _, branch := range slices.Sorted(maps.Keys(stats.branches)) {
+			head = append(head, fmt.Sprintf("  branch %s: %d, sessions %d, projects %d, distinct payloads %d", branch, stats.branches[branch], len(stats.branchSessions[branch]), len(stats.branchProjects[branch]), len(stats.branchPayloads[branch])))
+		}
 	}
 	head = append(head, fmt.Sprintf("daemon exit: %d", daemonExit))
 	fmt.Println(strings.Join(head, "\n"))
@@ -640,4 +987,18 @@ func closeDaemonLog(retErr *error, logFile *os.File) {
 	if err := logFile.Close(); err != nil {
 		*retErr = errors.Join(*retErr, fmt.Errorf("close daemon log: %w", err))
 	}
+}
+
+func appendExtraCorpus(cases []eqCase, inputs, suite string) ([]eqCase, error) {
+	if inputs == "" {
+		return cases, nil
+	}
+	if suite != "equal" && suite != "equal2" {
+		return nil, fmt.Errorf("invalid --extra-suite %q: want equal or equal2", suite)
+	}
+	extra, err := corpusCases(inputs, suite)
+	if err != nil {
+		return nil, err
+	}
+	return slices.Concat(cases, extra), nil
 }

@@ -60,8 +60,8 @@ var shadowOutside = map[string]string{
 	hookUnderstandCheck:  "судья claude -p: внешний процесс модели",
 	hookClaimStop:        "судья claude -p: внешний процесс модели",
 	hookWebFetchFallback: "сеть: webtext скачивает страницу",
-	hookUserPromptSubmit: "skill-reload запускает git (dry run), проверка модели claude читает /proc через modellaunch.ProcReader мимо записи",
-	hookPostToolBatch:    "skill-reload запускает git (dry run)",
+	hookUserPromptSubmit: "проверка модели claude читает дерево процессов через modellaunch.ProcReader; skill-reload читает транскрипт и файлы инструкций",
+	hookPostToolBatch:    "skill-reload читает транскрипт и файлы инструкций",
 	hookStatusLine:       "запускает ротацию учёток (процесс), пишет снимок лимитов и читает git и транскрипт без снимка",
 }
 

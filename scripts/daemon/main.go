@@ -227,9 +227,27 @@ type outcome struct {
 }
 
 func runOne(binary string, args, env []string, dir string, stdin []byte) (outcome, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	return runCommand(context.Background(), binary, args, env, dir, stdin)
+}
+
+// runOneUnderClaude gives both the CLI and proxy the same synthetic parent
+// process. The parent has Claude's argv0 and an intentionally unapproved
+// model; no claude executable or model is started.
+func runOneUnderClaude(binary string, args, env []string, dir string, stdin []byte, model string) (outcome, error) {
+	wrapped := append([]string{"-c", `"$3" "${@:4}" & child=$!; wait "$child" # user-prompt-submit`, "claude", "--model", model, binary}, args...)
+	env = append(slices.Clone(env), "CLAUDECODE=1")
+	return runCommandArgv0(context.Background(), "/bin/bash", "claude", wrapped, env, dir, stdin)
+}
+
+func runCommand(parent context.Context, binary string, args, env []string, dir string, stdin []byte) (outcome, error) {
+	return runCommandArgv0(parent, binary, binary, args, env, dir, stdin)
+}
+
+func runCommandArgv0(parent context.Context, binary, argv0 string, args, env []string, dir string, stdin []byte) (outcome, error) {
+	ctx, cancel := context.WithTimeout(parent, time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Args[0] = argv0
 	cmd.Env, cmd.Dir = slices.Clone(env), dir
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout, stderr bytes.Buffer

@@ -1225,7 +1225,12 @@ func commandCWDs(command, initial string, homes []string, logger core.Logger) []
 	for i := range calls {
 		call := &calls[i]
 		if call.Name == "cd" || call.Name == "pushd" {
-			call = assignedArguments(call, assigns)
+			resolved, assignErr := assignedArguments(call, assigns)
+			if assignErr != nil {
+				logger.Warn("model_guard: не удалось раскрыть значение аргумента", "error", assignErr)
+				return paths
+			}
+			call = resolved
 			for _, home := range homes {
 				dir, known := changeDirKnown(call, cwd, home)
 				if known && usableDirectory(dir, logger) {
@@ -1291,6 +1296,18 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 		call := &calls[i]
 		if nextCWD, changed := modelCallDirectory(call, cwd, home, logger); changed {
 			cwd = nextCWD
+			if !slices.Contains(cwdCandidates, nextCWD) {
+				cwdCandidates = append(cwdCandidates, nextCWD)
+			}
+			continue
+		}
+		if isShellName(call.Name) {
+			nested, nestedErr := nestedShellModelCandidates(command, call, cwd, home, homes, configs, files, settingsAt, agentAt, logger)
+			if nestedErr != nil {
+				logger.Warn("model_guard: не удалось разобрать присваивания перед вложенной оболочкой", "error", nestedErr)
+				continue
+			}
+			found = append(found, nested...)
 			continue
 		}
 		resolved, resolveErr := computedClientCall(call, command, logger)
@@ -1337,6 +1354,179 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 		found = append(found, textModelCandidates(whichClaudeSubstitution.ReplaceAllString(command, "claude"))...)
 	}
 	return found
+}
+
+func nestedShellModelCandidates(command string, call *shellcmd.Call, cwd, home string, homes, configs pathSet, files modelFiles, settingsAt func(string, bool) []modelCandidate, agentAt func(string, string, []string) []modelCandidate, logger core.Logger) ([]modelCandidate, error) {
+	outerAssigns, visibleAt, err := nestedShellVisibleAssignments(command, call)
+	if err != nil {
+		return nil, err
+	}
+	var found []modelCandidate
+	args, matched, renderErr := outerShellArgumentValues(command, call, outerAssigns, visibleAt)
+	if renderErr != nil {
+		return nil, fmt.Errorf("разбор argv вложенной оболочки: %w", renderErr)
+	}
+	if !matched {
+		args = call.Args
+	}
+	if call.Name == "ssh" {
+		// ssh передаёт удалённой оболочке слова после host как одну команду;
+		// shellCommandStrings предназначен для флагов -c локальных оболочек.
+		if len(args) > 1 {
+			args = []string{strings.Join(args[1:], " ")}
+		} else {
+			args = nil
+		}
+	}
+	for _, nested := range shellCommandStrings(args) {
+		found = append(found, bashModelCandidatesAt(nested, cwd, home, []string{cwd}, homes, configs, files, settingsAt, agentAt, logger)...)
+	}
+	if call.Name == "ssh" && len(args) == 1 {
+		found = append(found, bashModelCandidatesAt(args[0], cwd, home, []string{cwd}, homes, configs, files, settingsAt, agentAt, logger)...)
+	}
+	return found, nil
+}
+
+func nestedShellVisibleAssignments(command string, call *shellcmd.Call) ([]shellcmd.Assign, int, error) {
+	visibleAt := 0
+	assignmentText := ""
+	if call.Offset >= 0 && call.Offset <= len(command) {
+		visibleAt = call.Offset
+		assignmentText = command[:call.Offset]
+	} else if slices.Contains(call.Via, "tmux") {
+		if outerCalls, outerErr := shellcmd.Calls(command); outerErr == nil {
+			for i := range outerCalls {
+				if outerCalls[i].Name == "tmux" && outerCalls[i].Offset >= 0 && outerCalls[i].Offset <= len(command) {
+					visibleAt = outerCalls[i].Offset
+					assignmentText = command[:visibleAt]
+					break
+				}
+			}
+		}
+	}
+	outerAssigns, err := shellcmd.Assigns(assignmentText)
+	if err != nil {
+		return nil, 0, fmt.Errorf("разбор присваиваний перед вложенной оболочкой: %w", err)
+	}
+	return outerAssigns, visibleAt, nil
+}
+
+// outerShellArgumentValues evaluates only parameter expansions that the outer
+// shell performs while building this command's argv. Prefix assignments on the
+// same command are deliberately unavailable during that expansion.
+func outerShellArgumentValues(command string, call *shellcmd.Call, assigns []shellcmd.Assign, visibleAt int) ([]string, bool, error) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil, false, fmt.Errorf("разбор команды для argv оболочки: %w", err)
+	}
+	if call.Offset < 0 || call.Offset >= len(command) {
+		return nil, false, nil
+	}
+	var result []string
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		outer, ok := node.(*syntax.CallExpr)
+		if !ok || found {
+			return !found
+		}
+		commandIndex := -1
+		for i, word := range outer.Args {
+			if int(word.Pos().Offset()) == call.Offset {
+				commandIndex = i
+				break
+			}
+		}
+		if commandIndex < 0 {
+			return true
+		}
+		blocked := make(map[string]bool)
+		for _, assignment := range outer.Assigns {
+			if assignment.Name != nil {
+				blocked[assignment.Name.Value] = true
+			}
+		}
+		for _, word := range outer.Args[commandIndex+1:] {
+			value, ok := outerShellWordValue(command, word, assigns, visibleAt, blocked)
+			if !ok {
+				return true
+			}
+			result = append(result, value)
+		}
+		found = true
+		return false
+	})
+	return result, found, nil
+}
+
+func outerShellWordValue(command string, word *syntax.Word, assigns []shellcmd.Assign, visibleAt int, blocked map[string]bool) (string, bool) {
+	var b strings.Builder
+	if !appendOuterShellParts(&b, word.Parts, command, assigns, visibleAt, blocked) {
+		return "", false
+	}
+	return b.String(), true
+}
+
+func appendOuterShellParts(b *strings.Builder, parts []syntax.WordPart, command string, assigns []shellcmd.Assign, visibleAt int, blocked map[string]bool) bool {
+	for _, part := range parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			b.WriteString(shellOuterLiteral(p.Value))
+		case *syntax.SglQuoted:
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			if !appendOuterShellParts(b, p.Parts, command, assigns, visibleAt, blocked) {
+				return false
+			}
+		case *syntax.ParamExp:
+			if !appendOuterShellParameter(b, command, p, assigns, visibleAt, blocked) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func appendOuterShellParameter(b *strings.Builder, command string, p *syntax.ParamExp, assigns []shellcmd.Assign, visibleAt int, blocked map[string]bool) bool {
+	if p.Param == nil {
+		return false
+	}
+	value, known := "", false
+	name := p.Param.Value
+	if !blocked[name] {
+		for i := len(assigns) - 1; i >= 0; i-- {
+			a := assigns[i]
+			if a.Name == name && a.VisibleAt(visibleAt) {
+				value, known = a.Value, !a.Unknown && !a.Append && !strings.ContainsAny(a.Value, "$`~")
+				break
+			}
+		}
+	}
+	if known && simpleVariableParameter(p) {
+		b.WriteString(value)
+		return true
+	}
+	start, end := int(p.Pos().Offset()), int(p.End().Offset())
+	if start < 0 || end < start || end > len(command) {
+		return false
+	}
+	b.WriteString(command[start:end])
+	return true
+}
+
+func shellOuterLiteral(text string) string {
+	var b strings.Builder
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\\' && i+1 < len(text) {
+			i++
+			if text[i] == '\n' {
+				continue
+			}
+		}
+		b.WriteByte(text[i])
+	}
+	return b.String()
 }
 
 var whichClaudeSubstitution = regexp.MustCompile(`\$\(\s*(?:which\s+claude|command\s+-v\s+claude)\s*\)`)
@@ -1978,26 +2168,7 @@ func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger
 	})
 	// тело here-doc, в котором shellcmd нашёл claude, исполняет оболочка;
 	// снятая обёртка несёт те же перенаправления — тело читается один раз
-	bodies := map[int]bool{}
-	claudeOffsets := make([]int, 0, len(calls))
-	for i := range calls {
-		if clientDialect(calls[i].Name) == "claude" {
-			claudeOffsets = append(claudeOffsets, calls[i].Offset)
-		}
-	}
-	slices.Sort(claudeOffsets)
-	for i := range calls {
-		c := &calls[i]
-		for _, r := range c.Redirs {
-			j, _ := slices.BinarySearch(claudeOffsets, r.BodyStart)
-			foundBody := j < len(claudeOffsets) && claudeOffsets[j] < r.BodyEnd
-			if r.BodyStart < 0 || bodies[r.BodyStart] || !foundBody {
-				continue
-			}
-			bodies[r.BodyStart] = true
-			found = append(found, nestedEnvModels(r.Body, logger)...)
-		}
-	}
+	found = append(found, hereDocEnvCandidates(calls, logger)...)
 	// `script` не относится к оболочкам shellcmd и его командная строка
 	// не попадает в callEnvModels; разбираем её здесь.
 	for i := range calls {
@@ -2009,6 +2180,56 @@ func envModelCandidates(script string, calls []shellcmd.Call, logger core.Logger
 		}
 	}
 	return found
+}
+
+func hereDocEnvCandidates(calls []shellcmd.Call, logger core.Logger) []modelCandidate {
+	shellOffsets := make([]int, 0, len(calls))
+	for i := range calls {
+		call := &calls[i]
+		if isShellName(call.Name) || slices.ContainsFunc(call.Via, isShellName) {
+			shellOffsets = append(shellOffsets, call.Offset)
+		}
+	}
+	slices.Sort(shellOffsets)
+	bodies := map[int]bool{}
+	var found []modelCandidate
+	for i := range calls {
+		c := &calls[i]
+		for _, r := range c.Redirs {
+			if r.BodyStart < 0 || bodies[r.BodyStart] {
+				continue
+			}
+			if !isShellName(c.Name) && !shellInputInRange(shellOffsets, r.BodyStart, r.BodyEnd) {
+				continue
+			}
+			foundClient := hereDocHasClaudeClient(r.Body, logger)
+			if !foundClient {
+				continue
+			}
+			bodies[r.BodyStart] = true
+			found = append(found, nestedEnvModels(r.Body, logger)...)
+		}
+	}
+	return found
+}
+
+func shellInputInRange(offsets []int, start, end int) bool {
+	i, _ := slices.BinarySearch(offsets, start)
+	return i < len(offsets) && offsets[i] < end
+}
+
+func hereDocHasClaudeClient(body string, logger core.Logger) bool {
+	calls, err := shellcmd.Calls(body)
+	if err != nil {
+		logger.Warn("model_guard: shellcmd не разобрал тело here-doc", "error", err)
+		return false
+	}
+	for i := range calls {
+		if claudeClientCall(&calls[i], body, logger) {
+			return true
+		}
+	}
+	return false
 }
 
 func shellCommandStrings(args []string) []string {
@@ -2223,10 +2444,6 @@ func callEnvModels(script string, n *syntax.CallExpr, calls []shellcmd.Call, log
 	for i := range chain {
 		c := &chain[i]
 		switch {
-		case isShellName(c.Name):
-			for _, a := range c.Args {
-				found = append(found, nestedEnvModels(a, logger)...)
-			}
 		case runs && i+1 < len(chain):
 			// env A=x claude, sudo A=x claude, timeout 5 sudo A=x claude:
 			// слова снятых обёрток до следующей команды цепочки и её имя —

@@ -140,7 +140,8 @@ func worktreeMainRoot(dir, dotGit string) (string, error) {
 	}
 	commonDir := resolveFrom(strings.TrimSpace(string(common)), gitDir)
 	if filepath.Base(commonDir) != ".git" {
-		return dir, nil
+		// У worktree голого репозитория commondir и есть корень репозитория.
+		return commonDir, nil
 	}
 	return filepath.Dir(commonDir), nil
 }
@@ -446,8 +447,12 @@ func variableClient(command, name string, depth int, logger core.Logger) string 
 		if client := mentionedClient(text); client != "" {
 			return client
 		}
-		if m := variableReference.FindStringSubmatch(text); m != nil && depth < variableDepth {
-			if client := variableClient(command, m[1], depth+1, logger); client != "" {
+		_, name, suffix, ok, parseErr := variableArgument(text)
+		if parseErr != nil {
+			logger.Warn("model_guard: не удалось разобрать значение аргумента-переменной", "error", parseErr)
+		}
+		if ok && suffix == "" && depth < variableDepth {
+			if client := variableClient(command, name, depth+1, logger); client != "" {
 				return client
 			}
 		}
@@ -456,7 +461,7 @@ func variableClient(command, name string, depth int, logger core.Logger) string 
 }
 
 // variableReference — значение — ссылка на переменную целиком: $C, ${C}, "$C"
-var variableReference = regexp.MustCompile(`^"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?$`)
+// variable references are parsed with variableArgument below.
 
 // variableDepth — предел цепочки ссылок C2=$C и вложенных оболочек
 const variableDepth = 4
@@ -587,6 +592,36 @@ func computedClientName(source, command string, w *syntax.Word, logger core.Logg
 // hookSettingsMention — ключ, который снимает хуки, с присвоенным значением
 // в тексте команды не JSON-объектом (jq '.disableAllHooks = true')
 var hookSettingsMention = regexp.MustCompile(`disableAllHooks["'\\]*\s*[:=]\s*(["'\\]*)([A-Za-z0-9]*)`)
+var jqHookAssignment = regexp.MustCompile(`\.disableAllHooks\s*=\s*\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// jqArgJSONHookOff разбирает привязки --argjson и фильтр из argv jq.
+func jqArgJSONHookOff(args []string) bool {
+	values := make(map[string]string)
+	filter := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--argjson" && i+2 < len(args) {
+			values[args[i+1]] = args[i+2]
+			i += 2
+			continue
+		}
+		if after, ok := strings.CutPrefix(arg, "--argjson="); ok {
+			parts := strings.SplitN(after, "=", 2)
+			if len(parts) == 2 {
+				values[parts[0]] = parts[1]
+			}
+			continue
+		}
+		if filter == "" && !strings.HasPrefix(arg, "-") {
+			filter = arg
+		}
+	}
+	name := ""
+	if match := jqHookAssignment.FindStringSubmatch(filter); match != nil {
+		name = match[1]
+	}
+	return name != "" && values[name] == "true"
+}
 
 // writtenHookSettingsCandidates — команда пишет файл настроек claude
 // (перенаправление, tee, cp, sed -i — protectedWriteTargetSet), и её текст
@@ -612,6 +647,20 @@ func writtenHookSettingsCandidates(command string) []modelCandidate {
 	for _, m := range hookSettingsMention.FindAllStringSubmatch(command, -1) {
 		if m[1] == "" && m[2] == "true" {
 			reasons = append(reasons, "disableAllHooks снимает хуки claude (остаются только управляемые)")
+		}
+	}
+	calls, err := shellcmd.Calls(command)
+	if err != nil {
+		// Неоднозначная запись файла настроек с упоминанием ключа получает
+		// консервативную оценку, если argv jq разобрать нельзя.
+		if strings.Contains(command, "jq") && strings.Contains(command, "disableAllHooks") {
+			reasons = append(reasons, fmt.Sprintf("не удалось разобрать jq argv для disableAllHooks: %v", err))
+		}
+	} else {
+		for i := range calls {
+			if calls[i].Name == "jq" && jqArgJSONHookOff(calls[i].Args) {
+				reasons = append(reasons, "disableAllHooks снимает хуки claude (остаются только управляемые)")
+			}
 		}
 	}
 	slices.Sort(reasons)
@@ -677,16 +726,19 @@ func (d discardLogger) With(...any) core.Logger { return d }
 // cd "$D" после D=/путь. Неизвестное значение, дописывание (+=) и тильда
 // оставляют слово как есть. У вызова без смещения (Offset -1) присваивание
 // не видно (VisibleAt), и вызов не меняется
-func assignedArguments(c *shellcmd.Call, assigns []shellcmd.Assign) *shellcmd.Call {
+func assignedArguments(c *shellcmd.Call, assigns []shellcmd.Assign) (*shellcmd.Call, error) {
 	var args []string
 	for i, arg := range c.Args {
-		m := variableReference.FindStringSubmatch(arg)
-		if m == nil {
+		prefix, name, suffix, ok, err := variableArgument(arg)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
 			continue
 		}
 		value, known := "", false
 		for _, a := range assigns {
-			if a.Name == m[1] && a.VisibleAt(c.Offset) {
+			if a.Name == name && a.VisibleAt(c.Offset) {
 				value, known = a.Value, !a.Unknown && !a.Append && !strings.ContainsAny(a.Value, "$`~")
 			}
 		}
@@ -696,12 +748,85 @@ func assignedArguments(c *shellcmd.Call, assigns []shellcmd.Assign) *shellcmd.Ca
 		if args == nil {
 			args = slices.Clone(c.Args)
 		}
-		args[i] = value
+		args[i] = prefix + value + suffix
 	}
 	if args == nil {
-		return c
+		return c, nil
 	}
 	resolved := *c
 	resolved.Args = args
-	return &resolved
+	return &resolved, nil
+}
+
+// variableArgument разбирает значение одного shell-слова: ссылка на
+// присваивание в начале аргумента, возможно с
+// литеральным хвостом пути: "$D/work". Захват делается по форме уже
+// разобранного shell-аргумента; значение переменной и его видимость берутся
+// только из shellcmd.Assigns.
+func variableArgument(text string) (prefix, name, suffix string, ok bool, err error) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	if err != nil {
+		return "", "", "", false, fmt.Errorf("разбор shell-слова: %w", err)
+	}
+	if len(file.Stmts) != 1 {
+		return "", "", "", false, nil
+	}
+	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return "", "", "", false, nil
+	}
+	parts, found := variableArgumentParts(call.Args[0].Parts)
+	if !found {
+		return "", "", "", false, nil
+	}
+	return parts.prefix, parts.name, parts.suffix, true, nil
+}
+
+type variableWordParts struct{ prefix, name, suffix string }
+
+func variableArgumentParts(parts []syntax.WordPart) (variableWordParts, bool) {
+	var before, after strings.Builder
+	name := ""
+	var visit func([]syntax.WordPart) bool
+	visit = func(parts []syntax.WordPart) bool {
+		for _, part := range parts {
+			switch p := part.(type) {
+			case *syntax.Lit:
+				writeVariableLiteral(&before, &after, name != "", p.Value)
+			case *syntax.SglQuoted:
+				writeVariableLiteral(&before, &after, name != "", p.Value)
+			case *syntax.DblQuoted:
+				if !visit(p.Parts) {
+					return false
+				}
+			case *syntax.ParamExp:
+				if name != "" || !simpleVariableParameter(p) {
+					return false
+				}
+				name = p.Param.Value
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	if !visit(parts) || name == "" {
+		return variableWordParts{}, false
+	}
+	return variableWordParts{before.String(), name, after.String()}, true
+}
+
+func writeVariableLiteral(before, after *strings.Builder, parameterSeen bool, value string) {
+	if parameterSeen {
+		after.WriteString(value)
+		return
+	}
+	before.WriteString(value)
+}
+
+func simpleVariableParameter(p *syntax.ParamExp) bool {
+	return p.Param != nil && p.Flags == nil && !p.Excl && !p.Length && !p.Width && !p.IsSet &&
+		p.Split == syntax.OptUnset && p.GlobSubst == syntax.OptUnset && p.RcExpand == syntax.OptUnset &&
+		p.NestedParam == nil && p.Index == nil && p.Slice == nil && p.Repl == nil &&
+		len(p.Modifiers) == 0 && p.Names == 0 && p.Exp == nil
 }

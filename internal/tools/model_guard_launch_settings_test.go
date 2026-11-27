@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/akit/shellcmd"
@@ -36,6 +37,7 @@ func newLaunchFixture(t *testing.T) launchFixture {
 	files := map[string]string{
 		filepath.Join(f.worktree, ".git"):                         "gitdir: " + gitDir + "\n",
 		filepath.Join(gitDir, "commondir"):                        "../..\n",
+		filepath.Join(gitDir, "gitdir"):                           filepath.Join(f.worktree, ".git") + "\n",
 		filepath.Join(f.repo, ".claude", "settings.local.json"):   `{"disableAllHooks":true}`,
 		filepath.Join(f.parent, ".claude", "settings.json"):       `{"disableAllHooks":true}`,
 		filepath.Join(f.parent, ".claude", "settings.local.json"): `{"disableAllHooks":true}`,
@@ -64,6 +66,9 @@ func TestCanonicalGitRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(relGit, "commondir"), []byte("../.."), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(relGit, "gitdir"), []byte(filepath.Join(relative, ".git")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	submodule := filepath.Join(filepath.Dir(f.repo), "submodule")
 	if err := os.MkdirAll(filepath.Join(f.repo, ".git", "modules", "s"), 0o755); err != nil {
 		t.Fatal(err)
@@ -75,16 +80,19 @@ func TestCanonicalGitRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	bare := filepath.Join(filepath.Dir(f.repo), "bare")
-	bareGit := filepath.Join(filepath.Dir(f.repo), "store", "worktrees", "b")
+	bareGit := filepath.Join(bare, "worktrees", "b")
 	for _, dir := range []string{bare, bareGit} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(bare, ".git"), []byte("gitdir: "+bareGit), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(bare, ".git"), []byte("gitdir: "+bareGit+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bareGit, "commondir"), []byte("../.."), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(bareGit, "commondir"), []byte("../..\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bareGit, "gitdir"), []byte(filepath.Join(bare, ".git")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// путь через файл: Lstat даёт ENOTDIR, не «нет файла» — ошибка, а не подъём
@@ -144,6 +152,13 @@ func TestLaunchSettingsPaths(t *testing.T) {
 func TestModelGuardLaunchSettings(t *testing.T) {
 	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
 	f := newLaunchFixture(t)
+	work := filepath.Join(filepath.Dir(f.parent), "work")
+	if err := os.MkdirAll(filepath.Join(work, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, ".claude", "settings.json"), []byte(`{"disableAllHooks":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	runClientOptionCases(t, tool, []clientOptionCase{
 		{"worktree reads main repository local settings", "cd " + f.worktree + " && claude -p --model opus hi", false, "settings.local.json: disableAllHooks"},
 		{"worktree through runner", "cd " + f.worktree + "/ && npx -y @anthropic-ai/claude-code -p --model opus hi", false, "disableAllHooks"},
@@ -153,14 +168,45 @@ func TestModelGuardLaunchSettings(t *testing.T) {
 		{"cd through assigned variable", "D=" + f.parent + "; cd \"$D\" && claude -p --model opus hi", false, "disableAllHooks"},
 		{"cd through variable and list", "D=" + f.parent + " && cd $D && claude -p --model opus hi", false, "disableAllHooks"},
 		{"cd through braces", "D=" + f.parent + "; cd ${D} && claude -p --model opus hi", false, "disableAllHooks"},
+		{"cd through variable with suffix", "D=" + f.parent + "; cd \"$D/child\" && claude -p --model opus hi", true, ""},
+		{"cd through braced variable with suffix", "D=" + f.parent + "; cd \"${D}/child\" && claude -p --model opus hi", true, ""},
+		{"C11 split double quoted variable path", "D=" + filepath.Dir(work) + "; cd \"$D\"/work && claude -p --model opus hi", false, "disableAllHooks"},
+		{"C12 variable with double quoted suffix", "D=" + filepath.Dir(work) + "; cd $D\"/work\" && claude -p --model opus hi", false, "disableAllHooks"},
+		{"external variable in bash command", "D=" + f.parent + "; bash -c \"cd $D && claude -p --model opus hi\"", false, "disableAllHooks"},
+		{"tmux external variable in bash command", "D=" + f.parent + "; tmux new-session -d 'bash -c \"cd $D && claude -p --model opus hi\"'", false, "disableAllHooks"},
+		{"V03 single quoted nested script does not expand outer variable", "D=" + work + "; bash -c 'cd \"$D\" && claude -p --model opus hi'", true, ""},
+		{"V14 command prefix assignment does not expand in argv", "D=" + work + " bash -c \"cd $D && claude -p --model opus hi\"", true, ""},
+		{"V29 escaped dollar is not expanded by outer shell", "D=" + work + "; bash -c \"cd \\$D && claude -p --model opus hi\"", true, ""},
 		{"cd through reassigned variable", "D=" + f.parent + "; D=" + f.child + "; cd $D && claude -p --model opus hi", true, ""},
 		{"cd through appended variable", "D=" + f.parent + "; D+=/child; cd $D && claude -p --model opus hi", true, ""},
 		{"cd through unknown variable", "cd \"$WORKDIR\" && claude -p --model opus hi", true, ""},
 	})
 }
 
+func TestModelGuardConfigDirSettingsRemoveHooks(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), ".claude")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"disableAllHooks":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{
+		ToolName: "Bash",
+		Command:  "CLAUDE_CONFIG_DIR=" + configDir + " claude -p --model opus hi",
+		CWD:      t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsValid || len(result.Violations) == 0 || !strings.Contains(result.Violations[0].Message, "disableAllHooks") {
+		t.Fatalf("CLAUDE_CONFIG_DIR settings должны блокировать запуск без хуков: %+v", result)
+	}
+}
+
 func TestAssignedArguments(t *testing.T) {
-	command := `D=/a; E=~/b; F=$(pwd); G=/c; G+=/d; cd "$D" $E ${D} $D/x $F $G $H; H=/h`
+	command := `D=/a; E=~/b; F=$(pwd); G=/c; G+=/d; cd "$D" $E ${D} $D/x $F $G $H "$D"/work $D"/work"; H=/h`
 	calls, err := shellcmd.Calls(command)
 	if err != nil {
 		t.Fatal(err)
@@ -175,11 +221,15 @@ func TestAssignedArguments(t *testing.T) {
 			cd = &calls[i]
 		}
 	}
-	got := assignedArguments(cd, assigns).Args
-	if want := []string{"/a", "$E", "/a", "$D/x", "$F", "$G", "$H"}; !slices.Equal(got, want) {
+	resolved, err := assignedArguments(cd, assigns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resolved.Args
+	if want := []string{"/a", "$E", "/a", "/a/x", "$F", "$G", "$H", "/a/work", "/a/work"}; !slices.Equal(got, want) {
 		t.Fatalf("args = %q, want %q", got, want)
 	}
-	if !slices.Equal(cd.Args, []string{`"$D"`, "$E", "${D}", "$D/x", "$F", "$G", "$H"}) {
+	if !slices.Equal(cd.Args, []string{`"$D"`, "$E", "${D}", "$D/x", "$F", "$G", "$H", `"$D"/work`, `$D"/work"`}) {
 		t.Fatalf("исходный вызов изменён: %q", cd.Args)
 	}
 	evaluated := `D=/a; eval "$X"; cd $D`
@@ -191,11 +241,19 @@ func TestAssignedArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := assignedArguments(&calls[len(calls)-1], assigns).Args; !slices.Equal(got, []string{"$D"}) {
+	resolved, err = assignedArguments(&calls[len(calls)-1], assigns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resolved.Args; !slices.Equal(got, []string{"$D"}) {
 		t.Fatalf("после eval значение неизвестно: %q", got)
 	}
 	computed := &shellcmd.Call{Name: "cd", Args: []string{"$D"}, Offset: -1}
-	if assignedArguments(computed, assigns) != computed {
+	resolved, err = assignedArguments(computed, assigns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != computed {
 		t.Fatal("вызов без смещения не меняется")
 	}
 }

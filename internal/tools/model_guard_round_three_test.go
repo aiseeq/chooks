@@ -92,6 +92,41 @@ func TestModelGuardRoundFourMutationCases(t *testing.T) {
 	})
 }
 
+func TestNestedShellSyntheticTmuxOffset(t *testing.T) {
+	command := `D=/tmp/work; tmux new -d 'bash -c "cd $D && claude -p --model opus hi"'; D=/tmp/late`
+	calls, err := shellcmd.Calls(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nested *shellcmd.Call
+	for i := range calls {
+		if calls[i].Name == "bash" && calls[i].Offset < 0 && slices.Contains(calls[i].Via, "tmux") {
+			nested = &calls[i]
+			break
+		}
+	}
+	if nested == nil {
+		t.Fatalf("no synthetic tmux bash call: %+v", calls)
+	}
+	outer, visibleAt, err := nestedShellVisibleAssignments(command, nested)
+	if err != nil {
+		t.Fatalf("visible assignments: %v", err)
+	}
+	var visibleD, lateD bool
+	for _, assignment := range outer {
+		if assignment.Name == "D" && assignment.VisibleAt(visibleAt) {
+			visibleD = assignment.Value == "/tmp/work"
+			lateD = assignment.Value == "/tmp/late"
+		}
+	}
+	if !visibleD || lateD {
+		t.Fatalf("tmux must see only pre-command D, assignments=%+v", outer)
+	}
+	if _, err := nestedShellModelCandidates(command, nested, t.TempDir(), "/tmp", pathSet{}, pathSet{}, modelFiles{}, func(string, bool) []modelCandidate { return nil }, func(string, string, []string) []modelCandidate { return nil }, discardLogger{}); err != nil {
+		t.Fatalf("nested shell analysis failed: %v", err)
+	}
+}
+
 func TestRoundFourEnvOptionValues(t *testing.T) {
 	for _, option := range []string{"-C", "--chdir", "-u", "--unset"} {
 		args := []envArgument{{option, true}, {"$VALUE", false}, {"claude", true}}

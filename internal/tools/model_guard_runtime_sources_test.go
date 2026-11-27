@@ -7,8 +7,82 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/chooks/internal/core"
 )
+
+func TestWrittenHookSettingsJQArgJSON(t *testing.T) {
+	root := t.TempDir()
+	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
+	source := filepath.Join(root, "settings.json")
+	if err := os.WriteFile(source, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := "jq --argjson v true '.disableAllHooks = $v' " + source + " > " + filepath.Join(root, ".claude", "settings.local.json")
+	if result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Bash", Command: command, CWD: root}); err != nil || result.IsValid {
+		t.Fatalf("jq argjson снимает хуки: result=%+v err=%v", result, err)
+	}
+	if jqArgJSONHookOff([]string{"--argjson", "v", "false", ".disableAllHooks = $v"}) {
+		t.Fatal("false не снимает хуки")
+	}
+}
+
+func TestResolveVisibleVariablesInNestedShell(t *testing.T) {
+	for _, tc := range []struct{ command, want string }{
+		{`D=/tmp/work; bash -c "cd $D && claude -p --model opus hi"`, `cd /tmp/work && claude -p --model opus hi`},
+		{`D=/tmp/work; bash -c 'cd "$D" && claude -p --model opus hi'`, `cd "$D" && claude -p --model opus hi`},
+		{`D=/tmp/work bash -c "cd $D && claude -p --model opus hi"`, `cd $D && claude -p --model opus hi`},
+		{`D=/tmp/work; bash -c "cd \$D && claude -p --model opus hi"`, `cd $D && claude -p --model opus hi`},
+	} {
+		calls, err := shellcmd.Calls(tc.command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got string
+		for i := range calls {
+			if calls[i].Name == "bash" {
+				prefix := tc.command
+				if calls[i].Offset >= 0 {
+					prefix = tc.command[:calls[i].Offset]
+				}
+				assigns, err := shellcmd.Assigns(prefix)
+				if err != nil {
+					t.Fatal(err)
+				}
+				args, ok, err := outerShellArgumentValues(tc.command, &calls[i], assigns, calls[i].Offset)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ok {
+					commands := shellCommandStrings(args)
+					if len(commands) > 0 {
+						got = commands[0]
+					}
+				}
+			}
+		}
+		if got != tc.want {
+			t.Errorf("%q: nested shell = %q, want %q", tc.command, got, tc.want)
+		}
+	}
+}
+
+func TestClaudeClientCallHereDocComputedName(t *testing.T) {
+	script := "bash <<'EOF'\nexport ANTHROPIC_MODEL=claude-haiku-4-5\n`which claude` -p hi\nEOF"
+	calls, err := shellcmd.Calls(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range calls {
+		if claudeClientCall(&calls[i], script, discardLogger{}) {
+			if len(envModelCandidates(script, calls, discardLogger{})) == 0 {
+				t.Fatal("here-doc model environment was not attributed to computed client")
+			}
+			return
+		}
+	}
+	t.Fatal("here-doc client command substitution not recognized")
+}
 
 func TestModelGuardStreamJSONInput(t *testing.T) {
 	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")

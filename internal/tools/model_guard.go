@@ -107,6 +107,14 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 			}
 			continue
 		}
+		if c.badOverrides {
+			if c.value == "" {
+				reasons = append(reasons, "modelOverrides не разобран: модель не проверить")
+			} else {
+				reasons = append(reasons, fmt.Sprintf("modelOverrides в %s не разобран: модель не проверить", reasonExcerpt(c.value)))
+			}
+			continue
+		}
 		if c.unknownSettings {
 			reasons = append(reasons, "файл --settings не прочитать: модель не проверить")
 			continue
@@ -195,6 +203,8 @@ type modelCandidate struct {
 	unknownAgents     bool
 	agentsInline      bool
 	unknownSettings   bool
+	// badOverrides — modelOverrides не разобран; value — файл или флаг настроек, пусто — источник не назван
+	badOverrides bool
 	// clientOption — отказ опции, подкоманде или окружению клиента claude
 	clientOption string
 }
@@ -325,7 +335,7 @@ func settingsForCWD(ctx context.Context, cwd string, homes, configs pathSet, log
 	for _, path := range paths {
 		raw, err := readSettingsFile(path)
 		if err == nil {
-			candidates = append(candidates, settingsCandidates(raw, lookupAgent)...)
+			candidates = append(candidates, withSettingsSource(settingsCandidates(raw, lookupAgent), path)...)
 			if slices.Contains(hookPaths, path) {
 				candidates = append(candidates, hookSettingsCandidates(path, raw)...)
 			}
@@ -2942,8 +2952,22 @@ func jsonModelCandidates(flag string, arg word, readSettings func(string, shellc
 		}
 	}
 	var found []modelCandidate
+	source := "строке " + flag
+	if !strings.HasPrefix(strings.TrimSpace(arg.text), "{") {
+		source = arg.text
+	}
 	for _, raw := range raws {
-		found = append(found, settingsCandidates(raw, agent)...)
+		found = append(found, withSettingsSource(settingsCandidates(raw, agent), source)...)
+	}
+	return found
+}
+
+// withSettingsSource называет источник неразобранного modelOverrides в тексте отказа
+func withSettingsSource(found []modelCandidate, source string) []modelCandidate {
+	for i := range found {
+		if found[i].badOverrides {
+			found[i].value = source
+		}
 	}
 	return found
 }
@@ -3000,9 +3024,9 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 	var overrides map[string]json.RawMessage
 	rawOverrides := settings["modelOverrides"]
 	if len(rawOverrides) != 0 && strings.TrimSpace(string(rawOverrides)) != "null" {
-		//nolint:silent-error-handling // Некорректный modelOverrides отмечается как неизвестная настройка.
+		//nolint:silent-error-handling // Некорректный modelOverrides отмечается кандидатом badOverrides — отказ с именем источника.
 		if err := json.Unmarshal(rawOverrides, &overrides); err != nil {
-			found = append(found, modelCandidate{value: "modelOverrides", unknownSettings: true})
+			found = append(found, modelCandidate{badOverrides: true})
 		}
 	}
 	if overrides != nil {
@@ -3015,7 +3039,7 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 			if json.Unmarshal(rawModel, &model) == nil {
 				found.add(model)
 			} else {
-				found = append(found, modelCandidate{value: "modelOverrides", unknownSettings: true})
+				found = append(found, modelCandidate{badOverrides: true})
 			}
 		}
 	}

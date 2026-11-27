@@ -34,21 +34,38 @@ func TestPreToolUseModelOverrides(t *testing.T) {
 		blocked     bool
 		wantMessage string
 	}{
-		{"override number", `claude --settings '{"modelOverrides":{"claude-opus-5-5":1}}' --model opus`, true, "модель не проверить"},
-		{"override object", `claude --settings '{"modelOverrides":{"claude-opus-5-5":{}}}' --model opus`, true, "модель не проверить"},
+		{"override number", `claude --settings '{"modelOverrides":{"claude-opus-5-5":1}}' --model opus`, true, "modelOverrides в строке --settings не разобран"},
+		{"override object", `claude --settings '{"modelOverrides":{"claude-opus-5-5":{}}}' --model opus`, true, "modelOverrides в строке --settings не разобран"},
+		{"project overrides array", `claude --model opus`, true, "modelOverrides в " + filepath.Join(cwd, ".claude", "settings.json") + " не разобран"},
 		{"heredoc brace in key", "cat > .claude/settings.json <<'EOF'\n{\"modelOverrides\":{\"ignore}\":\"opus\",\"claude-opus-5-5\":\"fable\"}}\nEOF\nclaude --model opus", true, "не одобрена"},
 		{"heredoc nested object", "cat > .claude/settings.json <<'EOF'\n{\"modelOverrides\":{\"other\":{\"nested\":{}},\"claude-opus-5-5\":\"fable\"}}\nEOF\nclaude --model opus", true, "не одобрена"},
 		{"heredoc multiple values", "cat > .claude/settings.json <<'EOF'\n{\"modelOverrides\":{\"a\":\"opus\",\"claude-opus-5-5\":\"fable\"}}\nEOF\nclaude --model opus", true, "не одобрена"},
 		// запись без запуска claude не судится: имя settings.json носят и чужие файлы
 		{"foreign settings write", "cat > app/settings.json <<'EOF'\n{\"model\":\"gpt-4o\"}\nEOF", false, ""},
-		{"overrides not object", `claude --settings '{"modelOverrides":"claude-haiku-5-5"}' --model opus`, true, "модель не проверить"},
+		{"overrides not object", `claude --settings '{"modelOverrides":"claude-haiku-5-5"}' --model opus`, true, "modelOverrides в строке --settings не разобран"},
 		// --settings у агента — отказ по опции; одобренную замену модели
 		// в --settings судит проверка запуска (TestRuntimeModelGuardModelOverrides)
 		{"approved override", `claude --settings '{"modelOverrides":{"claude-opus-5-5":"opus"}}' --model opus`, true, "опция --settings"},
 		{"without overrides", `claude --settings '{"model":"opus"}' --model opus`, true, "опция --settings"},
 	}
+	// .claude/settings.json каталога на время случая
+	projectSettings := map[string]string{"project overrides array": `{"modelOverrides":[1]}`}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if content, ok := projectSettings[tc.name]; ok {
+				settingsPath := filepath.Join(cwd, ".claude", "settings.json")
+				if err := os.MkdirAll(filepath.Dir(settingsPath), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(settingsPath, []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := os.Remove(settingsPath); err != nil {
+						t.Error(err)
+					}
+				})
+			}
 			logger, logPath := fileLogger(t)
 			data, err := json.Marshal(map[string]any{
 				"session_id": "model-overrides-test",

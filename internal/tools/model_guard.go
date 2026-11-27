@@ -87,36 +87,8 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 			}
 			continue
 		}
-		if c.unknownAgent {
-			reasons = append(reasons, fmt.Sprintf("определение агента %s не найдено: модель не проверить", c.value))
-			continue
-		}
-		if c.unknownWrite {
-			reasons = append(reasons, fmt.Sprintf("содержимое изменяемого файла настроек не проверить: %s", reasonExcerpt(c.value)))
-			continue
-		}
-		if c.unknownAgentWrite {
-			reasons = append(reasons, fmt.Sprintf("содержимое изменяемого определения агента не проверить: %s", reasonExcerpt(c.value)))
-			continue
-		}
-		if c.unknownAgents {
-			if c.agentsInline {
-				reasons = append(reasons, "строку --agents не разобрать: модель агента не проверить")
-			} else {
-				reasons = append(reasons, "файл --agents не прочитать: модель агента не проверить")
-			}
-			continue
-		}
-		if c.badOverrides {
-			if c.value == "" {
-				reasons = append(reasons, "modelOverrides не разобран: модель не проверить")
-			} else {
-				reasons = append(reasons, fmt.Sprintf("modelOverrides в %s не разобран: модель не проверить", c.value))
-			}
-			continue
-		}
-		if c.unknownSettings {
-			reasons = append(reasons, "файл --settings не прочитать: модель не проверить")
+		if r, ok := c.unknownReason(); ok {
+			reasons = append(reasons, r)
 			continue
 		}
 		if c.dynamic {
@@ -192,6 +164,36 @@ func (t *ModelGuardTool) CandidateModels(ctx context.Context, input *core.ToolIn
 		}
 	}
 	return values
+}
+
+// unknownReason — причина отказа по источнику модели, который не прочитать
+// или не разобрать; ok=false — источник прочитан
+func (c modelCandidate) unknownReason() (string, bool) {
+	if c.unknownAgent {
+		return fmt.Sprintf("определение агента %s не найдено: модель не проверить", c.value), true
+	}
+	if c.unknownWrite {
+		return fmt.Sprintf("содержимое изменяемого файла настроек не проверить: %s", reasonExcerpt(c.value)), true
+	}
+	if c.unknownAgentWrite {
+		return fmt.Sprintf("содержимое изменяемого определения агента не проверить: %s", reasonExcerpt(c.value)), true
+	}
+	if c.unknownAgents && c.agentsInline {
+		return "строку --agents не разобрать: модель агента не проверить", true
+	}
+	if c.unknownAgents {
+		return "файл --agents не прочитать: модель агента не проверить", true
+	}
+	if c.badOverrides && c.value == "" {
+		return "modelOverrides не разобран: модель не проверить", true
+	}
+	if c.badOverrides {
+		return fmt.Sprintf("modelOverrides в %s не разобран: модель не проверить", c.value), true
+	}
+	if c.unknownSettings {
+		return "файл --settings не прочитать: модель не проверить", true
+	}
+	return "", false
 }
 
 type modelCandidate struct {

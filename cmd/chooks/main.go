@@ -548,7 +548,7 @@ func dispatchHook(ctx context.Context, hookType string, data []byte, config *cor
 		input := parseSessionInputForRequest(logger, hookType, data, &request)
 		timer.stage("state")
 		if input.AgentID == "" {
-			if _, err := core.SwapSessionStateIn(request.RuntimeDir(), input.SessionID, core.StateWaiting, core.StateWorking); err != nil {
+			if _, err := core.SwapSessionStateIn(context.WithoutCancel(ctx), request.RuntimeDir(), input.SessionID, core.StateWaiting, core.StateWorking); err != nil {
 				logger.Warn("session state not resumed", "session", input.SessionID, "error", err)
 			}
 		}
@@ -557,7 +557,7 @@ func dispatchHook(ctx context.Context, hookType string, data []byte, config *cor
 		return exitAllowed, nil
 	case hookStop, hookStopFailure, hookNotification:
 		capture := shadowCaptureFrom(ctx)
-		decision := runSessionEventForRequest(sessionEvents[hookType], data, config, logger, &request, capture)
+		decision := runSessionEventForRequest(ctx, sessionEvents[hookType], data, config, logger, &request, capture)
 		if capture != nil {
 			capture.mu.Lock()
 			capture.decision = &decision
@@ -605,7 +605,7 @@ func runUserPromptSubmit(ctx context.Context, hookType string, data []byte, conf
 		return exitBlocked, fmt.Errorf("%s", message)
 	}
 	timer.stage("state")
-	saveStateIn(logger, request.RuntimeDir(), input.SessionID, core.StateWorking)
+	saveStateIn(ctx, logger, request.RuntimeDir(), input.SessionID, core.StateWorking)
 	timer.stage("skills")
 	remindStaleSkills(ctx, eventUserPromptSubmit, input, config, logger, timer.deadline(optionalBudget), timer, request)
 	return exitAllowed, nil
@@ -717,8 +717,8 @@ func runPreToolUse(ctx context.Context, data []byte, config *core.Config, logger
 // только логируются: событие сессии нечего блокировать, а ошибка хука
 // показалась бы человеку в интерфейсе на каждой остановке
 // capture — тень (этап 2б-3а), nil — без тени
-func runSessionEventForRequest(eventName string, data []byte, config *core.Config, logger core.Logger, request *hookctx.Context, capture *shadowCapture) notifier.Decision {
-	return announceSessionEventWith(eventName, parseSessionInputForRequest(logger, eventName, data, request), config, logger, request, capture)
+func runSessionEventForRequest(ctx context.Context, eventName string, data []byte, config *core.Config, logger core.Logger, request *hookctx.Context, capture *shadowCapture) notifier.Decision {
+	return announceSessionEventWith(ctx, eventName, parseSessionInputForRequest(logger, eventName, data, request), config, logger, request, capture)
 }
 
 // sessionEvents — событие сессии подкоманды
@@ -730,13 +730,13 @@ var sessionEvents = map[string]string{
 
 // announceSessionEvent решает по событию сессии, запоминает состояние и зовёт
 // человека
-func announceSessionEvent(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, request *hookctx.Context) notifier.Decision {
-	return announceSessionEventWith(eventName, input, config, logger, request, nil)
+func announceSessionEvent(ctx context.Context, eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, request *hookctx.Context) notifier.Decision {
+	return announceSessionEventWith(ctx, eventName, input, config, logger, request, nil)
 }
 
 // announceSessionEventWith — announceSessionEvent под тенью: эффекты
 // уведомления записываются в capture, у демона — без исполнения
-func announceSessionEventWith(eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, request *hookctx.Context, capture *shadowCapture) notifier.Decision {
+func announceSessionEventWith(ctx context.Context, eventName string, input *core.ToolInput, config *core.Config, logger core.Logger, request *hookctx.Context, capture *shadowCapture) notifier.Decision {
 	// Неинтерактивную сессию человек не ждёт вовсе — ни её остановку, ни её
 	// вопросы: ответить в неё всё равно некому
 	if request == nil {
@@ -788,7 +788,7 @@ func announceSessionEventWith(eventName string, input *core.ToolInput, config *c
 	logDecision(logger, event, decision)
 
 	if decision.State != "" {
-		saveStateIn(logger, request.RuntimeDir(), input.SessionID, decision.State)
+		saveStateIn(ctx, logger, request.RuntimeDir(), input.SessionID, decision.State)
 	}
 	if capture != nil {
 		capture.snapshotAfter(*request)
@@ -802,7 +802,7 @@ func announceSessionEventWith(eventName string, input *core.ToolInput, config *c
 	if capture != nil {
 		tool = tool.WithEffects(capture.notifierEffects(realNotifierEffects()))
 	}
-	if err := tool.Announce(eventName, input, decision); err != nil {
+	if err := tool.Announce(ctx, eventName, input, decision); err != nil {
 		logger.Warn("failed to deliver alert", "hook", eventName, "error", err)
 	}
 	return decision
@@ -839,9 +839,9 @@ func resolveHookInput(input *core.ToolInput, request hookctx.Context) {
 // saveStateIn запоминает состояние сессии для строки статуса и следующего
 // события. Сбой хранилища хук не срывает: код ошибки Claude Code показал бы
 // человеку на каждом событии, а уведомление важнее записи
-func saveStateIn(logger core.Logger, runtimeDir, sessionID string, state core.SessionState) {
+func saveStateIn(ctx context.Context, logger core.Logger, runtimeDir, sessionID string, state core.SessionState) {
 	//nolint:log-and-return-zero // событие сессии не блокируется ошибкой записи состояния
-	if err := core.SaveSessionStateIn(runtimeDir, sessionID, state); err != nil {
+	if err := core.SaveSessionStateIn(context.WithoutCancel(ctx), runtimeDir, sessionID, state); err != nil {
 		logger.Warn("session state not saved", "session", sessionID, "error", err)
 	}
 }

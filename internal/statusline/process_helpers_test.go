@@ -26,7 +26,7 @@ func statusTestRequest(t *testing.T) hookctx.Context {
 
 func build(input Input, used float64, bar weekBar, now time.Time, visible func() (bool, error), logger core.Logger) (string, string) {
 	home, _ := os.UserHomeDir()
-	return buildForRuntime(core.RuntimeDir(), &home, input, used, bar, now, visible, logger)
+	return buildForRuntime(context.Background(), core.RuntimeDir(), &home, input, used, bar, now, visible, logger)
 }
 
 func terminalTitle(dir string, state core.SessionState) string {

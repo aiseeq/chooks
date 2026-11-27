@@ -1,6 +1,7 @@
 package statusline
 
 import (
+	"context"
 	"errors"
 	"regexp"
 	"strings"
@@ -158,7 +159,7 @@ func visible() (bool, error) { return true, nil }
 func TestBuildMarksTurnSeen(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	input := Input{CWD: "/home/user/work/demo", SessionID: "s1"}
-	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StateDone); err != nil {
+	if err := core.SaveSessionStateIn(context.Background(), core.RuntimeDir(), "s1", core.StateDone); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,7 +176,7 @@ func TestBuildMarksTurnSeen(t *testing.T) {
 		t.Errorf("состояние = %q, %v", state, err)
 	}
 	// Работу вид вкладки не трогает
-	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StateWorking); err != nil {
+	if err := core.SaveSessionStateIn(context.Background(), core.RuntimeDir(), "s1", core.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if _, title := build(input, 10, weekBar{}, time.Now(), visible, testLogger(t)); title != "🔄 demo" {
@@ -209,7 +210,7 @@ func TestBuildShowsBackground(t *testing.T) {
 	if _, err := core.RecordBackgroundIn(core.RuntimeDir(), "s1", tasks, nil, start); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StatePaused); err != nil {
+	if err := core.SaveSessionStateIn(context.Background(), core.RuntimeDir(), "s1", core.StatePaused); err != nil {
 		t.Fatal(err)
 	}
 
@@ -227,7 +228,7 @@ func TestBuildShowsBackground(t *testing.T) {
 	}
 
 	// Пока ход идёт, список задач устарел и не показывается
-	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StateWorking); err != nil {
+	if err := core.SaveSessionStateIn(context.Background(), core.RuntimeDir(), "s1", core.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if line, _ := build(input, 10, weekBar{}, start, hidden, testLogger(t)); strings.Contains(plain(line), "фон:") {
@@ -248,7 +249,7 @@ func TestBuildShowsAgentsWorking(t *testing.T) {
 	if _, err := core.RecordBackgroundIn(core.RuntimeDir(), "s1", tasks, nil, start); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StatePaused); err != nil {
+	if err := core.SaveSessionStateIn(context.Background(), core.RuntimeDir(), "s1", core.StatePaused); err != nil {
 		t.Fatal(err)
 	}
 
@@ -260,7 +261,7 @@ func TestBuildShowsAgentsWorking(t *testing.T) {
 		t.Errorf("показ агентов не пишется в состояние: %q, %v", state, err)
 	}
 
-	if err := core.SaveSessionStateIn(core.RuntimeDir(), "s1", core.StatePaused); err != nil {
+	if err := core.SaveSessionStateIn(context.Background(), core.RuntimeDir(), "s1", core.StatePaused); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := core.RecordBackgroundIn(core.RuntimeDir(), "s1", []core.BackgroundTask{{ID: "a1", Type: "subagent"}, {ID: "b1", Type: "shell"}}, nil, start.Add(3*time.Hour)); err != nil {

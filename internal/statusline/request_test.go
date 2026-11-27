@@ -18,15 +18,15 @@ import (
 func TestBuildRequestRuntime(t *testing.T) {
 	root := t.TempDir()
 	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
-	if err := core.SaveSessionStateIn(a, "shared", core.StateWorking); err != nil {
+	if err := core.SaveSessionStateIn(context.Background(), a, "shared", core.StateWorking); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.SaveSessionStateIn(b, "shared", core.StateDone); err != nil {
+	if err := core.SaveSessionStateIn(context.Background(), b, "shared", core.StateDone); err != nil {
 		t.Fatal(err)
 	}
 	input := Input{CWD: "/home/user/demo", SessionID: "shared"}
-	_, first := buildForRuntime(a, nil, input, 10, weekBar{}, time.Now(), hidden, testLogger(t))
-	_, second := buildForRuntime(b, nil, input, 10, weekBar{}, time.Now(), hidden, testLogger(t))
+	_, first := buildForRuntime(context.Background(), a, nil, input, 10, weekBar{}, time.Now(), hidden, testLogger(t))
+	_, second := buildForRuntime(context.Background(), b, nil, input, 10, weekBar{}, time.Now(), hidden, testLogger(t))
 	if first != "🔄 demo" || second != "❇️ demo" {
 		t.Fatalf("titles %q and %q", first, second)
 	}
@@ -61,7 +61,7 @@ func TestRenderParallel(t *testing.T) {
 		if i%2 == 0 {
 			state = core.StateDone
 		}
-		if err := core.SaveSessionStateIn(filepath.Join(dir, "run", "chooks"), "shared", state); err != nil {
+		if err := core.SaveSessionStateIn(context.Background(), filepath.Join(dir, "run", "chooks"), "shared", state); err != nil {
 			t.Fatal(err)
 		}
 	}

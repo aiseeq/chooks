@@ -33,16 +33,16 @@ const (
 // внутри tmux или другого claude, видит адрес чужой вкладки. Такая сессия идёт
 // путём прочих терминалов, OSC в stderr: вкладку родителя он не трогает.
 // Окружение, дерево процессов (от PID) и stderr — запроса
-func SetTerminalTitleForRequest(title string, request hookctx.Context) error {
-	return SetTerminalTitleWith(title, request, SetKonsoleTitle)
+func SetTerminalTitleForRequest(ctx context.Context, title string, request hookctx.Context) error {
+	return SetTerminalTitleWith(ctx, title, request, SetKonsoleTitle)
 }
 
 // KonsoleTitler ставит заголовок вкладки Konsole по адресу сессии D-Bus
-type KonsoleTitler func(service, session, title string, request hookctx.Context) error
+type KonsoleTitler func(ctx context.Context, service, session, title string, request hookctx.Context) error
 
 // SetKonsoleTitle — заголовок вкладки Konsole через шину сессии запроса
-func SetKonsoleTitle(service, session, title string, request hookctx.Context) error {
-	conn, err := requestSessionBus(context.Background(), request)
+func SetKonsoleTitle(ctx context.Context, service, session, title string, request hookctx.Context) error {
+	conn, err := requestSessionBus(context.WithoutCancel(ctx), request)
 	if err != nil {
 		return fmt.Errorf("session bus unavailable: %w", err)
 	}
@@ -53,7 +53,7 @@ func SetKonsoleTitle(service, session, title string, request hookctx.Context) er
 // SetTerminalTitleWith — SetTerminalTitleForRequest, где вкладку Konsole
 // ставит konsole: тень демона подставляет запись вместо вызова D-Bus. Дерево
 // процессов читается через ProcFS запроса
-func SetTerminalTitleWith(title string, request hookctx.Context, konsole KonsoleTitler) error {
+func SetTerminalTitleWith(ctx context.Context, title string, request hookctx.Context, konsole KonsoleTitler) error {
 	title = sanitizeTitle(title)
 	if title == "" {
 		return nil
@@ -66,7 +66,7 @@ func SetTerminalTitleWith(title string, request hookctx.Context, konsole Konsole
 			return fmt.Errorf("konsole tab owner unknown: %w", err)
 		}
 		if ownsKonsoleTab(names) {
-			return konsole(service, session, title, request)
+			return konsole(ctx, service, session, title, request)
 		}
 	}
 	fmt.Fprintf(request.Stderr, "\033]0;%s\007", title)

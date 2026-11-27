@@ -225,7 +225,7 @@ func TestStopRequestRuntimeDir(t *testing.T) {
 	for i := range 2 {
 		dir := filepath.Join(root, fmt.Sprint(i))
 		req := hookctx.New(nil, nil, nil, []string{"HOME=" + dir, "XDG_RUNTIME_DIR=" + dir}, dir, 100+i, 50+i)
-		decision := announceSessionEvent(core.EventStop, &core.ToolInput{SessionID: "shared"}, config, &captureLogger{}, &req)
+		decision := announceSessionEvent(context.Background(), core.EventStop, &core.ToolInput{SessionID: "shared"}, config, &captureLogger{}, &req)
 		if decision.State != core.StateDone {
 			t.Fatalf("request %d: decision %+v", i, decision)
 		}
@@ -329,7 +329,7 @@ func TestHookCommandsParallel(t *testing.T) {
 	}
 	run := func(i int) outcome {
 		dir := filepath.Join(root, fmt.Sprint(i))
-		if err := core.SaveSessionStateIn(filepath.Join(dir, "run", "chooks"), "shared", core.StateWorking); err != nil {
+		if err := core.SaveSessionStateIn(context.Background(), filepath.Join(dir, "run", "chooks"), "shared", core.StateWorking); err != nil {
 			return outcome{failure: err.Error()}
 		}
 		name := commands[i%len(commands)]

@@ -93,7 +93,7 @@ func TestKillJudgeGroups(t *testing.T) {
 	if child == 0 {
 		t.Fatal("judge child not started")
 	}
-	if n := KillJudgeGroups(); n != 1 {
+	if n := KillJudgeGroups(nil); n != 1 {
 		t.Errorf("killed groups %d, want 1", n)
 	}
 	select {

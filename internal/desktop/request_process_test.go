@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,7 +63,7 @@ func TestTerminalTitleRequestProcessTree(t *testing.T) {
 			pid := 510 + 10*(i%2)
 			env := []string{"KONSOLE_DBUS_SERVICE=org.kde.konsole-1", "KONSOLE_DBUS_SESSION=/Sessions/1", "DBUS_SESSION_BUS_ADDRESS=" + bus}
 			req := hookctx.New(nil, nil, &stderr, env, "/", pid, pid-90)
-			err := SetTerminalTitleForRequest(fmt.Sprint("p", i), req)
+			err := SetTerminalTitleForRequest(context.Background(), fmt.Sprint("p", i), req)
 			got[i] = result{stderr: stderr.String(), err: err}
 		})
 	}

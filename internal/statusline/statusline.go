@@ -179,8 +179,8 @@ func Render(ctx context.Context, stdin io.Reader, logger core.Logger) (string, e
 	used := contextFill(ctx, input, paths.ClaudeDir, logger)
 	// Имя проекта сравнивает каталог из ввода с $HOME лексически: MatchPath
 	match := request.MatchPath(hookctx.EnvHome)
-	line, title := buildForRuntime(request.RuntimeDir(), &match, input, used, bar, now, visible, logger)
-	titleErr := desktop.SetTerminalTitleForRequest(title, request)
+	line, title := buildForRuntime(ctx, request.RuntimeDir(), &match, input, used, bar, now, visible, logger)
+	titleErr := desktop.SetTerminalTitleForRequest(context.WithoutCancel(ctx), title, request)
 	if titleErr != nil {
 		logger.Warn("terminal title not set", "error", titleErr)
 	}
@@ -244,7 +244,7 @@ func currentWeeklyLimit(ctx context.Context, input *Input, store *accounts.Store
 // сессии строку не срывает: она рисуется по тому, что удалось прочитать, а
 // сбой уходит в лог. Ветки и worktree в строке нет (пользователь 24.10 о
 // строке всех агентов: «Хочу видеть только вот это»)
-func buildForRuntime(runtimeDir string, home *string, input Input, ctxUsed float64, bar weekBar, now time.Time, visible func() (bool, error), logger core.Logger) (string, string) {
+func buildForRuntime(ctx context.Context, runtimeDir string, home *string, input Input, ctxUsed float64, bar weekBar, now time.Time, visible func() (bool, error), logger core.Logger) (string, string) {
 	dir := sessionDir(input)
 	state, recorded, err := core.LookupSessionStateIn(runtimeDir, input.SessionID)
 	if err != nil {
@@ -270,13 +270,13 @@ func buildForRuntime(runtimeDir string, home *string, input Input, ctxUsed float
 		}
 	}
 	if state == core.StatePaused && background.Abandoned(now) {
-		state = abandon(runtimeDir, input.SessionID, logger)
+		state = abandon(ctx, runtimeDir, input.SessionID, logger)
 	}
 	if state == core.StatePaused && background.AgentsWorking(now) {
 		state = core.StateAgents
 	}
 	if state == core.StateDone {
-		state = seen(runtimeDir, input.SessionID, visible, logger)
+		state = seen(ctx, runtimeDir, input.SessionID, visible, logger)
 	}
 
 	// Путь не показывается: плашка уже называет проект, а полный путь
@@ -303,8 +303,8 @@ func buildForRuntime(runtimeDir string, home *string, input Input, ctxUsed float
 // срока, а будильников нет: Claude их больше не ждёт, а конец хода был
 // раньше, чем задачи стали брошенными. Без этого вкладка показывала бы паузу
 // до следующего хода
-func abandon(runtimeDir, sessionID string, logger core.Logger) core.SessionState {
-	swapped, err := core.SwapSessionStateIn(runtimeDir, sessionID, core.StatePaused, core.StateDone)
+func abandon(ctx context.Context, runtimeDir, sessionID string, logger core.Logger) core.SessionState {
+	swapped, err := core.SwapSessionStateIn(context.WithoutCancel(ctx), runtimeDir, sessionID, core.StatePaused, core.StateDone)
 	if err != nil {
 		logger.Warn("abandoned background tasks, pause kept", "session", sessionID, "error", err)
 		return core.StatePaused
@@ -382,7 +382,7 @@ func truncateRunes(text string, limit int) string {
 // Строка статуса — единственное, что запускается, пока сессия стоит
 // (statusLine.refreshInterval), поэтому смотрит она. Сбой — «новое» остаётся:
 // лишний значок лучше пропущенного ответа
-func seen(runtimeDir, sessionID string, visible func() (bool, error), logger core.Logger) core.SessionState {
+func seen(ctx context.Context, runtimeDir, sessionID string, visible func() (bool, error), logger core.Logger) core.SessionState {
 	shown, err := visible()
 	if err != nil {
 		logger.Warn("tab visibility unknown, keeping the turn unseen", "session", sessionID, "error", err)
@@ -391,7 +391,7 @@ func seen(runtimeDir, sessionID string, visible func() (bool, error), logger cor
 	if !shown {
 		return core.StateDone
 	}
-	swapped, err := core.SwapSessionStateIn(runtimeDir, sessionID, core.StateDone, core.StateIdle)
+	swapped, err := core.SwapSessionStateIn(context.WithoutCancel(ctx), runtimeDir, sessionID, core.StateDone, core.StateIdle)
 	if err != nil {
 		logger.Warn("session not marked seen", "session", sessionID, "error", err)
 		return core.StateDone

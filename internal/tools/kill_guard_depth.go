@@ -57,7 +57,7 @@ func depthSignal(c shellcmd.Call) (name string, ok bool) {
 	return c.Name, false
 }
 func (s *killScan) depthReason(c shellcmd.Call, calls []shellcmd.Call) string {
-	if c.Offset < 0 && dynamicCommandNameRe.MatchString(c.Raw) && visibleDynamicSignal(c) {
+	if c.Offset < 0 && dynamicCommandNameRe.MatchString(c.Raw) && s.visibleDynamicSignal(c) {
 		return "имя команды вычисляется при запуске, а в тексте видна команда сигнала: такую форму хук не разбирает"
 	}
 	if wrapperLevels(c.Via) < 2 || slices.Contains(c.Via, "ssh") || systemdRunElsewhere(c, calls) {
@@ -174,10 +174,16 @@ func signalWords(text string) (string, bool) {
 	}
 	return "", false
 }
-func visibleDynamicSignal(c shellcmd.Call) bool {
-	calls, _ := shellcmd.Calls(literalShellWords(c.Args))
+func (s *killScan) visibleDynamicSignal(c shellcmd.Call) bool {
+	calls, err := shellcmd.Calls(literalShellWords(c.Args))
+	if err != nil { //nolint:fallback-return // shellcmd возвращает распознанные вызовы до NestedError, их всё равно нужно проверять
+		s.tool.Logger().Warn("kill_guard: dynamic args not fully parsed", "error", err)
+	}
 	for _, r := range c.Redirs {
-		more, _ := shellcmd.Calls(r.Target + "\n" + r.Body)
+		more, err := shellcmd.Calls(r.Target + "\n" + r.Body)
+		if err != nil { //nolint:fallback-return // shellcmd возвращает распознанные вызовы до NestedError, их всё равно нужно проверять
+			s.tool.Logger().Warn("kill_guard: dynamic redirection not fully parsed", "error", err)
+		}
 		calls = append(calls, more...)
 	}
 	for i := range calls {

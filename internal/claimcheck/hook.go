@@ -203,7 +203,7 @@ func (h Hook) Stop(ctx context.Context, event StopEvent) Outcome {
 		input.CallsOnly = true
 	}
 	verdict, err := h.verdict(ctx, &entry, input, started)
-	if err != nil {
+	if err != nil { //nolint:silent-error-handling verdict logs failures through h.fail and records queue timeouts before returning
 		return Outcome{Result: entry.Outcome}
 	}
 	if h.Prompt == "v6" {
@@ -278,7 +278,7 @@ func (h Hook) Send(ctx context.Context, event SendEvent) Outcome {
 		return Outcome{Result: OutcomeRetryLimit}
 	}
 	verdict, err := h.verdict(ctx, &entry, input, started)
-	if err != nil {
+	if err != nil { //nolint:silent-error-handling verdict logs failures through h.fail and records queue timeouts before returning
 		return Outcome{Result: entry.Outcome}
 	}
 	flagged := verdict.FlaggedClaims()
@@ -515,7 +515,7 @@ func (h Hook) waitLine(ctx context.Context, path string, latest bool, find func(
 		if found > 0 {
 			build := h.Build
 			if build == nil {
-				build = BuildInputContext
+				build = BuildInput
 			}
 			type result struct {
 				input *Input

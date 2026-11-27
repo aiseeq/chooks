@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,10 +94,10 @@ func TestNotifier_AnnounceSilent(t *testing.T) {
 	notifier := newNotifier(t, core.ToolConfig{Enabled: true})
 
 	decision := Decision{State: core.StateDone, Alert: true}
-	if err := notifier.Announce(core.EventStop, &core.ToolInput{CWD: "/tmp/p"}, decision); err != nil {
+	if err := notifier.Announce(context.Background(), core.EventStop, &core.ToolInput{CWD: "/tmp/p"}, decision); err != nil {
 		t.Errorf("Announce: %v", err)
 	}
-	if err := notifier.Announce(core.EventStop, &core.ToolInput{}, Decision{State: core.StatePaused}); err != nil {
+	if err := notifier.Announce(context.Background(), core.EventStop, &core.ToolInput{}, Decision{State: core.StatePaused}); err != nil {
 		t.Errorf("пауза ничего не объявляет: %v", err)
 	}
 }

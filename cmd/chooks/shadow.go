@@ -266,12 +266,12 @@ func (c *shadowCapture) notifierEffects(real notifier.Effects) notifier.Effects 
 		c.mu.Unlock()
 	}
 	return notifier.Effects{
-		KonsoleTitle: func(service, session, title string, request hookctx.Context) error {
+		KonsoleTitle: func(ctx context.Context, service, session, title string, request hookctx.Context) error {
 			note(fmt.Sprintf("konsole title %s %s %q", service, session, title))
 			if c.dry {
 				return nil
 			}
-			return real.KonsoleTitle(service, session, title, request)
+			return real.KonsoleTitle(ctx, service, session, title, request)
 		},
 		Deliver: func(executable string, alert desktop.Alert, request hookctx.Context) error {
 			note(fmt.Sprintf("alert %+v", alert))

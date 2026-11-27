@@ -20,7 +20,7 @@ func newClaimCheckInputCmd() *cobra.Command {
 			if transcript == "" || line < 1 {
 				return fmt.Errorf("--transcript and positive --line are required")
 			}
-			input, err := claimcheck.BuildInput(transcript, line, claimcheck.Options{ContextLimit: contextLimit, Unbounded: unbounded, CallsOnly: callsOnly})
+			input, err := claimcheck.BuildInput(cmd.Context(), transcript, line, claimcheck.Options{ContextLimit: contextLimit, Unbounded: unbounded, CallsOnly: callsOnly})
 			if err != nil {
 				return err
 			}

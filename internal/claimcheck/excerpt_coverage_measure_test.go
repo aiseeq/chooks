@@ -1,6 +1,7 @@
 package claimcheck
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"syscall"
@@ -37,7 +38,7 @@ func TestMeasureExcerptWindowCoverage(t *testing.T) {
 			if err := syscall.Getrusage(syscall.RUSAGE_SELF, &before); err != nil {
 				t.Fatal(err)
 			}
-			input, err := BuildInput(path, len(rows), Options{})
+			input, err := BuildInput(context.Background(), path, len(rows), Options{})
 			if err2 := syscall.Getrusage(syscall.RUSAGE_SELF, &after); err2 != nil {
 				t.Fatal(err2)
 			}

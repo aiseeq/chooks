@@ -131,8 +131,7 @@ func (p *proxy) run() int {
 	if path == "" {
 		return p.fallback(nil, false, connectPrefix+"no socket path")
 	}
-	// Каталог процесса удалён: демону нечего передать в cwd — сразу CLI,
-	// stdin не тронут
+	// Нет каталога процесса: демону нечего передать в cwd — сразу CLI, stdin не тронут.
 	cwd, err := os.Getwd()
 	if err != nil {
 		return p.fallback(nil, false, "cwd: "+err.Error())

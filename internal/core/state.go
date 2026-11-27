@@ -70,7 +70,7 @@ const stateTTL = 24 * time.Hour
 // SaveSessionStateIn запоминает состояние сессии и попутно вычищает записи
 // давно завершившихся сессий. Пустой идентификатор — событие без сессии,
 // запоминать нечего
-func SaveSessionStateIn(runtimeDir, sessionID string, state SessionState) error {
+func SaveSessionStateIn(ctx context.Context, runtimeDir, sessionID string, state SessionState) error {
 	if sessionID == "" {
 		return nil
 	}
@@ -79,7 +79,7 @@ func SaveSessionStateIn(runtimeDir, sessionID string, state SessionState) error 
 	if err != nil {
 		return err
 	}
-	err = withStateLock(filepath.Dir(path), func() error {
+	err = withStateLock(context.WithoutCancel(ctx), filepath.Dir(path), func() error {
 		if err := os.WriteFile(path, []byte(state), 0o644); err != nil {
 			return fmt.Errorf("cannot write session state: %w", err)
 		}
@@ -95,7 +95,7 @@ func SaveSessionStateIn(runtimeDir, sessionID string, state SessionState) error 
 // from; true — заменено. Строка статуса и хуки пишут состояние из разных
 // процессов: без сверки под блокировкой «посмотрел» затёр бы «работает»
 // от только что отправленного сообщения
-func SwapSessionStateIn(runtimeDir, sessionID string, from, to SessionState) (bool, error) {
+func SwapSessionStateIn(ctx context.Context, runtimeDir, sessionID string, from, to SessionState) (bool, error) {
 	if sessionID == "" {
 		return false, nil
 	}
@@ -104,7 +104,7 @@ func SwapSessionStateIn(runtimeDir, sessionID string, from, to SessionState) (bo
 		return false, err
 	}
 	swapped := false
-	err = withStateLock(filepath.Dir(path), func() error {
+	err = withStateLock(context.WithoutCancel(ctx), filepath.Dir(path), func() error {
 		data, err := os.ReadFile(path)
 		if os.IsNotExist(err) {
 			return nil
@@ -129,7 +129,7 @@ func SwapSessionStateIn(runtimeDir, sessionID string, from, to SessionState) (bo
 const stateLockWait = time.Second
 
 // withStateLock выполняет fn под блокировкой каталога состояний
-func withStateLock(dir string, fn func() error) error {
+func withStateLock(ctx context.Context, dir string, fn func() error) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("cannot create session state dir: %w", err)
 	}
@@ -138,7 +138,7 @@ func withStateLock(dir string, fn func() error) error {
 		return fmt.Errorf("cannot open session state dir: %w", err)
 	}
 	defer lock.Close()
-	if err := LockFile(context.Background(), lock, time.Now().Add(stateLockWait)); err != nil {
+	if err := LockFile(ctx, lock, time.Now().Add(stateLockWait)); err != nil {
 		return fmt.Errorf("cannot lock session state dir: %w", err)
 	}
 	return fn()
@@ -255,7 +255,7 @@ func SessionStateFiles(sessionID string) []string {
 		return nil
 	}
 	path, err := sessionStatePathIn("sessions", sessionID)
-	if err != nil {
+	if err != nil { //nolint:silent-error-handling // некорректный ID по контракту означает отсутствие файлов состояния
 		return nil
 	}
 	return []string{path, path + tasksFileSuffix}

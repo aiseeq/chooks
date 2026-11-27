@@ -121,7 +121,7 @@ func TestSessionEventRequestClaudePIDParallel(t *testing.T) {
 			}
 			dir := filepath.Join(root, fmt.Sprint(i))
 			req := hookctx.New(nil, nil, nil, []string{"HOME=" + dir, "XDG_RUNTIME_DIR=" + dir, fmt.Sprintf("CLAUDE_PID=%d", pid)}, dir, 100+i, 50+i)
-			decision := announceSessionEvent(core.EventStop, &core.ToolInput{SessionID: "s"}, config, &captureLogger{}, &req)
+			decision := announceSessionEvent(context.Background(), core.EventStop, &core.ToolInput{SessionID: "s"}, config, &captureLogger{}, &req)
 			got[i] = fmt.Sprintf("state=%q reason=%q", decision.State, decision.Reason)
 		})
 	}

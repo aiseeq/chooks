@@ -1,6 +1,7 @@
 package claimcheck
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ func TestRealTranscriptDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	started = time.Now()
-	input, err := BuildInput(path, line, Options{})
+	input, err := BuildInput(context.Background(), path, line, Options{})
 	buildTook := time.Since(started)
 	if err != nil {
 		t.Fatal(err)

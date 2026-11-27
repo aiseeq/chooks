@@ -89,7 +89,7 @@ func TestV6SendSkipped(t *testing.T) {
 
 func TestCallsOnlyInput(t *testing.T) {
 	p := fixture(t, ev("user", "t1", "вопрос"), ev("assistant", "t2", []any{map[string]any{"type": "text", "text": "черновик"}, map[string]any{"type": "tool_use", "id": "a", "name": "Bash", "input": map[string]any{"command": "check docs"}}}), map[string]any{"type": "user", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "a", "content": "secret output"}}}}, ev("assistant", "t4", []any{map[string]any{"type": "text", "text": "последний ответ"}}))
-	in, err := BuildInput(p, 4, Options{CallsOnly: true})
+	in, err := BuildInput(context.Background(), p, 4, Options{CallsOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestTurnBoundaryDeliveries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := fixture(t, tc.events...)
 			for _, opt := range []Options{{}, {CallsOnly: true}} {
-				in, err := BuildInput(p, len(tc.events), opt)
+				in, err := BuildInput(context.Background(), p, len(tc.events), opt)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -164,7 +164,7 @@ func TestQueuedPromptDoesNotCrossTurnEnd(t *testing.T) {
 	notice := map[string]any{"type": "user", "origin": map[string]any{"kind": "task-notification"}, "message": map[string]any{"content": "уведомление"}}
 	final := ev("assistant", "t", []any{map[string]any{"type": "text", "text": "ответ"}})
 	events := []any{queued("первый ход"), call("old-turn-call"), duration, notice, queued("новый ход"), call("new-turn-call"), final}
-	in, err := BuildInput(fixture(t, events...), len(events), Options{})
+	in, err := BuildInput(context.Background(), fixture(t, events...), len(events), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestQueuedPromptResetsWhenUserRecordOpensTurn(t *testing.T) {
 	}
 	final := ev("assistant", "t", []any{map[string]any{"type": "text", "text": "ответ"}})
 	events := []any{queued("устаревший prompt"), ev("user", "t", "реплика-запись"), call("before-new-prompt"), queued("новый prompt"), call("after-new-prompt"), final}
-	in, err := BuildInput(fixture(t, events...), len(events), Options{})
+	in, err := BuildInput(context.Background(), fixture(t, events...), len(events), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestAnswerAndSendTurnEnd(t *testing.T) {
 	text := func(s string) any { return ev("assistant", "t", []any{map[string]any{"type": "text", "text": s}}) }
 	notice := map[string]any{"type": "user", "origin": map[string]any{"kind": "task-notification"}, "message": map[string]any{"content": "уведомление"}}
 	p := fixture(t, ev("user", "t", "вопрос"), text("старый"), duration, notice, text("новый"))
-	in, err := BuildInput(p, 5, Options{})
+	in, err := BuildInput(context.Background(), p, 5, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestCallsOnlyKeepsCallsWhenOutputsExhaustOldBudget(t *testing.T) {
 		events = append(events, map[string]any{"type": "user", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "content": strings.Repeat("result", 1000)}}}})
 	}
 	events = append(events, ev("assistant", "t", []any{map[string]any{"type": "text", "text": "готово"}}))
-	in, err := BuildInput(fixture(t, events...), len(events), Options{CallsOnly: true})
+	in, err := BuildInput(context.Background(), fixture(t, events...), len(events), Options{CallsOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestCallsOnlyKeepsCallsWhenOutputsExhaustOldBudget(t *testing.T) {
 func TestCallsOnlyKeepsLongCommandAction(t *testing.T) {
 	command := strings.Repeat("x", 640) + " git commit -m done\n" + strings.Repeat("y", 250)
 	p := fixture(t, ev("user", "t", "сделай"), ev("assistant", "t", []any{map[string]any{"type": "tool_use", "id": "a", "name": "Bash", "input": map[string]any{"command": command}}}), ev("assistant", "t", []any{map[string]any{"type": "text", "text": "готово"}}))
-	in, err := BuildInput(p, 3, Options{CallsOnly: true})
+	in, err := BuildInput(context.Background(), p, 3, Options{CallsOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestCallsOnlyCropsLongInputAndKeepsLaterCalls(t *testing.T) {
 		events = append(events, ev("assistant", "t", []any{map[string]any{"type": "tool_use", "id": id, "name": "Bash", "input": map[string]any{"command": command}}}))
 	}
 	events = append(events, ev("assistant", "t", []any{map[string]any{"type": "text", "text": "готово"}}))
-	in, err := BuildInput(fixture(t, events...), len(events), Options{CallsOnly: true})
+	in, err := BuildInput(context.Background(), fixture(t, events...), len(events), Options{CallsOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func TestCallsOnlyInputLimitEvenWithAvailableBudget(t *testing.T) {
 		ev("assistant", "t", []any{map[string]any{"type": "tool_use", "id": "long-call", "name": "Bash", "input": map[string]any{"command": command}}}),
 		ev("assistant", "t", []any{map[string]any{"type": "text", "text": "готово"}}),
 	}
-	in, err := BuildInput(fixture(t, events...), len(events), Options{CallsOnly: true})
+	in, err := BuildInput(context.Background(), fixture(t, events...), len(events), Options{CallsOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestCallsOnlyInputLimitEvenWithAvailableBudget(t *testing.T) {
 			ev("assistant", "t", []any{map[string]any{"type": "tool_use", "id": "boundary-call", "name": "Bash", "input": map[string]any{"command": command}}}),
 			ev("assistant", "t", []any{map[string]any{"type": "text", "text": "готово"}}),
 		}
-		input, err := BuildInput(fixture(t, events...), len(events), Options{CallsOnly: true})
+		input, err := BuildInput(context.Background(), fixture(t, events...), len(events), Options{CallsOnly: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -438,7 +438,7 @@ func TestCallsOnlyPreservesGitActionCalls(t *testing.T) {
 		ev("assistant", "t2", []any{map[string]any{"type": "tool_use", "id": "a", "name": "Bash", "input": map[string]any{"command": "git commit -q -m done && git commit --amend && git push"}}}),
 		ev("assistant", "t3", []any{map[string]any{"type": "text", "text": "готово"}}),
 	)
-	in, err := BuildInput(p, 3, Options{CallsOnly: true})
+	in, err := BuildInput(context.Background(), p, 3, Options{CallsOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +527,7 @@ func TestCallsOnlyPrioritizesRelevantLongCallOverManyShortCalls(t *testing.T) {
 				events = append(events, bash(fmt.Sprint(i), command))
 			}
 			events = append(events, ev("assistant", "2026-01-01T00:00:01Z", []any{map[string]any{"type": "text", "text": "needle найден"}}))
-			in, err := BuildInput(fixture(t, events...), len(events), Options{CallsOnly: true})
+			in, err := BuildInput(context.Background(), fixture(t, events...), len(events), Options{CallsOnly: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -572,7 +572,7 @@ func TestCallsOnlyCountsOutputMatchesBeforeClearingOutput(t *testing.T) {
 		map[string]any{"type": "user", "message": map[string]any{"content": results}},
 		ev("assistant", "t4", []any{map[string]any{"type": "text", "text": "needle подтверждён"}}),
 	)
-	in, err := BuildInput(p, 4, Options{CallsOnly: true})
+	in, err := BuildInput(context.Background(), p, 4, Options{CallsOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}

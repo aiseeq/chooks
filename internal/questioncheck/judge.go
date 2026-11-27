@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/secretmask"
 	"github.com/aiseeq/chooks/internal/hookctx"
 )
@@ -251,7 +252,11 @@ func runCLIEnv(ctx context.Context, cmd *exec.Cmd, dir, stdin string, extra []st
 	}
 	cmd.Env = withEnv(judgeEnv(request.Env), extra)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.Cancel = func() error {
+		pid := cmd.Process.Pid
+		_, err := proc.StopChild(pid, 0, func() error { return syscall.Kill(-pid, syscall.SIGKILL) })
+		return err
+	}
 	// По таймауту контекст убивает группу CLI, а потомок вне группы мог бы
 	// держать stdout: без WaitDelay хук ждал бы его и выходил за свой таймаут
 	cmd.WaitDelay = 2 * time.Second
@@ -270,9 +275,9 @@ func runCLIEnv(ctx context.Context, cmd *exec.Cmd, dir, stdin string, extra []st
 // пережил бы хук (ревью Terra 5ec62fa, п. 1)
 var judgeGroups = struct {
 	sync.Mutex
-	pids        map[int]bool
+	commands    map[*exec.Cmd]bool
 	terminating bool
-}{pids: map[int]bool{}}
+}{commands: map[*exec.Cmd]bool{}}
 
 // runTracked запускает cmd с учётом его группы и ждёт конца, как cmd.Output
 func runTracked(cmd *exec.Cmd) ([]byte, error) {
@@ -287,27 +292,32 @@ func runTracked(cmd *exec.Cmd) ([]byte, error) {
 		judgeGroups.Unlock()
 		return nil, fmt.Errorf("start judge command: %w", err)
 	}
-	pid := cmd.Process.Pid
-	judgeGroups.pids[pid] = true
+	judgeGroups.commands[cmd] = true
 	judgeGroups.Unlock()
 	err := cmd.Wait()
 	judgeGroups.Lock()
-	delete(judgeGroups.pids, pid)
+	delete(judgeGroups.commands, cmd)
 	judgeGroups.Unlock()
 	return stdout.Bytes(), err
 }
 
 // KillJudgeGroups убивает группы всех идущих судей и запрещает новые: его
 // зовёт обработчик SIGTERM CLI-хука перед выходом. Возвращает число групп
-func KillJudgeGroups() int {
+func KillJudgeGroups(warn func(string, ...any)) int {
 	judgeGroups.Lock()
 	defer judgeGroups.Unlock()
 	judgeGroups.terminating = true
-	pids := slices.Sorted(maps.Keys(judgeGroups.pids))
-	for _, pid := range pids {
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	commands := slices.Collect(maps.Keys(judgeGroups.commands))
+	slices.SortFunc(commands, func(a, b *exec.Cmd) int { return a.Process.Pid - b.Process.Pid })
+	for _, cmd := range commands {
+		pid := cmd.Process.Pid
+		if _, err := proc.StopChild(pid, 0, func() error { return syscall.Kill(-pid, syscall.SIGKILL) }); err != nil {
+			if warn != nil {
+				warn("questioncheck: failed to stop judge process group", "pid", pid, "error", err)
+			}
+		}
 	}
-	return len(judgeGroups.pids)
+	return len(judgeGroups.commands)
 }
 
 // withEnv заменяет в env переменные из extra («ИМЯ=значение»)

@@ -50,7 +50,7 @@ func TestBuildInputFixtures(t *testing.T) {
 	}
 	p := fixture(t, rows...)
 	t.Run("one response and all text blocks", func(t *testing.T) {
-		got, e := BuildInput(p, 2, Options{})
+		got, e := BuildInput(context.Background(), p, 2, Options{})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -60,7 +60,7 @@ func TestBuildInputFixtures(t *testing.T) {
 	})
 	t.Run("decision time covers preceding timestamp jitter", func(t *testing.T) {
 		p := fixture(t, ev("user", "2026-01-01T00:00:01.002Z", "вопрос"), ev("assistant", "2026-01-01T00:00:01.001Z", []any{map[string]any{"type": "text", "text": "ответ"}}))
-		got, e := BuildInput(p, 2, Options{})
+		got, e := BuildInput(context.Background(), p, 2, Options{})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -69,7 +69,7 @@ func TestBuildInputFixtures(t *testing.T) {
 		}
 	})
 	t.Run("tools output crop and no future", func(t *testing.T) {
-		got, e := BuildInput(p, 10, Options{})
+		got, e := BuildInput(context.Background(), p, 10, Options{})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -89,7 +89,7 @@ func TestBuildInputFixtures(t *testing.T) {
 			ev("user", "t1", []any{map[string]any{"type": "text", "text": "описание"}, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "dont-copy-image"}}}),
 			ev("assistant", "t2", []any{map[string]any{"type": "text", "text": "ответ с картинкой"}}),
 		)
-		got, e := BuildInput(p, 2, Options{})
+		got, e := BuildInput(context.Background(), p, 2, Options{})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -102,7 +102,7 @@ func TestBuildInputFixtures(t *testing.T) {
 			ev("user", "t1", []any{map[string]any{"type": "text", "text": "прочти файл"}, map[string]any{"type": "file", "file_path": "/home/user/report.txt", "content": "must not leak"}}),
 			ev("assistant", "t2", []any{map[string]any{"type": "text", "text": "ответ"}}),
 		)
-		got, err := BuildInput(p, 2, Options{})
+		got, err := BuildInput(context.Background(), p, 2, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -118,7 +118,7 @@ func TestBuildInputFixtures(t *testing.T) {
 			map[string]any{"type": "user", "timestamp": "t3", "message": map[string]any{"content": ""}},
 			ev("assistant", "t4", []any{map[string]any{"type": "text", "text": "ответ"}}),
 		)
-		got, err := BuildInput(p, 5, Options{})
+		got, err := BuildInput(context.Background(), p, 5, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -135,7 +135,7 @@ func TestBuildInputFixtures(t *testing.T) {
 			map[string]any{"type": "user", "timestamp": "t5", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "x", "content": "checked"}}}},
 			ev("assistant", "t6", []any{map[string]any{"type": "text", "text": "исправленный ответ"}}),
 		)
-		got, err := BuildInput(p, 6, Options{})
+		got, err := BuildInput(context.Background(), p, 6, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,7 +150,7 @@ func TestBuildInputFixtures(t *testing.T) {
 			map[string]any{"type": "user", "timestamp": "t3", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "x", "content": []any{map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "private"}}}}}}},
 			ev("assistant", "t4", []any{map[string]any{"type": "text", "text": "готово"}}),
 		)
-		got, err := BuildInput(p, 4, Options{})
+		got, err := BuildInput(context.Background(), p, 4, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -165,7 +165,7 @@ func TestBuildInputFixtures(t *testing.T) {
 			map[string]any{"type": "system", "subtype": "compact_boundary", "timestamp": "t3"},
 			ev("assistant", "t4", []any{map[string]any{"type": "text", "text": "ответ после компакции"}}),
 		)
-		got, err := BuildInput(p, 4, Options{})
+		got, err := BuildInput(context.Background(), p, 4, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -180,7 +180,7 @@ func TestBuildInputFixtures(t *testing.T) {
 			map[string]any{"type": "user", "isMeta": true, "message": map[string]any{"content": "context compacted"}, "timestamp": "2026-01-01T00:00:01Z"},
 			ev("assistant", "2026-01-01T00:00:04Z", []any{map[string]any{"type": "text", "text": "answer"}}),
 		)
-		got, err := BuildInput(p, 4, Options{})
+		got, err := BuildInput(context.Background(), p, 4, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -190,7 +190,7 @@ func TestBuildInputFixtures(t *testing.T) {
 	})
 	t.Run("send message", func(t *testing.T) {
 		p := fixture(t, ev("user", "t1", "hi"), ev("assistant", "t2", []any{map[string]any{"type": "tool_use", "id": "s", "name": "SendMessage", "input": map[string]any{"message": "письмо"}}}))
-		got, e := BuildInput(p, 2, Options{})
+		got, e := BuildInput(context.Background(), p, 2, Options{})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -205,7 +205,7 @@ func TestBuildInputFixtures(t *testing.T) {
 			map[string]any{"type": "user", "isMeta": true, "origin": map[string]any{"kind": "peer"}, "timestamp": "t2", "message": map[string]any{"content": "<cross-session-message from-name=\"peer-name\">peer-name: письмо</cross-session-message>"}},
 			ev("assistant", "t3", []any{map[string]any{"type": "tool_use", "id": "s", "name": "SendToProject", "input": map[string]any{"message": "ответ"}}}),
 		)
-		got, err := BuildInput(p, 4, Options{})
+		got, err := BuildInput(context.Background(), p, 4, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +260,7 @@ func TestLongAnswerThresholdCountsRepeatedWords(t *testing.T) {
 	}
 	rows = append(rows, ev("assistant", "2026-01-01T00:02:00Z", []any{map[string]any{"type": "text", "text": answer}}))
 	path := fixture(t, rows...)
-	input, err := BuildInput(path, len(rows), Options{})
+	input, err := BuildInput(context.Background(), path, len(rows), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestBoundToolsKeepsRelevantAndBoundaryCalls(t *testing.T) {
 	}
 	rows = append(rows, ev("assistant", "2026-01-01T01:00:00Z", []any{map[string]any{"type": "text", "text": "Verified checksum for /repo/evidence-file.txt"}}))
 	p := fixture(t, rows...)
-	got, err := BuildInput(p, len(rows), Options{})
+	got, err := BuildInput(context.Background(), p, len(rows), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ func TestBoundToolsKeepsLastCallsBeforeAnswerAndCropsWriteInput(t *testing.T) {
 		)
 	}
 	rows = append(rows, ev("assistant", "2026-01-01T01:00:00Z", []any{map[string]any{"type": "text", "text": "Отчёт report-r7 записан, бойцов не идёт."}}))
-	got, err := BuildInput(fixture(t, rows...), len(rows), Options{})
+	got, err := BuildInput(context.Background(), fixture(t, rows...), len(rows), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestContextRecentToolsCropWriteInput(t *testing.T) {
 		ev("user", "t6", "дальше"),
 		ev("assistant", "t7", []any{map[string]any{"type": "text", "text": "готово"}}),
 	)
-	got, err := BuildInput(p, 7, Options{})
+	got, err := BuildInput(context.Background(), p, 7, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +508,7 @@ func TestBoundToolsShowsMatchingLinesBeforeEdges(t *testing.T) {
 		map[string]any{"type": "user", "timestamp": "t3", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "long", "content": strings.Join(lines, "\n")}}}},
 		ev("assistant", "t4", []any{map[string]any{"type": "text", "text": "Результат 7921 бойцов."}}),
 	)
-	input, err := BuildInput(p, 4, Options{})
+	input, err := BuildInput(context.Background(), p, 4, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,8 @@ func StartDetached(cmd *exec.Cmd) error {
 
 	// A long-lived executor must reap the child when it eventually exits.
 	// The wait belongs to the detached child, not to the hook's deadline.
-	go func() { _ = cmd.Wait() }()
+	go func() { //nolint:ignored-error detached process has no hook log stream; Wait only reaps it after the caller returns
+		_ = cmd.Wait()
+	}()
 	return nil
 }

@@ -14,7 +14,7 @@ import (
 func TestTerminalTitleRequest(t *testing.T) {
 	var stderr bytes.Buffer
 	req := hookctx.New(nil, nil, &stderr, []string{"HOME=/test"}, "/test", 123, 12)
-	if err := SetTerminalTitleForRequest("project%\nline", req); err != nil {
+	if err := SetTerminalTitleForRequest(context.Background(), "project%\nline", req); err != nil {
 		t.Fatal(err)
 	}
 	if got := stderr.String(); got != "\x1b]0;project line\a" {

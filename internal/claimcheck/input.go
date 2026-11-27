@@ -180,13 +180,8 @@ type row struct {
 	Blocks []block
 }
 
-// BuildInput builds the judge input at the physical, one-based JSONL line.
-func BuildInput(path string, line int, options Options) (*Input, error) {
-	return BuildInputContext(context.Background(), path, line, options)
-}
-
-// BuildInputContext builds the judge input and stops when ctx is canceled.
-func BuildInputContext(ctx context.Context, path string, line int, options Options) (*Input, error) {
+// BuildInput builds the judge input and stops when ctx is canceled.
+func BuildInput(ctx context.Context, path string, line int, options Options) (*Input, error) {
 	if line < 1 {
 		return nil, fmt.Errorf("line must be positive")
 	}
@@ -3250,7 +3245,12 @@ func (m *wordMatcher) wordPositions(line string) map[string]int {
 	for word, position := range bytePositions {
 		ordered = append(ordered, wordBytePosition{word: word, position: position})
 	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].position < ordered[j].position })
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].position != ordered[j].position {
+			return ordered[i].position < ordered[j].position
+		}
+		return ordered[i].word < ordered[j].word
+	})
 	lastByte, runePosition := 0, 0
 	for _, match := range ordered {
 		runePosition += utf8.RuneCountInString(lower[lastByte:match.position])

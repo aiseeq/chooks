@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"path/filepath"
 	"time"
 )
@@ -10,12 +11,12 @@ import (
 
 // SaveSessionState — SaveSessionStateIn в каталоге своего процесса (только тесты)
 func SaveSessionState(sessionID string, state SessionState) error {
-	return SaveSessionStateIn(RuntimeDir(), sessionID, state)
+	return SaveSessionStateIn(context.Background(), RuntimeDir(), sessionID, state)
 }
 
 // SwapSessionState — SwapSessionStateIn в каталоге своего процесса (только тесты)
 func SwapSessionState(sessionID string, from, to SessionState) (bool, error) {
-	return SwapSessionStateIn(RuntimeDir(), sessionID, from, to)
+	return SwapSessionStateIn(context.Background(), RuntimeDir(), sessionID, from, to)
 }
 
 // LoadSessionState — LoadSessionStateIn в каталоге своего процесса (только тесты)

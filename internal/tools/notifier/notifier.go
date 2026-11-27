@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -72,7 +73,7 @@ func NewForRequest(config core.ToolConfig, logger core.Logger, request hookctx.C
 // переходе в «готово» или «ждёт ответа», даже без звонка: это подсказка в
 // панели задач. Звук и уведомление уходят в отдельный процесс — хук не ждёт
 // ни звука, ни клика
-func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision Decision) error {
+func (n *Notifier) Announce(ctx context.Context, eventName string, input *core.ToolInput, decision Decision) error {
 	if n.request == nil {
 		return fmt.Errorf("hook request is missing")
 	}
@@ -89,7 +90,7 @@ func (n *Notifier) Announce(eventName string, input *core.ToolInput, decision De
 	// Значок — по новому состоянию, как в строке статуса: минутное
 	// напоминание без конца хода — это «готово», а не вопрос.
 	// Без заголовка уведомление всё равно уходит
-	titleErr := desktop.SetTerminalTitleWith(decision.State.Marker()+" "+projectName, *n.request, n.effects.KonsoleTitle)
+	titleErr := desktop.SetTerminalTitleWith(context.WithoutCancel(ctx), decision.State.Marker()+" "+projectName, *n.request, n.effects.KonsoleTitle)
 	if titleErr != nil {
 		n.logger.Warn("terminal title not set", "error", titleErr)
 	}

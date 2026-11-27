@@ -270,7 +270,14 @@ func (t *hookTimer) watchTermination(exit func(int)) {
 	signal.Notify(signals, syscall.SIGTERM)
 	go func() {
 		<-signals
-		questioncheck.KillJudgeGroups()
+		questioncheck.KillJudgeGroups(func(msg string, args ...any) {
+			t.mu.Lock()
+			logger := t.logger
+			t.mu.Unlock()
+			if logger != nil {
+				logger.Warn(msg, args...)
+			}
+		})
 		t.reportTermination()
 		exit(killedExitCode)
 	}()

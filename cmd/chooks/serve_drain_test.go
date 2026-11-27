@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -275,7 +276,7 @@ func TestProxyLostDaemonHooks(t *testing.T) {
 			}
 			input := strings.ReplaceAll(tt.input, "@TRANSCRIPT@", filepath.Join(home, "transcript.jsonl"))
 			if tt.preState != "" {
-				if err := core.SaveSessionStateIn(filepath.Join(home, "run", "chooks"), "s", tt.preState); err != nil {
+				if err := core.SaveSessionStateIn(context.Background(), filepath.Join(home, "run", "chooks"), "s", tt.preState); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -426,7 +427,7 @@ func TestProxyLostSessionEventDoesNotDuplicateAlert(t *testing.T) {
 				_, _ = conn.Read(buf)
 				_, _ = conn.Write([]byte{hookwire.Accepted})
 				_, _ = conn.Read(buf[:1])
-				if err := core.SaveSessionStateIn(filepath.Join(home, "run", "chooks"), "s", tt.state); err != nil {
+				if err := core.SaveSessionStateIn(context.Background(), filepath.Join(home, "run", "chooks"), "s", tt.state); err != nil {
 					t.Errorf("save daemon state: %v", err)
 				}
 				appendTestLine(alerts, "daemon notification")

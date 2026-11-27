@@ -61,7 +61,7 @@ func throttleOnly(props []word) bool {
 // agentUnitReason отказ на действие над юнитом другого агента: name — имя
 // с типом (unitName). Общее для systemctl и вызова тех же методов по D-Bus
 // (unitActionReason). hint — подсказка: у бойца — worker stop
-func agentUnitReason(scope, name string) (reason, hint string) {
+func agentUnitReason(_ string, name string) (reason, hint string) {
 	for _, u := range agentUnits {
 		if !u.re.MatchString(name) {
 			continue

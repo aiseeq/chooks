@@ -747,7 +747,7 @@ func countKonsoleTitles(t *testing.T) func() int64 {
 	orig := realNotifierEffects
 	realNotifierEffects = func() notifier.Effects {
 		effects := orig()
-		effects.KonsoleTitle = func(service, session, title string, request hookctx.Context) error {
+		effects.KonsoleTitle = func(ctx context.Context, service, session, title string, request hookctx.Context) error {
 			n.Add(1)
 			return nil
 		}

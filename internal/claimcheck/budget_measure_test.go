@@ -50,7 +50,7 @@ func TestMeasureBuildInputLongTurn(t *testing.T) {
 	path, line := longTurnTranscript(t, 1500, 60, 5000)
 	cpuBefore := processCPU(t)
 	started := time.Now()
-	input, err := BuildInput(path, line, Options{})
+	input, err := BuildInput(context.Background(), path, line, Options{})
 	took := time.Since(started)
 	cpu := processCPU(t) - cpuBefore
 	if err != nil {
@@ -69,7 +69,7 @@ func TestMeasureExcerptManyLongOutputs(t *testing.T) {
 	path, line := longTurnTranscript(t, 40, 2000, 3000)
 	cpuBefore := processCPU(t)
 	started := time.Now()
-	input, err := BuildInput(path, line, Options{})
+	input, err := BuildInput(context.Background(), path, line, Options{})
 	cpu := processCPU(t) - cpuBefore
 	took := time.Since(started)
 	if err != nil {
@@ -125,7 +125,7 @@ func TestMeasureBuildInputManyLongWrites(t *testing.T) {
 		path, line := longWriteTranscript(t, tc.calls, 100, tc.words)
 		cpuBefore := processCPU(t)
 		started := time.Now()
-		input, err := BuildInput(path, line, Options{})
+		input, err := BuildInput(context.Background(), path, line, Options{})
 		cpu := processCPU(t) - cpuBefore
 		took := time.Since(started)
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/akit/shellcmd"
+	"github.com/aiseeq/chooks/internal/core"
 )
 
 // Правило глубины: команда и одна обёртка над ней проверяются как прямые;
@@ -83,7 +84,11 @@ func TestVisibleDynamicSignalScansPartialNestedCalls(t *testing.T) {
 	}) {
 		t.Fatalf("shellcmd.Calls partial result has no signal: %+v", calls)
 	}
-	if !visibleDynamicSignal(shellcmd.Call{Args: args}) {
+	tool, err := NewKillGuardToolForPID(core.ToolConfig{Enabled: true}, testLogger(t), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(&killScan{tool: tool}).visibleDynamicSignal(shellcmd.Call{Args: args}) {
 		t.Fatal("visibleDynamicSignal ignored the signal in partial calls")
 	}
 }

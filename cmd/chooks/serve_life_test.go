@@ -199,21 +199,97 @@ func startSupervised(t *testing.T, exe, home string, extraEnv ...string) *superv
 	sv.cmd = cmd
 	t.Cleanup(func() {
 		writeFiles(t, home, map[string]string{"stop": ""})
-		if _, err := proc.StopChildGroup(cmd, 10*time.Second, syscall.SIGTERM); err != nil {
+		if err := stopSupervisedTree(cmd); err != nil {
 			t.Errorf("stop supervised process tree: %v", err)
 		}
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
-			_, _ = proc.StopChildGroup(cmd, 0, syscall.SIGKILL)
-			<-done
-			t.Errorf("supervised daemon did not stop on SIGTERM; output:\n%s", stderr.String())
+		case <-time.After(5 * time.Second):
+			t.Errorf("supervisor cmd.Wait still blocked 5s after daemon cleanup; output:\n%s", stderr.String())
 		}
 		_ = listener.Close()
 	})
 	return sv
+}
+
+// stopSupervisedTree pins the command and all observed descendants before
+// signaling the direct child. SIGKILL then reaches pinned survivors even if
+// the supervisor shell exits and the daemon is reparented during the grace.
+func stopSupervisedTree(cmd *exec.Cmd) error {
+	_, err := proc.StopChild(cmd.Process.Pid, 2*time.Second, func() error {
+		return proc.SignalChild(cmd.Process.Pid, syscall.SIGTERM)
+	})
+	if errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	return err
+}
+
+// Reproduces the reviewer's orphan case: SIGTERM is ignored by the daemon,
+// which keeps stderr open after its supervisor is asked to exit.
+func TestStopSupervisedOrphan(t *testing.T) {
+	dir := t.TempDir()
+	starts, stop := filepath.Join(dir, "starts"), filepath.Join(dir, "stop")
+	script := filepath.Join(dir, "supervisor.sh")
+	body := "#!/bin/sh\nwhile [ ! -e \"$STOP\" ]; do\n  sh -c 'printf \"start test %s\\n\" \"$$\" >> \"$STARTS\"; trap \"\" TERM; exec sleep 30'\ndone\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(script)
+	cmd.Env = append(os.Environ(), "STOP="+stop, "STARTS="+starts)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stderr, &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	defer func() {
+		if waited {
+			return
+		}
+		_ = os.WriteFile(stop, nil, 0o600)
+		if err := stopSupervisedTree(cmd); err != nil {
+			t.Errorf("cleanup probe process tree: %v", err)
+		}
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("probe supervisor cmd.Wait still blocked after cleanup")
+		}
+	}()
+	if !waitFor(t, 3*time.Second, func() bool { return len(lines(readFile(t, starts))) > 0 }) {
+		t.Fatal("probe daemon did not start")
+	}
+	var daemonPID int
+	if _, err := fmt.Sscanf(lines(readFile(t, starts))[0], "start test %d", &daemonPID); err != nil {
+		t.Fatalf("read probe daemon PID: %v", err)
+	}
+	if err := os.WriteFile(stop, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := stopSupervisedTree(cmd); err != nil {
+		t.Fatalf("stop stubborn probe daemon: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		waited = true
+		_ = err // SIGTERM may be the supervisor's expected exit status.
+	case <-time.After(5 * time.Second):
+		t.Fatalf("supervisor Wait blocked 5s after cleanup; daemon PID %d; output:\n%s", daemonPID, stderr.String())
+	}
+	if !waitFor(t, 2*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join("/proc", strconv.Itoa(daemonPID)))
+		return errors.Is(err, os.ErrNotExist)
+	}) {
+		t.Errorf("probe daemon PID %d remains after cleanup", daemonPID)
+	}
 }
 
 // waitLog ждёт в логе демона строку с каждым из parts

@@ -139,7 +139,7 @@ func newNightHintCmd(exitCode *int) *cobra.Command {
 		Short: "Ночью при заблокированном экране или закрытой крышке подсказать сессии: пользователь спит, вопрос — тикетом админу пространства (SessionStart, UserPromptSubmit, PreToolUse AskUserQuestion, Stop с ❓)",
 		Long: "Подсказка в additionalContext, не отказ. Признак «спит» — экран заблокирован (LockedHint сессии seat0) или крышка закрыта (LidClosed logind), и местное время 22:00–09:00. " +
 			"SessionStart — раз за ночь на сессию и после сжатия и /clear; UserPromptSubmit — на каждом ходе, пока в сессии не вызван скилл autonomous-work или night-work (sc2go) (по записи skill-reload; записи нет — не вызван), после вызова, при выключенном skill_reload, сбое чтения записи или исчерпанном сроке хука — раз за ночь; " +
-			"PreToolUse AskUserQuestion — на каждый вызов, Stop — если в последнем ответе есть строка с ❓, раз за ход. " +
+			"PreToolUse AskUserQuestion — на каждый вызов, Stop — если в последнем ответе есть строка, начинающаяся с ❓ (после отступа, маркера списка и открытого **; цитата > ❓ не в счёт), раз за ход. " +
 			"--probe печатает признаки блокировки и крышки и время их получения.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if probe {

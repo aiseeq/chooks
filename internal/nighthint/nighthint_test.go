@@ -291,11 +291,29 @@ func TestIsNightAndNightOf(t *testing.T) {
 }
 
 func TestHasQuestion(t *testing.T) {
-	if HasQuestion("Готово.\n✅ сделано") {
-		t.Error("ответ без ❓")
+	cases := []struct {
+		name    string
+		message string
+		want    bool
+	}{
+		{"ответ без ❓", "Готово.\n✅ сделано", false},
+		// 27.11 03:20 CET, git-admin (tl 27d21ddd:58476): знак внутри строки
+		{"знак внутри строки", "⏳ вопрос в доке, ночью я не дублирую его строкой ❓ в консоли", false},
+		{"знак в коде посреди строки", "Метка `❓` ставится в начале строки", false},
+		{"строка с ❓", "❓ Да?", true},
+		{"строка списка с ❓", "Готово.\n- ❓ нужен доступ к pc", true},
+		{"звёздочка списка", "* ❓ Да?", true},
+		{"нумерованный список", "Итог:\n  2. ❓ Да?", true},
+		{"отступ", "   ❓ Да?", true},
+		{"плюс списка", "+ ❓ Да?", true},
+		// 20.11 06:53 CET (tl 4994d6a8:1638): метка внутри жирного выделения
+		{"жирная метка в списке", "- **❓ От тебя:** приложи палец к сканеру отпечатков", true},
+		{"цитата чужого вопроса", "> ❓ Да?", false},
 	}
-	if !HasQuestion("Готово.\n- ❓ нужен доступ к pc") {
-		t.Error("строка списка с ❓")
+	for _, tc := range cases {
+		if got := HasQuestion(tc.message); got != tc.want {
+			t.Errorf("%s: HasQuestion(%q) = %v, want %v", tc.name, tc.message, got, tc.want)
+		}
 	}
 }
 

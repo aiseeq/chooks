@@ -25,7 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"regexp"
 	"time"
 )
 
@@ -137,9 +137,15 @@ func Text(t time.Time) string {
 	return fmt.Sprintf("Сейчас ночь (%s), пользователь спит: первым действием хода вызови Skill autonomous-work, если его текста нет в контексте; вопрос — тикетом админу пространства (autonomous-work п.3), работай дальше", t.Format("15:04"))
 }
 
-// HasQuestion сообщает, что в ответе агента есть строка с меткой ❓
+// questionLine — строка, которая начинается меткой ❓: после отступа и
+// маркера списка (`- `, `* `, `+ `, `N. `) и открытого выделения (`**❓`,
+// `__❓`); знак внутри строки — упоминание, не вопрос; цитата `> ❓` —
+// черновик чужого вопроса (тикет nighthint-qmark-line-start)
+var questionLine = regexp.MustCompile(`(?m)^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+)?(?:\*\*|__)?` + regexp.QuoteMeta(questionMark))
+
+// HasQuestion сообщает, что в ответе агента есть строка, начинающаяся меткой ❓
 func HasQuestion(message string) bool {
-	return strings.Contains(message, questionMark)
+	return questionLine.MatchString(message)
 }
 
 // Run решает подсказку по событию. Дешёвые признаки (событие, час) — до

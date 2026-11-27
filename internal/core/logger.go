@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -92,7 +93,7 @@ func NewLoggerTo(config LoggerConfig, stderr io.Writer) (FileLogger, error) {
 func NewLoggerIn(config LoggerConfig, stderr io.Writer, loc *time.Location) (FileLogger, error) {
 	applyLoggerDefaults(&config)
 
-	writer, err := openLogWriter(config, stderr)
+	writer, err := openLogWriter(context.Background(), config, stderr) // context-first: safe — публичный API не принимает контекст
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +210,7 @@ func parseLogLevel(level string) slog.Level {
 }
 
 // openLogWriter открывает поток вывода логов
-func openLogWriter(config LoggerConfig, stderr io.Writer) (io.Writer, error) {
+func openLogWriter(ctx context.Context, config LoggerConfig, stderr io.Writer) (io.Writer, error) {
 	switch config.Output {
 	case "stdout":
 		// stdout зарезервирован под протокол обмена с Claude Code
@@ -222,7 +223,7 @@ func openLogWriter(config LoggerConfig, stderr io.Writer) (io.Writer, error) {
 			return nil, fmt.Errorf("failed to create log directory: %w", err)
 		}
 		// Неудавшаяся ротация логирование не останавливает: лог просто растёт дальше
-		if err := rotateLogIfNeeded(config.LogFile, config.MaxSizeMB); err != nil {
+		if err := rotateLogIfNeeded(ctx, config.LogFile, config.MaxSizeMB); err != nil {
 			fmt.Fprintf(stderr, "chooks: log rotation failed: %v\n", err)
 		}
 
@@ -240,46 +241,68 @@ func openLogWriter(config LoggerConfig, stderr io.Writer) (io.Writer, error) {
 // Одна запись O_APPEND короче страницы не перемешивается со строками других
 // процессов
 func AppendLine(path string, maxSizeMB int, line string) error {
-	return appendLineWithRename(path, maxSizeMB, line, os.Rename)
+	return appendLineWithRename(context.Background(), path, maxSizeMB, line, os.Rename) // context-first: safe — публичный API не принимает контекст
 }
 
-func appendLineWithRename(path string, maxSizeMB int, line string, rename func(string, string) error) error {
+func appendLineWithRename(ctx context.Context, path string, maxSizeMB int, line string, rename func(string, string) error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("cannot create directory for %s: %w", path, err)
 	}
-	if err := rotateLogIfNeededWithRename(path, maxSizeMB, rename); err != nil {
-		return err
+	// Сбой ротации (блокировка, rename) строку не роняет: она дописывается в
+	// текущий файл, ошибка ротации уходит вызывающему вместе с итогом записи
+	rotateErr := rotateLogIfNeededWithRename(ctx, path, maxSizeMB, rename)
+	if rotateErr != nil {
+		rotateErr = fmt.Errorf("rotation skipped, line appended to current file: %w", rotateErr)
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return fmt.Errorf("cannot open %s: %w", path, err)
+		return errors.Join(rotateErr, fmt.Errorf("cannot open %s: %w", path, err))
 	}
 	if _, err := file.WriteString(line + "\n"); err != nil {
-		return errors.Join(fmt.Errorf("cannot write %s: %w", path, err), file.Close())
+		return errors.Join(rotateErr, fmt.Errorf("cannot write %s: %w", path, err), file.Close())
 	}
-	return file.Close()
+	return errors.Join(rotateErr, file.Close())
 }
 
 // rotateLogIfNeeded переименовывает лог в *.1 при превышении порога размера.
 // Отсутствующий лог ротации не требует
-func rotateLogIfNeeded(logFile string, maxSizeMB int) error {
-	return rotateLogIfNeededWithRename(logFile, maxSizeMB, os.Rename)
+func rotateLogIfNeeded(ctx context.Context, logFile string, maxSizeMB int) error {
+	return rotateLogIfNeededWithRename(ctx, logFile, maxSizeMB, os.Rename)
 }
 
-func rotateLogIfNeededWithRename(logFile string, maxSizeMB int, rename func(string, string) error) error {
+func rotateLogIfNeededWithRename(ctx context.Context, logFile string, maxSizeMB int, rename func(string, string) error) (result error) {
 	if maxSizeMB <= 0 {
 		return nil
 	}
+	// Без блокировки — только отсев малого файла: строка журнала пишется в
+	// каждом хуке, а ротация редка. Размер для rename перечитывается под блокировкой
+	if big, err := logOverLimit(logFile, maxSizeMB); err != nil || !big {
+		return err
+	}
 
-	info, err := os.Stat(logFile)
+	// Только чтение: flock его не требует, а чужой .lock с 0644 не мешает
+	lockFile, err := os.OpenFile(logFile+".lock", os.O_CREATE|os.O_RDONLY, 0o644)
 	if err != nil {
-		if os.IsNotExist(err) {
+		return fmt.Errorf("cannot open rotation lock for %s: %w", logFile, err)
+	}
+	defer func() {
+		if err := lockFile.Close(); err != nil {
+			result = errors.Join(result, fmt.Errorf("cannot close rotation lock for %s: %w", logFile, err))
+		}
+	}()
+
+	// Исключительная блокировка между процессами не даёт двум из них заменить
+	// .1 по устаревшему Stat.
+	// По истечении секунды ротацию пропускаем, чтобы запись строки не задерживалась.
+	if err := LockFile(ctx, lockFile, time.Now().Add(time.Second)); err != nil {
+		if errors.Is(err, ErrLockBusy) {
 			return nil
 		}
-		return fmt.Errorf("cannot stat %s: %w", logFile, err)
+		return fmt.Errorf("cannot lock rotation for %s: %w", logFile, err)
 	}
-	if info.Size() < int64(maxSizeMB)*1024*1024 {
-		return nil
+
+	if big, err := logOverLimit(logFile, maxSizeMB); err != nil || !big {
+		return err
 	}
 
 	if err := rename(logFile, logFile+".1"); err != nil {
@@ -291,6 +314,18 @@ func rotateLogIfNeededWithRename(logFile string, maxSizeMB int, rename func(stri
 		return fmt.Errorf("cannot rename %s: %w", logFile, err)
 	}
 	return nil
+}
+
+// logOverLimit — лог не меньше порога ротации; отсутствующий лог — нет
+func logOverLimit(logFile string, maxSizeMB int) (bool, error) {
+	info, err := os.Stat(logFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("cannot stat %s: %w", logFile, err)
+	}
+	return info.Size() >= int64(maxSizeMB)*1024*1024, nil
 }
 
 // Debug логирует сообщение уровня debug

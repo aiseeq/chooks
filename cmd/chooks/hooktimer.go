@@ -227,7 +227,7 @@ func (t *hookTimer) recordDuration(at time.Time, session string, elapsed time.Du
 	}
 	line := strings.Join(fields, "\t")
 	if err := core.AppendLine(path, maxMB, line); err != nil && logger != nil {
-		logger.Warn("hook duration not recorded", "hook", t.hook, "error", err)
+		logger.Warn("hook duration log line", "hook", t.hook, "error", err)
 	}
 }
 

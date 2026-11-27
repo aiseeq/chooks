@@ -916,6 +916,6 @@ func logCLIFallback(config *core.Config, request hookctx.Context, hookType, reas
 	line := fmt.Sprintf("time=%q level=INFO msg=%q hook=%s reason=%q pid=%d",
 		time.Now().In(request.Location()).Format(time.DateTime), "hook via CLI fallback", hookType, reason, request.PID)
 	if err := core.AppendLine(config.Logger.LogFile, config.Logger.MaxSizeMB, line); err != nil {
-		fmt.Fprintf(request.Stderr, "chooks: fallback line not logged: %v\n", err)
+		fmt.Fprintf(request.Stderr, "chooks: fallback log line: %v\n", err)
 	}
 }

@@ -883,7 +883,7 @@ func (s *server) writeShadow(at time.Time, hookType, session, status, detail str
 		return
 	}
 	if err := core.AppendLine(s.shadowLog, s.shadowMaxMB, shadowLine(at.In(time.Local), hookType, session, status, detail)); err != nil {
-		s.logger.Warn("daemon: shadow line not written", "error", err)
+		s.logger.Warn("daemon: shadow log line", "error", err)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/aiseeq/chooks/internal/claimcheck"
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/hookctx"
+	"github.com/aiseeq/chooks/internal/hookproxy"
 	"github.com/aiseeq/chooks/internal/questioncheck"
 	"github.com/aiseeq/chooks/internal/understandcheck"
 )
@@ -284,6 +285,119 @@ func (a fixedAsker) Model() string { return "stub/high" }
 func (a fixedAsker) Ask(context.Context, string, string) (string, questioncheck.Usage, error) {
 	*a.calls++
 	return a.answer, questioncheck.Usage{}, nil
+}
+
+type fixedUnderstandAsker struct {
+	calls  *int
+	answer string
+}
+
+func (a fixedUnderstandAsker) Model() string { return "stub/high" }
+func (a fixedUnderstandAsker) Ask(context.Context, string) (string, questioncheck.Usage, error) {
+	*a.calls++
+	if a.answer == "" {
+		a.answer = `{"verdict":"ok"}`
+	}
+	return a.answer, questioncheck.Usage{}, nil
+}
+
+// Потерянный ответ означает, что демон уже позвал судью один раз. CLI должен
+// сохранить этот счётчик: повторный отказ мог бы изменить решение или уведомить
+// пользователя второй раз.
+func TestLostJudgeHooksDoNotCallJudgeAgain(t *testing.T) {
+	for _, hook := range []string{hookUnderstandCheck, hookClaimStop} {
+		t.Run(hook, func(t *testing.T) {
+			e := newClaimEnv(t)
+			configPath := filepath.Join(e.root, "config.yaml")
+			configText := serveConfig
+			var input []byte
+			calls := 1 // единственный вызов судьи на стороне демона до обрыва
+			deps := claimDeps{}
+			if hook == hookUnderstandCheck {
+				configText = strings.Replace(configText, "understand_check: {enabled: false}", "understand_check: {enabled: true}\n  claim_check: {enabled: false}", 1)
+				transcript := letterTranscript(t, e.root)
+				input, _ = json.Marshal(map[string]any{"session_id": "s1", "transcript_path": transcript, "tool_name": "SendMessage",
+					"tool_use_id": "toolu_1", "tool_input": map[string]any{"to": "git-admin", "message": claimLetter}})
+				deps.understand = fixedUnderstandAsker{calls: &calls}
+			} else {
+				answer := "Готово: тест прошёл."
+				transcript := writeStopTranscript(t, e.root, answer)
+				input, _ = json.Marshal(map[string]any{"session_id": "s1", "transcript_path": transcript, "hook_event_name": "Stop",
+					"stop_hook_active": false, "last_assistant_message": answer})
+				deps.judge = fixedAsker{answer: claimAnswerFlag, calls: &calls}
+			}
+			if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			request := e.request(&stdout)
+			request.ConfigPath = configPath
+			request.Stdin = strings.NewReader(string(input))
+			request.Stderr = &stderr
+			ctx := context.WithValue(context.Background(), fallbackReasonKey{}, hookproxy.LostPrefix+"test disconnect")
+			ctx = context.WithValue(ctx, cliTerminationKey{}, func(int) {})
+			ctx = context.WithValue(ctx, claimDepsKey{}, deps)
+			ctx = hookctx.WithRequest(ctx, request)
+			code, err := runHook(ctx, hook)
+			wantMessage := "проверка прервана, повтори команду"
+			if hook == hookClaimStop {
+				wantMessage = "судья утверждений прерван обрывом демона: перепроверь свои утверждения в ответе"
+			}
+			if code != exitBlocked || err == nil || err.Error() != wantMessage {
+				t.Fatalf("lost hook result = %d, %v; want code %d and %q", code, err, exitBlocked, wantMessage)
+			}
+			if calls != 1 {
+				t.Fatalf("judge calls %d, want 1", calls)
+			}
+		})
+	}
+	t.Run("claim-stop active does not block", func(t *testing.T) {
+		e := newClaimEnv(t)
+		var stdout, stderr bytes.Buffer
+		request := e.request(&stdout)
+		request.Stdin = strings.NewReader(`{"session_id":"s1","stop_hook_active":true}`)
+		request.Stderr = &stderr
+		ctx := context.WithValue(context.Background(), fallbackReasonKey{}, hookproxy.LostPrefix+"test disconnect")
+		ctx = context.WithValue(ctx, cliTerminationKey{}, func(int) {})
+		ctx = hookctx.WithRequest(ctx, request)
+		code, err := runHook(ctx, hookClaimStop)
+		if code != exitError || err != nil || !strings.Contains(stderr.String(), "связь с демоном оборвалась") {
+			t.Fatalf("lost active claim-stop = %d, %v, stderr %q; want pass with diagnostic", code, err, stderr.String())
+		}
+	})
+}
+
+func TestLostUnderstandCheckRecoversStoredDenial(t *testing.T) {
+	e := newClaimEnv(t)
+	configPath := filepath.Join(e.root, "config.yaml")
+	configText := strings.Replace(serveConfig, "understand_check: {enabled: false}", "understand_check: {enabled: true}\n  claim_check: {enabled: false}", 1)
+	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transcript := letterTranscript(t, e.root)
+	input, _ := json.Marshal(map[string]any{"session_id": "s1", "transcript_path": transcript, "tool_name": "SendMessage",
+		"tool_use_id": "toolu_1", "tool_input": map[string]any{"to": "git-admin", "message": claimLetter}})
+	var stdout, stderr bytes.Buffer
+	request := e.request(&stdout)
+	request.ConfigPath = configPath
+	request.Stdin = strings.NewReader(string(input))
+	request.Stderr = &stderr
+	calls := 0
+	deps := claimDeps{understand: fixedUnderstandAsker{calls: &calls, answer: understandFix}}
+	ctx := context.WithValue(hookctx.WithRequest(context.Background(), request), claimDepsKey{}, deps)
+	config, logger := silentConfig(t)
+	config.Tools[understandCheckTool] = core.ToolConfig{Enabled: true}
+	runUnderstandCheck(ctx, input, config, logger, &stdout)
+	if calls != 1 {
+		t.Fatalf("initial judge calls %d, want 1", calls)
+	}
+	ctx = context.WithValue(ctx, fallbackReasonKey{}, hookproxy.LostPrefix+"test disconnect")
+	ctx = context.WithValue(ctx, cliTerminationKey{}, func(int) {})
+	code, err := runHook(ctx, hookUnderstandCheck)
+	want := "судья отказал, причина потеряна обрывом демона, перепроверь по реплике пользователя"
+	if code != exitBlocked || err == nil || err.Error() != want || calls != 1 {
+		t.Fatalf("lost denied understand = %d, %v, calls %d; want code 2, %q, one judge call", code, err, calls, want)
+	}
 }
 
 // claim-stop: флаг — JSON decision block с reason; stop_hook_active —

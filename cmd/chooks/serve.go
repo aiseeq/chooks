@@ -151,8 +151,12 @@ func newServeCmd() *cobra.Command {
 сменился (graft install) — выходит с кодом 0, а следующее соединение
 systemd отдаёт новому процессу. Если идут принятые вызовы, демон их
 дообслуживает и до их конца отвечает новым соединениям «в CLI: upgrade».
-Обрыв связи после «принято» CLI повторяет pre-tool-use, остальные хуки только
-записывает. SIGTERM и SIGINT: перестать принимать, дообслужить идущие вызовы.
+После обрыва связи после «принято» CLI повторяет pre-tool-use, no-prompt,
+unsent-check, user-prompt-submit, post-tool-batch, stop, notification,
+stop-failure и night-hint. Для understand-check и claim-stop CLI просит явно
+повторить команду или остановку, не вызывая судью снова; webfetch-fallback и
+statusline не повторяются, остальные хуки только записываются. SIGTERM и
+SIGINT: перестать принимать, дообслужить идущие вызовы.
 Раз в час — строка
 stats в лог: RSS, живая куча после GC, горутины, fd.`,
 		Args: cobra.NoArgs,

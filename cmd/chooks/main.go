@@ -372,7 +372,7 @@ func prepareHookRun(ctx context.Context, hookType string, request hookctx.Contex
 	if reason, _ := ctx.Value(fallbackReasonKey{}).(string); cli && hookproxy.Lost(reason) {
 		lost = true
 		executor := executorDaemon
-		if hookType == hookPreToolUse {
+		if retryLostHook(hookType) {
 			executor = executorCLI
 		}
 		timer.setExecutor(executor, reason)
@@ -402,7 +402,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 		switch {
 		case lost:
 			status = statusLost
-			if hookType == hookPreToolUse {
+			if retryLostHook(hookType) {
 				status = statusLostRetried
 			}
 		case err != nil || code == exitError:
@@ -443,7 +443,7 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	timer.setLogger(logger)
 	timer.setDurations(config.Logger)
 	noteCLIFallback(ctx, config, request, hookType, logger)
-	handled, lostCode, lostErr := handleLostHook(ctx, hookType, lost, request, logger)
+	handled, lostCode, lostErr := handleLostHook(ctx, hookType, lost, data, request, logger)
 	if handled {
 		return lostCode, lostErr
 	}
@@ -466,15 +466,50 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 	return code, err
 }
 
-func handleLostHook(ctx context.Context, hookType string, lost bool, request hookctx.Context, logger core.Logger) (bool, int, error) {
-	if !lost || hookType == hookPreToolUse {
+func handleLostHook(ctx context.Context, hookType string, lost bool, data []byte, request hookctx.Context, logger core.Logger) (bool, int, error) {
+	if !lost || retryLostHook(hookType) {
 		return false, exitAllowed, nil
+	}
+	if hookType == hookUnderstandCheck {
+		if input, err := core.ParseToolInput(data); err == nil {
+			resolveHookInput(input, request)
+			if hook, err := newUnderstandHook(ctx, logger); err == nil {
+				if denied, err := hook.PreviouslyDenied(ctx, understandCall(ctx, input, logger)); err == nil && denied {
+					return true, exitBlocked, fmt.Errorf("судья отказал, причина потеряна обрывом демона, перепроверь по реплике пользователя")
+				}
+			}
+		}
+		return true, exitBlocked, fmt.Errorf("проверка прервана, повтори команду")
+	}
+	if hookType == hookClaimStop {
+		input, err := core.ParseToolInput(data)
+		if err == nil && input.StopHookActive {
+			reason, _ := ctx.Value(fallbackReasonKey{}).(string)
+			if _, writeErr := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); writeErr != nil {
+				logger.Warn("lost hook message not written", "hook", hookType, "error", writeErr)
+			}
+			return true, exitError, nil
+		}
+		return true, exitBlocked, fmt.Errorf("судья утверждений прерван обрывом демона: перепроверь свои утверждения в ответе")
 	}
 	reason, _ := ctx.Value(fallbackReasonKey{}).(string)
 	if _, err := io.WriteString(request.Stderr, hookproxy.LostMessage(reason)); err != nil {
 		logger.Warn("lost hook message not written", "hook", hookType, "error", err)
 	}
 	return true, exitError, nil
+}
+
+// retryLostHook lists hooks whose work is safe to repeat after the daemon
+// accepted the request and then disappeared. Session event notifications are
+// idempotent because their state is saved before delivery; judge hooks and
+// one-shot effects stay out.
+func retryLostHook(hookType string) bool {
+	switch hookType {
+	case hookPreToolUse, hookNoPrompt, hookUnsentCheck, hookStop, hookNotification, hookStopFailure, hookNightHint, hookUserPromptSubmit, hookPostToolBatch:
+		return true
+	default:
+		return false
+	}
 }
 
 func lostPreToolUseResult(lost bool, hookType string, logger core.Logger, code int, err error) (int, error) {

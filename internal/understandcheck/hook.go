@@ -70,6 +70,39 @@ type Outcome struct {
 	Verdict string
 }
 
+// PreviouslyDenied checks only the per-session refusal keys. It does not call
+// the judge, so a caller can safely recover a lost response without repeating
+// a model decision.
+func (h Hook) PreviouslyDenied(ctx context.Context, call Call) (bool, error) {
+	if call.AgentID != "" {
+		return false, nil
+	}
+	request, ok := hookctx.Request(ctx)
+	if !ok {
+		return false, errors.New("hook request is missing")
+	}
+	home := request.MatchPath(hookctx.EnvHome)
+	_, _, _, matched := classifyForHome(call.Tool, call.Input, home, request.Stderr)
+	if !matched {
+		return false, nil
+	}
+	if call.TranscriptPath == "" {
+		return false, nil
+	}
+	turn, err := ReadTurn(call.TranscriptPath, request)
+	if err != nil {
+		return false, err
+	}
+	if !turn.InTurn || strings.TrimSpace(turn.Human) == "" {
+		return false, nil
+	}
+	key, err := callKey(call.Tool, call.Input, turn.Human)
+	if err != nil {
+		return false, err
+	}
+	return h.denied(call.SessionID, key)
+}
+
 // DefaultPaths resolves the journal and denied-call directory for a request.
 func DefaultPaths(request hookctx.Context) (string, string, error) {
 	dir, err := request.StateDir()

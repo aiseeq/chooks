@@ -53,6 +53,9 @@ func runServeHelper() (int, bool) {
 		return runTestDaemon(), true
 	case os.Getenv(argvCLIHelper) == "1":
 		_ = os.Unsetenv(argvCLIHelper)
+		if os.Getenv("CHOOKS_TEST_NIGHT_LOCKED") == "1" {
+			nightProbes.locked = func(context.Context) (bool, error) { return true, nil }
+		}
 		return runCLI(), true
 	case os.Getenv(proxyHelper) == "1":
 		_ = os.Unsetenv(proxyHelper)

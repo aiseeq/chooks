@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/aiseeq/akit/proc"
+	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/fallbackwatch"
 	"github.com/aiseeq/chooks/internal/hookproxy"
 	"github.com/aiseeq/chooks/internal/hookwire"
@@ -44,6 +46,22 @@ func fallbackEvents(t *testing.T, home string) []fallbackwatch.Event {
 // дольше 20 с. Долгий запрос идёт, пока тест не отпустит его
 func holdUntil(name string) string {
 	return `0; i=0; while [ ! -e "$HOME/` + name + `" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done`
+}
+
+// nightTestTZ chooses a fixed-offset zone whose current request hour is 22,
+// so night-hint exercises the night path regardless of the host timezone.
+func nightTestTZ() string {
+	offset := 22 - time.Now().UTC().Hour()
+	if offset < -12 {
+		offset += 24
+	}
+	if offset > 14 {
+		offset -= 24
+	}
+	if offset < 0 {
+		return "Etc/GMT+" + strconv.Itoa(-offset)
+	}
+	return "Etc/GMT-" + strconv.Itoa(offset)
 }
 
 // Ревью 8f10b59, п. 2: install во время долгого запроса. v1 исполняет
@@ -192,25 +210,72 @@ func TestProxyLostAfterCommitIsRecorded(t *testing.T) {
 	}
 }
 
-// Обрыв после 'C': pre-tool-use повторяет проверку, остальные хуки сохраняют
-// прежнее поведение. Демон — заглушка: «принято», 'C', закрытие
-func TestProxyLostPreToolUse(t *testing.T) {
+// Обрыв после 'C': безопасные хуки повторяются в CLI; судьи требуют ручного
+// повтора, а хуки с внешними эффектами сохраняют исход. Демон — заглушка.
+func TestProxyLostDaemonHooks(t *testing.T) {
 	tests := []struct {
-		name, hook, input, stderr string
-		code                      int
+		name, hook, input, transcript string
+		wantStdout                    string
+		code                          int
+		retry, compareCLI             bool
+		checkLog                      bool
+		telemetry                     bool
+		wantState                     core.SessionState
+		preState                      core.SessionState
+		nightLocked                   bool
+		nightHint                     bool
+		lostMessage                   string
 	}{
-		{name: "denied model", hook: hookPreToolUse, input: `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"claude -p --model haiku hi"}}`, code: exitBlocked, stderr: `модель "haiku" не одобрена`},
-		{name: "allowed command", hook: hookPreToolUse, input: `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}`, code: exitAllowed},
-		{name: "check interrupted", hook: hookPreToolUse, input: `not json`, code: exitBlocked, stderr: "проверка прервана, повтори команду"},
-		{name: "stop is not repeated", hook: hookStop, input: `{}`, code: exitError, stderr: "после «принято», хук не повторён"},
+		{name: "denied model", hook: hookPreToolUse, input: `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"claude -p --model haiku hi"}}`, code: exitBlocked, lostMessage: `модель "haiku" не одобрена`, retry: true, telemetry: true},
+		{name: "allowed command", hook: hookPreToolUse, input: `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}`, compareCLI: true, retry: true, telemetry: true},
+		{name: "check interrupted", hook: hookPreToolUse, input: `not json`, code: exitBlocked, lostMessage: "проверка прервана, повтори команду", retry: true, checkLog: true, telemetry: true},
+		{name: "no-prompt repeats", hook: hookNoPrompt, input: `{"hook_event_name":"Elicitation"}`, compareCLI: true, retry: true, telemetry: true},
+		{name: "unsent-check repeats and blocks", hook: hookUnsentCheck,
+			input:      `{"session_id":"s","transcript_path":"@TRANSCRIPT@","last_assistant_message":"Ещё не отправлено: ответ Оле."}`,
+			transcript: "{\"type\":\"user\",\"uuid\":\"u1\",\"timestamp\":\"2026-10-29T10:00:00Z\",\"origin\":{\"kind\":\"human\"},\"message\":{\"content\":\"что с ответом?\"}}\n", wantStdout: `"decision":"block"`, compareCLI: true, retry: true, telemetry: true},
+		{name: "webfetch is not repeated", hook: hookWebFetchFallback, input: `{}`, code: exitError, lostMessage: "после «принято», хук не повторён", telemetry: true},
+		{name: "user-prompt-submit repeats", hook: hookUserPromptSubmit, input: `{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"проверь изменения"}`, compareCLI: true, retry: true, telemetry: true, wantState: core.StateWorking, preState: core.StateWaiting},
+		{name: "post-tool-batch repeats", hook: hookPostToolBatch, input: `{"session_id":"s","hook_event_name":"PostToolBatch","transcript_path":"@TRANSCRIPT@"}`, compareCLI: true, retry: true, telemetry: true, wantState: core.StateWorking, preState: core.StateWaiting},
+		{name: "stop repeats", hook: hookStop, input: `{"session_id":"s","hook_event_name":"Stop","background_tasks":[],"session_crons":[]}`, compareCLI: true, retry: true, telemetry: true, wantState: core.StateDone},
+		{name: "stop-failure repeats", hook: hookStopFailure, input: `{"session_id":"s","hook_event_name":"StopFailure","error":"rate_limit"}`, compareCLI: true, retry: true, telemetry: true, wantState: core.StateError},
+		{name: "notification repeats", hook: hookNotification, input: `{"session_id":"s","hook_event_name":"Notification","notification_type":"permission_prompt","message":"нужен ответ"}`, compareCLI: true, retry: true, telemetry: true, wantState: core.StateWaiting},
+		{name: "understand-check requires command retry", hook: hookUnderstandCheck, input: `{}`, code: exitBlocked, lostMessage: "проверка прервана, повтори команду", telemetry: true},
+		{name: "claim-stop requires stop retry", hook: hookClaimStop, input: `{}`, code: exitBlocked, lostMessage: "судья утверждений прерван обрывом демона: перепроверь свои утверждения в ответе", telemetry: true},
+		{name: "night-hint repeats", hook: hookNightHint, input: `{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"проверь подсказку"}`, wantStdout: "additionalContext", compareCLI: true, retry: true, telemetry: true, nightLocked: true, nightHint: true},
+		{name: "statusline is not repeated", hook: hookStatusLine, input: `{}`, code: exitError, lostMessage: "после «принято», хук не повторён"},
 	}
+	covered := make(map[string]bool)
 	for _, tt := range tests {
+		covered[tt.hook] = true
 		t.Run(tt.name, func(t *testing.T) {
+			nightTZ := nightTestTZ()
 			home := t.TempDir()
 			writeFiles(t, home, map[string]string{
 				".config/chooks/config.yaml": serveConfig,
 				".config/models/approved":    "opus claude-opus-5-5\nsonnet claude-sonnet-5-5\n",
 			})
+			if tt.nightHint {
+				configPath := filepath.Join(home, ".config/chooks/config.yaml")
+				config, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				config = []byte(strings.Replace(string(config), "night_hint: {enabled: false}", "night_hint: {enabled: true}", 1))
+				if err := os.WriteFile(configPath, config, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			input := strings.ReplaceAll(tt.input, "@TRANSCRIPT@", filepath.Join(home, "transcript.jsonl"))
+			if tt.preState != "" {
+				if err := core.SaveSessionStateIn(filepath.Join(home, "run", "chooks"), "s", tt.preState); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.transcript != "" {
+				if err := os.WriteFile(filepath.Join(home, "transcript.jsonl"), []byte(tt.transcript), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			socket := filepath.Join(socketDir(t), "drop.sock")
 			listener, err := listenSocket(socket)
 			if err != nil {
@@ -232,28 +297,261 @@ func TestProxyLostPreToolUse(t *testing.T) {
 				}
 			}()
 			runs := filepath.Join(home, "cli-runs")
-			r := runBinary(t, proxyHelper, []string{tt.hook}, proxyEnv(t, absoluteEnv(home), socket, runs), home, []byte(tt.input))
-			if r.code != tt.code || (tt.stderr != "" && !strings.Contains(r.stderr, tt.stderr)) {
-				t.Fatalf("code %d stdout %q stderr %q, want code %d containing %q", r.code, r.stdout, r.stderr, tt.code, tt.stderr)
+			env := proxyEnv(t, absoluteEnv(home), socket, runs)
+			if tt.nightLocked {
+				env = append(env, "CHOOKS_TEST_NIGHT_LOCKED=1", "TZ="+nightTZ)
+			}
+			r := runBinary(t, proxyHelper, []string{tt.hook}, env, home, []byte(input))
+			wantCode := tt.code
+			if tt.compareCLI {
+				baseHome := t.TempDir()
+				writeFiles(t, baseHome, map[string]string{
+					".config/chooks/config.yaml": serveConfig,
+					".config/models/approved":    "opus claude-opus-5-5\nsonnet claude-sonnet-5-5\n",
+				})
+				if tt.nightHint {
+					configPath := filepath.Join(baseHome, ".config/chooks/config.yaml")
+					config, err := os.ReadFile(configPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					config = []byte(strings.Replace(string(config), "night_hint: {enabled: false}", "night_hint: {enabled: true}", 1))
+					if err := os.WriteFile(configPath, config, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				baseEnv := absoluteEnv(baseHome)
+				if tt.nightLocked {
+					baseEnv = append(baseEnv, "CHOOKS_TEST_NIGHT_LOCKED=1", "TZ="+nightTZ)
+				}
+				base := runBinary(t, argvCLIHelper, []string{tt.hook}, baseEnv, baseHome, []byte(input))
+				wantCode = base.code
+				if r.stdout != base.stdout {
+					t.Fatalf("stdout %q, want CLI retry output %q", r.stdout, base.stdout)
+				}
+			}
+			if r.code != wantCode || (tt.lostMessage != "" && !strings.Contains(r.stderr, tt.lostMessage)) {
+				t.Fatalf("code %d stdout %q stderr %q, want code %d containing %q", r.code, r.stdout, r.stderr, wantCode, tt.lostMessage)
+			}
+			if tt.wantStdout != "" && !strings.Contains(r.stdout, tt.wantStdout) {
+				t.Fatalf("stdout %q, want %q", r.stdout, tt.wantStdout)
+			}
+			if tt.retry && strings.Contains(r.stderr, "хук не повторён") {
+				t.Fatalf("retryable hook was not repeated: %q", r.stderr)
+			}
+			if !tt.retry && tt.hook != hookUnderstandCheck && tt.hook != hookClaimStop && !strings.Contains(r.stderr, "хук не повторён") {
+				t.Fatalf("non-retryable hook missing lost message: %q", r.stderr)
 			}
 			reasons := lines(readFile(t, runs))
 			if len(reasons) != 1 || !hookproxy.Lost(reasons[0]) {
 				t.Fatalf("fallback reasons %q", reasons)
 			}
-			if tt.hook == hookPreToolUse {
+			if tt.telemetry {
 				rows := durationLines(t, home)
-				if len(rows) != 1 || len(rows[0]) != 8 || rows[0][1] != tt.hook || rows[0][5] != statusLostRetried || rows[0][6] != executorCLI || rows[0][7] != reasons[0] {
+				wantStatus, wantExecutor := statusLost, executorDaemon
+				if tt.retry {
+					wantStatus, wantExecutor = statusLostRetried, executorCLI
+				}
+				if len(rows) != 1 || len(rows[0]) != 8 || rows[0][1] != tt.hook || rows[0][5] != wantStatus ||
+					rows[0][6] != wantExecutor || rows[0][7] != reasons[0] {
 					t.Fatalf("duration rows %q", rows)
 				}
 				if events := fallbackEvents(t, home); len(events) != 1 || events[0].Hook != tt.hook || events[0].Reason != reasons[0] {
 					t.Fatalf("fallback count %+v", events)
 				}
-				if tt.name == "check interrupted" {
-					log := readFile(t, filepath.Join(home, ".claude", "logs", "chooks.log"))
-					if !strings.Contains(log, "pre-tool-use check failed after daemon connection loss") || !strings.Contains(log, "invalid character") {
-						t.Fatalf("original check error missing from log: %s", log)
+			}
+			if tt.checkLog {
+				log := readFile(t, filepath.Join(home, ".claude", "logs", "chooks.log"))
+				if !strings.Contains(log, "pre-tool-use check failed after daemon connection loss") || !strings.Contains(log, "invalid character") {
+					t.Fatalf("original check error missing from log: %s", log)
+				}
+			}
+			if tt.wantState != "" {
+				got, err := core.LoadSessionStateIn(filepath.Join(home, "run", "chooks"), "s")
+				if err != nil || got != tt.wantState {
+					t.Fatalf("session state = %q, %v; want %q", got, err, tt.wantState)
+				}
+			}
+		})
+	}
+	for hook := range hookTimeouts {
+		if !covered[hook] {
+			t.Errorf("daemon hook %q has no lost-connection case", hook)
+		}
+	}
+}
+
+// Session events commit their new state before delivery. A daemon that dies
+// after both effects must not cause the CLI retry to deliver a second alert.
+func TestProxyLostSessionEventDoesNotDuplicateAlert(t *testing.T) {
+	tests := []struct {
+		name, hook, input string
+		state             core.SessionState
+	}{
+		{name: "stop", hook: hookStop, input: `{"session_id":"s","hook_event_name":"Stop","background_tasks":[],"session_crons":[]}`, state: core.StateDone},
+		{name: "notification", hook: hookNotification, input: `{"session_id":"s","hook_event_name":"Notification","notification_type":"permission_prompt","message":"нужен ответ"}`, state: core.StateWaiting},
+		{name: "stop-failure", hook: hookStopFailure, input: `{"session_id":"s","hook_event_name":"StopFailure","error":"rate_limit"}`, state: core.StateError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			config := strings.Replace(serveConfig, "notifier: {enabled: false}", "notifier: {enabled: true, desktop: true, sound: true}", 1)
+			writeFiles(t, home, map[string]string{".config/chooks/config.yaml": config})
+			socket := filepath.Join(socketDir(t), "effect-then-drop.sock")
+			listener, err := listenSocket(socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			alerts := filepath.Join(home, "alerts")
+			go func() {
+				conn, err := listener.AcceptUnix()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				buf := make([]byte, 64<<10)
+				_, _ = conn.Read(buf)
+				_, _ = conn.Write([]byte{hookwire.Accepted})
+				_, _ = conn.Read(buf[:1])
+				if err := core.SaveSessionStateIn(filepath.Join(home, "run", "chooks"), "s", tt.state); err != nil {
+					t.Errorf("save daemon state: %v", err)
+				}
+				appendTestLine(alerts, "daemon notification")
+			}()
+			release, pidlog := filepath.Join(home, "release"), filepath.Join(home, "alert-pids")
+			env := append(proxyEnv(t, absoluteEnv(home), socket, filepath.Join(home, "cli-runs")), alertLogEnv+"="+alerts, alertHoldEnv+"="+release, alertPIDLogEnv+"="+pidlog)
+			r := runBinary(t, proxyHelper, []string{tt.hook}, env, home, []byte(tt.input))
+			logPath := filepath.Join(home, ".claude", "logs", "chooks.log")
+			if !waitFor(t, 5*time.Second, func() bool {
+				log := readFile(t, logPath)
+				return strings.Contains(log, `msg="alert muted"`) || strings.Contains(log, `msg="alert allowed"`)
+			}) {
+				t.Fatalf("CLI alert decision was not logged: %s", readFile(t, logPath))
+			}
+			// An allowed decision starts deliver-alert asynchronously. Wait for
+			// its PID and exit signal before checking the notification journal.
+			if strings.Contains(readFile(t, logPath), `msg="alert allowed"`) {
+				if !waitFor(t, 5*time.Second, func() bool {
+					data, err := os.ReadFile(pidlog)
+					return err == nil && len(lines(string(data))) > 0
+				}) {
+					t.Fatalf("deliver-alert was allowed but did not start: %q", readFile(t, pidlog))
+				}
+				if err := os.WriteFile(release, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if !waitFor(t, 5*time.Second, func() bool {
+					data, err := os.ReadFile(pidlog)
+					if err != nil {
+						return false
+					}
+					for _, line := range lines(string(data)) {
+						if value, ok := strings.CutPrefix(line, "pid "); ok {
+							pid, _ := strconv.Atoi(value)
+							if pid > 0 && !processExited(pid) {
+								return false
+							}
+						}
+					}
+					return true
+				}) {
+					t.Fatalf("deliver-alert process did not exit: pid log %q", readFile(t, pidlog))
+				}
+			} else if err := os.WriteFile(release, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if r.code != exitAllowed || strings.Contains(r.stderr, "хук не повторён") {
+				t.Fatalf("code %d stdout %q stderr %q, want successful CLI retry", r.code, r.stdout, r.stderr)
+			}
+			if got := lines(readFile(t, alerts)); len(got) != 1 || got[0] != "daemon notification" {
+				t.Fatalf("notification calls %q, want exactly one", got)
+			}
+		})
+	}
+}
+
+// If the daemon dies before saving event state, the CLI retry performs the
+// transition and delivers exactly one alert. This proves the retry actually
+// ran, rather than merely observing state written by the daemon.
+func TestProxyLostSessionEventRetriesBeforeStateSaved(t *testing.T) {
+	tests := []struct {
+		name, hook, input string
+		state             core.SessionState
+	}{
+		{name: "stop", hook: hookStop, input: `{"session_id":"s","hook_event_name":"Stop","background_tasks":[],"session_crons":[]}`, state: core.StateDone},
+		{name: "notification", hook: hookNotification, input: `{"session_id":"s","hook_event_name":"Notification","notification_type":"permission_prompt","message":"нужен ответ"}`, state: core.StateWaiting},
+		{name: "stop-failure", hook: hookStopFailure, input: `{"session_id":"s","hook_event_name":"StopFailure","error":"rate_limit"}`, state: core.StateError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			config := strings.Replace(serveConfig, "notifier: {enabled: false}", "notifier: {enabled: true, desktop: true, sound: true}", 1)
+			writeFiles(t, home, map[string]string{".config/chooks/config.yaml": config})
+			socket := filepath.Join(socketDir(t), "retry-before-state.sock")
+			listener, err := listenSocket(socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			go func() {
+				conn, err := listener.AcceptUnix()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				buf := make([]byte, 64<<10)
+				_, _ = conn.Read(buf)
+				_, _ = conn.Write([]byte{hookwire.Accepted})
+				_, _ = conn.Read(buf[:1])
+			}()
+			alerts := filepath.Join(home, "alerts")
+			release, pidlog := filepath.Join(home, "release"), filepath.Join(home, "alert-pids")
+			env := append(proxyEnv(t, absoluteEnv(home), socket, filepath.Join(home, "cli-runs")), alertLogEnv+"="+alerts, alertHoldEnv+"="+release, alertPIDLogEnv+"="+pidlog)
+			r := runBinary(t, proxyHelper, []string{tt.hook}, env, home, []byte(tt.input))
+			if r.code != exitAllowed || strings.Contains(r.stderr, "хук не повторён") {
+				t.Fatalf("code %d stdout %q stderr %q, want successful retry", r.code, r.stdout, r.stderr)
+			}
+			if !waitFor(t, 5*time.Second, func() bool { return len(lines(readFile(t, alerts))) == 1 }) {
+				t.Fatalf("CLI retry did not deliver exactly one alert: %q", readFile(t, alerts))
+			}
+			if err := os.WriteFile(release, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if !waitFor(t, 5*time.Second, func() bool {
+				data, err := os.ReadFile(pidlog)
+				if err != nil {
+					return false
+				}
+				var pids []int
+				for _, line := range lines(string(data)) {
+					if value, ok := strings.CutPrefix(line, "pid "); ok {
+						pid, _ := strconv.Atoi(value)
+						if pid > 0 {
+							pids = append(pids, pid)
+						}
 					}
 				}
+				if len(pids) == 0 {
+					return false
+				}
+				for _, pid := range pids {
+					if !processExited(pid) {
+						return false
+					}
+				}
+				return true
+			}) {
+				t.Fatalf("deliver-alert process did not exit: %q", readFile(t, pidlog))
+			}
+			if got := lines(readFile(t, alerts)); len(got) != 1 {
+				t.Fatalf("notification calls %q, want exactly one", got)
+			}
+			got, err := core.LoadSessionStateIn(filepath.Join(home, "run", "chooks"), "s")
+			if err != nil || got != tt.state {
+				t.Fatalf("session state = %q, %v; want %q", got, err, tt.state)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -40,6 +41,9 @@ const (
 	// окно, в которое тест заменяет исполняемый файл второй раз
 	daemonHoldEnv    = "CHOOKS_TEST_DAEMON_HOLD"
 	daemonReleaseEnv = "CHOOKS_TEST_DAEMON_RELEASE"
+	// daemonCrashEnv — путь файла, при появлении которого тестовый демон
+	// записывает аварийный выход и завершается с кодом 3
+	daemonCrashEnv = "CHOOKS_TEST_DAEMON_CRASH"
 	// alertLogEnv — журнал уведомлений: бинарь тестов в роли deliver-alert
 	// пишет сюда свои аргументы
 	alertLogEnv = "CHOOKS_TEST_ALERT_LOG"
@@ -112,6 +116,17 @@ func runTestDaemon() int {
 	Version = trailerVersion()
 	starts := os.Getenv(daemonStartsEnv)
 	appendTestLine(starts, fmt.Sprintf("start %s %d", Version, os.Getpid()))
+	if crash := os.Getenv(daemonCrashEnv); crash != "" {
+		go func() {
+			for {
+				if _, err := os.Stat(crash); err == nil {
+					appendTestLine(starts, fmt.Sprintf("crash %s %d", Version, os.Getpid()))
+					os.Exit(3)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+	}
 	if os.Getenv(daemonHoldEnv) == Version {
 		appendTestLine(starts, "hold "+Version)
 		release := os.Getenv(daemonReleaseEnv)
@@ -1087,6 +1102,45 @@ func unitProperties(t *testing.T, name, section string, skip ...string) []string
 	return props
 }
 
+// startSocketUnit поднимает временную пару socket+service с именем
+// prefix-<pid>-<n> и свойствами боевых unit (кроме ExecStart): демон —
+// бинарь exe в роли тестового демона с журналом стартов home/starts и
+// переменными extraEnv. Уборка unit — в t.Cleanup; настоящий chooks.service
+// не трогается
+func startSocketUnit(t *testing.T, env []string, home, exe, socket, prefix string, extraEnv ...string) string {
+	t.Helper()
+	unit := fmt.Sprintf("%s-%d-%d", prefix, os.Getpid(), time.Now().UnixNano()%1_000_000)
+	args := []string{"--user", "--unit=" + unit, "--quiet", "--collect", "--socket-property=ListenStream=" + socket}
+	for _, prop := range unitProperties(t, "chooks.socket", "Socket", "ListenStream") {
+		args = append(args, "--socket-property="+prop)
+	}
+	for _, prop := range append(unitProperties(t, "chooks.service", "Unit", "Description", "Requires", "After"),
+		unitProperties(t, "chooks.service", "Service", "ExecStart")...) {
+		args = append(args, "-p", prop)
+	}
+	setenv := append(absoluteEnv(home), daemonHelper+"=1", daemonStartsEnv+"="+filepath.Join(home, "starts"))
+	for _, kv := range append(setenv, extraEnv...) {
+		args = append(args, "--setenv="+kv)
+	}
+	args = append(args, "--working-directory="+home, exe, "serve")
+	run := exec.Command("systemd-run", args...)
+	run.Env = env
+	if out, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("systemd-run --user: %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		stop := exec.Command("systemctl", "--user", "stop", unit+".socket", unit+".service")
+		stop.Env = env
+		if out, err := stop.CombinedOutput(); err != nil {
+			t.Errorf("stop %s: %v: %s", unit, err, out)
+		}
+		reset := exec.Command("systemctl", "--user", "reset-failed", unit+".socket", unit+".service")
+		reset.Env = env
+		_ = reset.Run()
+	})
+	return unit
+}
+
 // processAlive — процесс pid жив и это не зомби
 func processAlive(pid int) bool {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
@@ -1116,36 +1170,10 @@ func TestSystemdSocketUnit(t *testing.T) {
 	exe := filepath.Join(home, "bin", "chooks")
 	installVersion(t, exe, "v1")
 	socket := filepath.Join(socketDir(t), "chooks.sock")
-	unit := fmt.Sprintf("chooks-test-%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000)
-	args := []string{"--user", "--unit=" + unit, "--quiet", "--collect", "--socket-property=ListenStream=" + socket}
-	for _, prop := range unitProperties(t, "chooks.socket", "Socket", "ListenStream") {
-		args = append(args, "--socket-property="+prop)
-	}
-	for _, prop := range append(unitProperties(t, "chooks.service", "Unit", "Description", "Requires", "After"),
-		unitProperties(t, "chooks.service", "Service", "ExecStart")...) {
-		args = append(args, "-p", prop)
-	}
-	for _, kv := range append(absoluteEnv(home), daemonHelper+"=1", daemonStartsEnv+"="+filepath.Join(home, "starts")) {
-		args = append(args, "--setenv="+kv)
-	}
-	args = append(args, "--working-directory="+home, exe, "serve")
-	run := exec.Command("systemd-run", args...)
-	run.Env = env
-	if out, err := run.CombinedOutput(); err != nil {
-		t.Fatalf("systemd-run --user: %v: %s", err, out)
-	}
+	unit := startSocketUnit(t, env, home, exe, socket, "chooks-test")
 	alerts, release := filepath.Join(home, "alerts"), filepath.Join(home, "release")
-	t.Cleanup(func() {
-		writeFiles(t, home, map[string]string{"release": ""})
-		stop := exec.Command("systemctl", "--user", "stop", unit+".socket", unit+".service")
-		stop.Env = env
-		if out, err := stop.CombinedOutput(); err != nil {
-			t.Errorf("stop %s: %v: %s", unit, err, out)
-		}
-		reset := exec.Command("systemctl", "--user", "reset-failed", unit+".socket", unit+".service")
-		reset.Env = env
-		_ = reset.Run()
-	})
+	// t.Cleanup идёт в обратном порядке: release — до остановки unit
+	t.Cleanup(func() { writeFiles(t, home, map[string]string{"release": ""}) })
 	if info, err := os.Lstat(socket); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("socket %v %v, want mode 0600", info, err)
 	}
@@ -1266,6 +1294,116 @@ func TestSystemdSocketUnit(t *testing.T) {
 		t.Errorf("notification watcher %d did not exit after release", watcher)
 	}
 	t.Logf("starts:\n%s\nfallbacks: %q; daemon unavailable: %d", readFile(t, filepath.Join(home, "starts")), lines(readFile(t, runs)), len(unavailable))
+}
+
+// TestSystemdCrashRestart проверяет падение процесса демона, Restart=on-failure
+// и выполнение следующего хука через перезапущенный демон либо CLI fallback.
+func TestSystemdCrashRestart(t *testing.T) {
+	env := systemdUser(t)
+	home := t.TempDir()
+	writeFiles(t, home, map[string]string{".config/chooks/config.yaml": serveConfig})
+	exe := filepath.Join(home, "bin", "chooks")
+	installVersion(t, exe, "v1")
+	socket := filepath.Join(socketDir(t), "chooks.sock")
+	starts := filepath.Join(home, "starts")
+	crash := filepath.Join(home, "crash")
+	unit := startSocketUnit(t, env, home, exe, socket, "chooks-crash-test", daemonCrashEnv+"="+crash)
+	log := filepath.Join(home, ".claude", "logs", "chooks.log")
+	runs := filepath.Join(home, "cli-runs")
+	proxy := proxyEnv(t, absoluteEnv(home), socket, runs)
+	call := func() proxyRun {
+		t.Helper()
+		r := runBinary(t, proxyHelper, []string{hookPreToolUse}, proxy, home, []byte(preToolUseLS))
+		if r.code != exitAllowed {
+			t.Fatalf("pre-tool-use code %d stderr %q; want exitAllowed", r.code, r.stderr)
+		}
+		return r
+	}
+	call()
+	served := servedBy(readFile(t, log), hookPreToolUse)
+	if len(served) == 0 || served[len(served)-1] != "v1" {
+		t.Fatalf("initial request served by %v; want v1; log:\n%s", served, readFile(t, log))
+	}
+	firstPID := servedPID(t, starts, "v1")
+	if err := os.WriteFile(crash, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool {
+		return slices.Contains(lines(readFile(t, starts)), fmt.Sprintf("crash v1 %d", firstPID))
+	}) {
+		t.Fatalf("daemon did not record crash; starts:\n%s", readFile(t, starts))
+	}
+	if err := os.Remove(crash); err != nil {
+		t.Fatal(err)
+	}
+
+	// Вызов во время RestartSec может уйти в CLI. Любой исход должен разрешить
+	// хук; затем повторы ждут реального обслуживания новым процессом демона.
+	beforeServed := len(servedBy(readFile(t, log), hookPreToolUse))
+	call()
+	newPID := 0
+	servedAgain := waitFor(t, 20*time.Second, func() bool {
+		call()
+		for _, line := range lines(readFile(t, starts)) {
+			fields := strings.Fields(line)
+			if len(fields) == 3 && fields[0] == "start" && fields[1] == "v1" {
+				pid, err := strconv.Atoi(fields[2])
+				if err != nil {
+					t.Errorf("invalid daemon pid in %q: %v", line, err)
+					return false
+				}
+				if pid != firstPID {
+					newPID = pid
+				}
+			}
+		}
+		current := servedBy(readFile(t, log), hookPreToolUse)
+		return newPID > 0 && len(current) > beforeServed
+	})
+	if !servedAgain {
+		t.Fatalf("no request served by restarted daemon within 20s; starts:\n%s\nlog:\n%s",
+			readFile(t, starts), readFile(t, log))
+	}
+	if newPID == 0 || newPID == firstPID {
+		t.Fatalf("no restarted daemon with a new pid; starts:\n%s", readFile(t, starts))
+	}
+	var restarts, result, mainStatus string
+	show := exec.Command("systemctl", "--user", "show", "-p", "NRestarts", "-p", "Result", "-p", "ExecMainStatus", unit+".service")
+	show.Env = env
+	if out, err := show.CombinedOutput(); err != nil {
+		t.Fatalf("systemctl show after crash: %v: %s", err, out)
+	} else {
+		properties := make(map[string]string)
+		for _, line := range lines(string(out)) {
+			key, value, ok := strings.Cut(line, "=")
+			if ok {
+				properties[key] = value
+			}
+		}
+		restarts, result, mainStatus = properties["NRestarts"], properties["Result"], properties["ExecMainStatus"]
+	}
+	// ExecMainStatus и Result — у нынешнего, поднятого процесса; падение
+	// прошлого systemd записывает счётчиком перезапусков Restart=on-failure
+	if n, err := strconv.Atoi(restarts); err != nil || n < 1 {
+		t.Fatalf("systemd did not record daemon failure: NRestarts=%q Result=%q ExecMainStatus=%q; starts:\n%s",
+			restarts, result, mainStatus, readFile(t, starts))
+	}
+	// Если любой вызов после аварии ушёл в CLI, он обязан быть отражён в
+	// fallbacks.json так же, как остальные CLI fallback сценарии.
+	if got := lines(readFile(t, runs)); len(got) > 0 {
+		statePath := filepath.Join(home, "state", "chooks", fallbackwatch.FileName)
+		var state struct {
+			Events []fallbackwatch.Event `json:"events"`
+		}
+		if err := json.Unmarshal([]byte(readFile(t, statePath)), &state); err != nil {
+			t.Fatalf("fallbacks.json: %v", err)
+		}
+		if len(state.Events) < len(got) {
+			t.Fatalf("fallbacks.json has %d events for %d CLI calls: %s", len(state.Events), len(got), readFile(t, statePath))
+		}
+	}
+	t.Logf("systemctl show after crash: NRestarts=%s Result=%s ExecMainStatus=%s; starts:\n%s; CLI fallbacks=%q",
+		restarts, result, mainStatus, readFile(t, starts), lines(readFile(t, runs)))
 }
 
 // servedPID — pid запуска version из журнала стартов

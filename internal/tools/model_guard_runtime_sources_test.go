@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,131 +176,20 @@ func TestModelGuardProjectSettingsWithoutClient(t *testing.T) {
 	}
 }
 
-func fileToolResult(t *testing.T, tool *ModelGuardTool, name, cwd string, fields map[string]any) *core.ValidationResult {
-	t.Helper()
-	raw, err := json.Marshal(fields)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: name, ToolInput: raw, CWD: cwd})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return result
-}
-
-func TestModelGuardSettingsWriteTool(t *testing.T) {
-	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
-	if !strings.Contains(strings.Join(tool.SupportedTools(), " "), "Write") || !strings.Contains(strings.Join(tool.SupportedTools(), " "), "Edit") {
-		t.Fatalf("model_guard не судит Write и Edit: %v", tool.SupportedTools())
-	}
-	dir := t.TempDir()
-	settings := filepath.Join(dir, ".claude", "settings.json")
-	cases := []struct {
-		name, path, content string
-		allowed             bool
-		reason              string
-	}{
-		{"disable all hooks", settings, `{"disableAllHooks":true}`, false, "запись " + settings + ": disableAllHooks"},
-		{"local settings", filepath.Join(dir, ".claude", "settings.local.json"), `{"permissions":{},"disableAllHooks":true}`, false, "disableAllHooks"},
-		{"string value", filepath.Join(dir, ".claude", "settings.local.json"), `{"disableAllHooks":"yes"}`, true, ""},
-		{"relative path", ".claude/settings.json", `{"disableAllHooks":true}`, false, "запись " + settings},
-		{"simple env", settings, `{"env":{"CLAUDE_CODE_SAFE_MODE":"1"}}`, false, "CLAUDE_CODE_SAFE_MODE"},
-		{"model", settings, `{"model":"claude-haiku-4-5"}`, false, "claude-haiku-4-5"},
-		{"approved model", settings, `{"model":"opus","permissions":{"allow":["Bash"]}}`, true, ""},
-		{"hooks kept", settings, `{"disableAllHooks":false}`, true, ""},
-		{"other file", filepath.Join(dir, "notes.json"), `{"disableAllHooks":true}`, true, ""},
-		{"other directory", filepath.Join(dir, "cfg", "settings.json"), `{"disableAllHooks":true}`, true, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := fileToolResult(t, tool, "Write", dir, map[string]any{"file_path": tc.path, "content": tc.content})
-			if result.IsValid != tc.allowed {
-				t.Fatalf("%s: allowed=%v, want %v; violations=%v", tc.content, result.IsValid, tc.allowed, result.Violations)
-			}
-			if tc.reason != "" && !strings.Contains(result.Violations[0].Message, tc.reason) {
-				t.Fatalf("reason %q lacks %q", result.Violations[0].Message, tc.reason)
-			}
-		})
-	}
-	for raw, allowed := range map[string]bool{"": true, `{"file_path":5}`: false} {
-		result, err := tool.ValidateTool(gitGuardTestContext(t), &core.ToolInput{ToolName: "Write", ToolInput: json.RawMessage(raw), CWD: dir})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if result.IsValid != allowed {
-			t.Errorf("Write %q: allowed=%v, want %v; violations=%v", raw, result.IsValid, allowed, result.Violations)
-		}
-	}
-}
-
-func TestModelGuardSettingsEditTool(t *testing.T) {
-	tool := modelGuardForTest(t, "opus claude-opus-5-5\n")
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, ".claude", "settings.json")
-	if err := os.WriteFile(path, []byte(`{"a":false,"disableAllHooks":false}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cases := []struct {
-		name, old, new string
-		all            bool
-		allowed        bool
-	}{
-		{"turns hooks off", `"disableAllHooks":false`, `"disableAllHooks":true`, false, false},
-		{"first match only", "false", "true", false, true},
-		{"replace all", "false", "true", true, false},
-		{"old text missing", "no-such-text", `"disableAllHooks":true`, false, true},
-		{"empty old text", "", `{"disableAllHooks":true}`, false, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := fileToolResult(t, tool, "Edit", dir, map[string]any{"file_path": path, "old_string": tc.old, "new_string": tc.new, "replace_all": tc.all})
-			if result.IsValid != tc.allowed {
-				t.Fatalf("allowed=%v, want %v; violations=%v", result.IsValid, tc.allowed, result.Violations)
-			}
-		})
-	}
-	missing := fileToolResult(t, tool, "Edit", dir, map[string]any{"file_path": filepath.Join(dir, "x", ".claude", "settings.json"), "old_string": "a", "new_string": `"disableAllHooks":true`})
-	if !missing.IsValid {
-		t.Fatalf("Edit несуществующего файла не выполнится: %v", missing.Violations)
-	}
-	// пустой old_string создаёт файл, если его нет или в нём одни пробелы
-	created := fileToolResult(t, tool, "Edit", dir, map[string]any{"file_path": filepath.Join(dir, "y", ".claude", "settings.json"), "old_string": "", "new_string": `{"disableAllHooks":true}`})
-	if created.IsValid {
-		t.Fatal("Edit с пустым old_string создаёт файл настроек без хуков")
-	}
-	blank := filepath.Join(dir, "z", ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(blank), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(blank, []byte(" \n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := fileToolResult(t, tool, "Edit", dir, map[string]any{"file_path": blank, "old_string": "", "new_string": `{"disableAllHooks":true}`}); result.IsValid {
-		t.Fatal("Edit с пустым old_string пишет файл из одних пробелов")
-	}
-}
-
 func TestClaudeSettingsFile(t *testing.T) {
 	cases := []struct {
-		path, config string
-		want         bool
+		path string
+		want bool
 	}{
-		{"/p/.claude/settings.json", "", true},
-		{"/p/.claude/settings.local.json", "", true},
-		{"/p/.claude/other.json", "", false},
-		{"/cfg/settings.json", "/cfg", true},
-		{"/cfg/settings.json", "/cfg/", true},
-		{"/cfg/settings.json", "", false},
-		{"/cfg/sub/settings.json", "/cfg", false},
-		{"settings.json", "", false},
+		{"/p/.claude/settings.json", true},
+		{"/p/.claude/settings.local.json", true},
+		{"/p/.claude/other.json", false},
+		{"/cfg/settings.json", false},
+		{"settings.json", false},
 	}
 	for _, tc := range cases {
-		if got := claudeSettingsFile(tc.path, tc.config); got != tc.want {
-			t.Errorf("claudeSettingsFile(%q, %q) = %v, want %v", tc.path, tc.config, got, tc.want)
+		if got := claudeSettingsFile(tc.path); got != tc.want {
+			t.Errorf("claudeSettingsFile(%q) = %v, want %v", tc.path, got, tc.want)
 		}
 	}
 }

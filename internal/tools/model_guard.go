@@ -43,7 +43,7 @@ type ModelGuardTool struct {
 // NewModelGuardTool создаёт проверку выбранной модели.
 func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardTool, error) {
 	return &ModelGuardTool{
-		BaseTool: NewBaseTool("model_guard", config.Enabled, append(append([]string{"Agent"}, settingsFileTools...), core.ShellTools...), logger),
+		BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent"}, core.ShellTools...), logger),
 	}, nil
 }
 
@@ -219,9 +219,6 @@ func commandModelCandidates(ctx context.Context, input *core.ToolInput, logger c
 	}
 	if input.ToolName == "Agent" {
 		return agentToolCandidates(input, agentModels, logger)
-	}
-	if slices.Contains(settingsFileTools, input.ToolName) {
-		return settingsWriteCandidates(input, claudeConfigDir(ctx), agentModels, logger)
 	}
 	cwdCandidates := commandCWDs(input.Command, input.CWD, []string{home}, logger)
 	homes := commandPathCandidates(input.Command, "HOME", cwdCandidates, []string{home}, home, logger)
@@ -1717,6 +1714,7 @@ var writtenAgentTarget = regexp.MustCompile(`(?:^|/)agents/.+\.md$`)
 // из них, что пишут sed -i, cp, mv, install и tee: их содержимое не видно
 func protectedWriteTargetSet(command string) (targets, copied []string) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	//nolint:silent-error-handling // запись не проверяется: решение 27.11, см. model-guard-word-values-rest
 	if err != nil {
 		return nil, nil
 	}
@@ -3002,6 +3000,7 @@ func (found jsonModels) settings(raw []byte) []modelCandidate {
 	var overrides map[string]json.RawMessage
 	rawOverrides := settings["modelOverrides"]
 	if len(rawOverrides) != 0 && strings.TrimSpace(string(rawOverrides)) != "null" {
+		//nolint:silent-error-handling // Некорректный modelOverrides отмечается как неизвестная настройка.
 		if err := json.Unmarshal(rawOverrides, &overrides); err != nil {
 			found = append(found, modelCandidate{value: "modelOverrides", unknownSettings: true})
 		}

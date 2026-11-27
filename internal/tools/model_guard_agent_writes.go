@@ -145,6 +145,7 @@ func writtenAgentDefinitionCandidates(command string) ([]modelCandidate, bool) {
 
 func agentWriteCandidates(command string) ([]modelCandidate, string) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	//nolint:silent-error-handling // неразобранная команда с путём agents/ — неизвестная запись агента (unparsedAgentReason); без такого пути судить нечего
 	if err != nil {
 		return nil, unparsedAgentReason(command)
 	}

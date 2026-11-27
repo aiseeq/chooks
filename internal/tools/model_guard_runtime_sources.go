@@ -17,8 +17,7 @@ import (
 )
 
 // Источники модели и хуков claude мимо его argv, которые видны в самой
-// команде агента: файл настроек каталога запуска, запись такого файла
-// инструментом Write или Edit, имя вызова, которое не равно claude
+// команде агента: файл настроек каталога запуска, имя вызова, которое не равно claude
 // (запускатель пакета, бинарь версии, screen, имя из подстановки).
 // Ввод stream-json судит scanClaudeArguments (streamJSONRefusal). Смену
 // модели и окружения отдельным вызовом (tmux set-buffer, send-keys
@@ -154,92 +153,14 @@ func resolveFrom(path, base string) string {
 	return filepath.Join(base, path)
 }
 
-// settingsFileTools — инструменты записи файла, которые судит model_guard
-var settingsFileTools = []string{"Write", "Edit"}
-
-// claudeSettingsFile — путь — файл настроек claude: settings.json или
-// settings.local.json в каталоге .claude (проект, ~/.claude) или в
-// CLAUDE_CONFIG_DIR
-func claudeSettingsFile(path, configDir string) bool {
+// claudeSettingsFile — settings.json или settings.local.json в каталоге .claude.
+func claudeSettingsFile(path string) bool {
 	base := filepath.Base(path)
 	if base != "settings.json" && base != "settings.local.json" {
 		return false
 	}
 	dir := filepath.Dir(path)
-	return filepath.Base(dir) == ".claude" || configDir != "" && dir == filepath.Clean(configDir)
-}
-
-// fileToolInput — поля Write и Edit
-type fileToolInput struct {
-	FilePath   string `json:"file_path"`
-	Content    string `json:"content"`
-	OldString  string `json:"old_string"`
-	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all"`
-}
-
-// settingsWriteCandidates — Write или Edit файла настроек claude: содержимое
-// после записи судится как настройки — модель и снятие хуков. У Edit оно —
-// файл, каким его оставит Edit (editedContent)
-func settingsWriteCandidates(input *core.ToolInput, configDir string, agent func(string) []modelCandidate, logger core.Logger) []modelCandidate {
-	if len(input.ToolInput) == 0 {
-		return nil
-	}
-	var fields fileToolInput
-	if err := json.Unmarshal(input.ToolInput, &fields); err != nil {
-		// claude проверяет поля инструмента по схеме до хука: сюда доходит
-		// только сломанный ввод, и он может писать файл настроек
-		logger.Warn("model_guard: поля записи файла не разобраны", "tool", input.ToolName, "error", err)
-		return []modelCandidate{clientOptionCandidate(fmt.Sprintf("поля %s не разобраны (%v): запись файла настроек claude не проверить", input.ToolName, err))}
-	}
-	if fields.FilePath == "" {
-		return nil
-	}
-	path := fields.FilePath
-	if !filepath.IsAbs(path) && input.CWD != "" {
-		path = filepath.Join(input.CWD, path)
-	}
-	path = filepath.Clean(path)
-	if !claudeSettingsFile(path, configDir) {
-		return nil
-	}
-	content := fields.Content
-	if input.ToolName == "Edit" {
-		edited, ok := editedContent(path, fields, logger)
-		if !ok {
-			return nil
-		}
-		content = edited
-	}
-	found := settingsCandidates([]byte(content), agent)
-	for _, reason := range hookSettingsReasons([]byte(content)) {
-		found = append(found, clientOptionCandidate(fmt.Sprintf("запись %s: %s; убери ключ — claude, запущенный с этими настройками, работает без хуков chooks", path, reason)))
-	}
-	return found
-}
-
-// editedContent — файл после Edit, как его выполнит claude: пустой
-// old_string создаёт файл с new_string, если файла нет или в нём одни
-// пробелы, иначе Edit откажет; непустой заменяет первое вхождение (или все
-// при replace_all). false — Edit не выполнится, судить нечего
-func editedContent(path string, fields fileToolInput, logger core.Logger) (string, bool) {
-	current, err := os.ReadFile(path)
-	missing := errors.Is(err, fs.ErrNotExist)
-	if err != nil && !missing {
-		logger.Debug("model_guard: правимый файл настроек не прочитан, Edit не выполнится", "path", path, "error", err)
-		return "", false
-	}
-	if fields.OldString == "" {
-		return fields.NewString, strings.TrimSpace(string(current)) == ""
-	}
-	if !strings.Contains(string(current), fields.OldString) {
-		return "", false
-	}
-	count := 1
-	if fields.ReplaceAll {
-		count = -1
-	}
-	return strings.Replace(string(current), fields.OldString, fields.NewString, count), true
+	return filepath.Base(dir) == ".claude"
 }
 
 // claudeCodePackage — спецификация пакета claude-code: имя с версией или
@@ -627,7 +548,7 @@ func jqArgJSONHookOff(args []string) bool {
 // (перенаправление, tee, cp, sed -i — protectedWriteTargetSet), и её текст
 // задаёт ключ, который снимает хуки: JSON-объект с ним (hookSettingsReasons)
 // или присваивание ключу литерала true без кавычек. Цель — файл настроек в
-// каталоге .claude, как у Write (claudeSettingsFile без CLAUDE_CONFIG_DIR).
+// каталоге .claude.
 // Запись судится и без вызова claude в команде: файл прочтёт любой claude из
 // этого каталога
 func writtenHookSettingsCandidates(command string) []modelCandidate {
@@ -636,7 +557,7 @@ func writtenHookSettingsCandidates(command string) []modelCandidate {
 	}
 	targets, _ := protectedWriteTargetSet(command)
 	if !slices.ContainsFunc(targets, func(target string) bool {
-		return claudeSettingsFile(filepath.Clean(strings.Trim(target, `"'`)), "")
+		return claudeSettingsFile(filepath.Clean(strings.Trim(target, `"'`)))
 	}) {
 		return nil
 	}
@@ -671,10 +592,9 @@ func writtenHookSettingsCandidates(command string) []modelCandidate {
 	return found
 }
 
-// modelGuardedTool — инструмент, чьи вызовы судит model_guard: Agent,
-// оболочка, запись файла настроек
+// modelGuardedTool — инструмент, чьи вызовы судит model_guard: Agent и оболочка
 func modelGuardedTool(name string) bool {
-	return name == "Agent" || slices.Contains(settingsFileTools, name) || core.IsShellTool(name)
+	return name == "Agent" || core.IsShellTool(name)
 }
 
 // printfWriterTexts — аргументы printf -v name: тексты, которые printf

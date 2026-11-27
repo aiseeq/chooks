@@ -474,6 +474,7 @@ func TestModelGuardReviewRoundTwoForms(t *testing.T) {
 		{"[[ -f agent ]]", "[[ -f " + agent + " ]] && " + run},
 		{"npx claude-code", "npx @anthropic-ai/claude-code -p \"review " + agent + "\""},
 		{"npx -y claude-code", "npx -y @anthropic-ai/claude-code -p \"review " + agent + "\""},
+		{"npx claude-code version", "npx -y @anthropic-ai/claude-code@latest -p \"review " + agent + "\""},
 		{"env assignment claude", "env FOO=1 claude -p \"review " + agent + "\""},
 		{"sudo assignment claude", "sudo FOO=1 claude -p \"review " + agent + "\""},
 		// --settings и --mcp-config — отказ по опции (TestModelGuardClientOptionsRefused):

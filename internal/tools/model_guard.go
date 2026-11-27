@@ -43,7 +43,7 @@ type ModelGuardTool struct {
 // NewModelGuardTool создаёт проверку выбранной модели.
 func NewModelGuardTool(config core.ToolConfig, logger core.Logger) (*ModelGuardTool, error) {
 	return &ModelGuardTool{
-		BaseTool: NewBaseTool("model_guard", config.Enabled, append([]string{"Agent"}, core.ShellTools...), logger),
+		BaseTool: NewBaseTool("model_guard", config.Enabled, append(append([]string{"Agent"}, settingsFileTools...), core.ShellTools...), logger),
 	}, nil
 }
 
@@ -202,7 +202,7 @@ type modelCandidate struct {
 // commandModelCandidates — кандидаты самой команды; текст, который она отдаёт
 // оболочке через tmux, добавляет modelCandidates
 func commandModelCandidates(ctx context.Context, input *core.ToolInput, logger core.Logger) []modelCandidate {
-	if input.ToolName != "Agent" && !core.IsShellTool(input.ToolName) {
+	if !modelGuardedTool(input.ToolName) {
 		return nil
 	}
 	request, _ := hookctx.Request(ctx)
@@ -219,6 +219,9 @@ func commandModelCandidates(ctx context.Context, input *core.ToolInput, logger c
 	}
 	if input.ToolName == "Agent" {
 		return agentToolCandidates(input, agentModels, logger)
+	}
+	if slices.Contains(settingsFileTools, input.ToolName) {
+		return settingsWriteCandidates(input, claudeConfigDir(ctx), agentModels, logger)
 	}
 	cwdCandidates := commandCWDs(input.Command, input.CWD, []string{home}, logger)
 	homes := commandPathCandidates(input.Command, "HOME", cwdCandidates, []string{home}, home, logger)
@@ -280,17 +283,27 @@ func commandModelCandidates(ctx context.Context, input *core.ToolInput, logger c
 }
 
 func settingsForCWD(ctx context.Context, cwd string, homes, configs pathSet, logger core.Logger, includeProject bool) []modelCandidate {
-	var paths []string
+	// модель судится по файлам до git-корня (как до launchSettingsPaths);
+	// снятие хуков — только по файлам, которые прочтёт claude
+	var paths, hookPaths []string
 	if includeProject {
 		paths = append(paths, projectSettingsPaths(cwd)...)
+		hookPaths = launchSettingsPaths(cwd, homes.paths, logger)
+		for _, path := range hookPaths {
+			if !slices.Contains(paths, path) {
+				paths = append(paths, path)
+			}
+		}
 	}
 	for _, home := range homes.paths {
 		paths = append(paths, filepath.Join(home, ".claude", "settings.json"))
+		hookPaths = append(hookPaths, filepath.Join(home, ".claude", "settings.json"))
 	}
 	paths = append(paths, managedSettingsPath)
 	var agentDirsForSettings []string
 	for _, configDir := range configs.paths {
 		paths = append(paths, filepath.Join(configDir, "settings.json"))
+		hookPaths = append(hookPaths, filepath.Join(configDir, "settings.json"))
 		agentDirsForSettings = append(agentDirsForSettings, filepath.Join(configDir, "agents"))
 		agentDirsForSettings = append(agentDirsForSettings, installedPluginAgentDirsLogged(filepath.Join(configDir, "plugins", "installed_plugins.json"), logger)...)
 	}
@@ -316,6 +329,9 @@ func settingsForCWD(ctx context.Context, cwd string, homes, configs pathSet, log
 		raw, err := readSettingsFile(path)
 		if err == nil {
 			candidates = append(candidates, settingsCandidates(raw, lookupAgent)...)
+			if slices.Contains(hookPaths, path) {
+				candidates = append(candidates, hookSettingsCandidates(path, raw)...)
+			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			logger.Warn("model_guard: файл настроек не читается, модель не проверена", "path", path, "error", err)
 			candidates = append(candidates, modelCandidate{value: path, dynamic: true})
@@ -1204,10 +1220,12 @@ func commandCWDs(command, initial string, homes []string, logger core.Logger) []
 	if calls == nil && err != nil {
 		return paths
 	}
+	assigns := commandAssigns(command, logger)
 	cwd := initial
 	for i := range calls {
 		call := &calls[i]
 		if call.Name == "cd" || call.Name == "pushd" {
+			call = assignedArguments(call, assigns)
 			for _, home := range homes {
 				dir, known := changeDirKnown(call, cwd, home)
 				if known && usableDirectory(dir, logger) {
@@ -1275,10 +1293,18 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 			cwd = nextCWD
 			continue
 		}
+		resolved, resolveErr := computedClientCall(call, command, logger)
+		if resolveErr != nil {
+			logger.Warn("model_guard: имя вызова из подстановки не разобрано, вызов судится как есть", "error", resolveErr)
+		}
+		if resolved != nil {
+			call = resolved
+		}
 		callFound, isClaude := modelCallCandidates(call, cwd, home, cwdCandidates, homes, configs, files, settingsAt, agentAt)
 		found = append(found, callFound...)
 		claude = claude || isClaude
 	}
+	found = append(found, writtenHookSettingsCandidates(command)...)
 	if claude {
 		found = append(found, envModelCandidates(command, calls, logger)...)
 		found = append(found, writtenProtectedFileCandidates(command)...)
@@ -1305,29 +1331,15 @@ func bashModelCandidatesAt(command, initialCWD, home string, cwdCandidates []str
 		found = append(found, unparsedClientCandidates(text)...)
 	}
 	if whichClaudeSubstitution.MatchString(command) {
-		replaced := whichClaudeSubstitution.ReplaceAllString(command, "claude")
-		found = append(found, textModelCandidates(replaced)...)
-		found = append(found, whichClaudeCandidates(replaced, initialCWD, home, files)...)
+		// модели в тексте, где $(which claude) стоит вместо claude: и в
+		// тексте промпта или тела here-doc (так было до computedClientCall,
+		// который судит сам вызов)
+		found = append(found, textModelCandidates(whichClaudeSubstitution.ReplaceAllString(command, "claude"))...)
 	}
 	return found
 }
 
-// whichClaudeCandidates — отказы опциям claude, запущенного как
-// $(which claude): имя вызова — подстановка, и разбор вызовов его не видит
-func whichClaudeCandidates(replaced, cwd, home string, files modelFiles) []modelCandidate {
-	calls, err := shellcmd.Calls(replaced)
-	if calls == nil && err != nil {
-		return unparsedClientCandidates(replaced)
-	}
-	var found []modelCandidate
-	for i := range calls {
-		if dialect, args, ok := clientCallWords(&calls[i]); ok && dialect == "claude" {
-			refusals, _ := claudeCallCandidates(&calls[i], args, files, cwd, home)
-			found = append(found, refusals...)
-		}
-	}
-	return found
-}
+var whichClaudeSubstitution = regexp.MustCompile(`\$\(\s*(?:which\s+claude|command\s+-v\s+claude)\s*\)`)
 
 func modelCallDirectory(call *shellcmd.Call, cwd, home string, logger core.Logger) (string, bool) {
 	if call.Name == "cd" || call.Name == "pushd" {
@@ -1348,18 +1360,15 @@ func modelCallDirectory(call *shellcmd.Call, cwd, home string, logger core.Logge
 }
 
 // clientCallWords — диалект клиента модели в вызове и слова его аргументов
-// (у npx — после @anthropic-ai/claude-code); false — вызов не клиента
+// (clientInvocation: у запускателя пакета — после пакета, у screen — после
+// программы); false — вызов не клиента
 func clientCallWords(call *shellcmd.Call) (string, []word, bool) {
-	isNpxClaude := call.Name == "npx" && npxClaudeCode(call.Args)
-	if !slices.Contains(modelClients, call.Name) && !isNpxClaude {
+	dialect, literalOffset, ok := clientInvocation(call.Name, call.Args, call.Raw)
+	if !ok {
 		return "", nil, false
 	}
-	callArgs := call.Args
-	if isNpxClaude {
-		callArgs = npxClaudeArgs(call.Args)
-	}
+	callArgs := call.Args[literalOffset:]
 	literalArgs, ansi := shellCallArgumentMetadata(call)
-	literalOffset := npxClaudeArgumentOffset(call.Args, isNpxClaude)
 	args := modelCallWords(call, callArgs, literalArgs, literalOffset)
 	for i := range args {
 		if index := i + literalOffset; index < len(ansi) && ansi[index].present {
@@ -1373,10 +1382,6 @@ func clientCallWords(call *shellcmd.Call) (string, []word, bool) {
 		// вызов не разобран: фигурных скобок не видно, любое слово может
 		// разбиться
 		args[i].braces = err != nil || braceWords[args[i].text]
-	}
-	dialect := clientDialect(call.Name)
-	if isNpxClaude {
-		dialect = "claude"
 	}
 	return dialect, args, true
 }
@@ -1492,18 +1497,6 @@ func modelCallCandidates(call *shellcmd.Call, cwd, home string, cwdCandidates []
 	return found, dialect == "claude"
 }
 
-func npxClaudeArgumentOffset(args []string, isNpxClaude bool) int {
-	if !isNpxClaude {
-		return 0
-	}
-	for i, arg := range args {
-		if arg == "@anthropic-ai/claude-code" {
-			return i + 1
-		}
-	}
-	return 0
-}
-
 func modelCallWords(call *shellcmd.Call, callArgs []string, literalArgs []bool, offset int) []word {
 	args := make([]word, len(callArgs))
 	for i, arg := range callArgs {
@@ -1526,8 +1519,6 @@ func claudeSettingsCandidates(cwdCandidates []string, homes, configs pathSet, se
 	}
 	return found
 }
-
-var whichClaudeSubstitution = regexp.MustCompile(`\$\(\s*(?:which\s+claude|command\s+-v\s+claude)\s*\)`)
 
 var protectedSettingsTarget = regexp.MustCompile(`(?i)(?:settings(?:\.local)?\.json|agents/[^\s"';&|<>]+\.md)`)
 var writtenAgentTarget = regexp.MustCompile(`(?:^|/)agents/.+\.md$`)
@@ -1830,19 +1821,6 @@ func envChdir(args []string, cwd, home string) (string, bool, bool) {
 		return resolvePath(path, 0, cwd, home), true, true
 	}
 	return "", false, false
-}
-
-func npxClaudeCode(args []string) bool {
-	return slices.Contains(args, "@anthropic-ai/claude-code")
-}
-
-func npxClaudeArgs(args []string) []string {
-	for i, arg := range args {
-		if arg == "@anthropic-ai/claude-code" {
-			return args[i+1:]
-		}
-	}
-	return nil
 }
 
 // claudeAddedAgentDirs — каталоги агентов из пар --add-dir и --plugin-dir
@@ -2221,20 +2199,20 @@ func callEnvModels(script string, n *syntax.CallExpr, calls []shellcmd.Call, log
 		}
 	}
 	if head < 0 {
+		// имя программы — подстановка или переменная, которая называет
+		// claude (`which claude`, $(type -P claude)): shellcmd отдаёт такой
+		// вызов без смещения. Другой клиент ($(which codex)) — не claude
+		if clientDialect(computedClient(script, n.Args[0], logger)) == "claude" {
+			return assignedModels(script, n.Assigns)
+		}
 		return nil
 	}
-	var chain []shellcmd.Call
-	for i := range calls {
-		c := &calls[i]
-		if c.Raw == calls[head].Raw && start <= c.Offset && c.Offset < end {
-			chain = append(chain, *c)
-		}
-	}
+	chain := envCallChain(calls, head, start, end)
 	var found []modelCandidate
 	runs := false
 	for i := range chain {
 		c := &chain[i]
-		if clientDialect(c.Name) == "claude" || isShellName(c.Name) {
+		if claudeClientCall(c, script, logger) || isShellName(c.Name) {
 			runs = true
 			break
 		}
@@ -2263,6 +2241,37 @@ func callEnvModels(script string, n *syntax.CallExpr, calls []shellcmd.Call, log
 		}
 	}
 	return found
+}
+
+// envCallChain — вызовы shellcmd простой команды [start, end) с головой
+// calls[head]: сама команда и снятые с неё обёртки. Снятая за обёрткой
+// команда с именем из подстановки или переменной (timeout 5 $(type -P
+// claude)) идёт без смещения сразу за своей обёрткой
+func envCallChain(calls []shellcmd.Call, head, start, end int) []shellcmd.Call {
+	var chain []shellcmd.Call
+	last := -1
+	for i := range calls {
+		c := &calls[i]
+		inside := start <= c.Offset && c.Offset < end
+		unwrapped := c.Offset < 0 && i == last+1
+		if c.Raw == calls[head].Raw && (inside || unwrapped) {
+			chain = append(chain, *c)
+			last = i
+		}
+	}
+	return chain
+}
+
+// commandAssigns — присваивания команды для cd через переменную; не
+// разобраны — нет присваиваний, и cd $D остаётся неизвестным каталогом
+func commandAssigns(command string, logger core.Logger) []shellcmd.Assign {
+	assigns, err := shellcmd.Assigns(command)
+	if err != nil {
+		logger.Warn("model_guard: присваивания не разобраны, cd через переменную не прослежен", "error", err)
+		// log-and-return-zero: safe — без присваиваний cd $D судится неизвестным каталогом, как до разбора переменных; ошибку видит лог
+		return nil
+	}
+	return assigns
 }
 
 // nestedEnvModels — модели из присваиваний во вложенном скрипте

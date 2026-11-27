@@ -126,6 +126,7 @@ type agentWriteEvent struct {
 }
 
 type agentWriteScan struct {
+	script   string
 	parent   map[syntax.Node]syntax.Node
 	events   []agentWriteEvent
 	writers  map[*syntax.Stmt]bool
@@ -147,7 +148,7 @@ func agentWriteCandidates(command string) ([]modelCandidate, string) {
 	if err != nil {
 		return nil, unparsedAgentReason(command)
 	}
-	scan := &agentWriteScan{parent: map[syntax.Node]syntax.Node{}, writers: map[*syntax.Stmt]bool{}, readOnly: readOnlyClaudeDirectory(file)}
+	scan := &agentWriteScan{script: command, parent: map[syntax.Node]syntax.Node{}, writers: map[*syntax.Stmt]bool{}, readOnly: readOnlyClaudeDirectory(file)}
 	var stack []syntax.Node
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if node == nil {
@@ -806,12 +807,16 @@ func (s *agentWriteScan) safeReader(call *syntax.CallExpr) bool {
 
 // modelClient — вызов клиента модели, в том числе за env, timeout и т. п.
 // Значения опций обёрток (sudo -u, exec -a, env -u/-a, timeout -s, в
-// кластере `-Eu`, сокращённой длинной опцией `--us`) — не имя клиента
+// кластере `-Eu`, сокращённой длинной опцией `--us`) — не имя клиента.
+// Клиент узнаётся тем же признаком, что в разборе вызова: clientInvocation
+// (имя, запускатель пакета, бинарь версии, screen) или имя из подстановки
+// (computedClient)
 func (s *agentWriteScan) modelClient(call *syntax.CallExpr) bool {
 	for i := 0; i < len(call.Args); i++ {
 		value, literal := literalValue(call.Args[i])
 		if !literal {
-			return false
+			client := computedClient(s.script, call.Args[i], discardLogger{})
+			return client != "" && !clientArgsWrite(client, call.Args[i+1:])
 		}
 		base := filepath.Base(value)
 		if slices.Contains(commandWrappers, base) {
@@ -822,40 +827,30 @@ func (s *agentWriteScan) modelClient(call *syntax.CallExpr) bool {
 			i = next - 1
 			continue
 		}
-		if base == "npx" {
-			next, ok := npxClaudePackage(call.Args, i+1)
-			if !ok {
-				return false
-			}
-			i, base = next, "claude"
+		args := make([]string, 0, len(call.Args)-i-1)
+		for _, arg := range call.Args[i+1:] {
+			args = append(args, wordOwnText(arg))
 		}
-		for _, rest := range call.Args[i+1:] {
-			if clientOptionWrites(base, wordOwnText(rest)) {
-				return false
-			}
+		// опции записи ищутся во всех словах после имени: опций запускателя
+		// (npx -y, screen -dm) с префиксом --debug-file или -o нет
+		dialect, _, ok := clientInvocation(base, args, value)
+		if !ok {
+			return false
 		}
-		return slices.Contains(modelClients, base)
+		client := base
+		if !slices.Contains(modelClients, base) {
+			client = dialect
+		}
+		return !clientArgsWrite(client, call.Args[i+1:])
 	}
 	return false
 }
 
-// npxClaudePackage — индекс пакета claude-code в `npx [-y|--yes] [--]
-// @anthropic-ai/claude-code …`; иные опции npx (-p/--package, -c/--call)
-// запускают другую команду — не клиент
-func npxClaudePackage(args []*syntax.Word, start int) (int, bool) {
-	for i := start; i < len(args); i++ {
-		value, literal := literalValue(args[i])
-		switch {
-		case !literal:
-			return 0, false
-		case value == "-y" || value == "--yes" || value == "--":
-		case value == "@anthropic-ai/claude-code":
-			return i, true
-		default:
-			return 0, false
-		}
-	}
-	return 0, false
+// clientArgsWrite — слово клиента client пишет файл (clientOptionWrites)
+func clientArgsWrite(client string, args []*syntax.Word) bool {
+	return slices.ContainsFunc(args, func(arg *syntax.Word) bool {
+		return clientOptionWrites(client, wordOwnText(arg))
+	})
 }
 
 // clientOptionRuns — опция claude/cl задаёт команды, которые клиент

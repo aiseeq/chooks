@@ -54,7 +54,16 @@ const (
 	claudeRefusedJudged
 	// claudeDebugFile — путь, куда claude пишет журнал отладки
 	claudeDebugFile
+	// claudeInputFormat — формат ввода: stream-json — отказ
+	// (streamJSONRefusal)
+	claudeInputFormat
 )
+
+// streamJSONRefusal — ввод stream-json несёт не только промпт: по коду
+// бинаря 2.1.332 claude исполняет из него control_request, set_model меняет
+// модель, apply_flag_settings — настройки, в том числе disableAllHooks.
+// Хук ввода не видит: pipe, файл, here-doc одинаково не проверить
+const streamJSONRefusal = "опция --input-format stream-json клиента claude берёт из ввода control_request: set_model меняет модель, apply_flag_settings — настройки и хуки (disableAllHooks); ввод не проверить — подай промпт текстом (без --input-format или --input-format text)"
 
 type claudeOption struct {
 	arity claudeArity
@@ -82,7 +91,7 @@ var claudeOptions = map[string]claudeOption{
 	"--append-system-prompt": {arity: claudeValue}, "--append-system-prompt-file": {arity: claudeValue},
 	"--system-prompt": {arity: claudeValue}, "--system-prompt-file": {arity: claudeValue},
 	"--system-prompt-snapshot": {arity: claudeValue}, "--autocompact": {arity: claudeValue},
-	"--effort": {arity: claudeValue}, "--input-format": {arity: claudeValue},
+	"--effort": {arity: claudeValue}, "--input-format": {arity: claudeValue, kind: claudeInputFormat},
 	"--output-format": {arity: claudeValue}, "--json-schema": {arity: claudeValue},
 	"--max-budget-usd": {arity: claudeValue}, "--max-turns": {arity: claudeValue},
 	"--name": {arity: claudeValue}, "--permission-mode": {arity: claudeValue},
@@ -752,6 +761,11 @@ func (p *claudeArguments) value(name string, arg claudeArg) {
 		}
 	case claudeDebugFile:
 		p.debugFiles = append(p.debugFiles, arg)
+	case claudeInputFormat:
+		// значение с неизвестной подстановкой может оказаться stream-json
+		if arg.unresolved || arg.text == "stream-json" {
+			p.refuse(streamJSONRefusal)
+		}
 	}
 }
 
@@ -1447,7 +1461,10 @@ func environmentControlUnknown(command string) bool {
 		if literal && (shellVariableWriter(name) || slices.Contains(environmentSourcing, name)) {
 			clear(knownCommands)
 		}
-		safeChild := literal && (shellcmd.IsShell(filepath.Base(name)) || wrappedChildShell(command, call))
+		// имя из подстановки, которая называет клиента ("$(which claude)"),
+		// судится как вызов клиента (computedClientCall): окружение
+		// оболочки он не меняет
+		safeChild := literal && (shellcmd.IsShell(filepath.Base(name)) || wrappedChildShell(command, call)) || computedClientWord(command, call.Args[0], discardLogger{})
 		parts := call.Args[0].Parts
 		if len(parts) == 1 {
 			if quoted, ok := parts[0].(*syntax.DblQuoted); ok {

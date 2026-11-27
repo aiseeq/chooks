@@ -836,7 +836,9 @@ func TestModelGuardRoundThree(t *testing.T) {
 		{"cd literal assignment", "Bash", "D=" + cwd + `; cd $D && claude -p --model opus hi`, false},
 		{"cd quoted assignment", "Bash", "P=" + cwd + `; cd "$P" && claude -p --model opus hi`, false},
 		{"cd variable prefix", "Bash", "P=" + cwd + `; cd $P/proj && claude -p --model opus hi`, false},
-		{"dynamic cd keeps session project settings candidate", "Bash", "P=" + dynamicProject + `; cd $P && claude -p --model opus hi`, false},
+		// значение P известно из присваивания той же команды: cd прослежен
+		{"cd through assigned variable", "Bash", "P=" + dynamicProject + `; cd $P && claude -p --model opus hi`, true},
+		{"cd through unknown variable keeps session settings", "Bash", `cd "$P" && claude -p --model opus hi`, false},
 		{"mktemp empty cwd", "Bash", `bash -c 'd=$(mktemp -d); cd $d && claude -p --model opus hi'`, false},
 		{"prompt mentions settings redirection elsewhere", "Bash", `claude -p "проверь .claude/settings.json" > /tmp/out.txt`, false},
 		{"settings source with output redirection", "Bash", `claude --settings ` + filepath.Join(cwd, ".claude/settings.json") + ` -p hi > /tmp/out.txt`, false},

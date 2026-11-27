@@ -157,8 +157,7 @@ stop-failure и night-hint. Для understand-check и claim-stop CLI проси
 повторить команду или остановку, не вызывая судью снова; webfetch-fallback и
 statusline не повторяются, остальные хуки только записываются. SIGTERM и
 SIGINT: перестать принимать, дообслужить идущие вызовы.
-Раз в час — строка
-stats в лог: RSS, живая куча после GC, горутины, fd.`,
+Раз в час — строка stats в лог: RSS, живая куча после GC, горутины, fd.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			request, err := commandRequest(cmd)

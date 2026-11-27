@@ -225,10 +225,14 @@ func TestProxyLostDaemonHooks(t *testing.T) {
 		nightLocked                   bool
 		nightHint                     bool
 		lostMessage                   string
+		config                        string
+		wantStatus                    string
 	}{
 		{name: "denied model", hook: hookPreToolUse, input: `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"claude -p --model haiku hi"}}`, code: exitBlocked, lostMessage: `модель "haiku" не одобрена`, retry: true, telemetry: true},
 		{name: "allowed command", hook: hookPreToolUse, input: `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}`, compareCLI: true, retry: true, telemetry: true},
-		{name: "check interrupted", hook: hookPreToolUse, input: `not json`, code: exitBlocked, lostMessage: "проверка прервана, повтори команду", retry: true, checkLog: true, telemetry: true},
+		{name: "check interrupted", hook: hookPreToolUse, input: `not json`, code: exitBlocked, lostMessage: "проверка прервана, повтори команду", retry: true, checkLog: true, telemetry: true, wantStatus: "lost-retry-failed"},
+		{name: "pre-tool-use broken config on retry", hook: hookPreToolUse, input: `{"tool_name":"Bash","tool_input":{"command":"git status"}}`, code: exitBlocked, lostMessage: "failed to load config", retry: true, config: "logger: [\n"},
+		{name: "stop broken config after loss", hook: hookStop, input: `{}`, code: exitError, config: "logger: [\n"},
 		{name: "no-prompt repeats", hook: hookNoPrompt, input: `{"hook_event_name":"Elicitation"}`, compareCLI: true, retry: true, telemetry: true},
 		{name: "unsent-check repeats and blocks", hook: hookUnsentCheck,
 			input:      `{"session_id":"s","transcript_path":"@TRANSCRIPT@","last_assistant_message":"Ещё не отправлено: ответ Оле."}`,
@@ -250,8 +254,12 @@ func TestProxyLostDaemonHooks(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			nightTZ := nightTestTZ()
 			home := t.TempDir()
+			config := serveConfig
+			if tt.config != "" {
+				config = tt.config
+			}
 			writeFiles(t, home, map[string]string{
-				".config/chooks/config.yaml": serveConfig,
+				".config/chooks/config.yaml": config,
 				".config/models/approved":    "opus claude-opus-5-5\nsonnet claude-sonnet-5-5\n",
 			})
 			if tt.nightHint {
@@ -339,7 +347,7 @@ func TestProxyLostDaemonHooks(t *testing.T) {
 			if tt.retry && strings.Contains(r.stderr, "хук не повторён") {
 				t.Fatalf("retryable hook was not repeated: %q", r.stderr)
 			}
-			if !tt.retry && tt.hook != hookUnderstandCheck && tt.hook != hookClaimStop && !strings.Contains(r.stderr, "хук не повторён") {
+			if !tt.retry && tt.config == "" && tt.hook != hookUnderstandCheck && tt.hook != hookClaimStop && !strings.Contains(r.stderr, "хук не повторён") {
 				t.Fatalf("non-retryable hook missing lost message: %q", r.stderr)
 			}
 			reasons := lines(readFile(t, runs))
@@ -348,9 +356,12 @@ func TestProxyLostDaemonHooks(t *testing.T) {
 			}
 			if tt.telemetry {
 				rows := durationLines(t, home)
-				wantStatus, wantExecutor := statusLost, executorDaemon
+				wantStatus, wantExecutor := "lost", executorDaemon
 				if tt.retry {
-					wantStatus, wantExecutor = statusLostRetried, executorCLI
+					wantStatus, wantExecutor = "lost-retried", executorCLI
+				}
+				if tt.wantStatus != "" {
+					wantStatus = tt.wantStatus
 				}
 				if len(rows) != 1 || len(rows[0]) != 8 || rows[0][1] != tt.hook || rows[0][5] != wantStatus ||
 					rows[0][6] != wantExecutor || rows[0][7] != reasons[0] {

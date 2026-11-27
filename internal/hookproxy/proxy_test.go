@@ -26,8 +26,28 @@ import (
 // proxyHelper — бинарь тестов становится прокси (Main) в TestMain
 const proxyHelper = "HOOKPROXY_TEST_MAIN"
 const proxyCloseStdout = "HOOKPROXY_TEST_CLOSE_STDOUT"
+const proxyMemfdFailureHelper = "HOOKPROXY_TEST_MEMFD_FAILURE"
+const proxyMemfdFailureLost = "HOOKPROXY_TEST_MEMFD_FAILURE_LOST"
 
 func TestMain(m *testing.M) {
+	if os.Getenv(proxyMemfdFailureHelper) == "1" {
+		var limit unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		limit.Cur = 3 // stdin/stdout/stderr remain open; memfd_create gets EMFILE
+		if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		p := &proxy{args: []string{"chooks-hook", "pre-tool-use"}, fd: -1}
+		reason := ackPrefix + "daemon closed before accept"
+		if os.Getenv(proxyMemfdFailureLost) == "1" {
+			reason = LostPrefix + "daemon closed after accept"
+		}
+		os.Exit(p.fallback([]byte(`{}`), true, reason))
+	}
 	if os.Getenv(proxyHelper) == "1" {
 		_ = os.Unsetenv(proxyHelper)
 		if os.Getenv(proxyCloseStdout) == "1" {
@@ -320,6 +340,36 @@ func TestLostPreToolUseExecFailureBlocks(t *testing.T) {
 	}
 }
 
+func TestLostStopExecFailureKeepsErrorCode(t *testing.T) {
+	d := startFake(t, func(conn *net.UnixConn, _ hookwire.Request) {
+		_, _ = conn.Write([]byte{hookwire.Accepted})
+		if b, err := readByte(conn, 5*time.Second); err != nil || b != hookwire.Commit {
+			t.Errorf("commit: %q %v", b, err)
+		}
+	})
+	stub := newCLIStub(t)
+	r := runProxyWithEnv(t, d.path, stub, []byte(`{}`), []string{EnvCLI + "=/nonexistent/chooks"}, "stop")
+	if r.code != 1 || !strings.Contains(r.stderr, "запасной путь /nonexistent/chooks") || strings.Contains(r.stderr, "проверка прервана") {
+		t.Fatalf("code %d stderr %q; want ordinary exec failure", r.code, r.stderr)
+	}
+}
+
+func TestNonLostPreToolUseStdinReplacementFailureKeepsErrorCode(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^$")
+	cmd.Env = append(os.Environ(), proxyMemfdFailureHelper+"=1", EnvCLI+"=/nonexistent/chooks")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err = cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(stderr.String(), "stdin для /nonexistent/chooks") || strings.Contains(stderr.String(), "проверка прервана") {
+		t.Fatalf("error %v stdout %q stderr %q; want ordinary fallback error", err, stdout.String(), stderr.String())
+	}
+}
+
 func TestNonLostPreToolUseExecFailureKeepsErrorCode(t *testing.T) {
 	stub := newCLIStub(t)
 	r := runProxyWithEnv(t, filepath.Join(t.TempDir(), "no-daemon.sock"), stub, []byte(`{}`), []string{EnvCLI + "=/nonexistent/chooks"}, "pre-tool-use")
@@ -329,23 +379,12 @@ func TestNonLostPreToolUseExecFailureKeepsErrorCode(t *testing.T) {
 }
 
 func TestLostPreToolUseStdinReplacementFailureBlocks(t *testing.T) {
-	strace, err := exec.LookPath("strace")
-	if err != nil {
-		t.Skip("strace is not installed")
-	}
-	d := startFake(t, func(conn *net.UnixConn, _ hookwire.Request) {
-		_, _ = conn.Write([]byte{hookwire.Accepted})
-		if b, err := readByte(conn, 5*time.Second); err != nil || b != hookwire.Commit {
-			t.Errorf("commit: %q %v", b, err)
-		}
-	})
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(strace, "-f", "-qq", "-e", "trace=memfd_create", "-e", "inject=memfd_create:error=EMFILE", exe, "pre-tool-use")
-	cmd.Env = append(os.Environ(), proxyHelper+"=1", EnvSocket+"="+d.path, EnvCLI+"=/unused/chooks")
-	cmd.Stdin = strings.NewReader(`{}`)
+	cmd := exec.Command(exe, "-test.run=^$")
+	cmd.Env = append(os.Environ(), proxyMemfdFailureHelper+"=1", proxyMemfdFailureLost+"=1", EnvCLI+"=/unused/chooks")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err = cmd.Run()

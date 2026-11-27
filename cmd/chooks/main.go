@@ -404,6 +404,9 @@ func runHook(ctx context.Context, hookType string) (code int, err error) {
 			status = statusLost
 			if retryLostHook(hookType) {
 				status = statusLostRetried
+				if err != nil || code == exitError {
+					status = statusLostRetryFailed
+				}
 			}
 		case err != nil || code == exitError:
 			status = "error"
@@ -519,7 +522,7 @@ func lostPreToolUseResult(lost bool, hookType string, logger core.Logger, code i
 	if logger != nil {
 		logger.Error("pre-tool-use check failed after daemon connection loss", "error", err)
 	}
-	return exitBlocked, fmt.Errorf("проверка прервана, повтори команду")
+	return exitBlocked, fmt.Errorf("проверка прервана, повтори команду: %w", err)
 }
 
 // dispatchHook — работа подкоманды хука после конфига и лога: её же зовёт

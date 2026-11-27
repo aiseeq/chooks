@@ -66,6 +66,20 @@ func runServeHelper() (int, bool) {
 	return 0, false
 }
 
+func TestServeHelpKeepsStatsSentenceOnOneLine(t *testing.T) {
+	cmd := newServeCmd()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs([]string{"--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Раз в час — строка stats в лог") {
+		t.Fatalf("serve --help split the stats sentence:\n%s", output.String())
+	}
+}
+
 func testBinary(t *testing.T) string {
 	t.Helper()
 	exe, err := os.Executable()

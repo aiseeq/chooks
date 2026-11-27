@@ -42,10 +42,13 @@ const (
 	statusCancelled = "cancelled" // отмена хода, до таймаута
 )
 
-// statusLost — исход вызова, у которого связь прокси с демоном оборвалась
-// после 'C', и повторная проверка CLI не запускалась
+// Исходы вызова, у которого связь прокси с демоном оборвалась после 'C':
+// statusLost — повторная проверка CLI не запускалась; statusLostRetried —
+// CLI повторил проверку и дошёл до решения; statusLostRetryFailed — повтор
+// CLI сам упал (конфиг, вход, execve), хук отдал «проверка прервана».
 const statusLost = "lost"
 const statusLostRetried = "lost-retried"
+const statusLostRetryFailed = "lost-retry-failed"
 
 // timeoutSlack — насколько раньше своего таймаута SIGTERM считается всё же
 // таймаутом: таймер Claude Code стартует раньше процесса, отсчёт которого под
@@ -197,7 +200,8 @@ func (t *hookTimer) setDurations(logger core.LoggerConfig) {
 }
 
 // recordDuration пишет строку TSV: время, хук, сессия, мс всего, мс запуска,
-// исход (ok, error, killed или cancelled). Вызов через прокси chooks-hook
+// исход (ok, error, killed, cancelled, lost, lost-retried или
+// lost-retry-failed). Вызов через прокси chooks-hook
 // добавляет ещё два столбца: кто исполнил (daemon или cli) и причину
 // запасного пути; у вызова CLI напрямую столбцов шесть, как раньше (их
 // разбирает dream/dreamstats). Запуск, убитый или упавший до чтения конфига,

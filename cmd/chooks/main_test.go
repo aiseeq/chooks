@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,9 +15,29 @@ import (
 	"github.com/aiseeq/chooks/internal/core"
 	"github.com/aiseeq/chooks/internal/desktop"
 	"github.com/aiseeq/chooks/internal/hookctx"
+	"github.com/aiseeq/chooks/internal/hookproxy"
 	"github.com/aiseeq/chooks/internal/textstyle"
 	"github.com/aiseeq/chooks/internal/tools/notifier"
 )
+
+type failingHookReader struct{}
+
+func (failingHookReader) Read([]byte) (int, error) { return 0, errors.New("test stdin failure") }
+
+func TestLostPreToolUseReadFailureBeforeLogger(t *testing.T) {
+	request, err := hookctx.FromProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Stdin = failingHookReader{}
+	request.Stderr = io.Discard
+	ctx := context.WithValue(context.Background(), cliTerminationKey{}, (func(int))(func(int) {}))
+	ctx = context.WithValue(ctx, fallbackReasonKey{}, hookproxy.LostPrefix+"test disconnect")
+	code, err := runHook(hookctx.WithRequest(ctx, request), hookPreToolUse)
+	if code != exitBlocked || err == nil || !strings.Contains(err.Error(), "test stdin failure") {
+		t.Fatalf("runHook = %d, %v; want blocked result containing the input error", code, err)
+	}
+}
 
 // stopInput собирает вход Stop по схеме Claude Code 2.1.284
 func stopInput(t *testing.T, sessionID, transcript string, tasks []map[string]any, crons []map[string]any) []byte {

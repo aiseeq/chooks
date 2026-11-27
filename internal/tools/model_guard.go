@@ -111,7 +111,7 @@ func (t *ModelGuardTool) ValidateTool(ctx context.Context, input *core.ToolInput
 			if c.value == "" {
 				reasons = append(reasons, "modelOverrides не разобран: модель не проверить")
 			} else {
-				reasons = append(reasons, fmt.Sprintf("modelOverrides в %s не разобран: модель не проверить", reasonExcerpt(c.value)))
+				reasons = append(reasons, fmt.Sprintf("modelOverrides в %s не разобран: модель не проверить", c.value))
 			}
 			continue
 		}
@@ -203,7 +203,8 @@ type modelCandidate struct {
 	unknownAgents     bool
 	agentsInline      bool
 	unknownSettings   bool
-	// badOverrides — modelOverrides не разобран; value — файл или флаг настроек, пусто — источник не назван
+	// badOverrides — modelOverrides не разобран; value — путь файла целиком (имя файла
+	// не обрезается) или «строке --settings», пусто — источник не назван
 	badOverrides bool
 	// clientOption — отказ опции, подкоманде или окружению клиента claude
 	clientOption string

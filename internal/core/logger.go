@@ -240,10 +240,14 @@ func openLogWriter(config LoggerConfig, stderr io.Writer) (io.Writer, error) {
 // Одна запись O_APPEND короче страницы не перемешивается со строками других
 // процессов
 func AppendLine(path string, maxSizeMB int, line string) error {
+	return appendLineWithRename(path, maxSizeMB, line, os.Rename)
+}
+
+func appendLineWithRename(path string, maxSizeMB int, line string, rename func(string, string) error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("cannot create directory for %s: %w", path, err)
 	}
-	if err := rotateLogIfNeeded(path, maxSizeMB); err != nil {
+	if err := rotateLogIfNeededWithRename(path, maxSizeMB, rename); err != nil {
 		return err
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -259,6 +263,10 @@ func AppendLine(path string, maxSizeMB int, line string) error {
 // rotateLogIfNeeded переименовывает лог в *.1 при превышении порога размера.
 // Отсутствующий лог ротации не требует
 func rotateLogIfNeeded(logFile string, maxSizeMB int) error {
+	return rotateLogIfNeededWithRename(logFile, maxSizeMB, os.Rename)
+}
+
+func rotateLogIfNeededWithRename(logFile string, maxSizeMB int, rename func(string, string) error) error {
 	if maxSizeMB <= 0 {
 		return nil
 	}
@@ -274,7 +282,12 @@ func rotateLogIfNeeded(logFile string, maxSizeMB int) error {
 		return nil
 	}
 
-	if err := os.Rename(logFile, logFile+".1"); err != nil {
+	if err := rename(logFile, logFile+".1"); err != nil {
+		// Другой процесс мог уже ротировать этот файл после нашего Stat.
+		// В таком случае новый лог нужно открыть и дописать строку.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return fmt.Errorf("cannot rename %s: %w", logFile, err)
 	}
 	return nil

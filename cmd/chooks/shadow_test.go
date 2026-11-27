@@ -660,6 +660,92 @@ func TestShadowReport(t *testing.T) {
 	}
 }
 
+func TestShadowReportCountsUnpairedShadowRows(t *testing.T) {
+	from := shadowAt.Add(-24 * time.Hour)
+	to := shadowAt
+	ln := func(at time.Time, fields ...string) string {
+		return at.Format(shadowTimeLayout) + "\t" + strings.Join(fields, "\t") + "\n"
+	}
+	a, b := from.Add(time.Hour), from.Add(2*time.Hour)
+	tests := []struct {
+		name, shadow, durations string
+		check                   func(*testing.T, *shadowReport, string)
+	}{
+		{
+			name:      "lost final CLI row keeps mismatch",
+			shadow:    ln(a, "stop", "s1", shadowMatch, "") + ln(b, "stop", "s1", shadowMismatch, "verdict"),
+			durations: ln(a.Add(10*time.Millisecond), "stop", "s1", "30", "20", "ok"),
+			check: func(t *testing.T, r *shadowReport, out string) {
+				if r.mismatches() != 1 || r.shadowWithoutCall != 1 || !strings.Contains(out, "stop: verdict — 1") {
+					t.Errorf("mismatch hidden or extra row uncounted:\n%s", out)
+				}
+				// Строка хука и итог тоже называют расхождение (ревью srns круг 2)
+				if !strings.Contains(out, "сравнено 1 (совпало 1, расхождений 0), расхождений без вызова CLI 1,") || !strings.Contains(out, "Итог: вызовов CLI 1, сравнено 1, расхождений 1,") {
+					t.Errorf("summary hides unpaired mismatch:\n%s", out)
+				}
+			},
+		},
+		{
+			name:      "shadow without any CLI row",
+			shadow:    ln(a, "pre-tool-use", "other", shadowMismatch, "action") + ln(a, "stop", "s1", shadowMatch, ""),
+			durations: ln(a.Add(10*time.Millisecond), "stop", "s1", "30", "20", "ok"),
+			check: func(t *testing.T, r *shadowReport, out string) {
+				if r.mismatches() != 1 || r.shadowWithoutCall != 1 || !strings.Contains(out, "pre-tool-use: action — 1") {
+					t.Errorf("mismatch hidden or extra row uncounted:\n%s", out)
+				}
+			},
+		},
+		{
+			name:      "unparsed CLI record keeps incomparable row",
+			shadow:    ln(a.Add(time.Millisecond), "stop", "", shadowIncomparable, "запись CLI не разобрана: x"),
+			durations: ln(a, "stop", "s1", "30", "20", "ok"),
+			check: func(t *testing.T, r *shadowReport, out string) {
+				if r.counts["stop"].incomparable != 1 || r.shadowWithoutCall != 1 || !strings.Contains(out, "stop: запись CLI не разобрана: x — 1") {
+					t.Errorf("incomparable row hidden or extra row uncounted:\n%s", out)
+				}
+			},
+		},
+		{
+			name:      "lost CLI row is counted separately, not as a negative skip",
+			shadow:    ln(a, "stop", "s1", shadowMatch, ""),
+			durations: "",
+			check: func(t *testing.T, r *shadowReport, out string) {
+				if r.compared() != 0 || r.shadowWithoutCall != 1 || !strings.Contains(out, "Пропущено (вызовы CLI без строки тени): 0") || !strings.Contains(out, "Сравнений нет: это не «без расхождений».") {
+					t.Errorf("lost CLI row accounting:\n%s", out)
+				}
+			},
+		},
+		{
+			name:   "shadow outside period is ignored",
+			shadow: ln(from.Add(-time.Second), "stop", "s1", shadowMismatch, "old"),
+			check: func(t *testing.T, r *shadowReport, out string) {
+				if r.mismatches() != 0 || r.shadowWithoutCall != 0 || strings.Contains(out, "stop: old") {
+					t.Errorf("out-of-period shadow row was counted:\n%s", out)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tdir := t.TempDir()
+			writeFiles(t, tdir, map[string]string{
+				shadowJournalFile: tt.shadow,
+				durationsFile:     ln(from.Add(-time.Hour), "statusline", "s0", "1", "1", "ok") + tt.durations,
+			})
+			r, err := buildShadowReport(filepath.Join(tdir, shadowJournalFile), filepath.Join(tdir, durationsFile), from, to)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			r.write(&out, time.UTC)
+			tt.check(t, r, out.String())
+			if !strings.Contains(out.String(), "Строк тени без вызова CLI:") {
+				t.Errorf("report lacks unpaired shadow count:\n%s", out.String())
+			}
+		})
+	}
+}
+
 // Снимок «до» берётся до исполнения CLI: демон не видит записи CLI
 func TestShadowSnapshotBeforeCLI(t *testing.T) {
 	socket, frames := captureFrames(t)

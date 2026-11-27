@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestNewLogger_WritesToFile(t *testing.T) {
@@ -109,6 +111,64 @@ func TestAppendLine_Rotates(t *testing.T) {
 	}
 	if info, err := os.Stat(path + ".1"); err != nil || info.Size() != 1024*1024 {
 		t.Errorf("прежний файл не ушёл в .1: %v", err)
+	}
+}
+
+func TestAppendLineConcurrentRotationKeepsBothLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "durations.tsv")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	arrived := make(chan struct{}, 2)
+	release := make(chan struct{})
+	firstRenamed := make(chan struct{})
+	loserAttempted := make(chan struct{})
+	var first sync.Once
+	rename := func(old, new string) error {
+		arrived <- struct{}{}
+		<-release
+		isFirst := false
+		first.Do(func() { isFirst = true })
+		if isFirst {
+			err := os.Rename(old, new)
+			close(firstRenamed)
+			<-loserAttempted
+			return err
+		}
+		<-firstRenamed
+		err := os.Rename(old, new)
+		close(loserAttempted)
+		return err
+	}
+
+	errs := make(chan error, 2)
+	for _, line := range []string{"first", "second"} {
+		go func(line string) { errs <- appendLineWithRename(path, 1, line, rename) }(line)
+	}
+	for range 2 {
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			close(release)
+			t.Fatal("both appenders did not reach rename")
+		}
+	}
+	close(release)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Errorf("append failed during concurrent rotation: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"first\n", "second\n"} {
+		if !strings.Contains(string(data), line) {
+			t.Errorf("current log lacks %q: %q", line, data)
+		}
 	}
 }
 

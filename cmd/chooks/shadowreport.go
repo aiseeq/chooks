@@ -71,17 +71,19 @@ func newShadowReportCmd(exitCode *int) *cobra.Command {
 
 // shadowCount — счёт одной подкоманды за период
 type shadowCount struct {
-	calls, match, mismatch, incomparable int
+	calls, paired, pairedMatch, pairedMismatch int
+	match, mismatch, incomparable              int
 }
 
 type shadowReport struct {
-	from, to         time.Time
-	journal          string
-	counts           map[string]*shadowCount
-	mismatchDetails  map[string]int
-	incomparableWhy  map[string]int
-	journalMissing   bool
-	durationsMissing bool
+	from, to          time.Time
+	journal           string
+	counts            map[string]*shadowCount
+	mismatchDetails   map[string]int
+	incomparableWhy   map[string]int
+	journalMissing    bool
+	durationsMissing  bool
+	shadowWithoutCall int
 	// coveredFrom — первая строка файла длительностей (с ротированным .1)
 	// позже начала периода: вызовы CLI до неё не видны, и период считается
 	// с неё; нулевое — период покрыт
@@ -100,7 +102,7 @@ func (r *shadowReport) count(hook string) *shadowCount {
 func (r *shadowReport) compared() int {
 	n := 0
 	for _, c := range r.counts {
-		n += c.match + c.mismatch
+		n += c.pairedMatch + c.pairedMismatch
 	}
 	return n
 }
@@ -116,8 +118,13 @@ func (r *shadowReport) mismatches() int {
 // shadowCLICall — прямой вызов CLI сравниваемой подкоманды из файла
 // длительностей
 type shadowCLICall struct {
-	hook string
-	at   time.Time
+	hook    string
+	session string
+	at      time.Time
+}
+
+type shadowCallKey struct {
+	hook, session string
 }
 
 // buildShadowReport считает журнал тени и вызовы CLI из файла длительностей
@@ -144,7 +151,7 @@ func buildShadowReport(journal, durations string, from, to time.Time) (*shadowRe
 			first = at
 		}
 		if _, covered := shadowHooks[fields[1]]; covered && len(fields) == 6 {
-			calls = append(calls, shadowCLICall{hook: fields[1], at: at})
+			calls = append(calls, shadowCLICall{hook: fields[1], session: fields[2], at: at})
 		}
 	})
 	if err != nil {
@@ -160,29 +167,62 @@ func buildShadowReport(journal, durations string, from, to time.Time) (*shadowRe
 			r.count(c.hook).calls++
 		}
 	}
+	// Строки обоих журналов имеют разные временные метки: длительность
+	// записывается при завершении CLI, а тень — со временем запроса. Поэтому
+	// связываем их по хуку и сессии и учитываем не более одной тени на вызов
+	// CLI, попавший в период.
+	remaining := make(map[shadowCallKey]int)
+	for _, c := range calls {
+		if inPeriod(c.at) {
+			remaining[shadowCallKey{hook: c.hook, session: c.session}]++
+		}
+	}
 	missing, err = scanRotated(journal, func(fields []string) {
-		at, ok := shadowLineTime(fields)
-		if !ok || len(fields) < 5 || !inPeriod(at) {
-			return
-		}
-		hook := fields[1]
-		c := r.count(hook)
-		switch fields[3] {
-		case shadowMatch:
-			c.match++
-		case shadowMismatch:
-			c.mismatch++
-			r.mismatchDetails[hook+": "+fields[4]]++
-		case shadowIncomparable:
-			c.incomparable++
-			r.incomparableWhy[hook+": "+fields[4]]++
-		}
+		r.countJournalRow(fields, inPeriod, remaining)
 	})
 	if err != nil {
 		return nil, err
 	}
 	r.journalMissing = missing
 	return r, nil
+}
+
+func (r *shadowReport) countJournalRow(fields []string, inPeriod func(time.Time) bool, remaining map[shadowCallKey]int) {
+	at, ok := shadowLineTime(fields)
+	if !ok || len(fields) < 5 || !inPeriod(at) {
+		return
+	}
+	hook := fields[1]
+	key := shadowCallKey{hook: hook, session: fields[2]}
+	switch fields[3] {
+	case shadowMatch, shadowMismatch, shadowIncomparable:
+	default:
+		return
+	}
+	c := r.count(hook)
+	paired := remaining[key] > 0
+	if paired {
+		remaining[key]--
+		c.paired++
+	} else {
+		r.shadowWithoutCall++
+	}
+	switch fields[3] {
+	case shadowMatch:
+		c.match++
+		if paired {
+			c.pairedMatch++
+		}
+	case shadowMismatch:
+		c.mismatch++
+		if paired {
+			c.pairedMismatch++
+		}
+		r.mismatchDetails[hook+": "+fields[4]]++
+	case shadowIncomparable:
+		c.incomparable++
+		r.incomparableWhy[hook+": "+fields[4]]++
+	}
 }
 
 // shadowLineTime — время строки журнала (первый столбец); false — строка
@@ -245,14 +285,20 @@ func (r *shadowReport) write(w io.Writer, loc *time.Location) {
 	missed := 0
 	for _, hook := range slices.Sorted(maps.Keys(r.counts)) {
 		c := r.counts[hook]
-		skipped := c.calls - c.match - c.mismatch - c.incomparable
+		// Пар не больше вызовов: remaining считает только вызовы периода
+		skipped := c.calls - c.paired
 		missed += skipped
 		total.calls += c.calls
-		total.match += c.match
+		total.match += c.pairedMatch
 		total.mismatch += c.mismatch
 		total.incomparable += c.incomparable
-		fmt.Fprintf(w, "%s: вызовов CLI %d, сравнено %d (совпало %d, расхождений %d), не сравнимо %d, пропущено %d\n",
-			hook, c.calls, c.match+c.mismatch, c.match, c.mismatch, c.incomparable, skipped)
+		// Расхождение видно всегда, даже у строки тени без вызова CLI
+		unpaired := ""
+		if extra := c.mismatch - c.pairedMismatch; extra > 0 {
+			unpaired = fmt.Sprintf(", расхождений без вызова CLI %d", extra)
+		}
+		fmt.Fprintf(w, "%s: вызовов CLI %d, сравнено %d (совпало %d, расхождений %d)%s, не сравнимо %d, пропущено %d\n",
+			hook, c.calls, c.pairedMatch+c.pairedMismatch, c.pairedMatch, c.pairedMismatch, unpaired, c.incomparable, skipped)
 	}
 	writeCounts(w, "Расхождения (подкоманда: поля):", r.mismatchDetails)
 	writeCounts(w, "Не сравнимо (подкоманда: причина):", r.incomparableWhy)
@@ -261,12 +307,10 @@ func (r *shadowReport) write(w io.Writer, loc *time.Location) {
 		fmt.Fprintf(w, "  %s — %s\n", hook, shadowOutside[hook])
 	}
 	fmt.Fprintf(w, "Итог: вызовов CLI %d, сравнено %d, расхождений %d, не сравнимо %d\n",
-		total.calls, total.match+total.mismatch, total.mismatch, total.incomparable)
+		total.calls, r.compared(), total.mismatch, total.incomparable)
 	fmt.Fprintf(w, "Пропущено (вызовы CLI без строки тени): %d\n", missed)
-	if missed < 0 {
-		fmt.Fprintln(w, "  строк тени больше, чем вызовов: файл длительностей ротирован или период режет вызов на границе")
-	}
-	if total.match+total.mismatch == 0 {
+	fmt.Fprintf(w, "Строк тени без вызова CLI: %d\n", r.shadowWithoutCall)
+	if r.compared() == 0 {
 		fmt.Fprintln(w, "Сравнений нет: это не «без расхождений».")
 	}
 }

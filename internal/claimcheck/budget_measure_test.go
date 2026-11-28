@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -42,35 +43,51 @@ func longTurnTranscript(t *testing.T, calls, lines, words int) (string, int) {
 }
 
 // Вход судьи на длинном ходе строится за секунды, а не за минуты: на
-// настоящем транскрипте 93 МБ сборка шла дольше 70 с. Предел — по
-// процессорному времени процесса, а не по часам: под нагрузкой гейта те же
-// 4,6 с по часам становились 15 с, а прежний кубический отбор тратил на
-// этом ходе больше 300 с процессора
+// настоящем транскрипте 93 МБ сборка шла дольше 70 с. Мера — байты аллокаций
+// (TotalAlloc), они от нагрузки машины не зависят: процессорное время того же
+// хода — 5,9 с на тихой машине и 21 с в гейте под нагрузкой (27.11, тикет
+// claim-budget-test-flake). База за три прогона — 1 142 511 168–1 142 698 928
+// байт (разброс 0,02 %), предел 1,75 ГБ — запас ×1,53: удвоение работы его
+// пробивает. CPU — широкий потолок 60 с: аллокации могут не заметить прежний
+// кубический отбор, который тратил на этом ходе больше 300 с процессора
 func TestMeasureBuildInputLongTurn(t *testing.T) {
 	path, line := longTurnTranscript(t, 1500, 60, 5000)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
 	cpuBefore := processCPU(t)
 	started := time.Now()
 	input, err := BuildInput(context.Background(), path, line, Options{})
 	took := time.Since(started)
 	cpu := processCPU(t) - cpuBefore
+	runtime.ReadMemStats(&after)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if input == nil || input.Answer == "" {
 		t.Fatalf("empty input: %+v", input)
 	}
-	t.Logf("BuildInput %d calls: cpu %v, wall %v", 1500, cpu, took)
-	if cpu > 20*time.Second {
-		t.Fatalf("BuildInput on a long turn used %v of CPU, want under 20s", cpu)
+	mallocs, allocated := after.Mallocs-before.Mallocs, after.TotalAlloc-before.TotalAlloc
+	t.Logf("BuildInput %d calls: mallocs %d, allocated %d bytes, cpu %v, wall %v", 1500, mallocs, allocated, cpu, took)
+	if allocated > 1_750_000_000 {
+		t.Fatalf("BuildInput on a long turn allocated %d bytes, want at most 1750000000", allocated)
+	}
+	if cpu > 60*time.Second {
+		t.Fatalf("BuildInput on a long turn used %v of CPU, want under 60s", cpu)
 	}
 }
 
 func TestMeasureExcerptManyLongOutputs(t *testing.T) {
+	// Мера та же, что у TestMeasureBuildInputLongTurn: база TotalAlloc за три
+	// прогона — 404 948 776–405 024 696 байт (разброс 0,02 %), предел 625 МБ —
+	// запас ×1,54; CPU — широкий потолок 60 с против катастрофической регрессии
 	path, line := longTurnTranscript(t, 40, 2000, 3000)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
 	cpuBefore := processCPU(t)
 	started := time.Now()
 	input, err := BuildInput(context.Background(), path, line, Options{})
 	cpu := processCPU(t) - cpuBefore
+	runtime.ReadMemStats(&after)
 	took := time.Since(started)
 	if err != nil {
 		t.Fatal(err)
@@ -78,9 +95,13 @@ func TestMeasureExcerptManyLongOutputs(t *testing.T) {
 	if input == nil || input.Answer == "" {
 		t.Fatalf("empty input: %+v", input)
 	}
-	t.Logf("BuildInput 40 calls × 2000 output lines, 3000 answer words: cpu %v, wall %v", cpu, took)
-	if cpu > 10*time.Second {
-		t.Fatalf("BuildInput on many long outputs used %v of CPU, want under 10s", cpu)
+	mallocs, allocated := after.Mallocs-before.Mallocs, after.TotalAlloc-before.TotalAlloc
+	t.Logf("BuildInput 40 calls × 2000 output lines, 3000 answer words: mallocs %d, allocated %d bytes, cpu %v, wall %v", mallocs, allocated, cpu, took)
+	if allocated > 625_000_000 {
+		t.Fatalf("BuildInput on many long outputs allocated %d bytes, want at most 625000000", allocated)
+	}
+	if cpu > 60*time.Second {
+		t.Fatalf("BuildInput on many long outputs used %v of CPU, want under 60s", cpu)
 	}
 }
 

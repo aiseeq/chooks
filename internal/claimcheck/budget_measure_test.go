@@ -44,16 +44,16 @@ func longTurnTranscript(t *testing.T, calls, lines, words int) (string, int) {
 
 // Пределы мерных тестов сборки входа (тикет claim-budget-test-flake).
 // Работу меряют байты аллокаций (TotalAlloc): от нагрузки машины они не
-// зависят, разброс базы между прогонами — 0,02 %. Предел — база × 1,15, так
-// что удвоение любого этапа с долей байт больше 15 % его пробивает.
-// Процессорное время процесса от нагрузки зависит: длинный ход тратит 5,9 с
-// на тихой машине и 21 с в гейте при load 13. Поэтому CPU — только потолок
-// по бюджету хука: Stop — 100 с, судья v7 отвечал до 36 с (27.11), на сборку
-// остаётся около 60 с. Потолок 40 с ловит прежний кубический отбор (больше
-// 300 с) и не срабатывает от нагрузки гейта. Замедление без роста байт ниже
-// потолка тест не ловит: в бюджете хука оно не опасно. Сборка с -race
-// меряет не боевой код (байты +21 %, CPU ×5,4), там числа идут только в
-// журнал теста
+// зависят, разброс между прогонами, в том числе с -cover и -shuffle, — до
+// 0,15 %. Предел — база × 1,15, так что удвоение любого этапа с долей байт
+// больше 15 % его пробивает. Процессорное время процесса от нагрузки зависит:
+// длинный ход тратит 5,9 с на тихой машине и 21 с в гейте при load 13.
+// Поэтому CPU — только потолок 40 с против катастрофы вроде прежнего
+// кубического отбора (больше 300 с); замедление без роста байт ниже потолка
+// тест не ловит. Тесты меряют полный режим (Options{}); режим CallsOnly,
+// который хук включает при prompt v6 и v7, здесь не мерится (тикет
+// claim-calls-only-measure). Сборка с -race меряет не боевой код (байты до
+// +57 %, CPU ×5,4), там числа идут только в журнал теста
 const (
 	allocMargin = 1.15
 	cpuCeiling  = 40 * time.Second
@@ -78,7 +78,7 @@ func buildMeasured(t *testing.T, path string, line int) (*Input, uint64, time.Du
 	return input, after.TotalAlloc - before.TotalAlloc, cpu
 }
 
-// checkBuildBudget сверяет замер с базой байт base (верх трёх прогонов) и
+// checkBuildBudget сверяет замер с базой байт base (верх замеров 28.11) и
 // потолком CPU
 func checkBuildBudget(t *testing.T, name string, allocated, base uint64, cpu time.Duration) {
 	t.Helper()
@@ -95,7 +95,7 @@ func checkBuildBudget(t *testing.T, name string, allocated, base uint64, cpu tim
 }
 
 // Вход судьи на длинном ходе строится за секунды, а не за минуты: на
-// настоящем транскрипте 93 МБ сборка шла дольше 70 с. База — 1 141 770 824–
+// настоящем транскрипте 93 МБ сборка шла дольше 70 с. База — 1 141 722 152–
 // 1 142 698 928 байт (28.11)
 func TestMeasureBuildInputLongTurn(t *testing.T) {
 	path, line := longTurnTranscript(t, 1500, 60, 5000)
@@ -140,13 +140,13 @@ func longWriteTranscript(t *testing.T, calls, lines, words int) (string, int) {
 }
 
 // Длинные Write проверяют общий матчёр на строках больше лимита входа. База —
-// 106 133 864–106 158 768 байт (28.11)
+// 106 133 864–106 172 344 байт (28.11)
 func TestMeasureBuildInputManyLongWrites(t *testing.T) {
 	for _, tc := range []struct {
 		calls, words int
 		base         uint64
 	}{
-		{calls: 8, words: 1500, base: 106_160_000},
+		{calls: 8, words: 1500, base: 106_180_000},
 	} {
 		path, line := longWriteTranscript(t, tc.calls, 100, tc.words)
 		input, allocated, cpu := buildMeasured(t, path, line)

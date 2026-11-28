@@ -117,6 +117,17 @@ func runTestDaemon() int {
 	starts := os.Getenv(daemonStartsEnv)
 	appendTestLine(starts, fmt.Sprintf("start %s %d", Version, os.Getpid()))
 	if crash := os.Getenv(daemonCrashEnv); crash != "" {
+		// Демон, поднятый systemd после падения, застаёт флаг и ждёт, пока
+		// тест его снимет: вызов в это окно детерминированно уходит в CLI, а
+		// сам демон не падает повторно
+		if _, err := os.Stat(crash); err == nil {
+			appendTestLine(starts, fmt.Sprintf("wait %s %d", Version, os.Getpid()))
+			for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+				if _, err := os.Stat(crash); errors.Is(err, os.ErrNotExist) {
+					break
+				}
+			}
+		}
 		go func() {
 			for {
 				if _, err := os.Stat(crash); err == nil {
@@ -1103,7 +1114,8 @@ func unitProperties(t *testing.T, name, section string, skip ...string) []string
 }
 
 // startSocketUnit поднимает временную пару socket+service с именем
-// prefix-<pid>-<n> и свойствами боевых unit (кроме ExecStart): демон —
+// prefix-<pid>-<n> и свойствами боевых unit (кроме ExecStart, Description и
+// зависимостей Requires/After): демон —
 // бинарь exe в роли тестового демона с журналом стартов home/starts и
 // переменными extraEnv. Уборка unit — в t.Cleanup; настоящий chooks.service
 // не трогается
@@ -1296,114 +1308,100 @@ func TestSystemdSocketUnit(t *testing.T) {
 	t.Logf("starts:\n%s\nfallbacks: %q; daemon unavailable: %d", readFile(t, filepath.Join(home, "starts")), lines(readFile(t, runs)), len(unavailable))
 }
 
-// TestSystemdCrashRestart проверяет падение процесса демона, Restart=on-failure
-// и выполнение следующего хука через перезапущенный демон либо CLI fallback.
+// TestSystemdCrashRestart — падение демона (тикет hooks-daemon): демон под
+// временным socket unit со свойствами боевого падает — выход с кодом 3 по
+// флагу, тестовый флаг падения вместо сигнала (dev-process, «Тестирование»).
+// Поднятый systemd демон ждёт, пока тест снимет флаг, поэтому следующий хук
+// детерминированно уходит в CLI: там он судится по-настоящему (отказ
+// model_guard), уход записан в fallbacks.json, сокет пережил падение (нет
+// причины connect:). Затем хуки обслуживает новый процесс, а systemd
+// записал перезапуск по Restart=on-failure: сокетная активация NRestarts не
+// увеличивает (TestSystemdSocketUnit). Настоящий chooks.service не трогается
 func TestSystemdCrashRestart(t *testing.T) {
 	env := systemdUser(t)
 	home := t.TempDir()
-	writeFiles(t, home, map[string]string{".config/chooks/config.yaml": serveConfig})
+	writeFiles(t, home, map[string]string{".config/chooks/config.yaml": serveConfig, "approved": "opus claude-opus-5-5\n"})
 	exe := filepath.Join(home, "bin", "chooks")
 	installVersion(t, exe, "v1")
 	socket := filepath.Join(socketDir(t), "chooks.sock")
-	starts := filepath.Join(home, "starts")
-	crash := filepath.Join(home, "crash")
+	starts, crash := filepath.Join(home, "starts"), filepath.Join(home, "crash")
 	unit := startSocketUnit(t, env, home, exe, socket, "chooks-crash-test", daemonCrashEnv+"="+crash)
-	log := filepath.Join(home, ".claude", "logs", "chooks.log")
-	runs := filepath.Join(home, "cli-runs")
-	proxy := proxyEnv(t, absoluteEnv(home), socket, runs)
-	call := func() proxyRun {
+	log, runs := filepath.Join(home, ".claude", "logs", "chooks.log"), filepath.Join(home, "cli-runs")
+	proxy := append(proxyEnv(t, absoluteEnv(home), socket, runs), "MODELS_APPROVED="+filepath.Join(home, "approved"))
+	hook := func(input string) proxyRun {
 		t.Helper()
-		r := runBinary(t, proxyHelper, []string{hookPreToolUse}, proxy, home, []byte(preToolUseLS))
-		if r.code != exitAllowed {
-			t.Fatalf("pre-tool-use code %d stderr %q; want exitAllowed", r.code, r.stderr)
-		}
-		return r
+		return runBinary(t, proxyHelper, []string{hookPreToolUse}, proxy, home, []byte(input))
 	}
-	call()
-	served := servedBy(readFile(t, log), hookPreToolUse)
-	if len(served) == 0 || served[len(served)-1] != "v1" {
+	if r := hook(preToolUseLS); r.code != exitAllowed {
+		t.Fatalf("first call: code %d stderr %q", r.code, r.stderr)
+	}
+	if served := servedBy(readFile(t, log), hookPreToolUse); len(served) == 0 || served[len(served)-1] != "v1" {
 		t.Fatalf("initial request served by %v; want v1; log:\n%s", served, readFile(t, log))
 	}
 	firstPID := servedPID(t, starts, "v1")
-	if err := os.WriteFile(crash, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFiles(t, home, map[string]string{"crash": ""})
 	if !waitFor(t, 10*time.Second, func() bool {
 		return slices.Contains(lines(readFile(t, starts)), fmt.Sprintf("crash v1 %d", firstPID))
 	}) {
-		t.Fatalf("daemon did not record crash; starts:\n%s", readFile(t, starts))
+		t.Fatalf("daemon did not crash; starts:\n%s", readFile(t, starts))
 	}
+
+	// Следующий хук — по запасному пути, и он там судится, а не проходит
+	// по умолчанию
+	refused := hook(`{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Agent","tool_input":{"model":"haiku","prompt":"p"}}`)
+	if refused.code != exitBlocked || !strings.Contains(refused.stderr, "haiku") {
+		t.Fatalf("hook after the crash: code %d stderr %q; want the model_guard refusal", refused.code, refused.stderr)
+	}
+	reasons := lines(readFile(t, runs))
+	if len(reasons) != 1 || !hookproxy.Unavailable(reasons[0]) || strings.HasPrefix(reasons[0], "connect:") {
+		t.Fatalf("CLI fallback reasons %q; want one daemon-unavailable reason with the socket alive", reasons)
+	}
+	statePath := filepath.Join(home, "state", "chooks", fallbackwatch.FileName)
+	var state struct {
+		Events []fallbackwatch.Event `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(readFile(t, statePath)), &state); err != nil {
+		t.Fatalf("%s: %v", fallbackwatch.FileName, err)
+	}
+	if len(state.Events) != 1 || state.Events[0].Hook != hookPreToolUse || state.Events[0].Reason != reasons[0] {
+		t.Fatalf("%s events %+v; want one %s event with reason %q", fallbackwatch.FileName, state.Events, hookPreToolUse, reasons[0])
+	}
+
 	if err := os.Remove(crash); err != nil {
 		t.Fatal(err)
 	}
-
-	// Вызов во время RestartSec может уйти в CLI. Любой исход должен разрешить
-	// хук; затем повторы ждут реального обслуживания новым процессом демона.
-	beforeServed := len(servedBy(readFile(t, log), hookPreToolUse))
-	call()
 	newPID := 0
-	servedAgain := waitFor(t, 20*time.Second, func() bool {
-		call()
+	if !waitFor(t, 20*time.Second, func() bool {
+		served, fallbacks := len(servedBy(readFile(t, log), hookPreToolUse)), len(lines(readFile(t, runs)))
+		if r := hook(preToolUseLS); r.code != exitAllowed {
+			t.Errorf("call after restart: code %d stderr %q", r.code, r.stderr)
+			return false
+		}
 		for _, line := range lines(readFile(t, starts)) {
-			fields := strings.Fields(line)
-			if len(fields) == 3 && fields[0] == "start" && fields[1] == "v1" {
-				pid, err := strconv.Atoi(fields[2])
-				if err != nil {
-					t.Errorf("invalid daemon pid in %q: %v", line, err)
-					return false
-				}
-				if pid != firstPID {
-					newPID = pid
-				}
+			if fields := strings.Fields(line); len(fields) == 3 && fields[0] == "start" && fields[2] != strconv.Itoa(firstPID) {
+				newPID, _ = strconv.Atoi(fields[2])
 			}
 		}
-		current := servedBy(readFile(t, log), hookPreToolUse)
-		return newPID > 0 && len(current) > beforeServed
-	})
-	if !servedAgain {
-		t.Fatalf("no request served by restarted daemon within 20s; starts:\n%s\nlog:\n%s",
-			readFile(t, starts), readFile(t, log))
+		return newPID > 0 && len(servedBy(readFile(t, log), hookPreToolUse)) > served && len(lines(readFile(t, runs))) == fallbacks
+	}) {
+		t.Fatalf("no request served by a restarted daemon within 20s; starts:\n%s\nfallbacks: %q", readFile(t, starts), lines(readFile(t, runs)))
 	}
-	if newPID == 0 || newPID == firstPID {
-		t.Fatalf("no restarted daemon with a new pid; starts:\n%s", readFile(t, starts))
-	}
-	var restarts, result, mainStatus string
-	show := exec.Command("systemctl", "--user", "show", "-p", "NRestarts", "-p", "Result", "-p", "ExecMainStatus", unit+".service")
+	show := exec.Command("systemctl", "--user", "show", "-p", "NRestarts", "-p", "MainPID", unit+".service")
 	show.Env = env
-	if out, err := show.CombinedOutput(); err != nil {
+	out, err := show.CombinedOutput()
+	if err != nil {
 		t.Fatalf("systemctl show after crash: %v: %s", err, out)
-	} else {
-		properties := make(map[string]string)
-		for _, line := range lines(string(out)) {
-			key, value, ok := strings.Cut(line, "=")
-			if ok {
-				properties[key] = value
-			}
-		}
-		restarts, result, mainStatus = properties["NRestarts"], properties["Result"], properties["ExecMainStatus"]
 	}
-	// ExecMainStatus и Result — у нынешнего, поднятого процесса; падение
-	// прошлого systemd записывает счётчиком перезапусков Restart=on-failure
-	if n, err := strconv.Atoi(restarts); err != nil || n < 1 {
-		t.Fatalf("systemd did not record daemon failure: NRestarts=%q Result=%q ExecMainStatus=%q; starts:\n%s",
-			restarts, result, mainStatus, readFile(t, starts))
-	}
-	// Если любой вызов после аварии ушёл в CLI, он обязан быть отражён в
-	// fallbacks.json так же, как остальные CLI fallback сценарии.
-	if got := lines(readFile(t, runs)); len(got) > 0 {
-		statePath := filepath.Join(home, "state", "chooks", fallbackwatch.FileName)
-		var state struct {
-			Events []fallbackwatch.Event `json:"events"`
-		}
-		if err := json.Unmarshal([]byte(readFile(t, statePath)), &state); err != nil {
-			t.Fatalf("fallbacks.json: %v", err)
-		}
-		if len(state.Events) < len(got) {
-			t.Fatalf("fallbacks.json has %d events for %d CLI calls: %s", len(state.Events), len(got), readFile(t, statePath))
+	properties := map[string]string{}
+	for _, line := range lines(string(out)) {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			properties[key] = value
 		}
 	}
-	t.Logf("systemctl show after crash: NRestarts=%s Result=%s ExecMainStatus=%s; starts:\n%s; CLI fallbacks=%q",
-		restarts, result, mainStatus, readFile(t, starts), lines(readFile(t, runs)))
+	if n, err := strconv.Atoi(properties["NRestarts"]); err != nil || n < 1 || properties["MainPID"] != strconv.Itoa(newPID) {
+		t.Fatalf("systemd after the crash: %v; want NRestarts >= 1 and MainPID %d; starts:\n%s", properties, newPID, readFile(t, starts))
+	}
+	t.Logf("systemd: %v; fallback: %q; starts:\n%s", properties, reasons, readFile(t, starts))
 }
 
 // servedPID — pid запуска version из журнала стартов

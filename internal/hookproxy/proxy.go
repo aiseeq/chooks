@@ -106,7 +106,8 @@ type termState struct {
 }
 
 // afterCommitWrite — точка расширения для детерминированного теста гонки.
-// В обычном процессе nil; вызывается под term.mu после отправки 'C'.
+// В обычном процессе nil; вызывается в writeCommit сразу после отправки 'C',
+// поэтому вместе с записью остаётся под term.mu или вне его
 var afterCommitWrite func()
 
 // beforeCommitWrite — тестовая точка синхронизации перед отправкой 'C'.
@@ -204,10 +205,7 @@ func (p *proxy) run() int {
 	// одним замком: SIGTERM между ними иначе выходил без 'T' — демон отменял
 	// запрос по EOF, но записывал его как оборванный прокси, а не killed
 	p.term.mu.Lock()
-	commitErr := writeAll(p.fd, []byte{hookwire.Commit}, deadline)
-	if afterCommitWrite != nil {
-		afterCommitWrite()
-	}
+	commitErr := writeCommit(p.fd, deadline)
 	p.term.committed = commitErr == nil
 	p.term.mu.Unlock()
 	if commitErr != nil {
@@ -526,6 +524,16 @@ func remaining(deadline time.Time) (time.Duration, error) {
 
 // writeAll пишет b целиком до срока; MSG_NOSIGNAL — закрытый демоном сокет
 // даёт EPIPE, а не SIGPIPE
+// writeCommit отправляет 'C'. Точка afterCommitWrite — здесь, а не у вызова:
+// запись, вынесенная из-под замка, уносит окно теста с собой
+func writeCommit(fd int, deadline time.Time) error {
+	err := writeAll(fd, []byte{hookwire.Commit}, deadline)
+	if afterCommitWrite != nil {
+		afterCommitWrite()
+	}
+	return err
+}
+
 func writeAll(fd int, b []byte, deadline time.Time) error {
 	for len(b) > 0 {
 		d, err := remaining(deadline)

@@ -541,6 +541,10 @@ func TestSIGTERMBeforeCommitDoesNotTellDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer window.Close()
+	// Прокси, не дошедший до точки перед 'C', не должен вешать тест до -timeout
+	if err := window.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	result := make(chan error, 1)
 	d := startFake(t, func(conn *net.UnixConn, _ hookwire.Request) {
 		_, _ = conn.Write([]byte{hookwire.Accepted})

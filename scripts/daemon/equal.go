@@ -552,6 +552,7 @@ type observed struct {
 	code           int
 	stdout, stderr string
 	files          map[string]string
+	elapsed        time.Duration
 }
 
 type equalRun struct {
@@ -559,6 +560,7 @@ type equalRun struct {
 	socket, wrapper string
 	fallbackLog     string
 	invocations     int
+	timingLines     []string
 }
 
 func (r *equalRun) invoke(binary string, c *eqCase) (result observed, reason string, retErr error) {
@@ -623,7 +625,7 @@ func (r *equalRun) invoke(binary string, c *eqCase) (result observed, reason str
 	if err != nil {
 		return observed{}, "", err
 	}
-	return observed{code: o.code, stdout: string(normalizeSandbox(o.stdout, o.pid, s.root)), stderr: string(normalizeSandbox(o.stderr, o.pid, s.root)), files: files}, reason, nil
+	return observed{code: o.code, stdout: string(normalizeSandbox(o.stdout, o.pid, s.root)), stderr: string(normalizeSandbox(o.stderr, o.pid, s.root)), files: files, elapsed: o.elapsed}, reason, nil
 }
 
 func installFixtures(s sandbox, fixtures map[string]string) error {
@@ -785,7 +787,7 @@ func decisionBranch(hook string, result observed) string {
 	}
 }
 
-func compareCases(r equalRun, cli, proxy string, cases []eqCase) ([]string, int, int, map[string][]string, map[string]hookEqualStats, error) {
+func compareCases(r *equalRun, cli, proxy string, cases []eqCase) ([]string, int, int, map[string][]string, map[string]hookEqualStats, error) {
 	var lines []string
 	mismatches, served := 0, 0
 	fallbacks := map[string][]string{}
@@ -816,6 +818,7 @@ func compareCases(r equalRun, cli, proxy string, cases []eqCase) ([]string, int,
 		if err != nil {
 			return nil, mismatches, served, fallbacks, byHook, err
 		}
+		r.timingLines = append(r.timingLines, fmt.Sprintf("timing %s: CLI %.3f ms, proxy+daemon %.3f ms", c.name, float64(want.elapsed.Microseconds())/1000, float64(got.elapsed.Microseconds())/1000))
 		if reason == "" {
 			served++
 			stats.served++
@@ -903,6 +906,7 @@ func runEqual(argv []string) (code int, retErr error) {
 	extraSuite := fsFlags.String("extra-suite", "equal", "набор дополнительного корпуса: equal или equal2")
 	suite := fsFlags.String("suite", "both", "корпус: equal, equal2 или both")
 	report := fsFlags.String("report", "", "файл отчёта о расхождениях")
+	timings := fsFlags.Bool("timings", false, "печатать время CLI и прокси для каждого входа")
 	if err := fsFlags.Parse(argv); err != nil {
 		return 2, fmt.Errorf("flags: %w", err)
 	}
@@ -941,7 +945,7 @@ func runEqual(argv []string) (code int, retErr error) {
 		return 2, err
 	}
 	r.socket = d.socket
-	lines, mismatches, served, fallbacks, byHook, runErr := compareCases(r, bin.cli, bin.proxy, cases)
+	lines, mismatches, served, fallbacks, byHook, runErr := compareCases(&r, bin.cli, bin.proxy, cases)
 	daemonExit := d.stop()
 	if runErr != nil {
 		return 2, runErr
@@ -964,6 +968,11 @@ func runEqual(argv []string) (code int, retErr error) {
 	}
 	head = append(head, fmt.Sprintf("daemon exit: %d", daemonExit))
 	fmt.Println(strings.Join(head, "\n"))
+	if *timings {
+		for _, line := range r.timingLines {
+			fmt.Println(line)
+		}
+	}
 	if *report != "" {
 		if err := os.WriteFile(*report, []byte(strings.Join(append(head, lines...), "\n")+"\n"), 0o600); err != nil {
 			return 2, fmt.Errorf("report: %w", err)

@@ -117,7 +117,7 @@ func compareWithScripts(t *testing.T, cliScript, proxyScript string, c eqCase) (
 	if err := os.WriteFile(fallback, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	lines, mismatches, _, _, _, err := compareCases(equalRun{sandbox: filepath.Join(root, "sandboxes"), fallbackLog: fallback}, cli, proxy, []eqCase{c})
+	lines, mismatches, _, _, _, err := compareCases(&equalRun{sandbox: filepath.Join(root, "sandboxes"), fallbackLog: fallback}, cli, proxy, []eqCase{c})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,10 +132,37 @@ func TestCompareCasesChecksExpectedBranchLabel(t *testing.T) {
 }
 
 func TestCompareCasesUsesSameSandboxRootForBothSides(t *testing.T) {
-	script := `basename "$(dirname "$PWD")"`
-	_, mismatches := compareWithScripts(t, script, script, eqCase{name: "same sandbox", suite: "equal", cmd: "test-hook"})
+	root := t.TempDir()
+	cli, proxy := filepath.Join(root, "cli"), filepath.Join(root, "proxy")
+	trace := filepath.Join(root, "roots.log")
+	script := `sandbox=$(basename "$(dirname "$PWD")"); printf '%s\n' "$sandbox" >> "$TRACE"; printf '%s' "$sandbox"`
+	for path := range map[string]bool{cli: true, proxy: true} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fallback := filepath.Join(root, "fallbacks.log")
+	if err := os.WriteFile(fallback, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []eqCase{
+		{name: "first sandbox", suite: "equal", cmd: "test-hook", env: map[string]string{"TRACE": trace}},
+		{name: "second sandbox", suite: "equal", cmd: "test-hook", env: map[string]string{"TRACE": trace}},
+	}
+	_, mismatches, _, _, _, err := compareCases(&equalRun{sandbox: filepath.Join(root, "sandboxes"), fallbackLog: fallback}, cli, proxy, cases)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if mismatches != 0 {
 		t.Fatalf("same-root CLI/proxy mismatch = %d", mismatches)
+	}
+	got, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Fields(string(got))
+	if len(lines) != 4 || lines[0] != lines[1] || lines[2] != lines[3] || lines[0] == lines[2] {
+		t.Fatalf("sandbox roots (CLI, proxy per case) = %q, want equal pairs and distinct cases", lines)
 	}
 }
 
@@ -366,7 +393,7 @@ func TestCompareCasesCountsRealDifferences(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := equalRun{sandbox: filepath.Join(root, "sandbox"), fallbackLog: fallback}
-	_, mismatches, _, _, byHook, err := compareCases(r, cli, proxy, []eqCase{{name: "mismatch", suite: "equal", cmd: "understand-check"}})
+	_, mismatches, _, _, byHook, err := compareCases(&r, cli, proxy, []eqCase{{name: "mismatch", suite: "equal", cmd: "understand-check"}})
 	if err != nil {
 		t.Fatal(err)
 	}

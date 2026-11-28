@@ -270,13 +270,25 @@ const noticeSeparator = "\n\n"
 
 func (n *Notice) format(loc *time.Location) string {
 	var subject, reload string
+	// Файл изменён не позже, чем текст попал в контекст: Claude Code отдал
+	// старую копию (субагенту — CLAUDE.md из кеша родителя), «после того»
+	// было бы неправдой
+	stale := !n.ChangedAt.After(n.LoadedAt)
 	if n.Kind == kindSkill {
 		subject = fmt.Sprintf("Скилл %s изменён после того, как попал тебе в контекст (текст в контексте от %s, файл изменён %s)",
 			n.Name, timeIn(n.LoadedAt, loc), timeIn(n.ChangedAt, loc))
+		if stale {
+			subject = fmt.Sprintf("Текст скилла %s у тебя в контексте старше файла: Claude Code передал старую копию (текст попал в контекст %s, файл изменён %s)",
+				n.Name, timeIn(n.LoadedAt, loc), timeIn(n.ChangedAt, loc))
+		}
 		reload = fmt.Sprintf("Вызови Skill %s заново, прежде чем работать по нему.", n.Name)
 	} else {
 		subject = fmt.Sprintf("Файл инструкций %s изменён на диске после того, как попал тебе в контекст (текст в контексте от %s, файл изменён %s)",
 			n.Path, timeIn(n.LoadedAt, loc), timeIn(n.ChangedAt, loc))
+		if stale {
+			subject = fmt.Sprintf("Текст файла инструкций %s у тебя в контексте старше файла: Claude Code передал старую копию (текст попал в контекст %s, файл изменён %s)",
+				n.Path, timeIn(n.LoadedAt, loc), timeIn(n.ChangedAt, loc))
+		}
 		reload = fmt.Sprintf("Перечитай его (Read %s), прежде чем работать дальше.", n.Path)
 	}
 	switch {

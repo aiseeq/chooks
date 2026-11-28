@@ -1224,7 +1224,12 @@ func TestDaemonOutsideShadowHooksMatchCLI(t *testing.T) {
 			} else if diff := diffOutcome(outcomeOf(t, cliFixture, cli), outcomeOf(t, proxyFixture, proxied)); diff != "" {
 				t.Fatalf("daemon differs from CLI: %s", diff)
 			}
-			if tc.command == hookPostToolBatch && (!strings.Contains(cli.stdout, "Скилл demo") || !strings.Contains(proxied.stdout, "Скилл demo")) {
+			// Подпись зависит от порядка времён: метки транскрипта фикстуры —
+			// 2999 год, позже mtime файла, и выдача говорит о старой копии
+			reminded := func(stdout string) bool {
+				return strings.Contains(stdout, "Скилл demo") || strings.Contains(stdout, "Текст скилла demo")
+			}
+			if tc.command == hookPostToolBatch && (!reminded(cli.stdout) || !reminded(proxied.stdout)) {
 				t.Fatalf("skill reminder not exercised: cli=(code %d stdout %q stderr %q log %q) proxy=(code %d stdout %q stderr %q log %q)", cli.code, cli.stdout, cli.stderr, readFile(t, filepath.Join(cliFixture.root, "home", ".claude", "logs", "chooks.log")), proxied.code, proxied.stdout, proxied.stderr, readFile(t, filepath.Join(proxyFixture.root, "home", ".claude", "logs", "chooks.log")))
 			}
 			if fallback := lines(readFile(t, proxyRuns)); len(fallback) != 0 {

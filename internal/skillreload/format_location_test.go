@@ -65,3 +65,28 @@ func TestCheckerBudgetInRequestLocation(t *testing.T) {
 		t.Errorf("при бюджете ровно под текст в поясе запроса правка не показана целиком: %+v", got)
 	}
 }
+
+// Claude Code отдаёт субагенту CLAUDE.md из кеша родителя: текст в контексте
+// старше файла, хотя попал туда позже его правки (тикет
+// inventory-instruction-time-1128, субагенты 13d1062b 28.11 02:56). Правка
+// верна, подпись «изменён после того, как попал» — нет
+func TestStaleCopyNoticeSaysCopyIsOlder(t *testing.T) {
+	base := time.Date(2026, 11, 27, 20, 27, 0, 0, time.UTC)
+	f := newFixture(t)
+	f.writeSkill("# А\nновое.", base)
+	f.load("# А\nстарое.", base.Add(5*time.Hour))
+	notices := f.check(Event{})
+	if len(notices) != 1 || notices[0].Diff == "" {
+		t.Fatalf("ждали правку к старой копии, получили %+v", notices)
+	}
+	for _, n := range []Notice{notices[0], {Kind: kindMemory, Path: "/home/u/.claude/CLAUDE.md", LoadedAt: base.Add(5 * time.Hour), ChangedAt: base}} {
+		text := FormatIn([]Notice{n}, time.UTC)
+		if strings.Contains(text, "после того") || !strings.Contains(text, "старше файла") {
+			t.Errorf("подпись к старой копии: %s", text)
+		}
+	}
+	fresh := FormatIn([]Notice{{Kind: kindSkill, Name: "demo", LoadedAt: base, ChangedAt: base.Add(time.Minute)}}, time.UTC)
+	if !strings.Contains(fresh, "изменён после того, как попал тебе в контекст") {
+		t.Errorf("подпись к правке после загрузки: %s", fresh)
+	}
+}

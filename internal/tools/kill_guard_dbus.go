@@ -621,7 +621,7 @@ func systemdMethod(method string) bool {
 }
 
 // dbusHint подсказка к отказу на вызов D-Bus, который не разобрать
-const dbusHint = "Назови получателя, объект, метод и юнит литералами — или останови юнит через systemctl с юнитом литералом: systemctl --user stop юнит"
+const dbusHint = "Назови получателя, объект, метод и юнит литералами — или останови только свой юнит, который запустил сам: systemctl --user stop юнит; чужое не трогай, сообщи в ответе"
 
 // systemdUnitPath путь объекта юнита systemd
 const systemdUnitPath = "/org/freedesktop/systemd1/unit/"

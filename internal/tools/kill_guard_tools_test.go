@@ -191,19 +191,46 @@ func TestKillGuardHintsContainNoBareSignalCommands(t *testing.T) {
 		_, hint := agentUnitReason("--user", name)
 		hints = append(hints, struct{ name, text string }{"юнит " + name, hint})
 	}
+	systemdRunHint := ""
 	for _, commandText := range []string{`systemd-run --user kill 1`} {
 		result := validateKill(t, commandText)
 		for _, hint := range result.Suggestions {
 			if strings.HasPrefix(hint, "Без systemd-run:") {
+				systemdRunHint = hint
 				hints = append(hints, struct{ name, text string }{"systemd-run сигнал", hint})
 			}
 		}
+	}
+	if systemdRunHint == "" || !strings.Contains(systemdRunHint, "pstop PID") {
+		t.Errorf("подсказка systemd-run должна быть непустой и предлагать pstop PID: %q", systemdRunHint)
 	}
 	fuserRefusal := fuserReason([]word{{text: "-k", literal: true}, {text: "/tmp/app.sock", literal: true}}, "")
 	hints = append(hints, struct{ name, text string }{"отказ fuser", fuserRefusal})
 	for _, hint := range hints {
 		if command.MatchString(hint.text) {
 			t.Errorf("подсказка %s содержит голую команду сигнала: %q", hint.name, hint.text)
+		}
+	}
+}
+
+func TestKillGuardManagerHintsSayOnlyOwnTargets(t *testing.T) {
+	result := validateKill(t, `systemd-run --user kill 1`)
+	systemdRunHint := ""
+	for _, hint := range result.Suggestions {
+		if strings.HasPrefix(hint, "Без systemd-run:") {
+			systemdRunHint = hint
+			break
+		}
+	}
+	hints := []struct{ name, text string }{
+		{"systemd-run контейнер", systemdRunHint},
+		{"D-Bus systemctl", dbusHint},
+		{"tmux", toolHints["tmux"]},
+		{"systemctl завершение", systemctlEndHint("systemctl --user", "exit")},
+	}
+	for _, hint := range hints {
+		if !strings.Contains(hint.text, "чужое не трогай") && !strings.Contains(hint.text, "чужую не трогай") {
+			t.Errorf("подсказка %s не ограничивает остановку своим объектом: %q", hint.name, hint.text)
 		}
 	}
 }

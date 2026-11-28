@@ -51,12 +51,15 @@ func privateSessionBus(t *testing.T) string {
 	}
 }
 
-// Соединение из requestSessionBus живёт после возврата: title.go зовёт по
-// нему Konsole (setKonsoleTitleOn). Срок подключения не закрывает его
+// Соединение из requestSessionBusContext живёт после отмены контекста:
+// title.go зовёт по нему Konsole (setKonsoleTitleOn). Отмена не закрывает его
 func TestRequestSessionBusConnUsable(t *testing.T) {
 	address := privateSessionBus(t)
 	req := hookctx.New(nil, nil, nil, []string{"DBUS_SESSION_BUS_ADDRESS=" + address}, "/", 1, 2)
-	conn, err := requestSessionBus(context.Background(), req)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := requestSessionBusContext(ctx, req)
+	cancel()
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

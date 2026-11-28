@@ -142,7 +142,7 @@ func (s *killScan) systemdRunSignalReason(c shellcmd.Call, calls []shellcmd.Call
 		return "", ""
 	}
 	return "systemd-run запускает " + name + " потомком systemd, а не агента: ядро (agent-signal-guard) его сигналы не сверяет, и он дотянется до процессов других агентов",
-		"Без systemd-run: найди PID (pgrep -a '[x]yz'); своего потомка останови pstop PID, осиротевшего своего из прошлого вызова попробуй pstop --own-unit PID; отказал — сигнал не шли. Юнит найди через systemctl --user list-units; контейнер — podman stop имя"
+		"Без systemd-run: найди PID (pgrep -a '[x]yz'); своего потомка останови pstop PID, осиротевшего своего из прошлого вызова попробуй pstop --own-unit PID; отказал — сигнал не шли. Юнит найди через systemctl --user list-units; podman stop имя — только если сам запустил контейнер; чужое не трогай, сообщи в ответе"
 }
 
 // hiddenTail конец причины отказа на невидимую команду под systemd-run

@@ -160,7 +160,7 @@ func (s *killScan) computedTool(c shellcmd.Call, args []word, via string, names 
 // toolHints подсказка к отказу на средство, где узкая цель — не PID: сессия
 // tmux, порт. У systemctl она своя по отказу (unitHint)
 var toolHints = map[string]string{
-	"tmux":  "Назови цель литералом: tmux kill-session -t имя",
+	"tmux":  "Назови цель литералом: tmux kill-session -t имя — только для своей сессии, которую запустил сам; чужую не трогай, сообщи в ответе",
 	"fuser": "Найди PID без сигнала: fuser 8080/tcp или ss -ltnp; проверь его и останови свой через pstop PID (осиротевший свой из прошлого вызова — попробуй pstop --own-unit PID)",
 }
 
@@ -195,7 +195,7 @@ func systemctlEndEffect(scope, verb string) string {
 // целиком (systemctl --user exit, systemctl poweroff, systemctl isolate):
 // подсказка про юнит из status тут не к месту
 func systemctlEndHint(scope, verb string) string {
-	return "Команда " + systemctlEndEffect(scope, verb) + ": такое запускает пользователь сам. Остановить один юнит без процессов сессии — назови его литералом: " + scope + " stop юнит"
+	return "Команда " + systemctlEndEffect(scope, verb) + ": такое запускает пользователь сам. Остановить один юнит, который ты запустил сам и где нет процессов сессии, — назови его литералом: " + scope + " stop юнит; чужое не трогай, сообщи в ответе"
 }
 
 // optionValue значение опции со значением: из слова (--signal=9, -s9) или

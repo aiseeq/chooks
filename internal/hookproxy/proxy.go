@@ -522,8 +522,6 @@ func remaining(deadline time.Time) (time.Duration, error) {
 	return d, nil
 }
 
-// writeAll пишет b целиком до срока; MSG_NOSIGNAL — закрытый демоном сокет
-// даёт EPIPE, а не SIGPIPE
 // writeCommit отправляет 'C'. Точка afterCommitWrite — здесь, а не у вызова:
 // запись, вынесенная из-под замка, уносит окно теста с собой
 func writeCommit(fd int, deadline time.Time) error {
@@ -534,6 +532,8 @@ func writeCommit(fd int, deadline time.Time) error {
 	return err
 }
 
+// writeAll пишет b целиком до срока; MSG_NOSIGNAL — закрытый демоном сокет
+// даёт EPIPE, а не SIGPIPE
 func writeAll(fd int, b []byte, deadline time.Time) error {
 	for len(b) > 0 {
 		d, err := remaining(deadline)

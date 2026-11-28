@@ -101,7 +101,7 @@ func TestExecMSIsolationAndFailure(t *testing.T) {
 	bin := filepath.Join(root, "mock.sh")
 	result := filepath.Join(root, "env.txt")
 	stdinCopy := filepath.Join(root, "stdin.txt")
-	content := "#!/usr/bin/env bash\necho 1\ncat >\"" + stdinCopy + "\"\nprintf '%s|%s|%s\\n' \"$HOME\" \"${KONSOLE_DBUS_SERVICE-unset}\" \"${CLAUDE_PID-unset}\" >\"$CHECK_FILE\"\nexit \"${MOCK_EXIT:-0}\"\n"
+	content := "#!/usr/bin/env bash\necho 1\ncat >\"" + stdinCopy + "\"\nprintf '%s|%s|%s|%s\\n' \"$HOME\" \"${KONSOLE_DBUS_SERVICE-unset}\" \"${CLAUDE_PID-unset}\" \"$(cat \"$HOME/.config/models/approved\" 2>/dev/null || echo missing)\" >\"$CHECK_FILE\"\nexit \"${MOCK_EXIT:-0}\"\n"
 	if err := os.WriteFile(bin, []byte(content), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +109,17 @@ func TestExecMSIsolationAndFailure(t *testing.T) {
 	if _, err := os.Stat(input); err != nil {
 		t.Fatal(err)
 	}
+	// Хук UserPromptSubmit сверяет модель сессии со списком одобренных: без копии списка
+	// во временном HOME он отказывает (код 2), и замер user-prompt-submit под сессией Claude падает
+	callerHome := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(callerHome, ".config", "models"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(callerHome, ".config", "models", "approved"), []byte("opus\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("./exec-ms.sh", "--bin", bin, "statusline", input)
-	cmd.Env = append(os.Environ(), "TMPDIR="+filepath.Join(root, "tmp"), "CHECK_FILE="+result, "KONSOLE_DBUS_SERVICE=must-be-removed", "CLAUDE_PID=must-be-removed")
+	cmd.Env = append(os.Environ(), "HOME="+callerHome, "TMPDIR="+filepath.Join(root, "tmp"), "CHECK_FILE="+result, "KONSOLE_DBUS_SERVICE=must-be-removed", "CLAUDE_PID=must-be-removed")
 	if err := os.Mkdir(filepath.Join(root, "tmp"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +135,7 @@ func TestExecMSIsolationAndFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	fields := strings.Split(strings.TrimSpace(string(data)), "|")
-	if len(fields) != 3 || fields[0] == os.Getenv("HOME") || fields[1] != "unset" || fields[2] != "unset" {
+	if len(fields) != 4 || fields[0] == callerHome || fields[1] != "unset" || fields[2] != "unset" || fields[3] != "opus" {
 		t.Fatalf("окружение mock бинаря: %q", data)
 	}
 

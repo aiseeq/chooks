@@ -37,6 +37,13 @@ unset KONSOLE_DBUS_SERVICE KONSOLE_DBUS_SESSION KONSOLE_DBUS_WINDOW CLAUDE_PID
 run_dir=$(mktemp -d -t chooks-perf.XXXXXX)
 trap 'rm -rf -- "$run_dir"' EXIT
 mkdir -p "$run_dir/state" "$run_dir/config" "$run_dir/runtime"
+# Хук UserPromptSubmit сверяет модель сессии Claude, из которой идёт замер, со списком
+# одобренных в $HOME: без копии списка он отказывает кодом 2 и замер падает
+approved="${HOME}/.config/models/approved"
+if [[ -f $approved ]]; then
+  mkdir -p "$run_dir/.config/models"
+  cp -- "$approved" "$run_dir/.config/models/approved"
+fi
 awk -v transcript="$transcript" -v repo="$repo" '{ gsub(/@TRANSCRIPT@/, transcript); gsub(/@REPO@/, repo); print }' "$input" >"$run_dir/input.json"
 
 # Прогоны и бюджет — умолчания timeit, они же из FORMAT.md ночного обхода perf:

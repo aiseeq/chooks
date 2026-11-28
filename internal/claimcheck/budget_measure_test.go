@@ -42,22 +42,31 @@ func longTurnTranscript(t *testing.T, calls, lines, words int) (string, int) {
 	return fixture(t, rows...), len(rows)
 }
 
-// Вход судьи на длинном ходе строится за секунды, а не за минуты: на
-// настоящем транскрипте 93 МБ сборка шла дольше 70 с. Мера — байты аллокаций
-// (TotalAlloc), они от нагрузки машины не зависят: процессорное время того же
-// хода — 5,9 с на тихой машине и 21 с в гейте под нагрузкой (27.11, тикет
-// claim-budget-test-flake). База за три прогона — 1 142 511 168–1 142 698 928
-// байт (разброс 0,02 %), предел 1,75 ГБ — запас ×1,53: удвоение работы его
-// пробивает. CPU — широкий потолок 60 с: аллокации могут не заметить прежний
-// кубический отбор, который тратил на этом ходе больше 300 с процессора
-func TestMeasureBuildInputLongTurn(t *testing.T) {
-	path, line := longTurnTranscript(t, 1500, 60, 5000)
+// Пределы мерных тестов сборки входа (тикет claim-budget-test-flake).
+// Работу меряют байты аллокаций (TotalAlloc): от нагрузки машины они не
+// зависят, разброс базы между прогонами — 0,02 %. Предел — база × 1,15, так
+// что удвоение любого этапа с долей байт больше 15 % его пробивает.
+// Процессорное время процесса от нагрузки зависит: длинный ход тратит 5,9 с
+// на тихой машине и 21 с в гейте при load 13. Поэтому CPU — только потолок
+// по бюджету хука: Stop — 100 с, судья v7 отвечал до 36 с (27.11), на сборку
+// остаётся около 60 с. Потолок 40 с ловит прежний кубический отбор (больше
+// 300 с) и не срабатывает от нагрузки гейта. Замедление без роста байт ниже
+// потолка тест не ловит: в бюджете хука оно не опасно. Сборка с -race
+// меряет не боевой код (байты +21 %, CPU ×5,4), там числа идут только в
+// журнал теста
+const (
+	allocMargin = 1.15
+	cpuCeiling  = 40 * time.Second
+)
+
+// buildMeasured — BuildInput с замером байт аллокаций и процессорного
+// времени процесса: тесты пакета идут без t.Parallel, соседей в замере нет
+func buildMeasured(t *testing.T, path string, line int) (*Input, uint64, time.Duration) {
+	t.Helper()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	cpuBefore := processCPU(t)
-	started := time.Now()
 	input, err := BuildInput(context.Background(), path, line, Options{})
-	took := time.Since(started)
 	cpu := processCPU(t) - cpuBefore
 	runtime.ReadMemStats(&after)
 	if err != nil {
@@ -66,43 +75,39 @@ func TestMeasureBuildInputLongTurn(t *testing.T) {
 	if input == nil || input.Answer == "" {
 		t.Fatalf("empty input: %+v", input)
 	}
-	mallocs, allocated := after.Mallocs-before.Mallocs, after.TotalAlloc-before.TotalAlloc
-	t.Logf("BuildInput %d calls: mallocs %d, allocated %d bytes, cpu %v, wall %v", 1500, mallocs, allocated, cpu, took)
-	if allocated > 1_750_000_000 {
-		t.Fatalf("BuildInput on a long turn allocated %d bytes, want at most 1750000000", allocated)
+	return input, after.TotalAlloc - before.TotalAlloc, cpu
+}
+
+// checkBuildBudget сверяет замер с базой байт base (верх трёх прогонов) и
+// потолком CPU
+func checkBuildBudget(t *testing.T, name string, allocated, base uint64, cpu time.Duration) {
+	t.Helper()
+	t.Logf("%s: allocated %d bytes (base %d), cpu %v", name, allocated, base, cpu)
+	if raceBuild {
+		return
 	}
-	if cpu > 60*time.Second {
-		t.Fatalf("BuildInput on a long turn used %v of CPU, want under 60s", cpu)
+	if limit := uint64(float64(base) * allocMargin); allocated > limit {
+		t.Errorf("%s allocated %d bytes, want at most %d (base %d × %.2f)", name, allocated, limit, base, allocMargin)
+	}
+	if cpu > cpuCeiling {
+		t.Errorf("%s used %v of CPU, want under %v", name, cpu, cpuCeiling)
 	}
 }
 
+// Вход судьи на длинном ходе строится за секунды, а не за минуты: на
+// настоящем транскрипте 93 МБ сборка шла дольше 70 с. База — 1 141 770 824–
+// 1 142 698 928 байт (28.11)
+func TestMeasureBuildInputLongTurn(t *testing.T) {
+	path, line := longTurnTranscript(t, 1500, 60, 5000)
+	_, allocated, cpu := buildMeasured(t, path, line)
+	checkBuildBudget(t, "BuildInput on a long turn (1500 calls)", allocated, 1_142_700_000, cpu)
+}
+
+// База — 404 756 392–405 348 664 байт (28.11)
 func TestMeasureExcerptManyLongOutputs(t *testing.T) {
-	// Мера та же, что у TestMeasureBuildInputLongTurn: база TotalAlloc за три
-	// прогона — 404 948 776–405 024 696 байт (разброс 0,02 %), предел 625 МБ —
-	// запас ×1,54; CPU — широкий потолок 60 с против катастрофической регрессии
 	path, line := longTurnTranscript(t, 40, 2000, 3000)
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	cpuBefore := processCPU(t)
-	started := time.Now()
-	input, err := BuildInput(context.Background(), path, line, Options{})
-	cpu := processCPU(t) - cpuBefore
-	runtime.ReadMemStats(&after)
-	took := time.Since(started)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if input == nil || input.Answer == "" {
-		t.Fatalf("empty input: %+v", input)
-	}
-	mallocs, allocated := after.Mallocs-before.Mallocs, after.TotalAlloc-before.TotalAlloc
-	t.Logf("BuildInput 40 calls × 2000 output lines, 3000 answer words: mallocs %d, allocated %d bytes, cpu %v, wall %v", mallocs, allocated, cpu, took)
-	if allocated > 625_000_000 {
-		t.Fatalf("BuildInput on many long outputs allocated %d bytes, want at most 625000000", allocated)
-	}
-	if cpu > 60*time.Second {
-		t.Fatalf("BuildInput on many long outputs used %v of CPU, want under 60s", cpu)
-	}
+	_, allocated, cpu := buildMeasured(t, path, line)
+	checkBuildBudget(t, "BuildInput on 40 calls × 2000 output lines", allocated, 405_350_000, cpu)
 }
 
 func longWriteTranscript(t *testing.T, calls, lines, words int) (string, int) {
@@ -134,27 +139,17 @@ func longWriteTranscript(t *testing.T, calls, lines, words int) (string, int) {
 	return fixture(t, rows...), len(rows)
 }
 
-// Длинные Write проверяют общий матчёр на строках больше лимита входа.
-// Предел оставляет не менее пятикратный запас относительно 11 с CPU на машине.
+// Длинные Write проверяют общий матчёр на строках больше лимита входа. База —
+// 106 133 864–106 158 768 байт (28.11)
 func TestMeasureBuildInputManyLongWrites(t *testing.T) {
 	for _, tc := range []struct {
 		calls, words int
-		cpuLimit     time.Duration
+		base         uint64
 	}{
-		{calls: 8, words: 1500, cpuLimit: 15 * time.Second},
+		{calls: 8, words: 1500, base: 106_160_000},
 	} {
 		path, line := longWriteTranscript(t, tc.calls, 100, tc.words)
-		cpuBefore := processCPU(t)
-		started := time.Now()
-		input, err := BuildInput(context.Background(), path, line, Options{})
-		cpu := processCPU(t) - cpuBefore
-		took := time.Since(started)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if input == nil || input.Answer == "" {
-			t.Fatalf("empty input: %+v", input)
-		}
+		input, allocated, cpu := buildMeasured(t, path, line)
 		writes := 0
 		croppedWrites := 0
 		for _, tool := range input.TurnTools {
@@ -171,10 +166,7 @@ func TestMeasureBuildInputManyLongWrites(t *testing.T) {
 		if croppedWrites == 0 {
 			t.Fatal("BuildInput retained no cropped long Write inputs")
 		}
-		t.Logf("BuildInput %d Write × 100 lines × ~600 chars, %d answer words (%d retained, %d cropped): cpu %v, wall %v", tc.calls, tc.words, writes, croppedWrites, cpu, took)
-		if cpu > tc.cpuLimit {
-			t.Fatalf("BuildInput on %d long Write inputs used %v of CPU, want under %v", tc.calls, cpu, tc.cpuLimit)
-		}
+		checkBuildBudget(t, fmt.Sprintf("BuildInput on %d Write × 100 lines × ~600 chars, %d answer words (%d retained, %d cropped)", tc.calls, tc.words, writes, croppedWrites), allocated, tc.base, cpu)
 	}
 }
 

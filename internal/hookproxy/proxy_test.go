@@ -28,8 +28,25 @@ const proxyHelper = "HOOKPROXY_TEST_MAIN"
 const proxyCloseStdout = "HOOKPROXY_TEST_CLOSE_STDOUT"
 const proxyMemfdFailureHelper = "HOOKPROXY_TEST_MEMFD_FAILURE"
 const proxyMemfdFailureLost = "HOOKPROXY_TEST_MEMFD_FAILURE_LOST"
+const proxyCommitWindow = "HOOKPROXY_TEST_COMMIT_WINDOW"
+const proxyBeforeCommitSocket = "HOOKPROXY_TEST_BEFORE_COMMIT_SOCKET"
 
 func TestMain(m *testing.M) {
+	if path := os.Getenv(proxyBeforeCommitSocket); path != "" {
+		beforeCommitWrite = func() {
+			conn, err := net.Dial("unix", path)
+			if err != nil {
+				panic(err)
+			}
+			defer conn.Close()
+			_, _ = conn.Write([]byte{'R'})
+			var release [1]byte
+			_, _ = io.ReadFull(conn, release[:])
+		}
+	}
+	if os.Getenv(proxyCommitWindow) == "1" {
+		afterCommitWrite = func() { time.Sleep(300 * time.Millisecond) }
+	}
 	if os.Getenv(proxyMemfdFailureHelper) == "1" {
 		var limit unix.Rlimit
 		if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
@@ -481,7 +498,7 @@ func TestSIGTERMAfterCommitTellsDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(exe, "webfetch-fallback")
-	cmd.Env = append(os.Environ(), proxyHelper+"=1", EnvSocket+"="+d.path, EnvCLI+"="+stub.path)
+	cmd.Env = append(os.Environ(), proxyHelper+"=1", proxyCommitWindow+"=1", EnvSocket+"="+d.path, EnvCLI+"="+stub.path)
 	cmd.Stdin = strings.NewReader(`{}`)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -510,6 +527,57 @@ func TestSIGTERMAfterCommitTellsDaemon(t *testing.T) {
 	}
 	if b := <-got; b != hookwire.Terminate {
 		t.Fatalf("daemon got %q, want 'T'", b)
+	}
+	if calls := stub.calls(t); len(calls) != 0 {
+		t.Fatalf("CLI called: %q", calls)
+	}
+}
+
+func TestSIGTERMBeforeCommitDoesNotTellDaemon(t *testing.T) {
+	dir := t.TempDir()
+	windowPath := filepath.Join(dir, "window.sock")
+	window, err := net.ListenUnix("unix", &net.UnixAddr{Name: windowPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer window.Close()
+	result := make(chan error, 1)
+	d := startFake(t, func(conn *net.UnixConn, _ hookwire.Request) {
+		_, _ = conn.Write([]byte{hookwire.Accepted})
+		_, err := readByte(conn, 5*time.Second)
+		result <- err
+	})
+	stub := newCLIStub(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "webfetch-fallback")
+	cmd.Env = append(os.Environ(), proxyHelper+"=1", proxyBeforeCommitSocket+"="+windowPath, EnvSocket+"="+d.path, EnvCLI+"="+stub.path)
+	cmd.Stdin = strings.NewReader(`{}`)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := window.AcceptUnix()
+	if err != nil {
+		_, _ = proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() })
+		_ = cmd.Wait()
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if b, err := readByte(conn, 5*time.Second); err != nil || b != 'R' {
+		t.Fatalf("before-commit handshake: %q %v", b, err)
+	}
+	if _, err := proc.StopChild(cmd.Process.Pid, time.Second, func() error { return cmd.Process.Signal(syscall.SIGTERM) }); err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Wait()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != KilledExitCode {
+		t.Fatalf("proxy exit %v, want code %d", err, KilledExitCode)
+	}
+	if err := <-result; !errors.Is(err, io.EOF) {
+		t.Fatalf("daemon read before commit: %v, want EOF", err)
 	}
 	if calls := stub.calls(t); len(calls) != 0 {
 		t.Fatalf("CLI called: %q", calls)

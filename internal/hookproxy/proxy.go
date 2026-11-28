@@ -105,6 +105,13 @@ type termState struct {
 	committed bool // 'C' отправлен: исполнение у демона
 }
 
+// afterCommitWrite — точка расширения для детерминированного теста гонки.
+// В обычном процессе nil; вызывается под term.mu после отправки 'C'.
+var afterCommitWrite func()
+
+// beforeCommitWrite — тестовая точка синхронизации перед отправкой 'C'.
+var beforeCommitWrite func()
+
 // watchTerm — SIGTERM от Claude Code (таймаут хука или отмена хода). После
 // 'C' прокси сообщает демону 'T': демон пишет исход «killed» или «cancelled»,
 // как CLI на SIGTERM, и отменяет запрос. Выход — KilledExitCode, как у CLI.
@@ -189,12 +196,18 @@ func (p *proxy) run() int {
 		p.close()
 		return p.fallback(stdin, true, ackPrefix+"unexpected byte")
 	}
+	if beforeCommitWrite != nil {
+		beforeCommitWrite()
+	}
 	// «Принято» пришло в срок: 'C' отдаёт исполнение демону. Не ушло — демон
 	// запрос не исполнит, CLI его исполнит один раз. Запись 'C' и флаг — под
 	// одним замком: SIGTERM между ними иначе выходил без 'T' — демон отменял
 	// запрос по EOF, но записывал его как оборванный прокси, а не killed
 	p.term.mu.Lock()
 	commitErr := writeAll(p.fd, []byte{hookwire.Commit}, deadline)
+	if afterCommitWrite != nil {
+		afterCommitWrite()
+	}
 	p.term.committed = commitErr == nil
 	p.term.mu.Unlock()
 	if commitErr != nil {

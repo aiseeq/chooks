@@ -1332,12 +1332,33 @@ func TestSystemdCrashRestart(t *testing.T) {
 		t.Helper()
 		return runBinary(t, proxyHelper, []string{hookPreToolUse}, proxy, home, []byte(input))
 	}
-	if r := hook(preToolUseLS); r.code != exitAllowed {
-		t.Fatalf("first call: code %d stderr %q", r.code, r.stderr)
+	statePath := filepath.Join(home, "state", "chooks", fallbackwatch.FileName)
+	events := func() []fallbackwatch.Event {
+		t.Helper()
+		var state struct {
+			Events []fallbackwatch.Event `json:"events"`
+		}
+		if data := readFile(t, statePath); data != "" {
+			if err := json.Unmarshal([]byte(data), &state); err != nil {
+				t.Fatalf("%s: %v", fallbackwatch.FileName, err)
+			}
+		}
+		return state.Events
 	}
-	if served := servedBy(readFile(t, log), hookPreToolUse); len(served) == 0 || served[len(served)-1] != "v1" {
-		t.Fatalf("initial request served by %v; want v1; log:\n%s", served, readFile(t, log))
+	// Холодный старт под нагрузкой может истечь ack (100 мс): прогрев до
+	// вызова, обслуженного демоном; уходы прогрева в счёт падения не идут
+	if !waitFor(t, 20*time.Second, func() bool {
+		if r := hook(preToolUseLS); r.code != exitAllowed {
+			t.Errorf("warm-up call: code %d stderr %q", r.code, r.stderr)
+			return false
+		}
+		served := servedBy(readFile(t, log), hookPreToolUse)
+		return len(served) > 0 && served[len(served)-1] == "v1"
+	}) {
+		t.Fatalf("v1 never served a request; fallbacks %q; log:\n%s", lines(readFile(t, runs)), readFile(t, log))
 	}
+	warmRuns, warmEvents := len(lines(readFile(t, runs))), len(events())
+	warmLogged := strings.Count(readFile(t, log), `msg="hook via CLI fallback"`)
 	firstPID := servedPID(t, starts, "v1")
 	writeFiles(t, home, map[string]string{"crash": ""})
 	if !waitFor(t, 10*time.Second, func() bool {
@@ -1352,19 +1373,15 @@ func TestSystemdCrashRestart(t *testing.T) {
 	if refused.code != exitBlocked || !strings.Contains(refused.stderr, "haiku") {
 		t.Fatalf("hook after the crash: code %d stderr %q; want the model_guard refusal", refused.code, refused.stderr)
 	}
-	reasons := lines(readFile(t, runs))
+	reasons := lines(readFile(t, runs))[warmRuns:]
 	if len(reasons) != 1 || !hookproxy.Unavailable(reasons[0]) || strings.HasPrefix(reasons[0], "connect:") {
 		t.Fatalf("CLI fallback reasons %q; want one daemon-unavailable reason with the socket alive", reasons)
 	}
-	statePath := filepath.Join(home, "state", "chooks", fallbackwatch.FileName)
-	var state struct {
-		Events []fallbackwatch.Event `json:"events"`
+	if got := events()[warmEvents:]; len(got) != 1 || got[0].Hook != hookPreToolUse || got[0].Reason != reasons[0] {
+		t.Fatalf("%s events %+v; want one %s event with reason %q", fallbackwatch.FileName, got, hookPreToolUse, reasons[0])
 	}
-	if err := json.Unmarshal([]byte(readFile(t, statePath)), &state); err != nil {
-		t.Fatalf("%s: %v", fallbackwatch.FileName, err)
-	}
-	if len(state.Events) != 1 || state.Events[0].Hook != hookPreToolUse || state.Events[0].Reason != reasons[0] {
-		t.Fatalf("%s events %+v; want one %s event with reason %q", fallbackwatch.FileName, state.Events, hookPreToolUse, reasons[0])
+	if logged := strings.Count(readFile(t, log), `msg="hook via CLI fallback"`) - warmLogged; logged != 1 {
+		t.Fatalf("chooks.log has %d new CLI fallback lines; want 1", logged)
 	}
 
 	if err := os.Remove(crash); err != nil {
